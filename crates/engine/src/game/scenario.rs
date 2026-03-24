@@ -6,14 +6,18 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::database::synthesis::synthesize_all;
 use crate::game::engine::{apply, EngineError};
 use crate::game::game_object::GameObject;
+use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::zones::create_object;
+use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, AdditionalCost, Effect, QuantityExpr, ReplacementDefinition,
-    StaticDefinition, TargetFilter, TriggerDefinition,
+    AbilityDefinition, AbilityKind, AdditionalCost, Effect, PtValue, QuantityExpr,
+    ReplacementDefinition, StaticDefinition, TargetFilter, TriggerDefinition,
 };
 use crate::types::actions::GameAction;
+use crate::types::card::CardFace;
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, WaitingFor};
@@ -30,6 +34,105 @@ use crate::types::zones::Zone;
 pub const P0: PlayerId = PlayerId(0);
 /// Convenience constant for Player 1.
 pub const P1: PlayerId = PlayerId(1);
+
+// ---------------------------------------------------------------------------
+// Oracle text → CardFace helper
+// ---------------------------------------------------------------------------
+
+/// Build a `CardFace` from a `GameObject`'s identity fields + parsed Oracle text.
+///
+/// Mirrors the real pipeline (`build_oracle_face` in `synthesis.rs`) but without
+/// MTGJSON-specific processing (partner keyword upgrading, color override,
+/// keyword deduplication, scryfall_oracle_id). Those require MTGJSON metadata
+/// not available from inline Oracle text.
+fn build_face_from_oracle(
+    obj: &GameObject,
+    keyword_names: &[String],
+    oracle_text: &str,
+) -> CardFace {
+    let type_strings: Vec<String> = obj
+        .card_types
+        .core_types
+        .iter()
+        .map(|t| t.to_string())
+        .collect();
+    let subtype_strings: Vec<String> = obj.card_types.subtypes.clone();
+
+    // Build keyword name hints if the caller didn't provide them.
+    // The parser's `extract_keyword_line` requires keyword name hints to identify
+    // keyword-only lines (returns None when hints are empty). Pre-scan each line
+    // through Keyword::from_str to detect bare keywords like "Flying", "Haste".
+    let inferred_kw_names: Vec<String>;
+    let effective_kw_names = if keyword_names.is_empty() {
+        inferred_kw_names = oracle_text
+            .lines()
+            .flat_map(|line| {
+                line.split(',')
+                    .map(|part| part.trim().to_lowercase())
+                    .filter(|lower| {
+                        let kw: Keyword = lower.parse().unwrap_or(Keyword::Unknown(String::new()));
+                        !matches!(kw, Keyword::Unknown(_))
+                    })
+            })
+            .collect();
+        &inferred_kw_names
+    } else {
+        keyword_names
+    };
+
+    let parsed = parse_oracle_text(
+        oracle_text,
+        &obj.name,
+        effective_kw_names,
+        &type_strings,
+        &subtype_strings,
+    );
+
+    // Merge keywords: parse keyword names into Keyword values (mirroring how
+    // build_oracle_face merges MTGJSON keywords with extracted_keywords).
+    // extract_keyword_line skips exact matches (since MTGJSON already has them),
+    // so we need to parse them here and merge, just like the real pipeline.
+    let mut keywords: Vec<Keyword> = effective_kw_names
+        .iter()
+        .filter_map(|s| {
+            let kw: Keyword = s.parse().unwrap();
+            if matches!(kw, Keyword::Unknown(_)) {
+                None
+            } else {
+                Some(kw)
+            }
+        })
+        .collect();
+    // Merge parser-extracted keywords, skipping any already present from hints.
+    for kw in parsed.extracted_keywords {
+        if !keywords.contains(&kw) {
+            keywords.push(kw);
+        }
+    }
+
+    let mut face = CardFace {
+        name: obj.name.clone(),
+        power: obj.power.map(PtValue::Fixed),
+        toughness: obj.toughness.map(PtValue::Fixed),
+        card_type: obj.card_types.clone(),
+        mana_cost: obj.mana_cost.clone(),
+        oracle_text: Some(oracle_text.to_string()),
+        keywords,
+        abilities: parsed.abilities,
+        triggers: parsed.triggers,
+        static_abilities: parsed.statics,
+        replacements: parsed.replacements,
+        modal: parsed.modal,
+        additional_cost: parsed.additional_cost,
+        casting_restrictions: parsed.casting_restrictions,
+        casting_options: parsed.casting_options,
+        solve_condition: parsed.solve_condition,
+        strive_cost: parsed.strive_cost,
+        ..Default::default()
+    };
+    synthesize_all(&mut face);
+    face
+}
 
 // ---------------------------------------------------------------------------
 // GameScenario (mutable builder)
@@ -240,6 +343,72 @@ impl GameScenario {
             state: &mut self.state,
             id,
         }
+    }
+
+    // --- Oracle text convenience constructors ---
+
+    /// Add a creature to the battlefield with abilities parsed from Oracle text.
+    pub fn add_creature_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let mut builder = self.add_creature(player, name, power, toughness);
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
+    /// Add a creature to hand with abilities parsed from Oracle text.
+    pub fn add_creature_to_hand_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        power: i32,
+        toughness: i32,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let mut builder = self.add_creature_to_hand(player, name, power, toughness);
+        builder.from_oracle_text(oracle_text);
+        builder
+    }
+
+    /// Add a spell (instant/sorcery) to hand with abilities parsed from Oracle text.
+    ///
+    /// Use `is_instant: true` for instants, `false` for sorceries.
+    pub fn add_spell_to_hand_from_oracle(
+        &mut self,
+        player: PlayerId,
+        name: &str,
+        is_instant: bool,
+        oracle_text: &str,
+    ) -> CardBuilder<'_> {
+        let card_id = CardId(self.state.next_object_id);
+        let id = create_object(
+            &mut self.state,
+            card_id,
+            player,
+            name.to_string(),
+            Zone::Hand,
+        );
+        let obj = self.state.objects.get_mut(&id).unwrap();
+        let core_type = if is_instant {
+            CoreType::Instant
+        } else {
+            CoreType::Sorcery
+        };
+        obj.card_types.core_types.push(core_type);
+        obj.base_card_types = obj.card_types.clone();
+        // Instants/sorceries have no power/toughness (unlike creatures)
+
+        let mut builder = CardBuilder {
+            state: &mut self.state,
+            id,
+        };
+        builder.from_oracle_text(oracle_text);
+        builder
     }
 
     /// Consume the builder, returning a `GameRunner` for step-by-step execution.
@@ -538,6 +707,55 @@ impl<'a> CardBuilder<'a> {
     /// Mark that this permanent has been dealt damage from a deathtouch source.
     pub fn with_deathtouch_damage(&mut self) -> &mut Self {
         self.obj().dealt_deathtouch_damage = true;
+        self
+    }
+
+    /// Set creature subtypes (e.g., `["Goblin", "Warrior"]`).
+    pub fn with_subtypes(&mut self, subtypes: Vec<&str>) -> &mut Self {
+        let obj = self.obj();
+        obj.card_types.subtypes = subtypes.into_iter().map(String::from).collect();
+        self.sync_base_card_types();
+        self
+    }
+
+    // --- Oracle text parsing ---
+
+    /// Replace all abilities, triggers, statics, replacements, and keywords on this
+    /// object with those parsed from Oracle text. Runs the full synthesis pipeline
+    /// (`parse_oracle_text` → `synthesize_all` → `apply_card_face_to_object`).
+    ///
+    /// **Warning:** This overwrites any keywords, abilities, triggers, statics, or
+    /// replacements previously set via builder methods (e.g., `.flying()`,
+    /// `.with_ability(...)`). Call `from_oracle_text` before any manual additions,
+    /// or use it as the sole ability source.
+    ///
+    /// Identity fields (name, power, toughness, card_types, mana_cost) are preserved
+    /// from the builder — they are round-tripped through a `CardFace` so
+    /// `apply_card_face_to_object` writes back the same values. Counters, zone,
+    /// entered_battlefield_turn, and other non-ability state are also preserved.
+    ///
+    /// Note: Unlike `build_oracle_face` in the card data pipeline, this does not
+    /// perform MTGJSON-specific processing (partner keyword upgrading, color override,
+    /// keyword deduplication). Those require MTGJSON metadata not available from
+    /// inline Oracle text.
+    pub fn from_oracle_text(&mut self, oracle_text: &str) -> &mut Self {
+        self.from_oracle_text_with_keywords(&[], oracle_text)
+    }
+
+    /// Like `from_oracle_text`, but accepts explicit MTGJSON-style keyword names
+    /// for precise keyword-only line detection. Use when Oracle text contains
+    /// multi-keyword lines like "Flying, vigilance" that require keyword name
+    /// hints to parse correctly.
+    pub fn from_oracle_text_with_keywords(
+        &mut self,
+        keyword_names: &[&str],
+        oracle_text: &str,
+    ) -> &mut Self {
+        let kw_strings: Vec<String> = keyword_names.iter().map(|s| s.to_string()).collect();
+        let obj = self.state.objects.get(&self.id).unwrap();
+        let face = build_face_from_oracle(obj, &kw_strings, oracle_text);
+        let obj = self.state.objects.get_mut(&self.id).unwrap();
+        apply_card_face_to_object(obj, &face);
         self
     }
 }
@@ -1137,5 +1355,213 @@ mod tests {
             assert_eq!(state.players[i].id, PlayerId(i as u8));
             assert_eq!(state.players[i].life, 20);
         }
+    }
+
+    // --- from_oracle_text tests ---
+
+    #[test]
+    fn from_oracle_text_keywords() {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature(P0, "Bird", 1, 1)
+            .from_oracle_text("Haste\nFlying")
+            .id();
+        let runner = scenario.build();
+        let obj = &runner.state().objects[&id];
+
+        assert!(obj.keywords.contains(&Keyword::Haste));
+        assert!(obj.keywords.contains(&Keyword::Flying));
+        assert!(obj.base_keywords.contains(&Keyword::Haste));
+        assert!(obj.base_keywords.contains(&Keyword::Flying));
+    }
+
+    #[test]
+    fn from_oracle_text_trigger() {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature(P0, "Goblin Guide", 2, 2)
+            .from_oracle_text("Whenever Goblin Guide attacks, defending player reveals the top card of their library. If it's a land card, that player puts it into their hand.")
+            .id();
+        let runner = scenario.build();
+        let obj = &runner.state().objects[&id];
+
+        assert!(
+            !obj.trigger_definitions.is_empty(),
+            "should have at least one trigger definition"
+        );
+        assert!(
+            !obj.base_trigger_definitions.is_empty(),
+            "base triggers should also be populated"
+        );
+    }
+
+    #[test]
+    fn from_oracle_text_static() {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature(P0, "Glorious Anthem", 0, 0)
+            .as_enchantment()
+            .from_oracle_text("Creatures you control get +1/+1.")
+            .id();
+        let runner = scenario.build();
+        let obj = &runner.state().objects[&id];
+
+        assert!(
+            !obj.static_definitions.is_empty(),
+            "should have at least one static definition"
+        );
+        assert!(
+            !obj.base_static_definitions.is_empty(),
+            "base statics should also be populated"
+        );
+    }
+
+    #[test]
+    fn from_oracle_text_preserves_identity() {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature(P0, "Bear", 2, 2)
+            .from_oracle_text("Flying")
+            .id();
+        let runner = scenario.build();
+        let obj = &runner.state().objects[&id];
+
+        assert_eq!(obj.name, "Bear");
+        assert_eq!(obj.power, Some(2));
+        assert_eq!(obj.toughness, Some(2));
+        assert_eq!(obj.base_power, Some(2));
+        assert_eq!(obj.base_toughness, Some(2));
+        assert!(obj.card_types.core_types.contains(&CoreType::Creature));
+    }
+
+    #[test]
+    fn from_oracle_text_spell_effect() {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature_to_hand(P0, "Lightning Bolt", 0, 0)
+            .as_instant()
+            .from_oracle_text("Lightning Bolt deals 3 damage to any target.")
+            .id();
+        let runner = scenario.build();
+        let obj = &runner.state().objects[&id];
+
+        assert!(!obj.abilities.is_empty(), "should have a spell ability");
+        assert_eq!(
+            crate::types::ability::effect_variant_name(&obj.abilities[0].effect),
+            "DealDamage"
+        );
+    }
+
+    #[test]
+    fn from_oracle_text_color_derived() {
+        use crate::types::mana::{ManaCost, ManaCostShard};
+
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature(P0, "Goblin", 1, 1)
+            .with_mana_cost(ManaCost::Cost {
+                shards: vec![ManaCostShard::Red],
+                generic: 0,
+            })
+            .from_oracle_text("Haste")
+            .id();
+        let runner = scenario.build();
+        let obj = &runner.state().objects[&id];
+
+        assert!(
+            obj.color.contains(&ManaColor::Red),
+            "color should be derived from mana cost"
+        );
+    }
+
+    #[test]
+    fn from_oracle_text_with_keywords_multi_keyword_line() {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature(P0, "Serra Angel", 4, 4)
+            .from_oracle_text_with_keywords(&["flying", "vigilance"], "Flying, vigilance")
+            .id();
+        let runner = scenario.build();
+        let obj = &runner.state().objects[&id];
+
+        assert!(obj.keywords.contains(&Keyword::Flying));
+        assert!(obj.keywords.contains(&Keyword::Vigilance));
+    }
+
+    #[test]
+    fn from_oracle_text_convenience_creature_on_battlefield() {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature_from_oracle(P0, "Llanowar Elves", 1, 1, "{T}: Add {G}.")
+            .id();
+        let runner = scenario.build();
+        let obj = &runner.state().objects[&id];
+
+        assert_eq!(obj.zone, Zone::Battlefield);
+        assert_eq!(obj.name, "Llanowar Elves");
+        assert!(
+            !obj.abilities.is_empty(),
+            "should have a mana ability from Oracle text"
+        );
+    }
+
+    #[test]
+    fn from_oracle_text_convenience_spell_to_hand() {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_spell_to_hand_from_oracle(
+                P0,
+                "Lightning Bolt",
+                true,
+                "Lightning Bolt deals 3 damage to any target.",
+            )
+            .id();
+        let runner = scenario.build();
+        let obj = &runner.state().objects[&id];
+
+        assert_eq!(obj.zone, Zone::Hand);
+        assert!(obj.card_types.core_types.contains(&CoreType::Instant));
+        assert!(!obj.abilities.is_empty());
+        // Instants/sorceries must not have power/toughness
+        assert_eq!(obj.power, None, "instants should not have power");
+        assert_eq!(obj.toughness, None, "instants should not have toughness");
+    }
+
+    #[test]
+    fn from_oracle_text_counters_survive() {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature(P0, "Bear", 2, 2)
+            .with_plus_counters(3)
+            .from_oracle_text("Flying")
+            .id();
+        let runner = scenario.build();
+        let obj = &runner.state().objects[&id];
+
+        assert!(obj.keywords.contains(&Keyword::Flying));
+        assert_eq!(
+            obj.counters
+                .get(&crate::game::game_object::CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "+1/+1 counters should survive from_oracle_text"
+        );
+    }
+
+    #[test]
+    fn from_oracle_text_empty_string() {
+        let mut scenario = GameScenario::new();
+        let id = scenario
+            .add_creature(P0, "Vanilla Bear", 2, 2)
+            .from_oracle_text("")
+            .id();
+        let runner = scenario.build();
+        let obj = &runner.state().objects[&id];
+
+        assert_eq!(obj.name, "Vanilla Bear");
+        assert_eq!(obj.power, Some(2));
+        assert!(obj.abilities.is_empty());
+        assert!(obj.keywords.is_empty());
     }
 }

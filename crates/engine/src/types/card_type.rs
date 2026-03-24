@@ -1,3 +1,4 @@
+use std::fmt;
 use std::str::FromStr;
 
 use schemars::JsonSchema;
@@ -24,6 +25,18 @@ impl FromStr for Supertype {
             "World" => Ok(Supertype::World),
             "Ongoing" => Ok(Supertype::Ongoing),
             _ => Err(()),
+        }
+    }
+}
+
+impl fmt::Display for Supertype {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Supertype::Legendary => write!(f, "Legendary"),
+            Supertype::Basic => write!(f, "Basic"),
+            Supertype::Snow => write!(f, "Snow"),
+            Supertype::World => write!(f, "World"),
+            Supertype::Ongoing => write!(f, "Ongoing"),
         }
     }
 }
@@ -68,6 +81,24 @@ impl FromStr for CoreType {
             "Kindred" => Ok(CoreType::Kindred),
             "Dungeon" => Ok(CoreType::Dungeon),
             _ => Err(()),
+        }
+    }
+}
+
+impl fmt::Display for CoreType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CoreType::Artifact => write!(f, "Artifact"),
+            CoreType::Creature => write!(f, "Creature"),
+            CoreType::Enchantment => write!(f, "Enchantment"),
+            CoreType::Instant => write!(f, "Instant"),
+            CoreType::Land => write!(f, "Land"),
+            CoreType::Planeswalker => write!(f, "Planeswalker"),
+            CoreType::Sorcery => write!(f, "Sorcery"),
+            CoreType::Tribal => write!(f, "Tribal"),
+            CoreType::Battle => write!(f, "Battle"),
+            CoreType::Kindred => write!(f, "Kindred"),
+            CoreType::Dungeon => write!(f, "Dungeon"),
         }
     }
 }
