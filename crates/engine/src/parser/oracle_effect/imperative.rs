@@ -2,6 +2,7 @@ use super::counter::{try_parse_double_effect, try_parse_put_counter, try_parse_r
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect};
 use super::token::try_parse_token;
 use super::types::*;
+use super::{resolve_it_pronoun, ParseContext};
 use crate::parser::oracle_static::parse_continuous_modifications;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
@@ -410,6 +411,10 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
         SearchCreationImperativeAst::Dig { count } => Effect::Dig {
             count,
             destination: None,
+            keep_count: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: None,
         },
         SearchCreationImperativeAst::CopyTokenOf { target } => Effect::CopyTokenOf {
             target,
@@ -858,7 +863,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
 /// Parse "put that many {type} counter(s) on {target}" — dynamic counter count from event context.
 /// CR 120.1: "that many" references the amount from the triggering event (e.g., damage dealt).
 /// Produces PutCounter with count=0 as a sentinel for event-context resolution.
-fn try_parse_that_many_counters(lower: &str) -> Option<Effect> {
+fn try_parse_that_many_counters(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     let rest = lower.strip_prefix("put that many ")?;
     // Next word(s) are counter type: "+1/+1", "charge", "loyalty", etc.
     let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
@@ -875,12 +880,11 @@ fn try_parse_that_many_counters(lower: &str) -> Option<Effect> {
 
     // Parse target after "on"
     let target = if let Some(on_rest) = after_counter.strip_prefix("on ") {
-        if on_rest.starts_with("~")
-            || on_rest.starts_with("it")
-            || on_rest.starts_with("this ")
-            || on_rest.starts_with("itself")
-        {
+        if on_rest.starts_with("~") || on_rest.starts_with("this ") {
             TargetFilter::SelfRef
+        } else if on_rest.starts_with("it") || on_rest.starts_with("itself") {
+            // CR 608.2k: Bare pronoun — context-dependent
+            resolve_it_pronoun(ctx)
         } else {
             let (t, _) = parse_target(on_rest);
             t
@@ -1210,7 +1214,11 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
     }
 }
 
-pub(super) fn parse_imperative_family_ast(text: &str, lower: &str) -> Option<ImperativeFamilyAst> {
+pub(super) fn parse_imperative_family_ast(
+    text: &str,
+    lower: &str,
+    ctx: &ParseContext,
+) -> Option<ImperativeFamilyAst> {
     let first_word = lower.split_whitespace().next().unwrap_or("");
 
     match first_word {
@@ -1222,12 +1230,12 @@ pub(super) fn parse_imperative_family_ast(text: &str, lower: &str) -> Option<Imp
         }
 
         // CR 701.10: "double the power/toughness" or "double the number of counters"
-        "double" => try_parse_double_effect(lower).map(ImperativeFamilyAst::GainKeyword),
+        "double" => try_parse_double_effect(lower, ctx).map(ImperativeFamilyAst::GainKeyword),
 
         // Zone-change/counter verbs (CR 701)
-        "destroy" => parse_zone_counter_ast(text, lower).map(ImperativeFamilyAst::ZoneCounter),
-        "exile" => parse_zone_counter_ast(text, lower).map(ImperativeFamilyAst::ZoneCounter),
-        "counter" => parse_zone_counter_ast(text, lower).map(ImperativeFamilyAst::ZoneCounter),
+        "destroy" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
+        "exile" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
+        "counter" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
 
         // Numeric verbs (CR 121)
         "draw" if lower.contains("that many") => {
@@ -1425,21 +1433,21 @@ pub(super) fn parse_imperative_family_ast(text: &str, lower: &str) -> Option<Imp
         // for the count. The engine resolver reads the count from the resolved ability's
         // event_context_amount field.
         "put" if lower.contains("that many") && lower.contains("counter") => {
-            try_parse_that_many_counters(lower)
+            try_parse_that_many_counters(lower, ctx)
                 .map(ImperativeFamilyAst::GainKeyword)
                 .or_else(|| {
-                    parse_zone_counter_ast(text, lower)
+                    parse_zone_counter_ast(text, lower, ctx)
                         .map(ImperativeFamilyAst::ZoneCounter)
                         .or_else(|| parse_put_ast(text, lower).map(ImperativeFamilyAst::Put))
                 })
         }
         // "put" → counter (step 2) first, then zone-change (step 12)
-        "put" => parse_zone_counter_ast(text, lower)
+        "put" => parse_zone_counter_ast(text, lower, ctx)
             .map(ImperativeFamilyAst::ZoneCounter)
             .or_else(|| parse_put_ast(text, lower).map(ImperativeFamilyAst::Put)),
 
         // "remove" → counter removal (step 2)
-        "remove" => parse_zone_counter_ast(text, lower).map(ImperativeFamilyAst::ZoneCounter),
+        "remove" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
 
         // "add" → mana/cost-resource (step 1)
         "add" => parse_cost_resource_ast(text, lower).map(ImperativeFamilyAst::CostResource),
@@ -1658,7 +1666,11 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
     }
 }
 
-pub(super) fn parse_zone_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
+pub(super) fn parse_zone_counter_ast(
+    text: &str,
+    lower: &str,
+    ctx: &ParseContext,
+) -> Option<ZoneCounterImperativeAst> {
     if let Some(ast) = parse_destroy_ast(text, lower) {
         return Some(ast);
     }
@@ -1686,7 +1698,7 @@ pub(super) fn parse_zone_counter_ast(text: &str, lower: &str) -> Option<ZoneCoun
             });
         }
         // Then fixed-count put ("put N counter(s) on ...")
-        return match try_parse_put_counter(lower, text) {
+        return match try_parse_put_counter(lower, text, ctx) {
             Some((
                 Effect::PutCounter {
                     counter_type,
@@ -1704,7 +1716,7 @@ pub(super) fn parse_zone_counter_ast(text: &str, lower: &str) -> Option<ZoneCoun
         };
     }
     if lower.starts_with("remove ") && lower.contains("counter") {
-        return match try_parse_remove_counter(lower) {
+        return match try_parse_remove_counter(lower, ctx) {
             Some(Effect::RemoveCounter {
                 counter_type,
                 count,

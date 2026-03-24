@@ -3,10 +3,12 @@ use crate::types::mana::ManaColor;
 
 use super::super::oracle_target::{parse_target, parse_type_phrase};
 use super::super::oracle_util::parse_number;
+use super::{resolve_it_pronoun, ParseContext};
 
 pub(super) fn try_parse_put_counter<'a>(
     lower: &str,
     text: &'a str,
+    ctx: &ParseContext,
 ) -> Option<(Effect, &'a str, Option<MultiTargetSpec>)> {
     // "put N {type} counter(s) on {target}"
     let after_put = lower[4..].trim();
@@ -34,13 +36,12 @@ pub(super) fn try_parse_put_counter<'a>(
     let (target, remainder, multi_target) = if let Some(on_rest) =
         after_counter_word.strip_prefix("on ")
     {
-        if on_rest.starts_with("this ")
-            || on_rest.starts_with("~")
-            || on_rest == "it"
-            || on_rest.starts_with("it ")
-            || on_rest.starts_with("itself")
-        {
+        if on_rest.starts_with("this ") || on_rest.starts_with("~") {
+            // Explicit self-reference — always SelfRef
             (TargetFilter::SelfRef, "", None)
+        } else if on_rest == "it" || on_rest.starts_with("it ") || on_rest.starts_with("itself") {
+            // CR 608.2k: Bare pronoun — context-dependent
+            (resolve_it_pronoun(ctx), "", None)
         } else {
             // CR 115.1d: Strip "up to N" quantifier before target parsing.
             // "put a +1/+1 counter on up to one target creature" — the "up to N"
@@ -82,7 +83,7 @@ pub(super) fn try_parse_put_counter<'a>(
     ))
 }
 
-pub(super) fn try_parse_remove_counter(lower: &str) -> Option<Effect> {
+pub(super) fn try_parse_remove_counter(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // "remove N {type} counter(s) from {target}"
     let after_remove = lower[7..].trim();
     let (count, rest) = parse_number(after_remove)?;
@@ -97,13 +98,14 @@ pub(super) fn try_parse_remove_counter(lower: &str) -> Option<Effect> {
         .map(|s| s.trim_start())?;
 
     let target_text = after_counter_word.strip_prefix("from ")?.trim();
-    let target = if target_text.starts_with("this ")
-        || target_text.starts_with("~")
-        || target_text == "it"
+    let target = if target_text.starts_with("this ") || target_text.starts_with("~") {
+        TargetFilter::SelfRef
+    } else if target_text == "it"
         || target_text.starts_with("it ")
         || target_text.starts_with("itself")
     {
-        TargetFilter::SelfRef
+        // CR 608.2k: Bare pronoun — context-dependent
+        resolve_it_pronoun(ctx)
     } else {
         parse_target(target_text).0
     };
@@ -153,7 +155,7 @@ pub(super) fn try_parse_move_counters<'a>(lower: &str, text: &'a str) -> Option<
 }
 
 /// CR 701.10e: Parse "double the number of {type} counters on {target}".
-pub(super) fn try_parse_multiply_counter(lower: &str) -> Option<Effect> {
+pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     let rest = lower.strip_prefix("double the number of ")?;
     // Parse counter type — next word(s) before "counter(s)"
     let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
@@ -168,13 +170,14 @@ pub(super) fn try_parse_multiply_counter(lower: &str) -> Option<Effect> {
         .map(|s| s.trim_start())?;
     let target_text = after_counter_word.strip_prefix("on ")?;
 
-    let target = if target_text.starts_with("this ")
-        || target_text.starts_with("~")
-        || target_text == "it"
+    let target = if target_text.starts_with("this ") || target_text.starts_with("~") {
+        TargetFilter::SelfRef
+    } else if target_text == "it"
         || target_text.starts_with("it ")
         || target_text.starts_with("itself")
     {
-        TargetFilter::SelfRef
+        // CR 608.2k: Bare pronoun — context-dependent
+        resolve_it_pronoun(ctx)
     } else {
         parse_target(target_text).0
     };
@@ -188,13 +191,16 @@ pub(super) fn try_parse_multiply_counter(lower: &str) -> Option<Effect> {
 
 /// CR 701.10: Dispatch "double the ..." to counter-doubling, life-doubling,
 /// mana-doubling, or P/T-doubling.
-pub(super) fn try_parse_double_effect(lower: &str) -> Option<Effect> {
+pub(super) fn try_parse_double_effect(lower: &str, ctx: &ParseContext) -> Option<Effect> {
     // CR 701.10e: "double the number of each kind of counter on ..." → all counter types
     if let Some(rest) = lower.strip_prefix("double the number of each kind of counter on ") {
         let target = if rest.starts_with("target ") {
             parse_target(rest).0
-        } else if rest.starts_with("it") || rest.starts_with("~") || rest.starts_with("this ") {
+        } else if rest.starts_with("~") || rest.starts_with("this ") {
             TargetFilter::SelfRef
+        } else if rest.starts_with("it") {
+            // CR 608.2k: Bare pronoun — context-dependent
+            resolve_it_pronoun(ctx)
         } else {
             parse_target(rest).0
         };
@@ -206,7 +212,7 @@ pub(super) fn try_parse_double_effect(lower: &str) -> Option<Effect> {
 
     // Counter doubling: "double the number of ..."
     if lower.starts_with("double the number of ") {
-        return try_parse_multiply_counter(lower);
+        return try_parse_multiply_counter(lower, ctx);
     }
 
     // CR 701.10d: "double your life total" / "double target player's life total"
@@ -237,7 +243,7 @@ pub(super) fn try_parse_double_effect(lower: &str) -> Option<Effect> {
         }
     }
 
-    // "double its power [and toughness]" — pronoun refers to trigger subject (SelfRef)
+    // CR 608.2k: "double its power [and toughness]" — possessive "its" is context-dependent
     if let Some(rest) = lower.strip_prefix("double its ") {
         let mode = if rest.starts_with("power and toughness") {
             DoublePTMode::PowerAndToughness
@@ -250,7 +256,7 @@ pub(super) fn try_parse_double_effect(lower: &str) -> Option<Effect> {
         };
         return Some(Effect::DoublePT {
             mode,
-            target: TargetFilter::SelfRef,
+            target: resolve_it_pronoun(ctx),
         });
     }
 

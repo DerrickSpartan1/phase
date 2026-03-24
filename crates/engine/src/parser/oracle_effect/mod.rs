@@ -40,6 +40,32 @@ use self::sequence::{
 use self::subject::{try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life};
 use self::types::*;
 
+/// Context threaded through the effect parsing pipeline.
+/// Enables pronoun resolution relative to the current subject.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ParseContext {
+    /// The trigger subject, if parsing within a trigger effect.
+    /// When Some and not SelfRef, bare pronouns ("it") resolve to TriggeringSource.
+    pub subject: Option<TargetFilter>,
+}
+
+/// CR 608.2k: Resolve bare pronoun ("it"/"itself"/"its") based on parser context.
+/// When a triggered ability's effect refers to an untargeted object previously
+/// referred to by the trigger condition, it still affects that object.
+/// In trigger effects where the subject is a non-self filter (e.g. "a creature
+/// you control"), "it" refers to the triggering object (TriggeringSource).
+/// For self-triggers ("~ enters"), "it" stays SelfRef.
+/// For AttachedTo subjects ("equipped creature"), TriggeringSource is also correct
+/// because the triggering event's source IS the attached-to creature.
+pub(crate) fn resolve_it_pronoun(ctx: &ParseContext) -> TargetFilter {
+    match &ctx.subject {
+        Some(subject) if !matches!(subject, TargetFilter::SelfRef | TargetFilter::Any) => {
+            TargetFilter::TriggeringSource
+        }
+        _ => TargetFilter::SelfRef,
+    }
+}
+
 /// Parse an effect clause from Oracle text into an Effect enum.
 /// This handles the verb-based matching for spell effects, activated ability effects,
 /// and the effect portion of triggered abilities.
@@ -47,7 +73,7 @@ use self::types::*;
 /// For compound effects ("Gain 3 life. Draw a card."), call `parse_effect_chain`
 /// which splits on sentence boundaries and chains via AbilityDefinition::sub_ability.
 pub fn parse_effect(text: &str) -> Effect {
-    parse_effect_clause(text).effect
+    parse_effect_clause(text, &ParseContext::default()).effect
 }
 
 /// CR 603.7c: Parse "whenever [trigger condition] this turn, [effect]" delayed triggers.
@@ -232,7 +258,7 @@ fn try_parse_damage_prevention_disabled(tp: TextPair) -> Option<ParsedEffectClau
 /// CR 608.2d: Parse "have it [verb]" / "have you [verb]" causative constructions.
 /// Used by "any opponent may" effects where the opponent causes the source or controller
 /// to perform an action (e.g., "have it deal 4 damage to them").
-fn try_parse_have_causative(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+fn try_parse_have_causative(tp: TextPair<'_>, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     // Pattern A: "have it deal N damage to them" / "have ~ deal N damage to them"
     let after_have = tp
         .strip_prefix("have it ")
@@ -251,13 +277,13 @@ fn try_parse_have_causative(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
             }
         }
         // Fallback: parse remaining as a generic imperative effect
-        let clause = parse_effect_clause(rest.original);
+        let clause = parse_effect_clause(rest.original, ctx);
         return Some(clause);
     }
 
     // Pattern B: "have you [verb]" — controller performs an action directed by opponent
     if let Some(rest) = tp.strip_prefix("have you ") {
-        let clause = parse_effect_clause(rest.original);
+        let clause = parse_effect_clause(rest.original, ctx);
         return Some(clause);
     }
 
@@ -265,7 +291,7 @@ fn try_parse_have_causative(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
 }
 
 #[tracing::instrument(level = "debug")]
-fn parse_effect_clause(text: &str) -> ParsedEffectClause {
+fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
     let text = strip_leading_sequence_connector(text)
         .trim()
         .trim_end_matches('.');
@@ -282,7 +308,7 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
 
     // CR 608.2d: "have it [verb]" / "have you [verb]" — causative construction
     // from "any opponent may" effects (e.g., "have it deal 4 damage to them").
-    if let Some(clause) = try_parse_have_causative(tp) {
+    if let Some(clause) = try_parse_have_causative(tp, ctx) {
         return clause;
     }
 
@@ -327,7 +353,7 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
     // CR 115.1d: "Two target creatures" / "Three target artifacts" — numeric target prefix.
     // Strip the count, recursively parse the remainder, and attach MultiTargetSpec.
     if let Some((count, rest)) = strip_numeric_target_prefix(tp.lower) {
-        let mut clause = parse_effect_clause(rest);
+        let mut clause = parse_effect_clause(rest, ctx);
         clause.multi_target = Some(MultiTargetSpec {
             min: count,
             max: Some(count),
@@ -339,7 +365,7 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
     // Returns a FlipCoin with the appropriate branch filled in.
     // consolidate_die_and_coin_defs merges these into the preceding FlipCoin.
     if let Some((is_win, effect_text)) = imperative::try_parse_coin_flip_branch(text) {
-        let branch_def = parse_effect_chain(effect_text, AbilityKind::Spell);
+        let branch_def = parse_effect_chain_impl(effect_text, AbilityKind::Spell, ctx);
         return if is_win {
             parsed_clause(Effect::FlipCoin {
                 win_effect: Some(Box::new(branch_def)),
@@ -354,7 +380,7 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
     }
 
     if let Some((duration, rest)) = strip_leading_duration(text) {
-        return with_clause_duration(parse_effect_clause(rest), duration);
+        return with_clause_duration(parse_effect_clause(rest, ctx), duration);
     }
 
     // "it's still a/an [type]" / "that's still a/an [type]" — type-retention clause
@@ -442,12 +468,12 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
     // (e.g., "creatures you control have flying"), which is a subject-predicate pattern with
     // a plural subject before "have". Here, "have" is the first word, followed by a target/
     // anaphoric reference and a predicate.
-    if let Some(redirected) = try_parse_have_redirection(text) {
+    if let Some(redirected) = try_parse_have_redirection(text, ctx) {
         return redirected;
     }
 
-    let ast = parse_clause_ast(text);
-    lower_clause_ast(ast)
+    let ast = parse_clause_ast(text, ctx);
+    lower_clause_ast(ast, ctx)
 }
 
 /// CR 611.2b: Parse "have [subject] [predicate]" subject redirection.
@@ -460,7 +486,7 @@ fn parse_effect_clause(text: &str) -> ParsedEffectClause {
 ///
 /// Distinguished from static "have" (e.g., "creatures you control have flying") by position:
 /// imperative "have" starts the clause; static "have" follows a subject.
-fn try_parse_have_redirection(text: &str) -> Option<ParsedEffectClause> {
+fn try_parse_have_redirection(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     let after_have = lower.strip_prefix("have ")?;
 
@@ -490,14 +516,14 @@ fn try_parse_have_redirection(text: &str) -> Option<ParsedEffectClause> {
     let redirected_text = text["have ".len()..].trim();
 
     // Try the subject-predicate AST parser on the redirected text.
-    if let Some(ast) = subject::try_parse_subject_predicate_ast(redirected_text) {
-        return Some(lower_clause_ast(ast));
+    if let Some(ast) = subject::try_parse_subject_predicate_ast(redirected_text, ctx) {
+        return Some(lower_clause_ast(ast, ctx));
     }
 
     // Fallback: if subject-predicate doesn't match, try parsing the redirected text
     // through the full parse_effect_clause pipeline (handles fight, damage, etc.).
     // This recursion is safe because "have" has been stripped — no infinite loop.
-    let clause = parse_effect_clause(redirected_text);
+    let clause = parse_effect_clause(redirected_text, ctx);
     if !matches!(clause.effect, Effect::Unimplemented { .. }) {
         return Some(clause);
     }
@@ -764,7 +790,7 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
 }
 
 #[tracing::instrument(level = "trace")]
-fn parse_clause_ast(text: &str) -> ClauseAst {
+fn parse_clause_ast(text: &str, ctx: &ParseContext) -> ClauseAst {
     let text = text.trim();
 
     // Mirror the CubeArtisan grammar's high-level sentence shapes:
@@ -772,11 +798,11 @@ fn parse_clause_ast(text: &str) -> ClauseAst {
     if let Some((condition_text, remainder)) = split_leading_conditional(text) {
         let _ = condition_text;
         return ClauseAst::Conditional {
-            clause: Box::new(parse_clause_ast(&remainder)),
+            clause: Box::new(parse_clause_ast(&remainder, ctx)),
         };
     }
 
-    if let Some(ast) = try_parse_subject_predicate_ast(text) {
+    if let Some(ast) = try_parse_subject_predicate_ast(text, ctx) {
         return ast;
     }
 
@@ -785,22 +811,22 @@ fn parse_clause_ast(text: &str) -> ClauseAst {
     }
 }
 
-fn lower_clause_ast(ast: ClauseAst) -> ParsedEffectClause {
+fn lower_clause_ast(ast: ClauseAst, ctx: &ParseContext) -> ParsedEffectClause {
     match ast {
-        ClauseAst::Imperative { text } => lower_imperative_clause(&text),
+        ClauseAst::Imperative { text } => lower_imperative_clause(&text, ctx),
         ClauseAst::SubjectPredicate { subject, predicate } => {
-            lower_subject_predicate_ast(*subject, *predicate)
+            lower_subject_predicate_ast(*subject, *predicate, ctx)
         }
         ClauseAst::Conditional { clause } => {
             // Phase 2 preserves current semantics for generic leading conditionals:
             // recognize the structure explicitly, but lower only the body.
-            lower_clause_ast(*clause)
+            lower_clause_ast(*clause, ctx)
         }
     }
 }
 
 #[tracing::instrument(level = "debug")]
-fn lower_imperative_clause(text: &str) -> ParsedEffectClause {
+fn lower_imperative_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
     // "Its controller gains life equal to its power/toughness" — subject must be preserved
     // because the life recipient is not the caster but the targeted permanent's controller.
     if let Some(clause) = try_parse_targeted_controller_gain_life(text) {
@@ -815,12 +841,12 @@ fn lower_imperative_clause(text: &str) -> ParsedEffectClause {
 
     // Compound targeted actions: "tap target creature and put a stun counter on it"
     // Split on " and " when the primary clause is a targeted verb.
-    if let Some(clause) = try_split_targeted_compound(text) {
+    if let Some(clause) = try_split_targeted_compound(text, ctx) {
         return clause;
     }
 
     let (stripped, duration) = strip_trailing_duration(text);
-    let mut clause = parse_imperative_effect(stripped);
+    let mut clause = parse_imperative_effect(stripped, ctx);
     if clause.duration.is_none() {
         clause.duration = duration;
     }
@@ -847,6 +873,7 @@ fn lower_imperative_clause(text: &str) -> ParsedEffectClause {
 fn try_parse_verb_and_target<'a>(
     text: &'a str,
     lower: &str,
+    ctx: &ParseContext,
 ) -> Option<(TargetedImperativeAst, &'a str)> {
     // Simple targeted verbs: parse_target on text after the verb prefix
     if lower.starts_with("tap ") {
@@ -997,7 +1024,7 @@ fn try_parse_verb_and_target<'a>(
             },
             rem,
             _multi_target,
-        )) = counter::try_parse_put_counter(lower, text)
+        )) = counter::try_parse_put_counter(lower, text, ctx)
         {
             return Some((
                 TargetedImperativeAst::ZoneCounterProxy(Box::new(
@@ -1027,7 +1054,7 @@ fn try_parse_verb_and_target<'a>(
 /// When the remainder references "it"/"that creature"/"them" (via `contains_object_pronoun`),
 /// the sub_ability's target is set to `TargetFilter::ParentTarget` so it inherits the
 /// parent's resolved targets at resolution time.
-fn try_split_targeted_compound(text: &str) -> Option<ParsedEffectClause> {
+fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
 
     // Quick bail: no " and " means no compound connector possible
@@ -1036,7 +1063,7 @@ fn try_split_targeted_compound(text: &str) -> Option<ParsedEffectClause> {
     }
 
     // Use parse_target's remainder to determine the compound split point
-    let (primary_ast, remainder) = try_parse_verb_and_target(text, &lower)?;
+    let (primary_ast, remainder) = try_parse_verb_and_target(text, &lower, ctx)?;
 
     // If parse_target consumed everything, there's no compound action
     // (e.g. "exile any number of other nonland permanents you own and control")
@@ -1060,7 +1087,7 @@ fn try_split_targeted_compound(text: &str) -> Option<ParsedEffectClause> {
     };
 
     // Parse the sub-effect
-    let mut sub_clause = parse_imperative_effect(sub_text);
+    let mut sub_clause = parse_imperative_effect(sub_text, ctx);
 
     // If the remainder contains anaphoric references ("it", "that creature", "them"),
     // replace the sub_effect's target with ParentTarget so it inherits the parent's targets.
@@ -1316,6 +1343,7 @@ fn has_typed_target(effect: &Effect) -> bool {
 fn lower_subject_predicate_ast(
     subject: SubjectPhraseAst,
     predicate: PredicateAst,
+    ctx: &ParseContext,
 ) -> ParsedEffectClause {
     match predicate {
         PredicateAst::Continuous {
@@ -1377,7 +1405,7 @@ fn lower_subject_predicate_ast(
                     count,
                 });
             }
-            let mut clause = lower_imperative_clause(&text);
+            let mut clause = lower_imperative_clause(&text, ctx);
             // CR 608.2c: Inject the subject's target into targeted effects that were
             // parsed via the imperative path (connive, phase out, force block, suspect).
             inject_subject_target(&mut clause.effect, &subject);
@@ -1499,14 +1527,14 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
 }
 
 #[tracing::instrument(level = "debug")]
-fn parse_imperative_effect(text: &str) -> ParsedEffectClause {
+fn parse_imperative_effect(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
-    parse_imperative_effect_inner(tp)
+    parse_imperative_effect_inner(tp, ctx)
 }
 
-fn parse_imperative_effect_inner(tp: TextPair) -> ParsedEffectClause {
-    if let Some(ast) = parse_imperative_family_ast(tp.original, tp.lower) {
+fn parse_imperative_effect_inner(tp: TextPair, ctx: &ParseContext) -> ParsedEffectClause {
+    if let Some(ast) = parse_imperative_family_ast(tp.original, tp.lower, ctx) {
         return lower_imperative_family_ast(ast);
     }
 
@@ -1804,6 +1832,21 @@ fn mark_uses_tracked_set(def: &mut AbilityDefinition) {
 /// splitter that preserves whether a chunk ended a sentence or was linked by
 /// `, then`.
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
+    parse_effect_chain_impl(text, kind, &ParseContext::default())
+}
+
+/// Parse a compound effect chain with subject context for pronoun resolution.
+/// CR 608.2k: Used by the trigger parser to thread the trigger subject so that
+/// bare pronouns ("it") resolve to TriggeringSource instead of SelfRef.
+pub(crate) fn parse_effect_chain_with_context(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> AbilityDefinition {
+    parse_effect_chain_impl(text, kind, ctx)
+}
+
+fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) -> AbilityDefinition {
     let full_text = text; // Bind before `text` is shadowed by strip helpers in the loop
     let chunks = split_clause_sequence(text);
     let mut defs: Vec<AbilityDefinition> = Vec::new();
@@ -1832,7 +1875,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         };
         if let Some(prefix_len) = otherwise_prefix_len {
             let else_text = &normalized_text[prefix_len..];
-            let else_def = parse_effect_chain(else_text, kind);
+            let else_def = parse_effect_chain_impl(else_text, kind, ctx);
             // Walk defs backward to find the most recent conditional
             let has_condition = defs.iter().any(|d| d.condition.is_some());
             if has_condition {
@@ -1936,7 +1979,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
         let (text_after_prefix, prefix_delayed) = strip_temporal_prefix(&text);
         if let Some(prefix_condition) = prefix_delayed {
             let (inner_text, inner_multi_target) = strip_any_number_quantifier(text_after_prefix);
-            let inner_clause = parse_effect_clause(&inner_text);
+            let inner_clause = parse_effect_clause(&inner_text, ctx);
             let mut inner_def = AbilityDefinition::new(kind, inner_clause.effect);
             if let Some(spec) = inner_multi_target.or(inner_clause.multi_target) {
                 inner_def = inner_def.multi_target(spec);
@@ -1977,7 +2020,7 @@ pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
 
         let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
         let (text_no_qty, multi_target) = strip_any_number_quantifier(text_no_temporal);
-        let clause = parse_effect_clause(&text_no_qty);
+        let clause = parse_effect_clause(&text_no_qty, ctx);
         let mut def = AbilityDefinition::new(kind, clause.effect);
         if is_optional {
             def.optional = true;
@@ -4257,7 +4300,10 @@ mod tests {
     #[test]
     fn damage_to_itself_equal_to_power_full_pipeline() {
         // Full pipeline: subject stripping + imperative → should produce DealDamage
-        let clause = parse_effect_clause("~ deals damage to itself equal to its power");
+        let clause = parse_effect_clause(
+            "~ deals damage to itself equal to its power",
+            &ParseContext::default(),
+        );
         assert!(
             matches!(
                 clause.effect,
@@ -4993,6 +5039,7 @@ mod tests {
     fn compound_tap_and_put_counter() {
         let clause = parse_effect_clause(
             "tap target creature an opponent controls and put a stun counter on it",
+            &ParseContext::default(),
         );
         assert!(
             matches!(clause.effect, Effect::Tap { .. }),
@@ -5015,8 +5062,10 @@ mod tests {
 
     #[test]
     fn compound_exile_own_and_control_not_split() {
-        let clause =
-            parse_effect_clause("exile any number of other nonland permanents you own and control");
+        let clause = parse_effect_clause(
+            "exile any number of other nonland permanents you own and control",
+            &ParseContext::default(),
+        );
         assert!(
             matches!(
                 clause.effect,
@@ -5051,6 +5100,7 @@ mod tests {
         let (effect, _rem, multi) = counter::try_parse_put_counter(
             "put a +1/+1 counter on up to one target creature",
             "Put a +1/+1 counter on up to one target creature",
+            &ParseContext::default(),
         )
         .expect("should parse");
         if let Effect::PutCounter { target, .. } = &effect {
@@ -5071,6 +5121,7 @@ mod tests {
         let (effect, _rem, multi) = counter::try_parse_put_counter(
             "put two +1/+1 counters on target creature",
             "Put two +1/+1 counters on target creature",
+            &ParseContext::default(),
         )
         .expect("should parse");
         assert!(matches!(effect, Effect::PutCounter { .. }));
@@ -5277,7 +5328,10 @@ mod tests {
 
     #[test]
     fn parse_damage_cant_be_prevented_this_turn() {
-        let clause = parse_effect_clause("Damage can't be prevented this turn");
+        let clause = parse_effect_clause(
+            "Damage can't be prevented this turn",
+            &ParseContext::default(),
+        );
         match clause.effect {
             Effect::AddRestriction { restriction } => {
                 assert!(matches!(
@@ -5297,6 +5351,7 @@ mod tests {
     fn shuffle_compound_subject_into_owners_libraries() {
         let clause = parse_effect_clause(
             "shuffle ~ and target creature with a stun counter on it into their owners' libraries",
+            &ParseContext::default(),
         );
         match &clause.effect {
             Effect::ChangeZone {
@@ -6563,7 +6618,10 @@ mod tests {
     #[test]
     fn extra_turn_imperative() {
         // Test the imperative path directly (no subject)
-        let clause = parse_imperative_effect("take an extra turn after this one");
+        let clause = parse_imperative_effect(
+            "take an extra turn after this one",
+            &ParseContext::default(),
+        );
         assert!(matches!(
             clause.effect,
             Effect::ExtraTurn {
@@ -6814,5 +6872,51 @@ mod tests {
             "effect should not be Unimplemented, got {:?}",
             def.effect
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 608.2k: resolve_it_pronoun unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_it_pronoun_default_context() {
+        let ctx = ParseContext::default();
+        assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
+    }
+
+    #[test]
+    fn resolve_it_pronoun_self_ref_subject() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::SelfRef),
+        };
+        assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
+    }
+
+    #[test]
+    fn resolve_it_pronoun_typed_subject() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(crate::types::ability::TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::You),
+                ..Default::default()
+            })),
+        };
+        assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::TriggeringSource);
+    }
+
+    #[test]
+    fn resolve_it_pronoun_attached_to_subject() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::AttachedTo),
+        };
+        assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::TriggeringSource);
+    }
+
+    #[test]
+    fn resolve_it_pronoun_any_subject() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::Any),
+        };
+        assert_eq!(resolve_it_pronoun(&ctx), TargetFilter::SelfRef);
     }
 }

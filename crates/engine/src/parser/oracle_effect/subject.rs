@@ -1,5 +1,6 @@
 use super::animation::{animation_modifications, parse_animation_spec};
 use super::types::*;
+use super::{resolve_it_pronoun, ParseContext};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect, FilterProp,
     GainLifePlayer, PtValue, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
@@ -11,12 +12,12 @@ use super::super::oracle_static::parse_continuous_modifications;
 use super::super::oracle_target::{parse_target, parse_type_phrase};
 use super::super::oracle_util::parse_number;
 
-pub(super) fn try_parse_subject_predicate_ast(text: &str) -> Option<ClauseAst> {
+pub(super) fn try_parse_subject_predicate_ast(text: &str, ctx: &ParseContext) -> Option<ClauseAst> {
     if try_parse_targeted_controller_gain_life(text).is_some() {
         return None;
     }
 
-    if let Some(clause) = try_parse_subject_continuous_clause(text) {
+    if let Some(clause) = try_parse_subject_continuous_clause(text, ctx) {
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
@@ -25,10 +26,11 @@ pub(super) fn try_parse_subject_predicate_ast(text: &str) -> Option<ClauseAst> {
                 duration,
                 sub_ability,
             },
+            ctx,
         ));
     }
 
-    if let Some(clause) = try_parse_subject_become_clause(text) {
+    if let Some(clause) = try_parse_subject_become_clause(text, ctx) {
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
@@ -37,23 +39,26 @@ pub(super) fn try_parse_subject_predicate_ast(text: &str) -> Option<ClauseAst> {
                 duration,
                 sub_ability,
             },
+            ctx,
         ));
     }
 
-    if let Some(clause) = try_parse_subject_restriction_clause(text) {
+    if let Some(clause) = try_parse_subject_restriction_clause(text, ctx) {
         return Some(subject_predicate_ast_from_clause(
             text,
             clause,
             |effect, duration, _sub_ability| PredicateAst::Restriction { effect, duration },
+            ctx,
         ));
     }
 
     if let Some(stripped) = strip_subject_clause(text) {
         let subject_text = extract_subject_text(text)?;
-        let application = parse_subject_application(&subject_text).unwrap_or(SubjectApplication {
-            affected: TargetFilter::Any,
-            target: None,
-        });
+        let application =
+            parse_subject_application(&subject_text, ctx).unwrap_or(SubjectApplication {
+                affected: TargetFilter::Any,
+                target: None,
+            });
         return Some(ClauseAst::SubjectPredicate {
             subject: Box::new(SubjectPhraseAst {
                 affected: application.affected,
@@ -70,12 +75,13 @@ fn subject_predicate_ast_from_clause<F>(
     text: &str,
     clause: ParsedEffectClause,
     build_predicate: F,
+    ctx: &ParseContext,
 ) -> ClauseAst
 where
     F: FnOnce(Effect, Option<Duration>, Option<Box<AbilityDefinition>>) -> PredicateAst,
 {
     let subject_text = extract_subject_text(text).unwrap_or_default();
-    let application = parse_subject_application(&subject_text).unwrap_or(SubjectApplication {
+    let application = parse_subject_application(&subject_text, ctx).unwrap_or(SubjectApplication {
         affected: TargetFilter::Any,
         target: None,
     });
@@ -103,26 +109,32 @@ fn extract_subject_text(text: &str) -> Option<String> {
     }
 }
 
-fn try_parse_subject_continuous_clause(text: &str) -> Option<ParsedEffectClause> {
+fn try_parse_subject_continuous_clause(
+    text: &str,
+    ctx: &ParseContext,
+) -> Option<ParsedEffectClause> {
     let verb_start = find_predicate_start(text)?;
     let subject = text[..verb_start].trim();
     let predicate = text[verb_start..].trim();
-    let application = parse_subject_application(subject)?;
+    let application = parse_subject_application(subject, ctx)?;
     build_continuous_clause(application, predicate)
 }
 
-fn try_parse_subject_become_clause(text: &str) -> Option<ParsedEffectClause> {
+fn try_parse_subject_become_clause(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     let verb_start = find_predicate_start(text)?;
     let subject = text[..verb_start].trim();
     let predicate = deconjugate_verb(text[verb_start..].trim());
     if !predicate.to_lowercase().starts_with("become ") {
         return None;
     }
-    let application = parse_subject_application(subject)?;
+    let application = parse_subject_application(subject, ctx)?;
     build_become_clause(application, &predicate)
 }
 
-fn try_parse_subject_restriction_clause(text: &str) -> Option<ParsedEffectClause> {
+fn try_parse_subject_restriction_clause(
+    text: &str,
+    ctx: &ParseContext,
+) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
 
     // CR 509.1c: "Target creature must be blocked [this turn] [if able]"
@@ -130,7 +142,7 @@ fn try_parse_subject_restriction_clause(text: &str) -> Option<ParsedEffectClause
     // and needs AddStaticMode for transient effect propagation through the layer system.
     if let Some(pos) = lower.find(" must be blocked") {
         let subject = text[..pos].trim();
-        let application = parse_subject_application(subject)?;
+        let application = parse_subject_application(subject, ctx)?;
         return Some(ParsedEffectClause {
             effect: Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::MustBeBlocked)
@@ -160,11 +172,11 @@ fn try_parse_subject_restriction_clause(text: &str) -> Option<ParsedEffectClause
     } else {
         return None;
     };
-    let application = parse_subject_application(subject)?;
+    let application = parse_subject_application(subject, ctx)?;
     build_restriction_clause(application, predicate)
 }
 
-fn parse_subject_application(subject: &str) -> Option<SubjectApplication> {
+fn parse_subject_application(subject: &str, ctx: &ParseContext) -> Option<SubjectApplication> {
     if subject.trim().is_empty() {
         return None;
     }
@@ -243,10 +255,10 @@ fn parse_subject_application(subject: &str) -> Option<SubjectApplication> {
             target: None,
         });
     }
+    // Explicit self-reference — always SelfRef
     if matches!(
         lower.as_str(),
         "~" | "this"
-            | "it"
             | "this card"
             | "this creature"
             | "this permanent"
@@ -255,6 +267,13 @@ fn parse_subject_application(subject: &str) -> Option<SubjectApplication> {
     ) {
         return Some(SubjectApplication {
             affected: TargetFilter::SelfRef,
+            target: None,
+        });
+    }
+    // CR 608.2k: Bare pronoun "it" — context-dependent
+    if lower == "it" {
+        return Some(SubjectApplication {
+            affected: resolve_it_pronoun(ctx),
             target: None,
         });
     }

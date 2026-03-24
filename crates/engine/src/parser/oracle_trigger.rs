@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use super::oracle_effect::parse_effect_chain;
+use super::oracle_effect::{parse_effect_chain_with_context, ParseContext};
 use super::oracle_target::parse_type_phrase;
 use super::oracle_util::{
     canonicalize_subtype_name, merge_or_filters, normalize_card_name_refs, parse_number,
@@ -46,10 +46,18 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     // Strip it before effect parsing and capture as UnlessPayModifier.
     let (effect_for_parse, unless_pay) = extract_unless_pay_modifier(&effect_final);
 
+    // CR 608.2k: Extract trigger subject for pronoun resolution in effect text.
+    // "it"/"its"/"itself" in the effect refer to the trigger subject, not the source permanent.
+    let trigger_subject = extract_trigger_subject_for_context(&condition_text);
+    let effect_ctx = ParseContext {
+        subject: Some(trigger_subject),
+    };
+
     // Parse the effect
     let has_up_to = effect_for_parse.contains("up to one");
     let execute = if !effect_for_parse.is_empty() {
-        let mut ability = parse_effect_chain(&effect_for_parse, AbilityKind::Spell);
+        let mut ability =
+            parse_effect_chain_with_context(&effect_for_parse, AbilityKind::Spell, &effect_ctx);
         if has_up_to {
             ability.optional_targeting = true;
         }
@@ -499,6 +507,19 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
     def.mode = mode.clone();
     def.description = Some(condition.to_string());
     (mode, def)
+}
+
+/// CR 608.2k: Extract the trigger subject from condition text for pronoun context.
+/// Reuses `parse_trigger_subject` but only needs the `TargetFilter`, not the remainder.
+/// For phase triggers ("at the beginning of..."), the subject is unrecognized and
+/// `resolve_it_pronoun` will fall back to `SelfRef`.
+fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
+    let after_keyword = condition_text
+        .strip_prefix("whenever ")
+        .or_else(|| condition_text.strip_prefix("when "))
+        .unwrap_or(condition_text);
+    let (subject, _) = parse_trigger_subject(after_keyword);
+    subject
 }
 
 // ---------------------------------------------------------------------------
@@ -4597,5 +4618,130 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         // No zone constraint — fires from default zones
         assert_eq!(def.trigger_zones, vec![Zone::Battlefield]);
+    }
+
+    // -----------------------------------------------------------------------
+    // CR 608.2k: Trigger pronoun resolution — "it"/"its" context-dependent
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn trigger_it_resolves_to_triggering_source_for_non_self_subject() {
+        // "it" refers to the entering creature, not the enchantment
+        let def = parse_trigger_line(
+            "Whenever a creature you control enters, put a +1/+1 counter on it",
+            "Test Enchantment",
+        );
+        let exec = def.execute.as_ref().expect("should have execute");
+        match &*exec.effect {
+            Effect::PutCounter { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TriggeringSource,
+                    "non-self trigger 'it' should resolve to TriggeringSource"
+                );
+            }
+            other => panic!("Expected PutCounter, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_it_stays_self_ref_for_self_subject() {
+        // "it" refers to ~ (the card itself entering)
+        let def = parse_trigger_line(
+            "When Test Card enters, put a +1/+1 counter on it",
+            "Test Card",
+        );
+        let exec = def.execute.as_ref().expect("should have execute");
+        match &*exec.effect {
+            Effect::PutCounter { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::SelfRef,
+                    "self-trigger 'it' should stay SelfRef"
+                );
+            }
+            other => panic!("Expected PutCounter, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_tilde_stays_self_ref_with_non_self_subject() {
+        // "~" always refers to the source permanent, even in non-self trigger
+        let def = parse_trigger_line(
+            "Whenever a creature you control enters, sacrifice ~",
+            "Test Enchantment",
+        );
+        let exec = def.execute.as_ref().expect("should have execute");
+        match &*exec.effect {
+            Effect::Sacrifice { target } => {
+                assert_eq!(*target, TargetFilter::SelfRef, "~ should always be SelfRef");
+            }
+            other => panic!("Expected Sacrifice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_otherwise_branch_preserves_context() {
+        // Tribute to the World Tree pattern: else_ability "it" = triggering creature
+        let def = parse_trigger_line(
+            "Whenever a creature you control enters, draw a card if its power is 3 or greater. Otherwise, put two +1/+1 counters on it.",
+            "Tribute to the World Tree",
+        );
+        let exec = def.execute.as_ref().expect("should have execute");
+        let else_ab = exec
+            .else_ability
+            .as_ref()
+            .expect("should have else_ability");
+        match &*else_ab.effect {
+            Effect::PutCounter { target, count, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TriggeringSource,
+                    "else_ability 'it' should be TriggeringSource"
+                );
+                assert_eq!(*count, 2);
+            }
+            other => panic!("Expected PutCounter in else_ability, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_subject_predicate_it_gains() {
+        // "it gains haste" — subject-predicate with "it" as subject
+        let def = parse_trigger_line(
+            "Whenever a creature you control enters, it gains haste until end of turn",
+            "Test Enchantment",
+        );
+        let exec = def.execute.as_ref().expect("should have execute");
+        match &*exec.effect {
+            Effect::GenericEffect { target, .. } => {
+                assert_eq!(
+                    *target,
+                    Some(TargetFilter::TriggeringSource),
+                    "subject-predicate 'it' should be TriggeringSource"
+                );
+            }
+            other => panic!("Expected GenericEffect, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_equipped_creature_it_resolves_to_triggering_source() {
+        // "it" = equipped creature (AttachedTo subject → TriggeringSource)
+        let def = parse_trigger_line(
+            "Whenever equipped creature attacks, put a +1/+1 counter on it",
+            "Test Equipment",
+        );
+        let exec = def.execute.as_ref().expect("should have execute");
+        match &*exec.effect {
+            Effect::PutCounter { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::TriggeringSource,
+                    "equipped creature 'it' should be TriggeringSource"
+                );
+            }
+            other => panic!("Expected PutCounter, got {:?}", other),
+        }
     }
 }
