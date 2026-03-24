@@ -229,17 +229,19 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (num_dmg, damage_source): (u32, Option<DamageSource>) = match &ability.effect {
-        Effect::DealDamage {
-            amount,
-            damage_source,
-            ..
-        } => (
-            resolve_quantity_with_targets(state, amount, ability) as u32,
-            *damage_source,
-        ),
-        _ => return Err(EffectError::MissingParam("DealDamage amount".to_string())),
-    };
+    let (num_dmg, damage_source, target_filter): (u32, Option<DamageSource>, &TargetFilter) =
+        match &ability.effect {
+            Effect::DealDamage {
+                amount,
+                damage_source,
+                target,
+            } => (
+                resolve_quantity_with_targets(state, amount, ability) as u32,
+                *damage_source,
+                target,
+            ),
+            _ => return Err(EffectError::MissingParam("DealDamage amount".to_string())),
+        };
 
     // CR 120.3: Determine damage source. When DamageSource::Target, the first resolved
     // object target is the damage source (e.g., "target creature deals damage to itself").
@@ -257,6 +259,20 @@ pub fn resolve(
             .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller))
     };
 
+    // Resolve effective targets: use explicit targets if present, otherwise derive
+    // implicit target from the TargetFilter for non-targeted damage ("to you", "to itself").
+    let implicit;
+    let effective_targets = if !ability.targets.is_empty() {
+        &ability.targets
+    } else {
+        implicit = match target_filter {
+            TargetFilter::Controller => vec![TargetRef::Player(ability.controller)],
+            TargetFilter::SelfRef => vec![TargetRef::Object(ability.source_id)],
+            _ => vec![],
+        };
+        &implicit
+    };
+
     // CR 601.2d: If the caster distributed damage among targets at cast time,
     // apply per-target amounts from ability.distribution instead of uniform damage.
     if let Some(distribution) = &ability.distribution {
@@ -267,7 +283,7 @@ pub fn resolve(
             }
         }
     } else {
-        for target in &ability.targets {
+        for target in effective_targets {
             match apply_damage_to_target(state, &ctx, target.clone(), num_dmg, false, events)? {
                 DamageResult::Applied(_) => {}
                 DamageResult::NeedsChoice => return Ok(()),

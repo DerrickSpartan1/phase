@@ -68,7 +68,9 @@ pub(super) fn parse_numeric_imperative_ast(
         // CR 119.1: Handle "life equal to {quantity}" — dynamic amount from game state.
         if let Some(eq_pos) = lower.find("life equal to ") {
             let qty_text = lower[eq_pos + "life equal to ".len()..].trim_end_matches('.');
-            if let Some(qty) = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text) {
+            if let Some(qty) =
+                crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
+            {
                 return Some(NumericImperativeAst::GainLife { amount: qty });
             }
         }
@@ -94,7 +96,9 @@ pub(super) fn parse_numeric_imperative_ast(
         // CR 119.3: Handle "life equal to {quantity}" — dynamic amount from game state.
         if let Some(eq_pos) = lower.find("life equal to ") {
             let qty_text = lower[eq_pos + "life equal to ".len()..].trim_end_matches('.');
-            if let Some(qty) = crate::parser::oracle_quantity::parse_event_context_quantity(qty_text) {
+            if let Some(qty) =
+                crate::parser::oracle_quantity::parse_event_context_quantity(qty_text)
+            {
                 return Some(NumericImperativeAst::LoseLife { amount: qty });
             }
         }

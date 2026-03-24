@@ -144,13 +144,12 @@ pub(super) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     if let Some(count_expression) = extract_token_count_expression(suffix) {
         if matches!(&count, QuantityExpr::Ref { qty: QuantityRef::Variable { ref name } } if name == "count")
         {
-            count = crate::parser::oracle_quantity::parse_cda_quantity(&count_expression).unwrap_or(
-                QuantityExpr::Ref {
+            count = crate::parser::oracle_quantity::parse_cda_quantity(&count_expression)
+                .unwrap_or(QuantityExpr::Ref {
                     qty: QuantityRef::Variable {
                         name: count_expression,
                     },
-                },
-            );
+                });
         }
     }
 

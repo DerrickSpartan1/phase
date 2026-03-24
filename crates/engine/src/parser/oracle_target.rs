@@ -639,7 +639,6 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     (filter, &text[pos..])
 }
 
-
 /// Result of classifying a negated word — routes to `type_filters` or `properties`.
 enum NegationResult {
     /// Core type/subtype negation → goes into `type_filters`

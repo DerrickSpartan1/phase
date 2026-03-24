@@ -23,6 +23,40 @@ fn combat_damage_amount(obj: &GameObject) -> u32 {
     }
 }
 
+/// CR 603.2 + CR 704.3: Full trigger/SBA loop after combat damage.
+///
+/// 1. Collect triggers from damage events while source creatures are still on the battlefield
+///    (e.g., DamageReceived for Jackal Pup).
+/// 2. Run SBAs (destroy lethal-damage creatures → ZoneChanged events).
+/// 3. Process triggers from SBA-generated events (e.g., dies triggers from graveyard scan).
+/// 4. Repeat SBA/trigger cycle until stable (no new SBAs, no new triggers).
+fn process_combat_damage_triggers(
+    state: &mut GameState,
+    damage_events: &[GameEvent],
+    all_events: &mut Vec<GameEvent>,
+) {
+    // Step 1: Collect triggers from damage events while creatures are still alive.
+    // CR 603.2: Triggers fire at the moment the event occurs — process_triggers
+    // scans state.battlefield, so this must run before SBAs remove dying objects.
+    triggers::process_triggers(state, damage_events);
+
+    // Steps 2-4: SBA/trigger loop per CR 704.3.
+    // SBAs may generate events (ZoneChanged for dying creatures) that need trigger
+    // processing (dies triggers). Repeat until no new SBAs and no new triggers.
+    loop {
+        let events_before = all_events.len();
+        sba::check_state_based_actions(state, all_events);
+
+        // If SBAs generated new events, process triggers for those events.
+        if all_events.len() > events_before {
+            let new_events: Vec<_> = all_events[events_before..].to_vec();
+            triggers::process_triggers(state, &new_events);
+        } else {
+            break;
+        }
+    }
+}
+
 /// Resolve combat damage with first strike / double strike support (CR 510.1).
 /// CR 702.7b: If any creature has first strike or double strike, two damage sub-steps run.
 /// Between sub-steps: SBAs are checked and triggers processed.
@@ -57,20 +91,17 @@ pub fn resolve_combat_damage(state: &mut GameState, events: &mut Vec<GameEvent>)
         }
 
         // CR 510.4: SBAs and triggers run between first-strike and regular damage sub-steps.
-        sba::check_state_based_actions(state, events);
-        triggers::process_triggers(state, &first_strike_events);
+        process_combat_damage_triggers(state, &first_strike_events, events);
 
         // Regular damage step
         let regular_events = regular_damage_step(state);
         events.extend(regular_events.iter().cloned());
-        sba::check_state_based_actions(state, events);
-        triggers::process_triggers(state, &regular_events);
+        process_combat_damage_triggers(state, &regular_events, events);
     } else {
         // Single damage step
         let regular_events = regular_damage_step(state);
         events.extend(regular_events.iter().cloned());
-        sba::check_state_based_actions(state, events);
-        triggers::process_triggers(state, &regular_events);
+        process_combat_damage_triggers(state, &regular_events, events);
     }
 }
 

@@ -521,7 +521,20 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             }
             Phase::CombatDamage => {
                 // CR 510.1 / CR 510.2: Combat damage assigned and dealt as a turn-based action.
+                // resolve_combat_damage handles the full CR 704.3 SBA/trigger loop inline,
+                // including DamageReceived triggers and dies triggers from SBA-generated events.
                 combat_damage::resolve_combat_damage(state, events);
+                // CR 704.3 / CR 800.4: SBAs may have ended the game during combat damage.
+                if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
+                    return state.waiting_for.clone();
+                }
+                // If triggers were placed on the stack (DamageReceived, dies, etc.),
+                // grant priority so they can resolve before advancing.
+                if !state.stack.is_empty() {
+                    return WaitingFor::Priority {
+                        player: state.active_player,
+                    };
+                }
                 advance_phase(state, events);
                 // Continue to EndCombat
             }

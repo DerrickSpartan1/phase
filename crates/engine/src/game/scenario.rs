@@ -417,9 +417,17 @@ impl<'a> CardBuilder<'a> {
         self
     }
 
-    /// Attach a trigger definition.
+    /// Attach a trigger definition (mode only, no execute).
     pub fn with_trigger(&mut self, mode: TriggerMode) -> &mut Self {
         let trigger = TriggerDefinition::new(mode);
+        let obj = self.obj();
+        obj.trigger_definitions.push(trigger.clone());
+        obj.base_trigger_definitions.push(trigger);
+        self
+    }
+
+    /// Attach a fully constructed trigger definition (with execute, zones, etc.).
+    pub fn with_trigger_definition(&mut self, trigger: TriggerDefinition) -> &mut Self {
         let obj = self.obj();
         obj.trigger_definitions.push(trigger.clone());
         obj.base_trigger_definitions.push(trigger);

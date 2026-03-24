@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum ReplacementEvent {
     // --- First-class variants with active matchers/appliers ---
-
     /// CR 614.1a + CR 614.2: Replaces damage being dealt from a source.
     DamageDone,
     /// CR 614.8: Destruction-replacement (regeneration uses implicit "instead").

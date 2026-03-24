@@ -35,10 +35,7 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
                 .strip_suffix(" counters on ~")
                 .or_else(|| trimmed.strip_suffix(" counters on it"))
             {
-                let raw_type = rest
-                    .strip_prefix("the number of ")
-                    .unwrap_or(rest)
-                    .trim();
+                let raw_type = rest.strip_prefix("the number of ").unwrap_or(rest).trim();
                 let counter_type = normalize_counter_type(raw_type);
                 if !counter_type.is_empty() {
                     return Some(QuantityRef::CountersOnSelf { counter_type });
@@ -413,11 +410,7 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
 
     // "[counter type] counter on ~" / "[counter type] counter on it"
     if clause.contains("counter on") {
-        let raw_type = clause
-            .split("counter")
-            .next()
-            .unwrap_or("")
-            .trim();
+        let raw_type = clause.split("counter").next().unwrap_or("").trim();
         if !raw_type.is_empty() {
             return Some(QuantityRef::CountersOnSelf {
                 counter_type: normalize_counter_type(raw_type),

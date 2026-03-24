@@ -58,7 +58,7 @@ export function MenuShell({
           )}
         </section>
 
-        <section className={isStacked ? "w-full max-w-5xl" : "w-full"}>{children}</section>
+        <section className={isStacked ? "flex w-full max-w-5xl justify-center" : "w-full"}>{children}</section>
       </div>
     </div>
   );

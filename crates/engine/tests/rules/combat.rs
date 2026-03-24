@@ -207,3 +207,130 @@ fn attacker_taps_when_attacking() {
         "Attacker without vigilance should be tapped after declaring attack"
     );
 }
+
+/// CR 603.2 + CR 704.3: DamageReceived triggers fire even when the source creature
+/// dies from the same combat damage (triggers are collected before SBAs destroy it).
+/// Regression test for Jackal Pup / Boros Reckoner pattern.
+#[test]
+fn damage_received_trigger_fires_when_creature_dies() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, QuantityExpr, QuantityRef, TargetFilter,
+        TriggerDefinition,
+    };
+    use engine::types::triggers::TriggerMode;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    // P0 attacks with a vanilla 1/1 — it will die to the blocker
+    let attacker_id = scenario.add_creature(P0, "Goblin", 1, 1).id();
+
+    // P1 blocks with a "Jackal Pup" — 2/1 with DamageReceived trigger that deals
+    // that much damage to its controller (P1).
+    let pup_trigger = TriggerDefinition::new(TriggerMode::DamageReceived)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+                target: TargetFilter::Controller,
+                damage_source: None,
+            },
+        ))
+        .valid_card(TargetFilter::SelfRef)
+        .trigger_zones(vec![Zone::Battlefield]);
+
+    let pup_id = {
+        let mut b = scenario.add_creature(P1, "Jackal Pup", 2, 1);
+        b.with_trigger_definition(pup_trigger);
+        b.id()
+    };
+
+    let mut runner = scenario.build();
+
+    run_combat(&mut runner, vec![attacker_id], vec![(pup_id, attacker_id)]);
+
+    // After combat damage, both creatures die (1 toughness each).
+    // The trigger should be on the stack — resolve it.
+    runner.resolve_top();
+
+    // Jackal Pup took 1 damage from the 1/1 attacker, so its trigger should deal
+    // 1 damage to P1 (its controller).
+    assert_eq!(
+        runner.life(P1),
+        19,
+        "Jackal Pup's DamageReceived trigger should deal 1 damage to its controller"
+    );
+
+    // Verify both creatures died
+    assert!(
+        !runner.state().battlefield.contains(&attacker_id),
+        "1/1 attacker should die to 2 damage from Jackal Pup"
+    );
+    assert!(
+        !runner.state().battlefield.contains(&pup_id),
+        "Jackal Pup (2/1) should die to 1 damage from attacker"
+    );
+}
+
+/// CR 603.10a: Dies triggers (leaves-the-battlefield) fire from graveyard scan
+/// after combat damage. The ZoneChanged events from SBAs are processed by
+/// run_post_action_pipeline when auto_advance returns Priority after CombatDamage.
+#[test]
+fn dies_trigger_fires_from_combat_damage() {
+    use engine::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, QuantityExpr, TargetFilter, TriggerDefinition,
+    };
+    use engine::types::triggers::TriggerMode;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let attacker_id = scenario.add_creature(P0, "Bear", 3, 3).id();
+
+    // P1 creature with "When this creature dies, you gain 3 life."
+    let dies_trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .execute(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: engine::types::ability::GainLifePlayer::Controller,
+            },
+        ))
+        .valid_card(TargetFilter::SelfRef)
+        .origin(Zone::Battlefield)
+        .destination(Zone::Graveyard)
+        .trigger_zones(vec![Zone::Graveyard]);
+
+    let blocker_id = {
+        let mut b = scenario.add_creature(P1, "Doomed Traveler", 1, 1);
+        b.with_trigger_definition(dies_trigger);
+        b.id()
+    };
+
+    let mut runner = scenario.build();
+
+    run_combat(
+        &mut runner,
+        vec![attacker_id],
+        vec![(blocker_id, attacker_id)],
+    );
+
+    // CR 510.4: After combat damage, players receive priority. The dies trigger
+    // is placed on the stack by run_post_action_pipeline processing ZoneChanged events.
+    // Resolve the trigger by passing priority.
+    runner.resolve_top();
+
+    assert!(
+        !runner.state().battlefield.contains(&blocker_id),
+        "1/1 blocker should die to 3 damage"
+    );
+
+    // P1 started at 20, blocker died → trigger grants 3 life → 23
+    assert_eq!(
+        runner.life(P1),
+        23,
+        "Dies trigger should fire and grant 3 life to controller"
+    );
+}

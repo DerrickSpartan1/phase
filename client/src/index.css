@@ -24,6 +24,7 @@ body {
   background:
     radial-gradient(circle at top, rgba(251, 146, 60, 0.12), transparent 30%),
     linear-gradient(180deg, #040816 0%, #050b1d 36%, #02050f 100%);
+  background-attachment: fixed;
 }
 
 #root {

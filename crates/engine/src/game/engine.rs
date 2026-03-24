@@ -631,8 +631,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                     // to select a target from their own permanents (sacrifice/tap).
                     let target_selection = match &ability.effect {
                         Effect::Sacrifice { ref target } | Effect::Tap { ref target } => {
-                            let require_untapped =
-                                matches!(ability.effect, Effect::Tap { .. });
+                            let require_untapped = matches!(ability.effect, Effect::Tap { .. });
                             // CR 701.21a: Opponent chooses from THEIR permanents.
                             let legal: Vec<ObjectId> = state
                                 .objects

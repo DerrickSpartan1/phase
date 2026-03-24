@@ -869,7 +869,6 @@ fn is_color_word(word: &str) -> bool {
     matches!(word, "white" | "blue" | "black" | "red" | "green")
 }
 
-
 fn extract_replacement_effect(text: &str) -> Option<String> {
     // Find ", " after "would" or "instead" clause
     if let Some(pos) = text.find(", ") {

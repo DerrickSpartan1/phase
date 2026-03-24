@@ -6,12 +6,12 @@ pub mod oracle_effect;
 pub(crate) mod oracle_keyword;
 pub(crate) mod oracle_level;
 pub(crate) mod oracle_modal;
+pub(crate) mod oracle_quantity;
 pub mod oracle_replacement;
 pub(crate) mod oracle_saga;
 pub mod oracle_static;
 pub mod oracle_target;
 pub mod oracle_trigger;
-pub(crate) mod oracle_quantity;
 pub mod oracle_util;
 
 pub use oracle::parse_oracle_text;
