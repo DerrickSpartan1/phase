@@ -73,16 +73,21 @@ export function BlockAssignmentLines() {
   );
 }
 
-/** Merge UI-side blockerAssignments map with engine-confirmed blocker_to_attacker. */
+/** Merge UI-side blockerAssignments map with engine-confirmed blocker_to_attacker.
+ *  Engine sends blocker_id → attacker_id[] (Vec supports multi-blocking via ExtraBlockers).
+ *  We flatten to (blocker, attacker) pairs — for multi-block we use the first attacker
+ *  since the line only needs one endpoint per blocker. */
 function useMergedPairs(
   uiAssignments: Map<ObjectId, ObjectId>,
-  engineAssignments: Record<string, ObjectId> | null,
+  engineAssignments: Record<string, ObjectId[]> | null,
 ): Map<ObjectId, ObjectId> {
   return useMemo(() => {
     const merged = new Map(uiAssignments);
     if (engineAssignments) {
-      for (const [blockerId, attackerId] of Object.entries(engineAssignments)) {
-        merged.set(Number(blockerId), attackerId);
+      for (const [blockerId, attackerIds] of Object.entries(engineAssignments)) {
+        if (attackerIds.length > 0) {
+          merged.set(Number(blockerId), attackerIds[0]);
+        }
       }
     }
     return merged;

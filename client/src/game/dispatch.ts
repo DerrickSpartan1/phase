@@ -15,7 +15,7 @@ import { useUiStore } from "../stores/uiStore";
  * Event types whose SFX is deferred to the card slam onImpact callback
  * in AnimationOverlay, so sound aligns with the visual impact moment.
  */
-const SLAM_DEFERRED_SFX = new Set(["DamageDealt", "BlockersDeclared"]);
+const SLAM_DEFERRED_SFX = new Set(["DamageDealt"]);
 
 /** Schedule SFX for each animation step, offset to sync with visual timing. */
 function scheduleSfxForSteps(steps: AnimationStep[], multiplier: number): void {

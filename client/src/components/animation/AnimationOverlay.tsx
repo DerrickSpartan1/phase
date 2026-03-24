@@ -295,26 +295,6 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
           break;
         }
 
-        case "BlockersDeclared": {
-          if (vfxQuality === "minimal") break;
-
-          for (const [blockerId, attackerId] of event.data.assignments) {
-            const attackerPos = getObjectPosition(attackerId);
-            if (!attackerPos) continue;
-
-            const blockerEl = document.querySelector<HTMLElement>(
-              `[data-object-id="${blockerId}"]`,
-            );
-            if (blockerEl) {
-              applyCardSlam(blockerEl, attackerPos.x, attackerPos.y, speedMultiplier, () => {
-                audioManager.playSfx("BlockersDeclared");
-                particleRef.current?.blockClash(attackerPos.x, attackerPos.y);
-              });
-            }
-          }
-          break;
-        }
-
         case "TurnStarted":
           // Handled directly in dispatch.ts via uiStore.flashTurnBanner
           break;

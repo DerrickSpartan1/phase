@@ -34,11 +34,7 @@ export interface AnimationStep {
 
 export type PositionSnapshot = Map<number, DOMRect>;
 
-/**
- * Combat pacing defaults (normal speed).
- * Keep blocker reveal distinct from damage so combat reads clearly.
- */
-export const COMBAT_BLOCKERS_REVEAL_MS = 700;
+/** Combat pacing defaults (normal speed). */
 export const COMBAT_ENGAGEMENT_DURATION_MS = 900;
 
 export const EVENT_DURATIONS: Record<string, number> = {
@@ -52,7 +48,6 @@ export const EVENT_DURATIONS: Record<string, number> = {
   CounterRemoved: 200,
   PermanentTapped: 200,
   PermanentUntapped: 200,
-  BlockersDeclared: COMBAT_BLOCKERS_REVEAL_MS,
 };
 
 export const DEFAULT_DURATION = 200;

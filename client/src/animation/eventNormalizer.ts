@@ -28,13 +28,13 @@ const NON_VISUAL_EVENTS = new Set([
   "ReplacementApplied",
   "Regenerated",
   "AttackersDeclared",
+  "BlockersDeclared",
 ]);
 
 /** Events that always begin a new step, regardless of context. */
 const OWN_STEP_TYPES = new Set([
   "SpellCast",
   "TurnStarted",
-  "BlockersDeclared",
 ]);
 
 /** Events that merge into the preceding step rather than starting a new one. */
@@ -98,7 +98,7 @@ const GROUPING_STRATEGIES: Map<string, GroupingStrategy> = new Map([
 // Step construction helpers
 // ---------------------------------------------------------------------------
 
-const COMBAT_PACED_EVENT_TYPES = new Set(["BlockersDeclared", "DamageDealt"]);
+const COMBAT_PACED_EVENT_TYPES = new Set(["DamageDealt"]);
 
 function toEffect(event: GameEvent, combatPacing: CombatPacing): StepEffect {
   const baseDuration = EVENT_DURATIONS[event.type] ?? DEFAULT_DURATION;

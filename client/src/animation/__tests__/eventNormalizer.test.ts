@@ -146,29 +146,25 @@ describe("normalizeEvents", () => {
     expect(steps[0].effects[0].event.type).toBe("TurnStarted");
   });
 
-  it("BlockersDeclared gets its own step", () => {
+  it("BlockersDeclared is non-visual (no animation step)", () => {
     const events: GameEvent[] = [
       { type: "BlockersDeclared", data: { assignments: [[3, 1]] } },
     ];
 
     const steps = normalizeEvents(events);
-    expect(steps).toHaveLength(1);
-    expect(steps[0].effects[0].event.type).toBe("BlockersDeclared");
-    expect(steps[0].duration).toBe(EVENT_DURATIONS.BlockersDeclared);
+    expect(steps).toHaveLength(0);
   });
 
   it("combat pacing scales combat-only step durations", () => {
     const events: GameEvent[] = [
-      { type: "BlockersDeclared", data: { assignments: [[3, 1]] } },
       { type: "DamageDealt", data: { source_id: 1, target: { Player: 0 }, amount: 3, is_combat: false } },
       { type: "SpellCast", data: { card_id: 9, controller: 0, object_id: 9 } },
     ];
 
     const steps = normalizeEvents(events, { combatPacing: "cinematic" });
-    expect(steps).toHaveLength(3);
-    expect(steps[0].duration).toBeGreaterThan(EVENT_DURATIONS.BlockersDeclared);
-    expect(steps[1].duration).toBeGreaterThan(EVENT_DURATIONS.DamageDealt);
-    expect(steps[2].duration).toBe(EVENT_DURATIONS.SpellCast);
+    expect(steps).toHaveLength(2);
+    expect(steps[0].duration).toBeGreaterThan(EVENT_DURATIONS.DamageDealt);
+    expect(steps[1].duration).toBe(EVENT_DURATIONS.SpellCast);
   });
 
   it("step duration equals max of effect durations", () => {

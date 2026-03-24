@@ -288,7 +288,7 @@ export interface DamageAssignment {
 export interface CombatState {
   attackers: AttackerInfo[];
   blocker_assignments: Record<string, ObjectId[]>;
-  blocker_to_attacker: Record<string, ObjectId>;
+  blocker_to_attacker: Record<string, ObjectId[]>;
   damage_assignments: Record<string, DamageAssignment[]>;
   first_strike_done: boolean;
 }
