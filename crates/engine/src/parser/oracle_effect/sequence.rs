@@ -541,8 +541,9 @@ pub(super) fn parse_intrinsic_continuation_ast(
     }
 }
 
-/// Parse "put up to N [filter] from among them/those cards onto the battlefield / into your hand"
-/// into a DigFromAmong continuation that patches the preceding Dig effect.
+/// CR 701.20e + CR 608.2c: Parse "put up to N [filter] from among them/those cards onto the
+/// battlefield / into your hand" into a DigFromAmong continuation that patches the preceding
+/// Dig effect. The player follows the Oracle text instructions in written order (CR 608.2c).
 ///
 /// Examples:
 /// - "put up to two creature cards with mana value 3 or less from among them onto the battlefield"
@@ -657,7 +658,8 @@ pub(super) fn parse_followup_continuation_ast(
         Effect::Token { .. } if lower.starts_with("suspect ") => {
             Some(ContinuationAst::SuspectLastCreated)
         }
-        // CR 701.15: "It can't be regenerated" / "They can't be regenerated" after Destroy/DestroyAll
+        // CR 701.19c + CR 608.2c: "It can't be regenerated" prevents regeneration shields;
+        // later text modifies the preceding Destroy instruction per CR 608.2c.
         Effect::Destroy { .. } | Effect::DestroyAll { .. }
             if lower.contains("can't be regenerated")
                 || lower.contains("cannot be regenerated") =>

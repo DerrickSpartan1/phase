@@ -172,12 +172,12 @@ fn evaluate_condition(
             .objects
             .get(&source_id)
             .is_some_and(|obj| obj.entered_battlefield_turn == Some(state.turn_number)),
-        // CR 701.52: True when this creature is the ring-bearer for its controller.
+        // CR 701.54a: True when this creature is the ring-bearer for its controller.
         StaticCondition::IsRingBearer => state
             .ring_bearer
             .get(&controller)
             .is_some_and(|bearer| *bearer == Some(source_id)),
-        // CR 701.52: True when the controller's ring level is at least this value.
+        // CR 701.54c: True when the controller's ring level is at least this value.
         StaticCondition::RingLevelAtLeast { level } => {
             state.ring_level.get(&controller).copied().unwrap_or(0) >= *level
         }

@@ -461,7 +461,7 @@ impl ManaPool {
         before - self.mana.len()
     }
 
-    /// CR 702.139b: Remove `count` unrestricted mana of any type from the pool (generic cost).
+    /// CR 702.139a: Remove `count` unrestricted mana of any type from the pool (generic cost).
     /// Skips mana with `ManaRestriction`s since the companion special action is not a spell.
     /// Returns true if enough eligible mana was available and removed, false otherwise.
     pub fn spend_generic(&mut self, count: usize) -> bool {

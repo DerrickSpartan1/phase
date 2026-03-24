@@ -468,7 +468,7 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
         return None;
     }
 
-    // CR 701.16a: "reveals a number of cards from their hand equal to X"
+    // CR 701.20a: "reveals a number of cards from their hand equal to X"
     if lower.contains("hand") && lower.contains("equal to ") {
         if let Some((_, qty_text)) = lower.split_once("equal to ") {
             let qty_text = qty_text.trim_end_matches('.');
@@ -1266,7 +1266,7 @@ pub(super) fn parse_imperative_family_ast(
         "create" => parse_search_and_creation_ast(text, lower)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::SearchCreation(ast))),
 
-        // Utility verbs (CR 615, CR 701.15, CR 701.6)
+        // Utility verbs (CR 615, CR 701.19, CR 701.6)
         "prevent" | "regenerate" | "copy" | "attach" => parse_utility_imperative_ast(text, lower)
             .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Utility(ast))),
         "transform" | "transforms" => parse_utility_imperative_ast(text, lower)

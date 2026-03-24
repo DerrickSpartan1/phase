@@ -40,7 +40,7 @@ pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState
         )
     };
 
-    // CR 701.16a: During DigChoice, the choosing player can see the looked-at
+    // CR 701.20e: During DigChoice, the looking player can see the looked-at
     // library cards. Opponents cannot see any library card identities.
     let (dig_visible, dig_cards): (
         std::collections::HashSet<ObjectId>,
@@ -70,7 +70,7 @@ pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState
         .collect();
     for obj_id in all_library_ids {
         // CR 701.62a: Don't hide cards visible to the manifesting player
-        // CR 701.16a: Don't hide cards visible to the digging player
+        // CR 701.20e: Don't hide cards visible to the looking player.
         // CR 701.20b: Don't hide cards currently revealed (e.g. Goblin Guide trigger),
         // but ManifestDread/Dig cards use their own visibility path — not generic revealed_cards
         let visible = manifest_dread_visible.contains(&obj_id)
@@ -94,7 +94,7 @@ pub fn filter_state_for_player(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
-    // CR 701.16a: For opponents during DigChoice, redact the card list
+    // CR 701.20e: For opponents during DigChoice, redact the card list
     // so they can't see which specific cards were looked at.
     if let WaitingFor::DigChoice {
         player,

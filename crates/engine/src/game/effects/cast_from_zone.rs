@@ -10,7 +10,7 @@ use crate::types::zones::Zone;
 /// CR 601.2a + CR 118.9: Cast a card from a zone without paying its mana cost.
 ///
 /// Grants a `CastingPermission::ExileWithAltCost` on the target card(s),
-/// following the same pattern as Discover (CR 702.170). If the card is not
+/// following the same pattern as Discover (CR 701.57a). If the card is not
 /// already in exile, it is moved there first — the casting pipeline expects
 /// cards with exile-cast permissions to be in the exile zone.
 ///

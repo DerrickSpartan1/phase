@@ -2,7 +2,8 @@ use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, Ta
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 
-/// CR 701.16a: Dig — look at top N cards, select some to keep, rest go elsewhere.
+/// CR 701.20e + CR 608.2c: Look at top N cards (shown only to the looking player),
+/// select some to keep per the effect's instructions, rest go elsewhere.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,

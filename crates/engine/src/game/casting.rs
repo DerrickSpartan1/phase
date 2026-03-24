@@ -1411,7 +1411,7 @@ pub fn pay_ability_cost(
                 // intercepted before reaching pay_ability_cost.
             }
         }
-        // CR 702.133a: Discard the source card itself as part of the cost (Channel).
+        // CR 207.2c + CR 602.1: Discard the source card itself as part of the cost (Channel).
         AbilityCost::Discard { self_ref: true, .. } => {
             super::effects::discard::discard_as_cost(state, source_id, player, events);
         }
@@ -1545,7 +1545,7 @@ pub fn can_activate_ability_now(
     }
 
     let mut ability_def = obj.abilities[ability_index].clone();
-    // CR 702.133: Check activation zone — default to battlefield.
+    // CR 602.1: Check activation zone — default to battlefield.
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
     if obj.zone != required_zone {
         return false;
@@ -1629,7 +1629,7 @@ pub fn handle_activate_ability(
     }
 
     let mut ability_def = obj.abilities[ability_index].clone();
-    // CR 702.133: Check activation zone — default to battlefield.
+    // CR 602.1: Check activation zone — default to battlefield.
     let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
     if obj.zone != required_zone {
         return Err(EngineError::InvalidAction(format!(

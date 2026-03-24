@@ -112,7 +112,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.players_who_had_artifact_etb_this_turn.clear();
     state.cards_left_graveyard_this_turn.clear();
     state.creature_died_this_turn = false;
-    // CR 702.170: Reset cumulative mana spent on spells for Expend triggers.
+    // CR 700.14: Reset cumulative mana spent on spells for Expend triggers.
     state.mana_spent_on_spells_this_turn.clear();
     state.modal_modes_chosen_this_turn.clear();
     for player in &mut state.players {

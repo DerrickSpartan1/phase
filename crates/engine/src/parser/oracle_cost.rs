@@ -130,7 +130,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
 
     // "Discard a card" / "Discard N cards"
     if let Some(rest) = lower.strip_prefix("discard ") {
-        // CR 702.133a: "Discard this card" — Channel self-ref cost.
+        // CR 207.2c: "Discard this card" — Channel self-ref cost (ability word, not keyword).
         if rest == "this card" {
             return AbilityCost::Discard {
                 count: 1,

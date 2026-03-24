@@ -245,7 +245,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         }
     }
 
-    // CR 702.170: "discover N"
+    // CR 701.57a: "discover N"
     if let Some(rest) = text.strip_prefix("discover ") {
         if let Ok(n) = rest.trim().parse::<u32>() {
             return Some(Keyword::Discover(n));

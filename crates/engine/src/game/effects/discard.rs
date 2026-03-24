@@ -161,7 +161,7 @@ pub fn resolve(
     Ok(())
 }
 
-/// CR 702.133a + CR 118.12a: Discard a card as part of an ability cost.
+/// CR 207.2c + CR 118.12a: Discard a card as part of an ability cost (Channel).
 /// Routes through the replacement pipeline so Madness (CR 702.35) etc. can intercept.
 pub fn discard_as_cost(
     state: &mut GameState,

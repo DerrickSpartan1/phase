@@ -264,7 +264,7 @@ pub enum GameEvent {
         player: PlayerId,
         delta: i32,
     },
-    /// CR 702.170a: Mana was spent on a spell cast, updating the cumulative total this turn.
+    /// CR 700.14: Mana was spent on a spell cast, updating the cumulative total this turn.
     ManaExpended {
         player_id: PlayerId,
         amount_spent: u32,

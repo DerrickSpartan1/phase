@@ -4,12 +4,12 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::zones::Zone;
 
-/// CR 701.52: The Ring tempts you.
+/// CR 701.54: The Ring tempts you.
 ///
-/// CR 701.52a: When the Ring tempts you, if you don't control a Ring-bearer,
-/// choose a creature you control. That creature becomes your Ring-bearer.
+/// CR 701.54a: When the Ring tempts you, choose a creature you control.
+/// That creature becomes your Ring-bearer.
 ///
-/// CR 701.52b: Each time the Ring tempts you, your ring level increases by one
+/// CR 701.54c: Each time the Ring tempts you, your ring level increases by one
 /// (to a maximum of four levels, 0-indexed as 0–3).
 pub fn resolve(
     state: &mut GameState,

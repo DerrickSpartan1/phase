@@ -302,7 +302,7 @@ pub enum Keyword {
     /// Gift — optional casting-time promise. If promised, opponent receives the gift
     /// at resolution before the spell's other effects.
     Gift(GiftKind),
-    /// CR 702.170: Discover N — exile from top until nonland card with MV ≤ N.
+    /// CR 701.57a: Discover N — exile from top until nonland card with MV ≤ N.
     Discover(u32),
     Spree,
     Ravenous,

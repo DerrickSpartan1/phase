@@ -105,12 +105,12 @@ pub enum GameAction {
     PayUnlessCost {
         pay: bool,
     },
-    /// CR 701.52: Choose a creature to be the ring-bearer.
+    /// CR 701.54a: Choose a creature to be the ring-bearer.
     ChooseRingBearer {
         target: ObjectId,
     },
-    /// CR 702.6a: Tap creature/artifact for convoke or waterbend mana.
-    /// CR 702.6b: Summoning sickness does not apply.
+    /// CR 702.51a: Tap creature/artifact for convoke or waterbend mana.
+    /// CR 302.6: Summoning sickness does not apply (convoke doesn't use the tap ability mechanism).
     TapForConvoke {
         object_id: ObjectId,
         mana_type: super::mana::ManaType,
@@ -125,9 +125,9 @@ pub enum GameAction {
         /// Index into the eligible_companions list, or None to decline.
         card_index: Option<usize>,
     },
-    /// CR 702.139b: Pay {3} to put companion into hand (special action).
+    /// CR 702.139a: Pay {3} to put companion into hand (special action, see rule 116.2g).
     CompanionToHand,
-    /// CR 702.170: Choose to cast discovered card or put it to hand.
+    /// CR 701.57a: Choose to cast discovered card or put it to hand.
     DiscoverChoice {
         /// true = cast without paying mana cost, false = put to hand
         cast: bool,

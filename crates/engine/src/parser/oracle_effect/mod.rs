@@ -330,7 +330,7 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
         });
     }
 
-    // CR 701.52: "the ring tempts you" — Ring Tempts You effect.
+    // CR 701.54: "the ring tempts you" — Ring Tempts You effect.
     if tp.contains("the ring tempts you") {
         return parsed_clause(Effect::RingTemptsYou);
     }
@@ -443,7 +443,7 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
         return clause;
     }
 
-    // CR 702.170: "discover N" — effect variant
+    // CR 701.57a: "discover N" — effect variant
     if let Some(rest) = tp.strip_prefix("discover ") {
         if let Ok(n) = rest.lower.trim().parse::<u32>() {
             return parsed_clause(Effect::Discover {
@@ -1387,7 +1387,7 @@ fn lower_subject_predicate_ast(
                     target: subject.affected,
                 });
             }
-            // CR 701.16a: "<player> reveals the top [N] card(s) of their library"
+            // CR 701.20a: "<player> reveals the top [N] card(s) of their library"
             if pred_lower.starts_with("reveal ")
                 && pred_lower.contains("top")
                 && pred_lower.contains("library")

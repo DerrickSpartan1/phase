@@ -312,7 +312,7 @@ fn advance_companion_reveal(
 
 // ── Special Action: Pay {3} to Move Companion to Hand ───────────────────
 
-/// CR 702.139b: Check if a player can pay {3} to put their companion into hand.
+/// CR 702.139a: Check if a player can pay {3} to put their companion into hand.
 /// Returns true if all conditions are met (sorcery speed, has companion, not used, enough mana).
 pub fn can_activate_companion(state: &GameState, player: PlayerId) -> bool {
     let player_data = &state.players[player.0 as usize];
@@ -343,7 +343,7 @@ pub fn can_activate_companion(state: &GameState, player: PlayerId) -> bool {
         >= COMPANION_COST
 }
 
-/// CR 702.139b: Pay {3} as a special action to put companion into hand.
+/// CR 702.139a: Pay {3} as a special action to put companion into hand.
 pub fn handle_companion_to_hand(
     state: &mut GameState,
     player: PlayerId,

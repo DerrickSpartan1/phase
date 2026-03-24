@@ -793,7 +793,7 @@ pub(super) fn finalize_cast(
     casting_variant: CastingVariant,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    // CR 702.170a: Snapshot pool size before payment to compute actual mana spent.
+    // CR 700.14: Snapshot pool size before payment to compute actual mana spent.
     let pool_before = state
         .players
         .iter()
@@ -803,7 +803,7 @@ pub(super) fn finalize_cast(
 
     super::casting::pay_mana_cost(state, player, object_id, cost, events)?;
 
-    // CR 702.170a: Compute actual mana deducted from pool (not declared cost).
+    // CR 700.14: Compute actual mana deducted from pool (not declared cost).
     let pool_after = state
         .players
         .iter()
@@ -884,7 +884,7 @@ pub(super) fn finalize_cast(
         .clone();
     restrictions::record_spell_cast(state, player, &obj);
 
-    // CR 702.170a: Track cumulative mana spent on spells this turn for Expend triggers.
+    // CR 700.14: Track cumulative mana spent on spells this turn for Expend triggers.
     // Uses actual mana deducted from pool (accounts for cost reduction, convoke, etc.).
     if actual_mana_spent > 0 {
         let cumulative = state

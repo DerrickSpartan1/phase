@@ -379,7 +379,7 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
-        // CR 702.138b: AI selects cards to exile from graveyard for Escape cost
+        // CR 702.138a: AI selects cards to exile from graveyard as part of paying Escape cost.
         WaitingFor::ExileFromGraveyardForCost {
             player,
             count,
@@ -532,7 +532,7 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
-        // CR 701.52: Choose a ring-bearer from candidate creatures.
+        // CR 701.54a: Choose a ring-bearer from candidate creatures.
         WaitingFor::ChooseRingBearer { player, candidates } => candidates
             .iter()
             .map(|&target| {
@@ -794,7 +794,7 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         }
     }
 
-    // CR 702.133: Hand-activated abilities (Channel, Cycling, etc.)
+    // CR 602.1: Hand-activated abilities (Cycling per CR 702.29a, etc.)
     for &obj_id in &state.players[player.0 as usize].hand {
         if let Some(obj) = state.objects.get(&obj_id) {
             if obj.controller == player {
@@ -826,7 +826,7 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
     // Mana tap candidates are still generated for ManaPayment/UnlessPayment contexts
     // via mana_payment_actions().
 
-    // CR 702.139b: Companion special action — pay {3} to put companion into hand
+    // CR 702.139a: Companion special action — pay {3} to put companion into hand.
     if crate::game::companion::can_activate_companion(state, player) {
         actions.push(candidate(
             GameAction::CompanionToHand,
@@ -1212,7 +1212,7 @@ fn mana_payment_actions(
         Some(player),
     ));
     if let Some(mode) = convoke_mode {
-        // CR 702.6b: Summoning sickness does not restrict tapping for convoke.
+        // CR 702.51a + CR 302.6: Summoning sickness does not restrict tapping for convoke.
         for (obj_id, obj) in &state.objects {
             if obj.is_convoke_eligible(player) {
                 match mode {
@@ -1228,7 +1228,7 @@ fn mana_payment_actions(
                         ));
                     }
                     ConvokeMode::Convoke => {
-                        // CR 702.6a: Colorless (for generic) always available
+                        // CR 702.51a: Colorless (for generic) always available
                         actions.push(candidate(
                             GameAction::TapForConvoke {
                                 object_id: *obj_id,

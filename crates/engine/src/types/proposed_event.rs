@@ -95,7 +95,7 @@ pub enum ProposedEvent {
     Destroy {
         object_id: ObjectId,
         source: Option<ObjectId>,
-        /// CR 701.15: When true, regeneration shields cannot prevent this destruction.
+        /// CR 701.19c: When true, regeneration shields cannot prevent this destruction.
         cant_regenerate: bool,
         applied: HashSet<ReplacementId>,
     },

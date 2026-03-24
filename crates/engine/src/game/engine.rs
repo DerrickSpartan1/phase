@@ -1208,7 +1208,8 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
         }
         // CR 702.51a / Waterbend: Tap a creature or artifact to pay mana.
-        // CR 702.6b: Summoning sickness does not apply to tapping for convoke.
+        // CR 702.51a + CR 302.6: Convoke taps creatures to pay mana; summoning sickness
+        // (CR 302.6) is not checked because convoke does not use the tap activated-ability mechanism.
         (
             WaitingFor::ManaPayment {
                 player,
@@ -1250,7 +1251,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 // Waterbend always produces colorless
                 ConvokeMode::Waterbend => crate::types::mana::ManaType::Colorless,
             };
-            // Tap the permanent (no summoning sickness check — CR 702.6b)
+            // Tap the permanent (no summoning sickness check — CR 702.51a + CR 302.6)
             if let Some(obj) = state.objects.get_mut(&object_id) {
                 obj.tapped = true;
             }
@@ -1618,7 +1619,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
             state.waiting_for.clone()
         }
-        // CR 702.170: Discover — player chose cast-free or put-to-hand.
+        // CR 701.57a: Discover — player chose cast-free or put-to-hand.
         (
             WaitingFor::DiscoverChoice {
                 player,
@@ -1632,7 +1633,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             let misses = exiled_misses.clone();
 
             if cast {
-                // CR 702.170: "Cast it without paying its mana cost" — grant
+                // CR 701.57a: "Cast it without paying its mana cost" — grant
                 // a zero-cost casting permission on the exiled card so the player
                 // can cast it via the normal exile-cast flow.
                 if let Some(obj) = state.objects.get_mut(&hit) {
@@ -1647,7 +1648,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 zones::move_to_zone(state, hit, Zone::Hand, &mut events);
             }
 
-            // CR 702.170a: Put exiled misses on bottom in random order
+            // CR 701.57a: Put exiled misses on bottom in random order.
             {
                 use rand::seq::SliceRandom;
                 let mut shuffled = misses;
@@ -1679,7 +1680,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
             state.waiting_for.clone()
         }
-        // CR 701.16a: Dig — player selects cards to keep, rest go elsewhere.
+        // CR 701.20e + CR 608.2c: Player selects cards to keep from looked-at cards; rest go elsewhere.
         (
             WaitingFor::DigChoice {
                 player,
@@ -2124,7 +2125,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             state.last_named_choice = None;
             state.waiting_for.clone()
         }
-        // CR 701.52: Player selects a ring-bearer from candidates.
+        // CR 701.54a: Player chooses a ring-bearer — the chosen creature becomes the Ring-bearer.
         (
             WaitingFor::ChooseRingBearer { player, candidates },
             GameAction::ChooseRingBearer { target },
@@ -2538,7 +2539,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 )));
             }
 
-            // CR 115.1d: Each selected target must be a legal target.
+            // CR 601.2c: Each selected target must be a legal target.
             for id in &selected {
                 if !legal.contains(id) {
                     return Err(EngineError::InvalidAction(
@@ -2564,7 +2565,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             WaitingFor::CompanionReveal { player, .. },
             GameAction::DeclareCompanion { card_index },
         ) => super::companion::handle_declare_companion(state, *player, card_index, &mut events),
-        // CR 702.139b: Special action — companion to hand
+        // CR 702.139a: Special action — pay {3} to put companion into hand (see rule 116.2g).
         (WaitingFor::Priority { player }, GameAction::CompanionToHand) => {
             state.lands_tapped_for_mana.remove(player);
             super::companion::handle_companion_to_hand(state, *player, &mut events)

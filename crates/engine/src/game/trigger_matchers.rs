@@ -139,7 +139,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 705: Coin flipping triggers
     r.insert(TriggerMode::FlippedCoin, match_flipped_coin);
 
-    // CR 701.52: Ring tempts you trigger
+    // CR 701.54: Ring tempts you trigger
     r.insert(TriggerMode::RingTemptsYou, match_ring_tempts_you);
 
     // CR 702.110a: Exploit trigger matcher
@@ -148,7 +148,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 701.37a: "When ~ becomes monstrous" — self-trigger on Monstrosity resolution.
     r.insert(TriggerMode::BecomeMonstrous, match_become_monstrous);
 
-    // CR 702.170: Expend trigger — cumulative mana spent on spells
+    // CR 700.14: Expend trigger — cumulative mana spent on spells
     r.insert(TriggerMode::ManaExpend, match_mana_expend);
 
     // Compound: enters or attacks — fires on ETB or attack events
@@ -1612,7 +1612,7 @@ pub(super) fn match_flipped_coin(
     }
 }
 
-/// CR 701.52: Match "the Ring tempts you" events.
+/// CR 701.54d: Match "the Ring tempts you" events.
 pub(super) fn match_ring_tempts_you(
     event: &GameEvent,
     _trigger: &TriggerDefinition,
@@ -1744,10 +1744,10 @@ pub(super) fn match_elemental_bend(
     *controller == source_controller
 }
 
-/// CR 702.170a: Expend N — fires when cumulative mana spent on spells this turn
+/// CR 700.14: Expend N — fires when cumulative mana spent on spells this turn
 /// crosses the threshold for the first time.
-/// CR 702.170b: prev < threshold <= new_cumulative means we just crossed it.
-/// CR 702.170c: The crossing math guarantees at-most-once-per-turn without needing OncePerTurn.
+/// prev < threshold <= new_cumulative means we just crossed it.
+/// The crossing math guarantees at-most-once-per-turn without needing OncePerTurn.
 pub(super) fn match_mana_expend(
     event: &GameEvent,
     trigger: &TriggerDefinition,
@@ -1762,7 +1762,7 @@ pub(super) fn match_mana_expend(
     {
         let threshold = trigger.expend_threshold.unwrap_or(0);
         let prev = new_cumulative.saturating_sub(*amount_spent);
-        // CR 702.170b: Fires when crossing the threshold
+        // CR 700.14: Fires when crossing the threshold
         if prev >= threshold || *new_cumulative < threshold {
             return false;
         }

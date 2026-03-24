@@ -127,7 +127,7 @@ pub(super) enum ContinuationAst {
     },
     /// "create a ... token and suspect it" → chain Suspect { target: LastCreated }
     SuspectLastCreated,
-    /// CR 701.15: "It can't be regenerated" / "They can't be regenerated" — sets
+    /// CR 701.19c: "It can't be regenerated" / "They can't be regenerated" — sets
     /// `cant_regenerate: true` on the preceding Destroy/DestroyAll effect.
     CantRegenerate,
     /// "Choose one/N of them" / "An opponent chooses one/N of those cards" after a ChangeZone
@@ -140,8 +140,8 @@ pub(super) enum ContinuationAst {
     /// after Dig/RevealTop — the remaining cards go back to the library top.
     /// The ordering choice is handled by the engine's WaitingFor flow.
     PutBackInAnyOrder,
-    /// "Put up to N [filter] from among them onto the battlefield/into your hand"
-    /// after Dig — patches the Dig's keep_count, filter, destination, and rest_destination.
+    /// CR 701.20e + CR 608.2c: "Put up to N [filter] from among them onto the battlefield/into
+    /// your hand" after Dig — patches the Dig's keep_count, filter, destination, and rest_destination.
     DigFromAmong {
         count: u32,
         up_to: bool,
@@ -318,7 +318,7 @@ pub(super) enum HandRevealImperativeAst {
         target: TargetFilter,
     },
     RevealHand,
-    /// "reveals a number of cards from their hand equal to X" (CR 701.16a).
+    /// "reveals a number of cards from their hand equal to X" (CR 701.20a).
     RevealPartialHand {
         count: crate::types::ability::QuantityExpr,
     },

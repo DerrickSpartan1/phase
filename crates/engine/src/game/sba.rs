@@ -1296,7 +1296,7 @@ mod tests {
         let mut events = Vec::new();
         check_state_based_actions(&mut state, &mut events);
 
-        // CR 701.15: Creature survives lethal damage via regeneration
+        // CR 701.19a: Creature survives lethal damage via regeneration
         assert!(
             state.battlefield.contains(&id),
             "Creature with regen shield should survive lethal damage SBA"

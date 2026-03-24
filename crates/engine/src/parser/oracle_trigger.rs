@@ -284,7 +284,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         );
     }
 
-    // "if you cast it" — zoneless cast check (CR 702.170: Discover ETBs)
+    // "if you cast it" — zoneless cast check (CR 701.57a: Discover ETBs)
     if let Some(pos) = lower.find("if you cast it") {
         // Guard: must not be followed by " from" (which is the zone-specific variant)
         let after = &lower[pos + "if you cast it".len()..];
@@ -1584,7 +1584,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some(result);
     }
 
-    // CR 702.170a: "whenever you expend N" — cumulative mana spent on spells this turn
+    // CR 700.14: "whenever you expend N" — cumulative mana spent on spells this turn
     for prefix in ["whenever you expend ", "when you expend "] {
         if let Some(rest) = lower.strip_prefix(prefix) {
             if let Some((n, _)) = parse_number(rest) {

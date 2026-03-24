@@ -101,10 +101,10 @@ pub enum DayNight {
     Night,
 }
 
-/// CR 702.6a / Waterbend: Determines tap-to-pay behavior during mana payment.
+/// CR 702.51a / Waterbend: Determines tap-to-pay behavior during mana payment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConvokeMode {
-    /// CR 702.6a: Creature's color determines mana produced.
+    /// CR 702.51a: Creature's color determines mana produced.
     Convoke,
     /// Waterbend: always produces {1} colorless, emits Waterbend event.
     Waterbend,
@@ -251,8 +251,8 @@ pub enum WaitingFor {
     },
     ManaPayment {
         player: PlayerId,
-        /// CR 702.6a / Waterbend: When present, the player can tap untapped
-        /// creatures/artifacts to pay mana. Summoning sickness does not apply.
+        /// CR 702.51a / Waterbend: When present, the player can tap untapped
+        /// creatures/artifacts to pay mana. Summoning sickness does not apply (CR 302.6).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         convoke_mode: Option<ConvokeMode>,
     },
@@ -302,6 +302,7 @@ pub enum WaitingFor {
         player: PlayerId,
         cards: Vec<ObjectId>,
     },
+    /// CR 701.20e: Waiting for the player to choose which looked-at cards to keep.
     DigChoice {
         player: PlayerId,
         cards: Vec<ObjectId>,
@@ -545,7 +546,7 @@ pub enum WaitingFor {
         /// The pending cast to resume after the sacrifice is complete.
         pending_cast: Box<PendingCast>,
     },
-    /// CR 702.138b: Player must choose cards to exile from graveyard as escape cost.
+    /// CR 702.138a: Player must choose cards to exile from graveyard as escape cost.
     ExileFromGraveyardForCost {
         player: PlayerId,
         /// How many cards to exile.
@@ -565,7 +566,7 @@ pub enum WaitingFor {
         /// The pending cast to resume after the tap choice.
         pending_cast: Box<PendingCast>,
     },
-    /// CR 702.170: Player chooses to cast the discovered card or put it to hand.
+    /// CR 701.57a: Player chooses to cast the discovered card or put it to hand.
     DiscoverChoice {
         player: PlayerId,
         /// The nonland card that was hit.
@@ -1032,7 +1033,7 @@ pub struct GameState {
     pub cards_left_graveyard_this_turn: HashMap<PlayerId, u32>,
     #[serde(default)]
     pub creature_died_this_turn: bool,
-    /// CR 702.170a: Cumulative mana spent on spells this turn per player (for Expend triggers).
+    /// CR 700.14: Cumulative mana spent on spells this turn per player (for Expend triggers).
     #[serde(default)]
     pub mana_spent_on_spells_this_turn: HashMap<PlayerId, u32>,
 

@@ -443,17 +443,17 @@ fn test_ai_convoke_ignores_summoning_sickness() {
 
     let actions = candidate_actions(runner.state());
 
-    // CR 702.6b: Summoning sickness does not restrict tapping for convoke
+    // CR 702.51a + CR 302.6: Summoning sickness does not restrict tapping for convoke
     assert!(
         actions.iter().any(
             |a| matches!(a.action, GameAction::TapForConvoke { object_id, .. } if object_id == creature_id)
         ),
-        "Summoning-sick creature should still be eligible for convoke (CR 702.6b)"
+        "Summoning-sick creature should still be eligible for convoke (CR 702.51a + CR 302.6)"
     );
 }
 
 // ---------------------------------------------------------------------------
-// Convoke color matching (CR 702.6a)
+// Convoke color matching (CR 702.51a)
 // ---------------------------------------------------------------------------
 
 #[test]

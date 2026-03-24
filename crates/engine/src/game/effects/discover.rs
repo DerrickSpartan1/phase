@@ -6,7 +6,7 @@ use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::zones::Zone;
 
-/// CR 702.170: Discover N — exile cards from the top of your library until
+/// CR 701.57a: Discover N — exile cards from the top of your library until
 /// you exile a nonland card with mana value N or less. Cast it without paying
 /// its mana cost or put it into your hand. Put the rest on the bottom of your
 /// library in a random order.
@@ -31,7 +31,7 @@ pub fn resolve(
     let mut exiled_misses: Vec<ObjectId> = Vec::new();
     let mut hit_card: Option<ObjectId> = None;
 
-    // CR 702.170a: Exile one at a time until hit or library exhausted
+    // CR 701.57a: Exile one at a time until hit or library exhausted
     for &card_id in &library {
         // Move to exile
         zones::move_to_zone(state, card_id, Zone::Exile, events);
@@ -66,7 +66,7 @@ pub fn resolve(
             };
         }
         None => {
-            // CR 702.170a: No hit — put all exiled misses on bottom in random order
+            // CR 701.57a: No hit — put all exiled misses on bottom in random order
             shuffle_to_bottom(state, &exiled_misses, ability.controller, events);
         }
     }

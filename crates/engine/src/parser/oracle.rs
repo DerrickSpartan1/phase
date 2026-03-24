@@ -311,7 +311,7 @@ pub fn parse_oracle_text(
             }
         }
 
-        // Priority 3c: Channel — "Channel — {cost}, Discard this card: {effect}" (CR 702.133)
+        // Priority 3c: Channel — "Channel — {cost}, Discard this card: {effect}" (CR 207.2c + CR 602.1)
         if let Some(rest) = lower
             .strip_prefix("channel — ")
             .or_else(|| lower.strip_prefix("channel -- "))
@@ -324,7 +324,7 @@ pub fn parse_oracle_text(
                 let cost = parse_oracle_cost(cost_text);
                 let mut def = parse_effect_chain(&effect_text, AbilityKind::Activated);
                 def.cost = Some(cost);
-                // CR 702.133a: Channel abilities are activated from hand.
+                // CR 207.2c: Channel is an ability word; the underlying ability activates from hand.
                 def.activation_zone = Some(Zone::Hand);
                 def.description = Some(line.to_string());
                 if constraints.sorcery_speed() {
@@ -3378,7 +3378,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Channel (CR 702.133)
+    // Channel (CR 207.2c — ability word)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -3394,7 +3394,7 @@ mod tests {
         assert_eq!(r.abilities.len(), 1);
         let ability = &r.abilities[0];
         assert_eq!(ability.kind, AbilityKind::Activated);
-        // CR 702.133a: Channel activates from hand
+        // CR 207.2c: Channel is an ability word — the underlying ability activates from hand
         assert_eq!(ability.activation_zone, Some(Zone::Hand));
         // Cost should contain mana + self-ref discard, not Unimplemented
         match ability.cost.as_ref().unwrap() {
