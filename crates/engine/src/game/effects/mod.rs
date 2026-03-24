@@ -533,6 +533,24 @@ pub fn resolve_ability_chain(
         return Ok(());
     }
 
+    // CR 608.2c: Evaluate top-level condition before resolving the effect.
+    // Some abilities (e.g. Tribute to the World Tree) have a condition directly on
+    // the execute ability rather than on a sub_ability. When the condition is false,
+    // execute the else_ability branch if present, otherwise skip the effect entirely.
+    if let Some(ref condition) = ability.condition {
+        if !evaluate_condition(condition, state, ability) {
+            if let Some(ref else_branch) = ability.else_ability {
+                let mut else_resolved = else_branch.as_ref().clone();
+                if else_resolved.targets.is_empty() && !ability.targets.is_empty() {
+                    else_resolved.targets = ability.targets.clone();
+                }
+                else_resolved.context = ability.context.clone();
+                resolve_ability_chain(state, &else_resolved, events, depth + 1)?;
+            }
+            return Ok(());
+        }
+    }
+
     // CR 603.7: Snapshot event count so we can detect objects moved by this effect.
     let events_before = events.len();
 
@@ -670,115 +688,19 @@ pub fn resolve_ability_chain(
         // Check if the sub_ability has a condition that gates its execution.
         // Casting-time conditions are evaluated against the parent's SpellContext.
         if let Some(ref condition) = sub.condition {
-            let condition_met = match condition {
-                AbilityCondition::AdditionalCostPaid => ability.context.additional_cost_paid,
-                AbilityCondition::AdditionalCostNotPaid => !ability.context.additional_cost_paid,
-                // CR 608.2e: "Instead" — when condition was met, the override effect was
-                // already swapped in place of the parent (see Cow swap above).
-                // If we reach here, the condition was NOT met (parent ran normally).
-                // Override subs are terminal — do not chain further.
-                AbilityCondition::AdditionalCostPaidInstead => {
-                    return Ok(());
-                }
-                AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => {
-                    ability.context.optional_effect_performed && !state.cost_payment_failed_flag
-                }
-                // CR 603.12: "When you do" — reflexive trigger that always fires when
-                // the parent effect was performed. Non-optional effects always perform.
-                AbilityCondition::WhenYouDo => true,
-                // CR 603.4: "If you cast it from [zone]" — check cast origin.
-                AbilityCondition::CastFromZone { zone } => {
-                    ability.context.cast_from_zone == Some(*zone)
-                }
-                // CR 608.2c: "If it's a [type] card" — check the revealed card's type.
-                AbilityCondition::RevealedHasCardType { card_type, negated } => {
-                    let matches = state
-                        .last_revealed_ids
-                        .first()
-                        .and_then(|id| {
-                            state
-                                .objects
-                                .get(id)
-                                .map(|obj| obj.card_types.core_types.contains(card_type))
-                        })
-                        .unwrap_or(false);
-                    if *negated {
-                        !matches
-                    } else {
-                        matches
-                    }
-                }
-                // CR 400.7 + CR 608.2c: "unless ~ entered this turn" — skip effect if source
-                // entered this turn. Condition is true when source did NOT enter this turn.
-                AbilityCondition::SourceDidNotEnterThisTurn => state
-                    .objects
-                    .get(&ability.source_id)
-                    .map(|obj| obj.entered_battlefield_turn != Some(state.turn_number))
-                    .unwrap_or(true),
-                // CR 702.49 + CR 603.4: "if its sneak/ninjutsu cost was paid" — check
-                // ninjutsu variant tracking on the source permanent.
-                AbilityCondition::NinjutsuVariantPaid { variant } => state
-                    .objects
-                    .get(&ability.source_id)
-                    .map(|obj| {
-                        obj.ninjutsu_variant_paid == Some((variant.clone(), state.turn_number))
-                    })
-                    .unwrap_or(false),
-                // CR 608.2e + CR 702.49: "Instead" override gated on ninjutsu variant.
-                // Same terminal semantics as AdditionalCostPaidInstead.
-                AbilityCondition::NinjutsuVariantPaidInstead { variant } => {
-                    let condition_met = state
-                        .objects
-                        .get(&ability.source_id)
-                        .map(|obj| {
-                            obj.ninjutsu_variant_paid == Some((variant.clone(), state.turn_number))
-                        })
-                        .unwrap_or(false);
-                    if !condition_met {
-                        // Condition not met — skip the override sub, parent ran normally
-                        return Ok(());
-                    }
-                    // Condition met — this is handled by the Cow swap above (like
-                    // AdditionalCostPaidInstead). If we reach here, the swap already happened.
-                    true
-                }
-                // CR 608.2e: "If target has [keyword], instead" override.
-                // Same terminal semantics as AdditionalCostPaidInstead.
-                AbilityCondition::TargetHasKeywordInstead { ref keyword } => {
-                    let condition_met = ability
-                        .targets
-                        .iter()
-                        .find_map(|t| match t {
-                            TargetRef::Object(id) => state.objects.get(id),
-                            _ => None,
-                        })
-                        .is_some_and(|obj| obj.has_keyword(keyword));
-                    if !condition_met {
-                        return Ok(());
-                    }
-                    true
-                }
-                // CR 608.2c: General quantity comparison on trigger/effect context.
-                AbilityCondition::QuantityCheck {
-                    lhs,
-                    comparator,
-                    rhs,
-                } => {
-                    let l = crate::game::quantity::resolve_quantity(
-                        state,
-                        lhs,
-                        ability.controller,
-                        ability.source_id,
-                    );
-                    let r = crate::game::quantity::resolve_quantity(
-                        state,
-                        rhs,
-                        ability.controller,
-                        ability.source_id,
-                    );
-                    comparator.clone().evaluate(l, r)
-                }
-            };
+            // CR 608.2e: "Instead" overrides are terminal — the Cow swap above either
+            // replaced the parent's effect (condition met) or didn't (condition not met).
+            // Either way, this sub is fully consumed and must not chain further.
+            if matches!(
+                condition,
+                AbilityCondition::AdditionalCostPaidInstead
+                    | AbilityCondition::NinjutsuVariantPaidInstead { .. }
+                    | AbilityCondition::TargetHasKeywordInstead { .. }
+            ) {
+                return Ok(());
+            }
+
+            let condition_met = evaluate_condition(condition, state, ability);
             if !condition_met {
                 // CR 608.2c: Execute else branch if present ("Otherwise, [effect]")
                 if let Some(ref else_branch) = sub.else_ability {
@@ -801,6 +723,56 @@ pub fn resolve_ability_chain(
                     resolve_ability_chain(state, &else_resolved, events, depth + 1)?;
                 }
                 return Ok(());
+            }
+
+            // CR 603.12: When a deferred conditional sub-ability (WhenYouDo,
+            // QuantityCheck) has its condition met and needs player-selected targets,
+            // create a reflexive trigger that goes on the stack for target selection.
+            // Targets were not pre-collected (see defers_conditional_target_selection
+            // in ability_utils), so we must collect them now.
+            if matches!(
+                condition,
+                AbilityCondition::WhenYouDo | AbilityCondition::QuantityCheck { .. }
+            ) && sub.targets.is_empty()
+            {
+                let target_slots = crate::game::ability_utils::build_target_slots(state, sub)
+                    .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+                if !target_slots.is_empty() {
+                    // Compute selection first — if this fails (no legal targets for a
+                    // required slot), we skip the reflexive trigger cleanly without
+                    // leaving an orphaned pending_trigger.
+                    let selection =
+                        crate::game::ability_utils::begin_target_selection(&target_slots, &[])
+                            .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+
+                    let mut reflexive = sub.as_ref().clone();
+                    reflexive.context = ability.context.clone();
+                    let trigger_description = sub
+                        .description
+                        .clone()
+                        .or_else(|| ability.description.clone());
+                    state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+                        source_id: ability.source_id,
+                        controller: ability.controller,
+                        condition: None,
+                        ability: reflexive,
+                        timestamp: state.turn_number,
+                        target_constraints: vec![],
+                        trigger_event: state.current_trigger_event.clone(),
+                        modal: None,
+                        mode_abilities: vec![],
+                        description: trigger_description.clone(),
+                    });
+                    state.waiting_for = WaitingFor::TriggerTargetSelection {
+                        player: ability.controller,
+                        target_slots,
+                        target_constraints: vec![],
+                        selection,
+                        source_id: Some(ability.source_id),
+                        description: trigger_description,
+                    };
+                    return Ok(());
+                }
             }
         }
         // If resolve_effect just entered a player-choice state (Scry/Dig/Surveil),
@@ -888,6 +860,95 @@ pub fn resolve_ability_chain(
     }
 
     Ok(())
+}
+
+/// CR 608.2c: Evaluate a condition against the current game state and ability context.
+/// Returns whether the condition is met. Handles all `AbilityCondition` variants as
+/// pure boolean evaluators — callers are responsible for any terminal control flow
+/// (e.g., "Instead" overrides that early-return in the sub-ability context).
+fn evaluate_condition(
+    condition: &AbilityCondition,
+    state: &GameState,
+    ability: &ResolvedAbility,
+) -> bool {
+    match condition {
+        AbilityCondition::AdditionalCostPaid => ability.context.additional_cost_paid,
+        AbilityCondition::AdditionalCostNotPaid => !ability.context.additional_cost_paid,
+        AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => {
+            ability.context.optional_effect_performed && !state.cost_payment_failed_flag
+        }
+        // CR 603.12: "When you do" — reflexive trigger that always fires.
+        AbilityCondition::WhenYouDo => true,
+        // CR 603.4: "If you cast it from [zone]" — check cast origin.
+        AbilityCondition::CastFromZone { zone } => ability.context.cast_from_zone == Some(*zone),
+        // CR 608.2c: "If it's a [type] card" — check the revealed card's type.
+        AbilityCondition::RevealedHasCardType { card_type, negated } => {
+            let matches = state
+                .last_revealed_ids
+                .first()
+                .and_then(|id| {
+                    state
+                        .objects
+                        .get(id)
+                        .map(|obj| obj.card_types.core_types.contains(card_type))
+                })
+                .unwrap_or(false);
+            if *negated {
+                !matches
+            } else {
+                matches
+            }
+        }
+        // CR 400.7 + CR 608.2c: "unless ~ entered this turn"
+        AbilityCondition::SourceDidNotEnterThisTurn => state
+            .objects
+            .get(&ability.source_id)
+            .map(|obj| obj.entered_battlefield_turn != Some(state.turn_number))
+            .unwrap_or(true),
+        // CR 702.49 + CR 603.4: "if its sneak/ninjutsu cost was paid"
+        AbilityCondition::NinjutsuVariantPaid { variant } => state
+            .objects
+            .get(&ability.source_id)
+            .map(|obj| obj.ninjutsu_variant_paid == Some((variant.clone(), state.turn_number)))
+            .unwrap_or(false),
+        // CR 608.2c: General quantity comparison on trigger/effect context.
+        AbilityCondition::QuantityCheck {
+            lhs,
+            comparator,
+            rhs,
+        } => {
+            let l = crate::game::quantity::resolve_quantity(
+                state,
+                lhs,
+                ability.controller,
+                ability.source_id,
+            );
+            let r = crate::game::quantity::resolve_quantity(
+                state,
+                rhs,
+                ability.controller,
+                ability.source_id,
+            );
+            comparator.clone().evaluate(l, r)
+        }
+        // "Instead" override conditions — return pure boolean value.
+        // Terminal control flow (early return from resolve_ability_chain) is the caller's
+        // responsibility in the sub-ability context.
+        AbilityCondition::AdditionalCostPaidInstead => ability.context.additional_cost_paid,
+        AbilityCondition::NinjutsuVariantPaidInstead { variant } => state
+            .objects
+            .get(&ability.source_id)
+            .map(|obj| obj.ninjutsu_variant_paid == Some((variant.clone(), state.turn_number)))
+            .unwrap_or(false),
+        AbilityCondition::TargetHasKeywordInstead { ref keyword } => ability
+            .targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Object(id) => state.objects.get(id),
+                _ => None,
+            })
+            .is_some_and(|obj| obj.has_keyword(keyword)),
+    }
 }
 
 /// Resolve the payer for an unless-pay modifier from the trigger event context.

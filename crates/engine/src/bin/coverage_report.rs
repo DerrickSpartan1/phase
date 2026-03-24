@@ -2,7 +2,9 @@ use std::path::PathBuf;
 use std::process;
 
 use engine::database::CardDatabase;
-use engine::game::coverage::{analyze_coverage, audit_silent_drops, CoverageSummary};
+use engine::game::coverage::{
+    analyze_coverage, audit_resolver_features, audit_silent_drops, CoverageSummary,
+};
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -208,6 +210,55 @@ fn main() {
         eprintln!("AUDIT_JSON_START");
         eprintln!("{}", serde_json::to_string_pretty(&audit_json).unwrap());
         eprintln!("AUDIT_JSON_END");
+    }
+
+    // Run resolver feature audit if requested
+    if run_audit {
+        let resolver_audit = audit_resolver_features(&db);
+        eprintln!();
+        eprintln!(
+            "Resolver feature audit: {} supported cards audited, {} with unhandled features",
+            resolver_audit.total_supported_audited, resolver_audit.cards_with_unhandled_features
+        );
+        if !resolver_audit.unhandled_features.is_empty() {
+            eprintln!();
+            eprintln!("Unhandled features (resolver may silently ignore):");
+            for feat in &resolver_audit.unhandled_features {
+                let examples = feat.example_cards.join(", ");
+                eprintln!(
+                    "  {} — {} cards (e.g. {})",
+                    feat.feature, feat.card_count, examples
+                );
+            }
+        }
+        // Show top handled features by usage for informational purposes
+        let top_handled: Vec<_> = resolver_audit
+            .all_features
+            .iter()
+            .filter(|f| f.handled)
+            .take(10)
+            .collect();
+        if !top_handled.is_empty() {
+            eprintln!();
+            eprintln!("Top handled features by card count:");
+            for feat in top_handled {
+                eprintln!("  {} — {} cards", feat.feature, feat.card_count);
+            }
+        }
+        if !resolver_audit.flagged_cards.is_empty() {
+            eprintln!();
+            eprintln!("Flagged cards ({}):", resolver_audit.flagged_cards.len());
+            for card in resolver_audit.flagged_cards.iter().take(20) {
+                eprintln!(
+                    "  {} — [{}]",
+                    card.card_name,
+                    card.unhandled_features.join(", ")
+                );
+            }
+            if resolver_audit.flagged_cards.len() > 20 {
+                eprintln!("  ... and {} more", resolver_audit.flagged_cards.len() - 20);
+            }
+        }
     }
 
     // Check threshold enforcement
