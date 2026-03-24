@@ -326,10 +326,6 @@ function CardCoverageView() {
       : coverage.coverage_pct > 40
         ? "from-yellow-600 to-yellow-400"
         : "from-red-600 to-red-400";
-  const formatCoverage = Object.entries(coverage.coverage_by_format ?? {}).filter(
-    ([, summary]) => summary.total_cards > 0,
-  );
-
   const visibleCards = filteredCards.slice(0, MAX_VISIBLE_CARDS);
 
   return (
@@ -350,18 +346,7 @@ function CardCoverageView() {
             {coverage.coverage_pct.toFixed(1)}%
           </span>
         </div>
-        {formatCoverage.length > 0 && (
-          <div className="hidden min-w-0 truncate text-xs text-slate-500 lg:block">
-            {formatCoverage.map(([format, summary]) => (
-              <span key={format}>
-                <span className="uppercase">{format.slice(0, 3)}</span>
-                {" "}
-                <span className="text-slate-400">{summary.coverage_pct.toFixed(0)}%</span>
-                <span className="mx-1.5 text-white/10">&middot;</span>
-              </span>
-            ))}
-          </div>
-        )}
+        {/* Format breakdown shown in bar chart below — no inline duplication */}
       </div>
 
       {/* Master-detail split */}
@@ -478,6 +463,19 @@ function CardCoverageView() {
   );
 }
 
+const FORMAT_DISPLAY_NAMES: Record<string, string> = {
+  standard: "Standard",
+  standardbrawl: "Std Brawl",
+  pioneer: "Pioneer",
+  modern: "Modern",
+  legacy: "Legacy",
+  vintage: "Vintage",
+  commander: "Commander",
+  brawl: "Brawl",
+  historic: "Historic",
+  pauper: "Pauper",
+};
+
 /** Summary view shown in the detail panel when no card is selected. */
 function DetailEmptyState({ coverage }: { coverage: CoverageSummary }) {
   const formatCoverage = Object.entries(coverage.coverage_by_format ?? {}).filter(
@@ -486,44 +484,49 @@ function DetailEmptyState({ coverage }: { coverage: CoverageSummary }) {
 
   return (
     <div className="flex h-full flex-col items-center justify-center px-8 py-12">
-      <div className="mb-8 text-center">
+      <div className="mb-6 text-center">
         <div className="text-sm text-slate-400">Select a card to inspect its parse breakdown</div>
         <div className="mt-1 text-xs text-slate-600">
           Use arrow keys to navigate, Escape to deselect
         </div>
       </div>
 
-      {/* Format coverage grid */}
+      {/* Format coverage bar chart */}
       {formatCoverage.length > 0 && (
-        <div className="w-full max-w-lg">
-          <div className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
+        <div className="w-full max-w-md">
+          <div className="mb-2 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
             Coverage by Format
           </div>
-          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-            {formatCoverage.map(([format, summary]) => (
-              <div
-                key={format}
-                className="rounded-[12px] border border-white/6 bg-black/16 px-3 py-2.5"
-              >
-                <div className="flex items-baseline justify-between">
-                  <span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
-                    {format}
-                  </span>
-                  <span className="font-mono text-xs text-emerald-300">
-                    {summary.coverage_pct.toFixed(1)}%
-                  </span>
-                </div>
-                <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-black/30">
-                  <div
-                    className="h-full rounded-full bg-gradient-to-r from-emerald-600 to-emerald-400"
-                    style={{ width: `${Math.min(summary.coverage_pct, 100)}%` }}
-                  />
-                </div>
-                <div className="mt-1 text-[11px] text-slate-500">
-                  {summary.supported_cards.toLocaleString()} / {summary.total_cards.toLocaleString()}
-                </div>
-              </div>
-            ))}
+          <div className="space-y-1.5">
+            {[...formatCoverage]
+              .sort(([, a], [, b]) => b.coverage_pct - a.coverage_pct)
+              .map(([format, summary]) => {
+                const barColor =
+                  summary.coverage_pct > 70
+                    ? "from-emerald-600 to-emerald-400"
+                    : summary.coverage_pct > 40
+                      ? "from-yellow-600 to-yellow-400"
+                      : "from-red-600 to-red-400";
+                return (
+                  <div key={format} className="flex items-center gap-2">
+                    <span className="w-[5.5rem] shrink-0 text-right text-[11px] text-slate-500">
+                      {FORMAT_DISPLAY_NAMES[format] ?? format}
+                    </span>
+                    <div className="relative h-4 min-w-0 flex-1 overflow-hidden rounded bg-black/30">
+                      <div
+                        className={`absolute inset-y-0 left-0 rounded bg-gradient-to-r ${barColor}`}
+                        style={{ width: `${Math.min(summary.coverage_pct, 100)}%` }}
+                      />
+                      <span className="absolute inset-0 flex items-center justify-center font-mono text-[10px] font-medium text-white/80">
+                        {summary.coverage_pct.toFixed(1)}%
+                      </span>
+                    </div>
+                    <span className="w-[6.5rem] shrink-0 text-right font-mono text-[10px] text-slate-600">
+                      {summary.supported_cards.toLocaleString()} / {summary.total_cards.toLocaleString()}
+                    </span>
+                  </div>
+                );
+              })}
           </div>
         </div>
       )}
