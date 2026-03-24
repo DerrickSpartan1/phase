@@ -1,7 +1,7 @@
 import { motion, useMotionValue, useTransform, animate } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 
-import { PROJECTILE_TRAVEL_MS, SPEED_MULTIPLIERS } from "../../animation/types.ts";
+import { CARD_SLAM_FLIGHT_MS, SPEED_MULTIPLIERS } from "../../animation/types.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -29,7 +29,7 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
 
   // Animate life total in sync with damage/heal visuals. When a DamageDealt
   // event co-occurs in the same step, delay the counter update to match the
-  // projectile travel time so the number ticks when the projectile arrives.
+  // card slam flight duration so the number ticks at impact.
   // Pre-updating prevLife suppresses the redundant re-animation from the deferred
   // gameStore state update that follows once all animations complete.
   // Flash timer is managed via ref — returning a cleanup would cancel it when
@@ -59,7 +59,7 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
       prevLife.current = newLife;
 
       if (hasDamageDealt) {
-        impactTimerRef.current = setTimeout(doAnimate, PROJECTILE_TRAVEL_MS * speedMultiplier);
+        impactTimerRef.current = setTimeout(doAnimate, CARD_SLAM_FLIGHT_MS * speedMultiplier);
       } else {
         doAnimate();
       }

@@ -57,5 +57,5 @@ export const EVENT_DURATIONS: Record<string, number> = {
 
 export const DEFAULT_DURATION = 200;
 
-/** How long the combat projectile takes to travel from source to target. */
-export const PROJECTILE_TRAVEL_MS = 250;
+/** How long the card slam flight phase takes before impact (ms, before speed multiplier). */
+export const CARD_SLAM_FLIGHT_MS = 200;

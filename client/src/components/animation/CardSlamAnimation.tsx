@@ -1,3 +1,5 @@
+import { CARD_SLAM_FLIGHT_MS } from "../../animation/types.ts";
+
 /**
  * Arena-style card slam: animates the ACTUAL card DOM element from its
  * battlefield position toward the target, impacts with jitter, then
@@ -20,7 +22,7 @@ export function applyCardSlam(
   const dx = targetX - centerX;
   const dy = targetY - centerY;
 
-  const flightMs = 200 * speedMultiplier;
+  const flightMs = CARD_SLAM_FLIGHT_MS * speedMultiplier;
   const jitterMs = 300 * speedMultiplier;
   const returnMs = 250 * speedMultiplier;
   const totalMs = flightMs + jitterMs + returnMs;
