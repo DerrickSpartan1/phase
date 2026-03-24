@@ -241,7 +241,7 @@ describe("AudioManager", () => {
     mockCreateBufferSource.mockClear();
 
     audioManager.playSfxForStep([
-      { event: { type: "DamageDealt", data: { source_id: 1, target: { Player: 0 }, amount: 3 } }, duration: 600 },
+      { event: { type: "DamageDealt", data: { source_id: 1, target: { Player: 0 }, amount: 3, is_combat: false } }, duration: 600 },
       { event: { type: "LifeChanged", data: { player_id: 0, amount: -3 } }, duration: 600 },
     ]);
 

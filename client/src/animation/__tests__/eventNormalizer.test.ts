@@ -47,8 +47,8 @@ describe("normalizeEvents", () => {
   it("DamageDealt: attacker and its blockers fight simultaneously (engagement grouping)", () => {
     // Attacker 1 hits blocker 2; blocker 2 hits attacker 1 back
     const events: GameEvent[] = [
-      { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 3 } },
-      { type: "DamageDealt", data: { source_id: 2, target: { Object: 1 }, amount: 2 } },
+      { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 3, is_combat: false } },
+      { type: "DamageDealt", data: { source_id: 2, target: { Object: 1 }, amount: 2, is_combat: false } },
     ];
 
     const steps = normalizeEvents(events);
@@ -59,8 +59,8 @@ describe("normalizeEvents", () => {
   it("DamageDealt: each attacker's engagement is a separate step", () => {
     // Attacker 1 hits blocker 2; unrelated attacker 4 hits player
     const events: GameEvent[] = [
-      { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 3 } },
-      { type: "DamageDealt", data: { source_id: 4, target: { Player: 0 }, amount: 5 } },
+      { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 3, is_combat: false } },
+      { type: "DamageDealt", data: { source_id: 4, target: { Player: 0 }, amount: 5, is_combat: false } },
     ];
 
     const steps = normalizeEvents(events);
@@ -74,8 +74,8 @@ describe("normalizeEvents", () => {
     // Bidirectional pairing only groups A↔B1 and A↔B2; two unidirectional hits from
     // the same attacker are distinct engagements.
     const events: GameEvent[] = [
-      { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 2 } },
-      { type: "DamageDealt", data: { source_id: 1, target: { Object: 3 }, amount: 1 } },
+      { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 2, is_combat: false } },
+      { type: "DamageDealt", data: { source_id: 1, target: { Object: 3 }, amount: 1, is_combat: false } },
     ];
 
     const steps = normalizeEvents(events);
@@ -88,10 +88,10 @@ describe("normalizeEvents", () => {
     // Engine emits all attacker assignments before blocker assignments.
     // Expected: step 1 = {1→2, 2→1}, step 2 = {1→3, 3→1}
     const events: GameEvent[] = [
-      { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 2 } },
-      { type: "DamageDealt", data: { source_id: 1, target: { Object: 3 }, amount: 1 } },
-      { type: "DamageDealt", data: { source_id: 2, target: { Object: 1 }, amount: 2 } },
-      { type: "DamageDealt", data: { source_id: 3, target: { Object: 1 }, amount: 1 } },
+      { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 2, is_combat: false } },
+      { type: "DamageDealt", data: { source_id: 1, target: { Object: 3 }, amount: 1, is_combat: false } },
+      { type: "DamageDealt", data: { source_id: 2, target: { Object: 1 }, amount: 2, is_combat: false } },
+      { type: "DamageDealt", data: { source_id: 3, target: { Object: 1 }, amount: 1, is_combat: false } },
     ];
 
     const steps = normalizeEvents(events);
@@ -127,7 +127,7 @@ describe("normalizeEvents", () => {
 
   it("LifeChanged groups with concurrent DamageDealt step", () => {
     const events: GameEvent[] = [
-      { type: "DamageDealt", data: { source_id: 1, target: { Player: 0 }, amount: 3 } },
+      { type: "DamageDealt", data: { source_id: 1, target: { Player: 0 }, amount: 3, is_combat: false } },
       { type: "LifeChanged", data: { player_id: 0, amount: -3 } },
     ];
 
@@ -160,7 +160,7 @@ describe("normalizeEvents", () => {
   it("combat pacing scales combat-only step durations", () => {
     const events: GameEvent[] = [
       { type: "BlockersDeclared", data: { assignments: [[3, 1]] } },
-      { type: "DamageDealt", data: { source_id: 1, target: { Player: 0 }, amount: 3 } },
+      { type: "DamageDealt", data: { source_id: 1, target: { Player: 0 }, amount: 3, is_combat: false } },
       { type: "SpellCast", data: { card_id: 9, controller: 0, object_id: 9 } },
     ];
 
@@ -200,8 +200,8 @@ describe("normalizeEvents", () => {
       { type: "ZoneChanged", data: { object_id: 1, from: "Hand", to: "Stack" } },
       { type: "PriorityPassed", data: { player_id: 1 } },
       // Attacker 1 hits blockers 2 and 3 — each is a separate sequential step
-      { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 3 } },
-      { type: "DamageDealt", data: { source_id: 1, target: { Object: 3 }, amount: 2 } },
+      { type: "DamageDealt", data: { source_id: 1, target: { Object: 2 }, amount: 3, is_combat: false } },
+      { type: "DamageDealt", data: { source_id: 1, target: { Object: 3 }, amount: 2, is_combat: false } },
       { type: "LifeChanged", data: { player_id: 1, amount: -5 } },
       { type: "CreatureDestroyed", data: { object_id: 2 } },
       { type: "CreatureDestroyed", data: { object_id: 3 } },

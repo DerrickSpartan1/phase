@@ -126,8 +126,6 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             pos = getPlayerHudPosition(target.Player);
           }
 
-          const sourcePos = getObjectPosition(source_id);
-
           // Creature-on-creature: slam the actual card element (Arena-style)
           if ("Object" in target && vfxQuality !== "minimal") {
             // For bidirectional pairs (combat or fight), only slam the first direction.
