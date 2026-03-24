@@ -651,16 +651,14 @@ fn evaluate_format_legality(
             let status = db
                 .legality_status(resolved, format)
                 .unwrap_or(LegalityStatus::NotLegal);
-            // Banned is worse than NotLegal is worse than Legal
             match status {
                 LegalityStatus::Banned => {
                     worst = LegalityStatus::Banned;
                     break; // Can't get worse
                 }
                 LegalityStatus::NotLegal => {
-                    if worst != LegalityStatus::Banned {
-                        worst = LegalityStatus::NotLegal;
-                    }
+                    worst = LegalityStatus::NotLegal;
+                    break; // Deck is already illegal — no need to scan further
                 }
                 LegalityStatus::Restricted | LegalityStatus::Legal => {}
             }
