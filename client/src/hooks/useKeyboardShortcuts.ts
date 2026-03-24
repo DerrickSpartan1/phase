@@ -1,0 +1,141 @@
+import { useEffect } from "react";
+
+import { useGameStore } from "../stores/gameStore";
+import { useUiStore } from "../stores/uiStore";
+import { dispatchAction } from "../game/dispatch";
+
+/**
+ * Registers global keyboard shortcuts for the game.
+ * - Space: Pass priority / advance phase
+ * - Enter: Toggle end-turn mode
+ * - F: Toggle full control
+ * - Z: Undo last unrevealed-info action
+ * - T: Tap all untapped lands (when in ManaPayment)
+ * - Escape: Cancel current action / cancel end-turn mode
+ * - D: Copy game state JSON to clipboard (debug)
+ */
+export function useKeyboardShortcuts(): void {
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      // Don't fire shortcuts when typing in input fields
+      const target = e.target as HTMLElement;
+      if (
+        target.tagName === "INPUT" ||
+        target.tagName === "TEXTAREA" ||
+        target.tagName === "SELECT" ||
+        target.isContentEditable
+      ) {
+        return;
+      }
+
+      const { gameState, waitingFor, dispatch, undo, stateHistory } =
+        useGameStore.getState();
+      const uiState = useUiStore.getState();
+
+      switch (e.key) {
+        case " ":
+          if (waitingFor?.type === "Priority") {
+            e.preventDefault();
+            dispatch({ type: "PassPriority" });
+          }
+          break;
+
+        case "Enter": {
+          e.preventDefault();
+          // Toggle auto-pass: if any auto-pass is active, cancel it; otherwise set UntilEndOfTurn
+          const playerId = gameState?.active_player ?? 0;
+          const currentAutoPass = gameState?.auto_pass?.[playerId];
+          if (currentAutoPass) {
+            dispatchAction({ type: "CancelAutoPass" });
+          } else {
+            dispatchAction({ type: "SetAutoPass", data: { mode: { type: "UntilEndOfTurn" } } });
+          }
+          break;
+        }
+
+        case "f":
+        case "F":
+          e.preventDefault();
+          uiState.toggleFullControl();
+          break;
+
+        case "z":
+        case "Z":
+          // Only plain Z (no Ctrl/Cmd modifier to avoid conflict with browser undo)
+          if (!e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            if (stateHistory.length > 0) {
+              undo();
+            }
+          }
+          break;
+
+        case "t":
+        case "T":
+          if (waitingFor?.type === "ManaPayment") {
+            e.preventDefault();
+            // Tap all untapped lands controlled by the player
+            const gs = useGameStore.getState().gameState;
+            const mp = waitingFor.data.player;
+            if (gs) {
+              for (const id of gs.battlefield) {
+                const o = gs.objects[id];
+                if (o && !o.tapped && o.controller === mp
+                    && o.card_types.core_types.includes("Land")) {
+                  dispatch({ type: "TapLandForMana", data: { object_id: id } });
+                }
+              }
+            }
+          }
+          break;
+
+        case "Escape": {
+          e.preventDefault();
+          const escPlayerId = gameState?.active_player ?? 0;
+          if (gameState?.auto_pass?.[escPlayerId]) {
+            dispatchAction({ type: "CancelAutoPass" });
+          } else if (waitingFor?.type === "TargetSelection") {
+            dispatch({ type: "CancelCast" });
+          } else if (waitingFor?.type === "TriggerTargetSelection") {
+            const activeSlot =
+              waitingFor.data.target_slots[waitingFor.data.selection.current_slot];
+            if (activeSlot?.optional) {
+              dispatch({ type: "ChooseTarget", data: { target: null } });
+            }
+          } else {
+            uiState.clearSelectedCards();
+          }
+          break;
+        }
+
+        case "d":
+        case "D":
+          if (!e.ctrlKey && !e.metaKey) {
+            e.preventDefault();
+            if (gameState) {
+              const debug = {
+                gameState,
+                waitingFor,
+                legalActions: useGameStore.getState().legalActions,
+                turnCheckpoints: useGameStore.getState().turnCheckpoints,
+              };
+              navigator.clipboard.writeText(JSON.stringify(debug, null, 2))
+                .then(() => console.log("[Debug] Game state copied to clipboard"))
+                .catch((err) => console.error("[Debug] Failed to copy:", err));
+            }
+          }
+          break;
+
+        case "`":
+          if (import.meta.env.DEV) {
+            e.preventDefault();
+            uiState.toggleDebugPanel();
+          }
+          break;
+      }
+    };
+
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
+}

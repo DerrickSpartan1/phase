@@ -1,0 +1,442 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-wasm:
+    name: Build WASM + Frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          targets: wasm32-unknown-unknown
+          cache-shared-key: rust-wasm
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.114
+
+      - name: Install binaryen
+        run: |
+          curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
+          echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Generate card data and coverage report
+        run: |
+          mkdir -p data/mtgjson
+          curl -L -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
+          cargo run --release --bin oracle-gen -- data/ --stats > client/public/card-data.json
+          cargo run --release --bin coverage-report -- data/ --all > client/public/coverage-data.json
+
+      - name: Build WASM
+        run: ./scripts/build-wasm.sh release
+
+      - name: Build frontend
+        env:
+          CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/card-data.json"
+          COVERAGE_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/coverage-data.json"
+        run: |
+          cd client
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Upload card data to R2
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: r2 object put phase-rs-data/card-data.json --file client/public/card-data.json --content-type application/json --remote
+
+      - name: Upload coverage data to R2
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: r2 object put phase-rs-data/coverage-data.json --file client/public/coverage-data.json --content-type application/json --remote
+
+      - name: Remove large data files from dist (served from R2)
+        run: rm -f client/dist/card-data.json client/dist/coverage-data.json
+
+      - name: Upload frontend artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: client/dist
+          retention-days: 90
+
+      - name: Upload card data artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: card-data
+          path: client/public/card-data.json
+          retention-days: 1
+
+  deploy-production:
+    name: Deploy Production (Cloudflare Pages)
+    needs: [build-wasm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download frontend artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy dist --project-name=phase-rs --commit-dirty=true
+
+  build-server:
+    name: Build Server (${{ matrix.os }})
+    needs: [build-wasm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+            artifact: phase-server-linux-x86_64
+            archive_ext: tar.gz
+          - os: macos
+            runner: macos-latest
+            triple: aarch64-apple-darwin
+            artifact: phase-server-macos-arm64
+            archive_ext: tar.gz
+          - os: windows
+            runner: windows-latest
+            triple: x86_64-pc-windows-msvc
+            artifact: phase-server-windows-x86_64
+            archive_ext: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-server-${{ matrix.os }}
+
+      - name: Build phase-server
+        run: cargo build --profile server-release --bin phase-server
+
+      - name: Download card data
+        uses: actions/download-artifact@v4
+        with:
+          name: card-data
+          path: staging/data
+
+      - name: Package server archive (Unix)
+        if: matrix.os != 'windows'
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          mkdir -p staging
+          cp target/server-release/phase-server staging/
+          chmod +x staging/phase-server
+          cd staging
+          tar czf ../${{ matrix.artifact }}.tar.gz phase-server data/card-data.json
+        shell: bash
+
+      - name: Package server archive (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          $Tag = $env:GITHUB_REF -replace 'refs/tags/',''
+          Copy-Item "target/server-release/phase-server.exe" "staging/"
+          Compress-Archive -Path "staging/phase-server.exe","staging/data/card-data.json" -DestinationPath "${{ matrix.artifact }}.zip"
+        shell: pwsh
+
+      - name: Generate checksum (Unix)
+        if: matrix.os != 'windows'
+        run: shasum -a 256 ${{ matrix.artifact }}.tar.gz > ${{ matrix.artifact }}.tar.gz.sha256
+
+      - name: Generate checksum (Windows)
+        if: matrix.os == 'windows'
+        run: |
+          $hash = (Get-FileHash "${{ matrix.artifact }}.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  ${{ matrix.artifact }}.zip" | Out-File -Encoding utf8 "${{ matrix.artifact }}.zip.sha256"
+        shell: pwsh
+
+      - name: Upload server archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            ${{ matrix.artifact }}.${{ matrix.archive_ext }}
+            ${{ matrix.artifact }}.${{ matrix.archive_ext }}.sha256
+          retention-days: 90
+
+  build-tauri:
+    name: Build Tauri (${{ matrix.os }})
+    needs: [build-wasm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+            artifact: phase-tauri-linux
+            sidecar_triple: x86_64-unknown-linux-gnu
+          - os: macos
+            runner: macos-latest
+            artifact: phase-tauri-macos
+            sidecar_triple: aarch64-apple-darwin
+          - os: windows
+            runner: windows-latest
+            artifact: phase-tauri-windows
+            sidecar_triple: x86_64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.114
+
+      - name: Install binaryen (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
+          echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
+
+      - name: Install binaryen (macOS)
+        if: matrix.os == 'macos'
+        run: brew install binaryen
+
+      - name: Install binaryen (Windows)
+        if: matrix.os == 'windows'
+        run: choco install binaryen
+        shell: pwsh
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Install system dependencies (Linux)
+        if: matrix.os == 'linux'
+        run: |
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Download card data
+        uses: actions/download-artifact@v4
+        with:
+          name: card-data
+          path: client/public
+
+      - name: Build phase-server sidecar
+        run: |
+          cargo build --profile server-release --bin phase-server
+          mkdir -p client/src-tauri/binaries
+        shell: bash
+
+      - name: Place sidecar binary (Unix)
+        if: matrix.os != 'windows'
+        run: cp target/server-release/phase-server client/src-tauri/binaries/phase-server-${{ matrix.sidecar_triple }}
+
+      - name: Place sidecar binary (Windows)
+        if: matrix.os == 'windows'
+        run: Copy-Item "target/server-release/phase-server.exe" "client/src-tauri/binaries/phase-server-${{ matrix.sidecar_triple }}.exe"
+        shell: pwsh
+
+      - name: Build WASM for Tauri
+        run: ./scripts/build-wasm.sh release
+        shell: bash
+
+      - name: Install frontend dependencies
+        run: cd client && pnpm install --frozen-lockfile
+
+      - name: Build Tauri
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: client
+
+      - name: Upload Tauri artifact (Linux)
+        if: matrix.os == 'linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            client/src-tauri/target/release/bundle/deb/*.deb
+            client/src-tauri/target/release/bundle/appimage/*.AppImage
+            client/src-tauri/target/release/bundle/appimage/*.AppImage.sig
+          retention-days: 90
+
+      - name: Upload Tauri artifact (macOS)
+        if: matrix.os == 'macos'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            client/src-tauri/target/release/bundle/dmg/*.dmg
+            client/src-tauri/target/release/bundle/macos/*.app.tar.gz
+            client/src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+          retention-days: 90
+
+      - name: Upload Tauri artifact (Windows)
+        if: matrix.os == 'windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            client/src-tauri/target/release/bundle/nsis/*.exe
+            client/src-tauri/target/release/bundle/nsis/*.nsis.zip
+            client/src-tauri/target/release/bundle/nsis/*.nsis.zip.sig
+          retention-days: 90
+
+  deploy-server:
+    name: Deploy Server (beebs)
+    needs: [build-server]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download server artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: phase-server-linux-x86_64
+          path: artifact
+
+      - name: Extract archive
+        run: |
+          mkdir -p staging
+          tar xzf artifact/phase-server-linux-x86_64.tar.gz -C staging
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H ${{ secrets.DEPLOY_HOST_BEEBS }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to beebs
+        run: |
+          SSH="ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}"
+          SCP="scp -i ~/.ssh/deploy_key"
+
+          # Upload binary and card data
+          $SCP staging/phase-server staging/data/card-data.json ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}:/tmp/
+
+          # Stop, install, start
+          $SSH "sudo systemctl stop phase-server || true \
+            && sudo cp /tmp/phase-server /opt/phase-server/phase-server \
+            && sudo chmod +x /opt/phase-server/phase-server \
+            && sudo cp /tmp/card-data.json /opt/phase-server/data/card-data.json \
+            && sudo chown -R phase:phase /opt/phase-server \
+            && sudo systemctl start phase-server \
+            && rm -f /tmp/phase-server /tmp/card-data.json"
+
+          echo "Deployed phase-server ${GITHUB_REF#refs/tags/} to beebs"
+
+      - name: Verify deployment
+        run: |
+          sleep 2
+          SSH="ssh -i ~/.ssh/deploy_key ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST_BEEBS }}"
+          $SSH "sudo systemctl is-active phase-server"
+
+  release:
+    name: Create GitHub Release
+    needs: [build-wasm, build-server, build-tauri]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Generate updater manifest
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF#refs/tags/}"
+          REPO="${GITHUB_REPOSITORY}"
+
+          # Read signatures — fail if any are missing
+          LINUX_SIG=$(cat artifacts/phase-tauri-linux/*.AppImage.sig)
+          MACOS_SIG=$(cat artifacts/phase-tauri-macos/*.app.tar.gz.sig)
+          WINDOWS_SIG=$(cat artifacts/phase-tauri-windows/*.nsis.zip.sig)
+
+          for sig_name in LINUX_SIG MACOS_SIG WINDOWS_SIG; do
+            if [ -z "${!sig_name}" ]; then
+              echo "::error::${sig_name} is empty — updater artifacts were not signed"
+              exit 1
+            fi
+          done
+
+          cat > artifacts/update.json << MANIFEST
+          {
+            "version": "${TAG}",
+            "notes": "Release ${TAG}",
+            "pub_date": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "platforms": {
+              "linux-x86_64": {
+                "signature": "${LINUX_SIG}",
+                "url": "https://github.com/${REPO}/releases/download/${TAG}/phase_${TAG#v}_amd64.AppImage"
+              },
+              "darwin-aarch64": {
+                "signature": "${MACOS_SIG}",
+                "url": "https://github.com/${REPO}/releases/download/${TAG}/Phase.app.tar.gz"
+              },
+              "windows-x86_64": {
+                "signature": "${WINDOWS_SIG}",
+                "url": "https://github.com/${REPO}/releases/download/${TAG}/Phase_${TAG#v}_x64-setup.nsis.zip"
+              }
+            }
+          }
+          MANIFEST
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/phase-server-linux-x86_64/*.tar.gz
+            artifacts/phase-server-linux-x86_64/*.sha256
+            artifacts/phase-server-macos-arm64/*.tar.gz
+            artifacts/phase-server-macos-arm64/*.sha256
+            artifacts/phase-server-windows-x86_64/*.zip
+            artifacts/phase-server-windows-x86_64/*.sha256
+            artifacts/phase-tauri-linux/*.deb
+            artifacts/phase-tauri-linux/*.AppImage
+            artifacts/phase-tauri-macos/*.dmg
+            artifacts/phase-tauri-macos/*.app.tar.gz
+            artifacts/phase-tauri-windows/*.exe
+            artifacts/update.json

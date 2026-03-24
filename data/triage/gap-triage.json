@@ -1,0 +1,71 @@
+{
+  "generated": "2026-03-23T21:30:00Z",
+  "updated": "2026-03-23T22:30:00Z",
+  "baseline": {
+    "initial_global_pct": 74.6,
+    "initial_standard_pct": 79.3,
+    "final_global_pct": 76.1,
+    "final_standard_pct": 83.3,
+    "global_supported": 26118,
+    "global_total": 34313,
+    "standard_supported": 3623,
+    "standard_total": 4348
+  },
+  "improvements": {
+    "global_cards_added": 530,
+    "standard_cards_added": 177,
+    "global_pct_gain": 1.5,
+    "standard_pct_gain": 4.0
+  },
+  "categories": {
+    "implemented": [
+      "Cost: Exile this card from your graveyard (73 cards)",
+      "Cost: Exile this artifact/creature/enchantment/land (41 cards)",
+      "Cost: Pay energy {E} variants (44 cards)",
+      "Cost: Return land to hand (14 cards)",
+      "Cost: Reveal this card from hand (10 cards)",
+      "Cost: Exert this creature (6 cards)",
+      "Cost: Mill a card (6 cards)",
+      "Cost: Exile top of library (5 cards)",
+      "Cost: Collect evidence N (6+ cards)",
+      "Cost: Forage (4+ cards)",
+      "Cost: Ability-word prefixes (Cohort, Boast, Metalcraft, Exhaust, Renew, Delirium, etc.)",
+      "Cost: Ticket costs ({TK} prefixed)",
+      "Cost: Vehicle tier costs (N+ | {cost})",
+      "Cost: Tap another untapped creature",
+      "Replacement: Bond lands (UnlessPlayerLifeAtMost - 12 cards)",
+      "Replacement: Battlebond lands (UnlessMultipleOpponents - 6 cards)",
+      "Replacement: Generic enters-tapped-unless fallback (30+ cards)",
+      "Static condition: Graveyard threshold/delirium",
+      "Static condition: Controls N or more",
+      "Static condition: Entered this turn",
+      "Static condition: Committed a crime / gained life this turn",
+      "Effect: Suspect keyword action",
+      "Effect: Blight N keyword action",
+      "Effect: Forage keyword action",
+      "Effect: Collect evidence N keyword action",
+      "Effect: Endure N keyword action",
+      "Routing: Vehicle tier lines (N+ | ability)",
+      "Routing: Skip draw step, maximum hand size, life can't change",
+      "Routing: Extended keyword cost line recognition (20+ new keywords)"
+    ],
+    "remaining_fixable": "Remaining patterns are highly fragmented (1-7 cards each per unique pattern). The 725 remaining Standard cards require ~200+ distinct parser patterns.",
+    "deferred": [
+      "Effect:remove (contains ante mechanic)",
+      "Effect:starting (contains intensity mechanic)"
+    ],
+    "out_of_scope": [
+      "Effect:conjure (Arena-digital)",
+      "Effect:seek (Arena-digital)",
+      "Effect:draft (Arena-digital)",
+      "Effect:specialize (Arena-digital)"
+    ]
+  },
+  "targets": {
+    "global_target": 80.0,
+    "standard_target": 90.0,
+    "global_achieved": false,
+    "standard_achieved": false,
+    "note": "Targets require implementing hundreds of unique low-count patterns. Each additional percent requires exponentially more parser work as the remaining gaps are highly fragmented."
+  }
+}

@@ -1,0 +1,47 @@
+name: Refresh Metagame Feeds
+
+on:
+  schedule:
+    # Run daily at 06:00 UTC
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh-feeds:
+    name: Scrape & Commit Feeds
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache-shared-key: rust-feed-scraper
+
+      - name: Build feed-scraper
+        run: cargo build --release -p feed-scraper
+
+      - name: Scrape metagame feeds
+        run: |
+          cargo run --release -p feed-scraper -- \
+            --format standard,modern,pioneer,commander \
+            --output-dir client/public/feeds/ \
+            --top 10 \
+            --delay 1500
+
+      - name: Check for changes
+        id: diff
+        run: |
+          git diff --quiet client/public/feeds/mtggoldfish-*.json && echo "changed=false" >> "$GITHUB_OUTPUT" || echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Commit updated feeds
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add client/public/feeds/mtggoldfish-*.json
+          git commit -m "chore: refresh metagame feeds [skip ci]"
+          git push

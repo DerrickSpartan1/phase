@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+PROJECT_NAME="${1:-phase-rs}"
+R2_BUCKET="phase-rs-data"
+R2_PUBLIC="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
+
+export CARD_DATA_URL="${CARD_DATA_URL:-$R2_PUBLIC/card-data.json}"
+export COVERAGE_DATA_URL="${COVERAGE_DATA_URL:-$R2_PUBLIC/coverage-data.json}"
+export AUDIO_BASE_URL="${AUDIO_BASE_URL:-$R2_PUBLIC/audio}"
+
+DEPLOY_CACHE=".deploy-cache"
+touch "$DEPLOY_CACHE"
+
+# --- R2 uploads (run in background, parallel to WASM build) ---
+upload_to_r2() {
+  # Upload JSON data files in parallel, skipping unchanged
+  local json_pids=()
+  for entry in "card-data.json:public/card-data.json" "coverage-data.json:public/coverage-data.json"; do
+    key="${entry%%:*}"
+    file="${entry#*:}"
+    (
+      local_hash=$(md5 -q "client/$file")
+      cached_hash=$(grep "^$key:" "$DEPLOY_CACHE" 2>/dev/null | cut -d: -f2 || true)
+      if [ "$local_hash" = "$cached_hash" ]; then
+        echo "  = $key (unchanged)"
+      else
+        echo "  ^ $key (uploading)"
+        (cd client && pnpm wrangler r2 object put "$R2_BUCKET/$key" \
+          --file "$file" --content-type application/json --remote)
+        # Update cache atomically
+        grep -v "^$key:" "$DEPLOY_CACHE" > "$DEPLOY_CACHE.tmp" 2>/dev/null || true
+        echo "$key:$local_hash" >> "$DEPLOY_CACHE.tmp"
+        mv "$DEPLOY_CACHE.tmp" "$DEPLOY_CACHE"
+      fi
+    ) &
+    json_pids+=($!)
+  done
+
+  # Upload audio files in parallel, skipping existing
+  echo "Uploading audio to R2 (skipping existing)..."
+  local audio_pids=()
+  for f in client/public/audio/music/planeswalker-*.m4a; do
+    (
+      name=$(basename "$f")
+      if curl -sf --head "$R2_PUBLIC/audio/$name" >/dev/null 2>&1; then
+        echo "  = $name (exists)"
+      else
+        echo "  ^ $name (uploading)"
+        (cd client && pnpm wrangler r2 object put "$R2_BUCKET/audio/$name" \
+          --file "public/audio/music/$name" --content-type audio/mp4 --remote)
+      fi
+    ) &
+    audio_pids+=($!)
+  done
+
+  # Wait for all uploads
+  for pid in "${json_pids[@]}" "${audio_pids[@]}"; do
+    wait "$pid"
+  done
+  echo "R2 uploads complete."
+}
+
+echo "Starting R2 uploads (background) and WASM build (foreground)..."
+upload_to_r2 &
+R2_PID=$!
+
+# --- WASM build (foreground) ---
+echo "Building WASM (release)..."
+./scripts/build-wasm.sh release
+
+# --- Wait for R2 uploads before frontend build ---
+wait $R2_PID
+echo "All R2 uploads finished."
+
+# --- Frontend build ---
+echo "Building frontend..."
+echo "  CARD_DATA_URL=$CARD_DATA_URL"
+echo "  COVERAGE_DATA_URL=$COVERAGE_DATA_URL"
+echo "  AUDIO_BASE_URL=$AUDIO_BASE_URL"
+(cd client && pnpm build)
+
+# Remove large data/audio files and their compressed variants — served from R2
+rm -f client/dist/card-data.json client/dist/card-data.json.br
+rm -f client/dist/coverage-data.json client/dist/coverage-data.json.br
+rm -f client/dist/audio/music/planeswalker-*.m4a
+
+# --- Deploy ---
+echo "Deploying to Cloudflare Pages ($PROJECT_NAME)..."
+(cd client && pnpm wrangler pages deploy dist --project-name="$PROJECT_NAME" --branch=main --commit-dirty=true)

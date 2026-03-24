@@ -1,0 +1,704 @@
+use crate::types::card_type::CoreType;
+use crate::types::events::GameEvent;
+use crate::types::game_state::GameState;
+use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::player::PlayerId;
+use crate::types::statics::StaticMode;
+use crate::types::zones::Zone;
+
+use super::game_object::GameObject;
+use super::printed_cards::{apply_back_face_to_object, snapshot_object_face};
+
+/// Allocate a new ObjectId, create a GameObject with defaults, insert into state.objects, and add to the specified zone.
+pub fn create_object(
+    state: &mut GameState,
+    card_id: CardId,
+    owner: PlayerId,
+    name: String,
+    zone: Zone,
+) -> ObjectId {
+    let id = ObjectId(state.next_object_id);
+    state.next_object_id += 1;
+
+    let obj = GameObject::new(id, card_id, owner, name, zone);
+    state.objects.insert(id, obj);
+    add_to_zone(state, id, zone, owner);
+
+    id
+}
+
+/// CR 400.7: Move an object to a new zone. An object that moves to a new zone becomes a new object.
+pub fn move_to_zone(
+    state: &mut GameState,
+    object_id: ObjectId,
+    to: Zone,
+    events: &mut Vec<GameEvent>,
+) {
+    // CR 903.9a: Commander may be redirected to the command zone instead of graveyard/exile.
+    let to = if state.format_config.command_zone
+        && super::commander::should_redirect_to_command_zone(state, object_id, to)
+    {
+        Zone::Command
+    } else {
+        to
+    };
+
+    // CR 614.1d: Check CantEnterBattlefieldFrom statics before allowing the move.
+    // e.g., Grafdigger's Cage: "Creature cards in graveyards and libraries can't enter the battlefield."
+    if to == Zone::Battlefield {
+        if let Some(obj) = state.objects.get(&object_id) {
+            if is_blocked_from_entering_battlefield(state, obj) {
+                return;
+            }
+            // CR 400.4a: Instants and sorceries can't enter the battlefield.
+            if !obj.face_down
+                && (obj.card_types.core_types.contains(&CoreType::Instant)
+                    || obj.card_types.core_types.contains(&CoreType::Sorcery))
+            {
+                return; // Remain in previous zone per CR 400.4a
+            }
+        }
+    }
+
+    let obj = state.objects.get(&object_id).expect("object exists");
+    let from = obj.zone;
+    let owner = obj.owner;
+
+    // CR 400.7: Snapshot LKI before zone change from battlefield or exile.
+    // Power/toughness reflect layer modifications on battlefield (Layer 7);
+    // from exile they will be None (no layer computation), which is correct.
+    if from == Zone::Battlefield || from == Zone::Exile {
+        let lki = crate::types::game_state::LKISnapshot {
+            name: obj.name.clone(),
+            power: obj.power,
+            toughness: obj.toughness,
+            mana_value: obj.mana_cost.mana_value(),
+            controller: obj.controller,
+            owner: obj.owner,
+            // CR 400.7: Capture core types for "if it was a creature" patterns.
+            card_types: obj.card_types.core_types.clone(),
+        };
+        state.lki_cache.insert(object_id, lki);
+    }
+
+    remove_from_zone(state, object_id, from, owner);
+    add_to_zone(state, object_id, to, owner);
+
+    let obj_mut = state.objects.get_mut(&object_id).unwrap();
+    obj_mut.zone = to;
+
+    // CR 712.14 + CR 400.7: Transformed permanents revert to front face on zone change.
+    if obj_mut.transformed {
+        if let Some(back_face) = obj_mut.back_face.clone() {
+            let current_back = snapshot_object_face(obj_mut);
+            apply_back_face_to_object(obj_mut, back_face);
+            obj_mut.back_face = Some(current_back);
+            obj_mut.transformed = false;
+        }
+    }
+
+    // CR 400.7 + CR 113.6e: Clear exile-based casting permissions when leaving exile
+    // (prevents re-casting if the card returns to exile via a different effect).
+    if from == crate::types::zones::Zone::Exile {
+        obj_mut.casting_permissions.retain(|p| {
+            !matches!(
+                p,
+                crate::types::ability::CastingPermission::AdventureCreature
+                    | crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+                    | crate::types::ability::CastingPermission::PlayFromExile { .. }
+                    | crate::types::ability::CastingPermission::ExileWithEnergyCost
+                    | crate::types::ability::CastingPermission::WarpExile { .. }
+            )
+        });
+    }
+
+    // CR 302.6: Track when objects enter the battlefield (for summoning sickness).
+    if to == Zone::Battlefield {
+        obj_mut.entered_battlefield_turn = Some(state.turn_number);
+
+        // CR 400.7: A Class that re-enters is a new object at level 1.
+        if obj_mut.class_level.is_some() {
+            obj_mut.class_level = Some(1);
+        }
+    }
+
+    // CR 701.37b: Monstrous designation clears when a permanent leaves the battlefield.
+    if from == Zone::Battlefield {
+        obj_mut.monstrous = false;
+    }
+
+    // Track descended: a permanent card was put into its owner's graveyard
+    if to == Zone::Graveyard {
+        let is_permanent_card = obj_mut.card_types.core_types.iter().any(|ct| {
+            matches!(
+                ct,
+                CoreType::Creature
+                    | CoreType::Artifact
+                    | CoreType::Enchantment
+                    | CoreType::Planeswalker
+                    | CoreType::Land
+                    | CoreType::Battle
+            )
+        });
+        if is_permanent_card {
+            if let Some(player) = state.players.iter_mut().find(|p| p.id == owner) {
+                player.descended_this_turn = true;
+            }
+        }
+    }
+
+    // Mark layers dirty when objects enter or leave the battlefield
+    if from == Zone::Battlefield || to == Zone::Battlefield {
+        state.layers_dirty = true;
+    }
+
+    // Prune host-bound transient effects when a permanent leaves the battlefield
+    if from == Zone::Battlefield {
+        super::layers::prune_host_left_effects(state, object_id);
+
+        // Clean up manual mana-tap tracking for departing permanents
+        for tapped in state.lands_tapped_for_mana.values_mut() {
+            tapped.retain(|&id| id != object_id);
+        }
+    }
+
+    super::restrictions::record_zone_change(state, object_id, from, to);
+
+    events.push(GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to,
+    });
+}
+
+/// Move an object to a specific position in its owner's library (top or bottom), emitting a ZoneChanged event.
+/// Convention: library[0] = top of library.
+pub fn move_to_library_position(
+    state: &mut GameState,
+    object_id: ObjectId,
+    top: bool,
+    events: &mut Vec<GameEvent>,
+) {
+    let index = if top { Some(0) } else { None }; // None = push to end
+    move_to_library_at_index(state, object_id, index, events);
+}
+
+/// CR 701.24g: Move an object to a specific index in its owner's library.
+/// `index = Some(0)` = top, `index = None` = bottom, `index = Some(n)` = nth position.
+/// Handles full cross-zone cleanup (LKI, transform revert, layer pruning, restrictions)
+/// unlike ChangeZone { destination: Library } which auto-shuffles per CR 401.3.
+pub fn move_to_library_at_index(
+    state: &mut GameState,
+    object_id: ObjectId,
+    index: Option<usize>,
+    events: &mut Vec<GameEvent>,
+) {
+    let obj = state.objects.get(&object_id).expect("object exists");
+    let from = obj.zone;
+    let owner = obj.owner;
+
+    // CR 400.7: Snapshot LKI before zone change from battlefield or exile.
+    if from == Zone::Battlefield || from == Zone::Exile {
+        let lki = crate::types::game_state::LKISnapshot {
+            name: obj.name.clone(),
+            power: obj.power,
+            toughness: obj.toughness,
+            mana_value: obj.mana_cost.mana_value(),
+            controller: obj.controller,
+            owner: obj.owner,
+            // CR 400.7: Capture core types for "if it was a creature" patterns.
+            card_types: obj.card_types.core_types.clone(),
+        };
+        state.lki_cache.insert(object_id, lki);
+    }
+
+    remove_from_zone(state, object_id, from, owner);
+
+    // Place at specified index or push to end (bottom)
+    let player = state
+        .players
+        .iter_mut()
+        .find(|p| p.id == owner)
+        .expect("owner exists");
+    match index {
+        Some(i) => {
+            let clamped = i.min(player.library.len());
+            player.library.insert(clamped, object_id);
+        }
+        None => player.library.push(object_id),
+    }
+
+    let obj_mut = state.objects.get_mut(&object_id).unwrap();
+    obj_mut.zone = Zone::Library;
+
+    // CR 712.14 + CR 400.7: Transformed permanents revert to front face on zone change.
+    if obj_mut.transformed {
+        if let Some(back_face) = obj_mut.back_face.clone() {
+            let current_back = snapshot_object_face(obj_mut);
+            apply_back_face_to_object(obj_mut, back_face);
+            obj_mut.back_face = Some(current_back);
+            obj_mut.transformed = false;
+        }
+    }
+
+    // CR 400.7 + CR 113.6e: Clear exile-based casting permissions when leaving exile.
+    if from == Zone::Exile {
+        obj_mut.casting_permissions.retain(|p| {
+            !matches!(
+                p,
+                crate::types::ability::CastingPermission::AdventureCreature
+                    | crate::types::ability::CastingPermission::ExileWithAltCost { .. }
+                    | crate::types::ability::CastingPermission::PlayFromExile { .. }
+                    | crate::types::ability::CastingPermission::ExileWithEnergyCost
+                    | crate::types::ability::CastingPermission::WarpExile { .. }
+            )
+        });
+    }
+
+    // Mark layers dirty when objects leave the battlefield
+    if from == Zone::Battlefield {
+        state.layers_dirty = true;
+        // Prune host-bound transient effects (auras, pumps, etc.)
+        super::layers::prune_host_left_effects(state, object_id);
+        // Clean up manual mana-tap tracking for departing permanents
+        for tapped in state.lands_tapped_for_mana.values_mut() {
+            tapped.retain(|&id| id != object_id);
+        }
+    }
+
+    super::restrictions::record_zone_change(state, object_id, from, Zone::Library);
+
+    events.push(GameEvent::ZoneChanged {
+        object_id,
+        from,
+        to: Zone::Library,
+    });
+}
+
+/// Remove an ObjectId from the appropriate zone collection.
+pub fn remove_from_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner: PlayerId) {
+    match zone {
+        Zone::Library | Zone::Hand | Zone::Graveyard => {
+            let player = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == owner)
+                .expect("owner exists");
+            match zone {
+                Zone::Library => player.library.retain(|id| *id != object_id),
+                Zone::Hand => player.hand.retain(|id| *id != object_id),
+                Zone::Graveyard => player.graveyard.retain(|id| *id != object_id),
+                _ => unreachable!(),
+            }
+        }
+        Zone::Battlefield => state.battlefield.retain(|id| *id != object_id),
+        Zone::Stack => state.stack.retain(|e| e.id != object_id),
+        Zone::Exile => state.exile.retain(|id| *id != object_id),
+        Zone::Command => state.command_zone.retain(|id| *id != object_id),
+    }
+}
+
+/// Add an ObjectId to the appropriate zone collection.
+pub fn add_to_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner: PlayerId) {
+    match zone {
+        Zone::Library | Zone::Hand | Zone::Graveyard => {
+            let player = state
+                .players
+                .iter_mut()
+                .find(|p| p.id == owner)
+                .expect("owner exists");
+            match zone {
+                Zone::Library => player.library.push(object_id),
+                Zone::Hand => player.hand.push(object_id),
+                Zone::Graveyard => player.graveyard.push(object_id),
+                _ => unreachable!(),
+            }
+        }
+        // TODO(CR 400.4a): No guard preventing instants/sorceries from entering the battlefield.
+        Zone::Battlefield => state.battlefield.push(object_id),
+        Zone::Stack => {} // Stack entries are managed separately via StackEntry
+        Zone::Exile => state.exile.push(object_id),
+        Zone::Command => state.command_zone.push(object_id),
+    }
+}
+
+/// CR 614.1d: Check if any active CantEnterBattlefieldFrom static prevents this
+/// object from entering the battlefield from its current zone.
+/// e.g., Grafdigger's Cage: "Creature cards in graveyards and libraries can't enter the battlefield."
+fn is_blocked_from_entering_battlefield(state: &GameState, obj: &GameObject) -> bool {
+    let object_id = obj.id;
+    for &bf_id in &state.battlefield {
+        let Some(bf_obj) = state.objects.get(&bf_id) else {
+            continue;
+        };
+        for def in &bf_obj.static_definitions {
+            if def.mode != StaticMode::CantEnterBattlefieldFrom {
+                continue;
+            }
+            // The affected filter encodes both card type and zone restrictions
+            // (e.g., Creature + InAnyZone[Graveyard, Library]).
+            if let Some(ref filter) = def.affected {
+                if super::filter::matches_target_filter(state, object_id, filter, bf_id) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::game_state::GameState;
+
+    fn setup() -> GameState {
+        GameState::new_two_player(42)
+    }
+
+    #[test]
+    fn create_object_assigns_id_and_inserts() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        assert_eq!(id, ObjectId(1));
+        assert!(state.objects.contains_key(&id));
+        assert_eq!(state.objects[&id].name, "Forest");
+        assert_eq!(state.objects[&id].zone, Zone::Hand);
+        assert_eq!(state.next_object_id, 2);
+    }
+
+    #[test]
+    fn create_object_adds_to_player_hand() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Hand,
+        );
+        assert!(state.players[0].hand.contains(&id));
+    }
+
+    #[test]
+    fn create_object_adds_to_battlefield() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Land".to_string(),
+            Zone::Battlefield,
+        );
+        assert!(state.battlefield.contains(&id));
+    }
+
+    #[test]
+    fn create_object_increments_id() {
+        let mut state = setup();
+        let id1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "A".to_string(),
+            Zone::Hand,
+        );
+        let id2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "B".to_string(),
+            Zone::Hand,
+        );
+        assert_eq!(id1, ObjectId(1));
+        assert_eq!(id2, ObjectId(2));
+    }
+
+    #[test]
+    fn move_hand_to_battlefield() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Hand,
+        );
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+
+        assert!(!state.players[0].hand.contains(&id));
+        assert!(state.battlefield.contains(&id));
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            GameEvent::ZoneChanged {
+                object_id,
+                from,
+                to,
+            } => {
+                assert_eq!(*object_id, id);
+                assert_eq!(*from, Zone::Hand);
+                assert_eq!(*to, Zone::Battlefield);
+            }
+            _ => panic!("expected ZoneChanged event"),
+        }
+    }
+
+    #[test]
+    fn move_library_to_hand() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Library,
+        );
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Hand, &mut events);
+
+        assert!(!state.players[0].library.contains(&id));
+        assert!(state.players[0].hand.contains(&id));
+        assert_eq!(state.objects[&id].zone, Zone::Hand);
+    }
+
+    #[test]
+    fn move_battlefield_to_graveyard() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+
+        assert!(!state.battlefield.contains(&id));
+        assert!(state.players[0].graveyard.contains(&id));
+        assert_eq!(state.objects[&id].zone, Zone::Graveyard);
+    }
+
+    #[test]
+    fn move_to_exile() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Battlefield,
+        );
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Exile, &mut events);
+
+        assert!(!state.battlefield.contains(&id));
+        assert!(state.exile.contains(&id));
+        assert_eq!(state.objects[&id].zone, Zone::Exile);
+    }
+
+    #[test]
+    fn move_generates_zone_changed_event() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Hand,
+        );
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            GameEvent::ZoneChanged {
+                object_id: id,
+                from: Zone::Hand,
+                to: Zone::Graveyard,
+            }
+        );
+    }
+
+    #[test]
+    fn move_to_library_top() {
+        let mut state = setup();
+        let id1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bottom".to_string(),
+            Zone::Library,
+        );
+        let id2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Top".to_string(),
+            Zone::Hand,
+        );
+
+        let mut events = Vec::new();
+        move_to_library_position(&mut state, id2, true, &mut events);
+
+        assert_eq!(state.players[0].library[0], id2); // top
+        assert_eq!(state.players[0].library[1], id1); // bottom
+        assert_eq!(state.objects[&id2].zone, Zone::Library);
+    }
+
+    #[test]
+    fn move_to_library_bottom() {
+        let mut state = setup();
+        let id1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Top".to_string(),
+            Zone::Library,
+        );
+        let id2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Hand,
+        );
+
+        let mut events = Vec::new();
+        move_to_library_position(&mut state, id2, false, &mut events);
+
+        assert_eq!(state.players[0].library[0], id1); // stays at top
+        assert_eq!(state.players[0].library[1], id2); // goes to bottom
+    }
+
+    #[test]
+    fn player_zones_are_per_player() {
+        let mut state = setup();
+        let id1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P0 Card".to_string(),
+            Zone::Hand,
+        );
+        let id2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "P1 Card".to_string(),
+            Zone::Hand,
+        );
+
+        assert!(state.players[0].hand.contains(&id1));
+        assert!(!state.players[0].hand.contains(&id2));
+        assert!(state.players[1].hand.contains(&id2));
+        assert!(!state.players[1].hand.contains(&id1));
+    }
+
+    #[test]
+    fn shared_zones_work_for_any_player() {
+        let mut state = setup();
+        let id1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P0 Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let id2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "P1 Creature".to_string(),
+            Zone::Battlefield,
+        );
+
+        assert!(state.battlefield.contains(&id1));
+        assert!(state.battlefield.contains(&id2));
+    }
+
+    #[test]
+    fn multiple_zone_transfers() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Library,
+        );
+        let mut events = Vec::new();
+
+        // Library -> Hand (draw)
+        move_to_zone(&mut state, id, Zone::Hand, &mut events);
+        assert_eq!(state.objects[&id].zone, Zone::Hand);
+
+        // Hand -> Battlefield (play)
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+
+        // Battlefield -> Graveyard (destroy)
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+        assert_eq!(state.objects[&id].zone, Zone::Graveyard);
+
+        assert_eq!(events.len(), 3);
+    }
+
+    #[test]
+    fn instant_cannot_enter_battlefield() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Lightning Bolt".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+
+        // CR 400.4a: Instant should remain in hand
+        assert_eq!(state.objects[&id].zone, Zone::Hand);
+        assert!(state.players[0].hand.contains(&id));
+    }
+
+    #[test]
+    fn face_down_instant_can_enter_battlefield() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Morph Instant".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.face_down = true;
+        }
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+
+        // Face-down instants (morph) can enter the battlefield
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+    }
+}

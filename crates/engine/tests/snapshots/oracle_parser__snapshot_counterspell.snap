@@ -1,0 +1,44 @@
+---
+source: crates/engine/tests/oracle_parser.rs
+assertion_line: 44
+expression: result
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Counter",
+        "target": {
+          "type": "Typed",
+          "type_filters": [
+            "Card"
+          ],
+          "controller": null,
+          "properties": [
+            {
+              "type": "InZone",
+              "zone": "Stack"
+            }
+          ]
+        },
+        "source_static": null,
+        "unless_payment": null
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": "Counter target spell.",
+      "target_prompt": null,
+      "sorcery_speed": false,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": []
+}

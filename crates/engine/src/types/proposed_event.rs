@@ -1,0 +1,336 @@
+use std::collections::HashSet;
+
+use serde::{Deserialize, Serialize};
+
+use crate::game::game_object::CounterType;
+
+use super::ability::TargetRef;
+use super::identifiers::ObjectId;
+use super::player::PlayerId;
+use super::zones::Zone;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ReplacementId {
+    pub source: ObjectId,
+    pub index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ProposedEvent {
+    ZoneChange {
+        object_id: ObjectId,
+        from: Zone,
+        to: Zone,
+        cause: Option<ObjectId>,
+        /// Whether this permanent enters the battlefield tapped (set by ETB-tapped replacements).
+        enter_tapped: bool,
+        /// Counters to place on this permanent as it enters the battlefield.
+        /// Each entry is (counter_type_string, count). Set by ETB-counter replacements.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        enter_with_counters: Vec<(String, u32)>,
+        /// Override the controller on ETB. Used by Earthbending return ("under your control")
+        /// and other "enters the battlefield under [player]'s control" effects.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        controller_override: Option<PlayerId>,
+        /// CR 711.8: When true, the object enters the battlefield showing its back face.
+        /// Set by "return ... transformed" effects.
+        #[serde(default)]
+        enter_transformed: bool,
+        applied: HashSet<ReplacementId>,
+    },
+    Damage {
+        source_id: ObjectId,
+        target: TargetRef,
+        amount: u32,
+        is_combat: bool,
+        applied: HashSet<ReplacementId>,
+    },
+    Draw {
+        player_id: PlayerId,
+        count: u32,
+        applied: HashSet<ReplacementId>,
+    },
+    LifeGain {
+        player_id: PlayerId,
+        amount: u32,
+        applied: HashSet<ReplacementId>,
+    },
+    LifeLoss {
+        player_id: PlayerId,
+        amount: u32,
+        applied: HashSet<ReplacementId>,
+    },
+    AddCounter {
+        object_id: ObjectId,
+        counter_type: CounterType,
+        count: u32,
+        applied: HashSet<ReplacementId>,
+    },
+    RemoveCounter {
+        object_id: ObjectId,
+        counter_type: CounterType,
+        count: u32,
+        applied: HashSet<ReplacementId>,
+    },
+    CreateToken {
+        owner: PlayerId,
+        name: String,
+        /// CR 614.1a: Number of tokens to create. May be modified by replacement effects.
+        count: u32,
+        applied: HashSet<ReplacementId>,
+    },
+    Discard {
+        player_id: PlayerId,
+        object_id: ObjectId,
+        applied: HashSet<ReplacementId>,
+    },
+    Tap {
+        object_id: ObjectId,
+        applied: HashSet<ReplacementId>,
+    },
+    Untap {
+        object_id: ObjectId,
+        applied: HashSet<ReplacementId>,
+    },
+    Destroy {
+        object_id: ObjectId,
+        source: Option<ObjectId>,
+        /// CR 701.15: When true, regeneration shields cannot prevent this destruction.
+        cant_regenerate: bool,
+        applied: HashSet<ReplacementId>,
+    },
+    Sacrifice {
+        object_id: ObjectId,
+        player_id: PlayerId,
+        applied: HashSet<ReplacementId>,
+    },
+}
+
+impl ProposedEvent {
+    /// Construct a `ZoneChange` with default `enter_tapped: false` and empty `applied` set.
+    pub fn zone_change(object_id: ObjectId, from: Zone, to: Zone, cause: Option<ObjectId>) -> Self {
+        Self::ZoneChange {
+            object_id,
+            from,
+            to,
+            cause,
+            enter_tapped: false,
+            enter_with_counters: Vec::new(),
+            controller_override: None,
+            enter_transformed: false,
+            applied: HashSet::new(),
+        }
+    }
+
+    pub fn applied_set(&self) -> &HashSet<ReplacementId> {
+        match self {
+            ProposedEvent::ZoneChange { applied, .. }
+            | ProposedEvent::Damage { applied, .. }
+            | ProposedEvent::Draw { applied, .. }
+            | ProposedEvent::LifeGain { applied, .. }
+            | ProposedEvent::LifeLoss { applied, .. }
+            | ProposedEvent::AddCounter { applied, .. }
+            | ProposedEvent::RemoveCounter { applied, .. }
+            | ProposedEvent::CreateToken { applied, .. }
+            | ProposedEvent::Discard { applied, .. }
+            | ProposedEvent::Tap { applied, .. }
+            | ProposedEvent::Untap { applied, .. }
+            | ProposedEvent::Destroy { applied, .. }
+            | ProposedEvent::Sacrifice { applied, .. } => applied,
+        }
+    }
+
+    pub fn applied_set_mut(&mut self) -> &mut HashSet<ReplacementId> {
+        match self {
+            ProposedEvent::ZoneChange { applied, .. }
+            | ProposedEvent::Damage { applied, .. }
+            | ProposedEvent::Draw { applied, .. }
+            | ProposedEvent::LifeGain { applied, .. }
+            | ProposedEvent::LifeLoss { applied, .. }
+            | ProposedEvent::AddCounter { applied, .. }
+            | ProposedEvent::RemoveCounter { applied, .. }
+            | ProposedEvent::CreateToken { applied, .. }
+            | ProposedEvent::Discard { applied, .. }
+            | ProposedEvent::Tap { applied, .. }
+            | ProposedEvent::Untap { applied, .. }
+            | ProposedEvent::Destroy { applied, .. }
+            | ProposedEvent::Sacrifice { applied, .. } => applied,
+        }
+    }
+
+    pub fn already_applied(&self, id: &ReplacementId) -> bool {
+        self.applied_set().contains(id)
+    }
+
+    pub fn mark_applied(&mut self, id: ReplacementId) {
+        self.applied_set_mut().insert(id);
+    }
+
+    pub fn affected_player(&self, state: &crate::types::game_state::GameState) -> PlayerId {
+        match self {
+            ProposedEvent::ZoneChange { object_id, .. }
+            | ProposedEvent::Tap { object_id, .. }
+            | ProposedEvent::Untap { object_id, .. }
+            | ProposedEvent::Destroy { object_id, .. }
+            | ProposedEvent::AddCounter { object_id, .. }
+            | ProposedEvent::RemoveCounter { object_id, .. } => state
+                .objects
+                .get(object_id)
+                .map(|o| o.controller)
+                .unwrap_or(PlayerId(0)),
+            ProposedEvent::Damage { target, .. } => match target {
+                TargetRef::Player(pid) => *pid,
+                TargetRef::Object(oid) => state
+                    .objects
+                    .get(oid)
+                    .map(|o| o.controller)
+                    .unwrap_or(PlayerId(0)),
+            },
+            ProposedEvent::Draw { player_id, .. }
+            | ProposedEvent::LifeGain { player_id, .. }
+            | ProposedEvent::LifeLoss { player_id, .. }
+            | ProposedEvent::Discard { player_id, .. }
+            | ProposedEvent::Sacrifice { player_id, .. } => *player_id,
+            ProposedEvent::CreateToken { owner, .. } => *owner,
+        }
+    }
+
+    /// Returns the primary object affected by this event, if any.
+    pub fn affected_object_id(&self) -> Option<ObjectId> {
+        match self {
+            ProposedEvent::ZoneChange { object_id, .. }
+            | ProposedEvent::Tap { object_id, .. }
+            | ProposedEvent::Untap { object_id, .. }
+            | ProposedEvent::Destroy { object_id, .. }
+            | ProposedEvent::AddCounter { object_id, .. }
+            | ProposedEvent::RemoveCounter { object_id, .. }
+            | ProposedEvent::Discard { object_id, .. }
+            | ProposedEvent::Sacrifice { object_id, .. } => Some(*object_id),
+            ProposedEvent::Damage { target, .. } => match target {
+                TargetRef::Object(oid) => Some(*oid),
+                TargetRef::Player(_) => None,
+            },
+            ProposedEvent::Draw { .. }
+            | ProposedEvent::LifeGain { .. }
+            | ProposedEvent::LifeLoss { .. }
+            | ProposedEvent::CreateToken { .. } => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn proposed_event_has_13_variants() {
+        // Verify all 13 variants compile
+        let events: Vec<ProposedEvent> = vec![
+            ProposedEvent::zone_change(ObjectId(1), Zone::Battlefield, Zone::Graveyard, None),
+            ProposedEvent::Damage {
+                source_id: ObjectId(1),
+                target: TargetRef::Player(PlayerId(0)),
+                amount: 3,
+                is_combat: false,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::Draw {
+                player_id: PlayerId(0),
+                count: 1,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::LifeGain {
+                player_id: PlayerId(0),
+                amount: 3,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::LifeLoss {
+                player_id: PlayerId(0),
+                amount: 3,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::AddCounter {
+                object_id: ObjectId(1),
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::RemoveCounter {
+                object_id: ObjectId(1),
+                counter_type: CounterType::Plus1Plus1,
+                count: 1,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::CreateToken {
+                owner: PlayerId(0),
+                name: "Soldier".to_string(),
+                count: 1,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::Discard {
+                player_id: PlayerId(0),
+                object_id: ObjectId(2),
+                applied: HashSet::new(),
+            },
+            ProposedEvent::Tap {
+                object_id: ObjectId(1),
+                applied: HashSet::new(),
+            },
+            ProposedEvent::Untap {
+                object_id: ObjectId(1),
+                applied: HashSet::new(),
+            },
+            ProposedEvent::Destroy {
+                object_id: ObjectId(1),
+                source: None,
+                cant_regenerate: false,
+                applied: HashSet::new(),
+            },
+            ProposedEvent::Sacrifice {
+                object_id: ObjectId(1),
+                player_id: PlayerId(0),
+                applied: HashSet::new(),
+            },
+        ];
+        assert_eq!(events.len(), 13);
+    }
+
+    #[test]
+    fn replacement_id_equality_and_hash() {
+        let id1 = ReplacementId {
+            source: ObjectId(1),
+            index: 0,
+        };
+        let id2 = ReplacementId {
+            source: ObjectId(1),
+            index: 0,
+        };
+        let id3 = ReplacementId {
+            source: ObjectId(1),
+            index: 1,
+        };
+        assert_eq!(id1, id2);
+        assert_ne!(id1, id3);
+
+        let mut set = HashSet::new();
+        set.insert(id1);
+        assert!(set.contains(&id2));
+        assert!(!set.contains(&id3));
+    }
+
+    #[test]
+    fn mark_applied_and_already_applied() {
+        let mut event = ProposedEvent::Draw {
+            player_id: PlayerId(0),
+            count: 1,
+            applied: HashSet::new(),
+        };
+        let rid = ReplacementId {
+            source: ObjectId(5),
+            index: 0,
+        };
+        assert!(!event.already_applied(&rid));
+        event.mark_applied(rid);
+        assert!(event.already_applied(&rid));
+    }
+}

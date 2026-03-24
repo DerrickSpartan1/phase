@@ -1,0 +1,98 @@
+name: Deploy Staging (GitHub Pages)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    name: Build & Deploy Staging
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          targets: wasm32-unknown-unknown
+          cache-shared-key: rust-wasm
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-bindgen-cli@0.2.114
+
+      - name: Install binaryen
+        run: |
+          curl -L https://github.com/WebAssembly/binaryen/releases/download/version_123/binaryen-version_123-x86_64-linux.tar.gz | tar xz
+          echo "$PWD/binaryen-version_123/bin" >> $GITHUB_PATH
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Generate card data and coverage report
+        run: |
+          mkdir -p data/mtgjson
+          curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
+          cargo run --release --bin oracle-gen -- data/ --stats > client/public/card-data.json
+          cargo run --release --bin coverage-report -- data/ --all > client/public/coverage-data.json
+
+      - name: Upload card data to R2 (staging)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: r2 object put phase-rs-data/staging/card-data.json --file client/public/card-data.json --content-type application/json --remote
+
+      - name: Upload coverage data to R2 (staging)
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: r2 object put phase-rs-data/staging/coverage-data.json --file client/public/coverage-data.json --content-type application/json --remote
+
+      - name: Build WASM
+        run: ./scripts/build-wasm.sh release
+
+      - name: Build frontend
+        env:
+          CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/card-data.json"
+          COVERAGE_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/coverage-data.json"
+        run: |
+          cd client
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Remove large data files from dist (served from R2)
+        run: rm -f client/dist/card-data.json client/dist/card-data.json.br client/dist/coverage-data.json client/dist/coverage-data.json.br
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: client/dist
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

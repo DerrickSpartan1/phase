@@ -1,0 +1,267 @@
+@import "tailwindcss";
+
+:root {
+  --card-size-scale: 1;
+  --card-viewport-scale: 1;
+  --art-crop-viewport-scale: 1;
+  --card-base: clamp(4rem, calc((7vw + 11vh) / 2), 6.75rem);
+  --card-w: calc(var(--card-base) * var(--card-size-scale) * var(--card-viewport-scale));
+  --card-h: calc(var(--card-w) * 1.4);
+  --card-radius: 6px;
+  --art-crop-base: clamp(6rem, calc((10vw + 14vh) / 2), 9.5rem);
+  --art-crop-w: calc(var(--art-crop-base) * var(--card-size-scale) * var(--art-crop-viewport-scale));
+  --art-crop-h: calc(var(--art-crop-w) * 0.75);
+}
+
+@media (min-width: 768px) {
+  :root {
+    --card-base: clamp(4.25rem, calc((6.4vw + 11.5vh) / 2), 7rem);
+    --art-crop-base: clamp(6.25rem, calc((8.8vw + 15vh) / 2), 9.75rem);
+  }
+}
+
+body {
+  background:
+    radial-gradient(circle at top, rgba(251, 146, 60, 0.12), transparent 30%),
+    linear-gradient(180deg, #040816 0%, #050b1d 36%, #02050f 100%);
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.menu-display {
+  font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+}
+
+.menu-kicker {
+  font-size: 0.72rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+.menu-meta {
+  font-size: 0.78rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.menu-scene {
+  position: relative;
+  isolation: isolate;
+  background:
+    radial-gradient(circle at 50% 18%, rgba(255, 161, 72, 0.16), transparent 22%),
+    radial-gradient(circle at 20% 24%, rgba(72, 163, 255, 0.12), transparent 28%),
+    radial-gradient(circle at 80% 24%, rgba(31, 201, 152, 0.1), transparent 24%),
+    linear-gradient(180deg, rgba(6, 10, 24, 0.96) 0%, rgba(4, 7, 17, 0.96) 58%, rgba(2, 3, 10, 1) 100%);
+}
+
+.menu-scene::before,
+.menu-scene::after {
+  content: "";
+  position: absolute;
+  top: clamp(-4.5rem, -2vh, -1.75rem);
+  left: clamp(82%, 90vw, 96%);
+  width: clamp(6rem, 12vw, 10.5rem);
+  height: clamp(6rem, 12vw, 10.5rem);
+  border-radius: 9999px;
+  pointer-events: none;
+}
+
+.menu-scene::before {
+  z-index: -2;
+  transform: translateX(-50%);
+  opacity: 0.08;
+  background:
+    radial-gradient(circle at 34% 30%, rgba(255, 248, 238, 0.44) 0%, rgba(236, 231, 223, 0.22) 24%, rgba(163, 177, 215, 0.1) 54%, rgba(74, 93, 136, 0.03) 70%, transparent 80%),
+    radial-gradient(circle at center, rgba(255, 184, 108, 0.04), rgba(96, 142, 220, 0.03) 58%, transparent 78%);
+  box-shadow: 0 0 84px rgba(255, 184, 108, 0.04), 0 0 144px rgba(96, 142, 220, 0.04);
+  animation: menu-moon-pulse 28s ease-in-out infinite;
+}
+
+.menu-scene::after {
+  z-index: -1;
+  opacity: 0.22;
+  transform: translateX(calc(-50% + 8%));
+  background:
+    radial-gradient(circle at 50% 50%, rgba(3, 6, 16, 0.62) 0%, rgba(3, 6, 16, 0.74) 66%, rgba(3, 6, 16, 0.18) 76%, transparent 84%);
+  filter: blur(3px);
+  box-shadow: 0 0 24px rgba(2, 4, 10, 0.14);
+}
+
+@keyframes menu-moon-pulse {
+  0% {
+    opacity: 0.12;
+    transform: translateX(-50%) scale(1);
+  }
+
+  25% {
+    opacity: 0.18;
+    transform: translateX(-50%) scale(1.01);
+  }
+
+  50% {
+    opacity: 0.15;
+    transform: translateX(-50%) scale(0.998);
+  }
+
+  75% {
+    opacity: 0.16;
+    transform: translateX(-50%) scale(1.006);
+  }
+
+  100% {
+    opacity: 0.12;
+    transform: translateX(-50%) scale(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .menu-scene::before {
+    animation: none;
+    opacity: 0.08;
+    transform: translateX(-50%);
+  }
+
+  .menu-scene::after {
+    opacity: 0.22;
+    transform: translateX(calc(-50% + 8%));
+  }
+}
+
+.menu-scene__vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background:
+    radial-gradient(circle at center, transparent 38%, rgba(0, 0, 0, 0.22) 70%, rgba(0, 0, 0, 0.62) 100%),
+    linear-gradient(180deg, rgba(0, 0, 0, 0.26), transparent 18%, transparent 82%, rgba(0, 0, 0, 0.42));
+}
+
+.menu-scene__haze {
+  position: absolute;
+  inset: auto 0 0;
+  height: 32vh;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg, transparent 0%, rgba(9, 14, 30, 0.45) 38%, rgba(3, 5, 12, 0.84) 100%),
+    radial-gradient(circle at 50% 0%, rgba(255, 176, 89, 0.14), transparent 48%);
+}
+
+.menu-scene__sigil {
+  position: absolute;
+  top: 12%;
+  width: 32rem;
+  height: 32rem;
+  border-radius: 9999px;
+  pointer-events: none;
+  opacity: 0.18;
+  filter: blur(1px);
+  background:
+    radial-gradient(circle, transparent 58%, rgba(255, 255, 255, 0.08) 59%, transparent 61%),
+    radial-gradient(circle, transparent 70%, rgba(255, 255, 255, 0.05) 71%, transparent 73%);
+}
+
+.menu-scene__sigil--left {
+  left: -12rem;
+  transform: rotate(18deg);
+}
+
+.menu-scene__sigil--right {
+  right: -12rem;
+  transform: rotate(-18deg);
+}
+
+@media (min-width: 1200px) {
+  :root {
+    --card-base: clamp(4.5rem, calc((5.9vw + 12vh) / 2), 7.25rem);
+    --card-radius: 8px;
+    --art-crop-base: clamp(6.5rem, calc((8.2vw + 15.5vh) / 2), 10rem);
+  }
+}
+
+@media (max-height: 820px) and (min-aspect-ratio: 11/10) {
+  :root {
+    --card-viewport-scale: 0.95;
+    --art-crop-viewport-scale: 0.93;
+  }
+}
+
+@media (max-aspect-ratio: 10/11) {
+  :root {
+    --card-viewport-scale: 1;
+    --art-crop-viewport-scale: 1;
+    --card-base: clamp(3.5rem, 8.25vw, 5.5rem);
+    --art-crop-base: clamp(5.25rem, 11vw, 7.5rem);
+  }
+}
+
+@media (min-width: 900px) and (max-aspect-ratio: 10/11) {
+  :root {
+    --card-base: clamp(3.5rem, 6vw, 5.25rem);
+    --art-crop-base: clamp(5.25rem, 7.75vw, 7.25rem);
+  }
+}
+
+/* Class level bookmark — notched bottom edge */
+.clip-bookmark {
+  clip-path: polygon(0 0, 100% 0, 100% calc(100% - 4px), 50% 100%, 0 calc(100% - 4px));
+}
+
+/* Debug layout bounds — toggled via Ctrl+Shift+D */
+.debug-bounds [data-debug-label] {
+  outline: 2px solid color-mix(in srgb, currentColor 60%, transparent);
+  outline-offset: -1px;
+}
+/* Only add position:relative for ::after labels on statically-positioned elements.
+   Elements with absolute/fixed/relative already have a positioning context. */
+.debug-bounds [data-debug-label]:not(.absolute):not(.fixed):not(.relative) {
+  position: relative;
+}
+
+.debug-bounds [data-debug-label]::after {
+  content: attr(data-debug-label);
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 9999;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  font-family: monospace;
+  line-height: 1.4;
+  color: #000;
+  pointer-events: none;
+}
+
+/* Distinct colors per area */
+.debug-bounds [data-debug-label="Opp Hand"]          { outline-color: #f97316; }
+.debug-bounds [data-debug-label="Opp Hand"]::after   { background: #f97316; }
+.debug-bounds [data-debug-label="Opp HUD"]           { outline-color: #eab308; }
+.debug-bounds [data-debug-label="Opp HUD"]::after    { background: #eab308; }
+.debug-bounds [data-debug-label="Battlefield"]        { outline-color: #22c55e; }
+.debug-bounds [data-debug-label="Battlefield"]::after { background: #22c55e; }
+.debug-bounds [data-debug-label="Opp Creatures"]      { outline-color: #ef4444; }
+.debug-bounds [data-debug-label="Opp Creatures"]::after { background: #ef4444; }
+.debug-bounds [data-debug-label="Creatures"]          { outline-color: #ef4444; }
+.debug-bounds [data-debug-label="Creatures"]::after   { background: #ef4444; }
+.debug-bounds [data-debug-label="Middle Row"]         { outline-color: #a855f7; }
+.debug-bounds [data-debug-label="Middle Row"]::after  { background: #a855f7; }
+.debug-bounds [data-debug-label="Lands"]              { outline-color: #14b8a6; }
+.debug-bounds [data-debug-label="Lands"]::after       { background: #14b8a6; }
+.debug-bounds [data-debug-label="Support"]            { outline-color: #ec4899; }
+.debug-bounds [data-debug-label="Support"]::after     { background: #ec4899; }
+.debug-bounds [data-debug-label="Player HUD"]         { outline-color: #3b82f6; }
+.debug-bounds [data-debug-label="Player HUD"]::after  { background: #3b82f6; }
+.debug-bounds [data-debug-label="Player Hand"]        { outline-color: #06b6d4; }
+.debug-bounds [data-debug-label="Player Hand"]::after { background: #06b6d4; }
+.debug-bounds [data-debug-label="Player Zones"]       { outline-color: #f59e0b; }
+.debug-bounds [data-debug-label="Player Zones"]::after { background: #f59e0b; }
+.debug-bounds [data-debug-label="Opp Top"]             { outline-color: #fb923c; }
+.debug-bounds [data-debug-label="Opp Top"]::after      { background: #fb923c; }
+.debug-bounds [data-debug-label="Opp Zones"]           { outline-color: #fbbf24; }
+.debug-bounds [data-debug-label="Opp Zones"]::after    { background: #fbbf24; }
+.debug-bounds [data-debug-label="Player Bottom"]       { outline-color: #818cf8; }
+.debug-bounds [data-debug-label="Player Bottom"]::after { background: #818cf8; }

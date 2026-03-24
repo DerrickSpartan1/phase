@@ -1,0 +1,48 @@
+# Rust
+/target/
+
+# Node
+node_modules/
+
+# GSD
+.planning/
+
+# WASM output (generated)
+client/src/wasm/
+
+# Claude worktrees
+.claude/worktrees/
+
+# Build output
+client/dist/
+
+# Generated data files (built by gen-card-data.sh, served from R2)
+client/public/card-data.json
+client/public/coverage-data.json
+
+# Coverage
+client/coverage/
+
+# Downloaded card data (keep JSON data for CI)
+data/*
+!data/standard-cards.txt
+!data/mtgjson/
+data/mtgjson/AtomicCards.json
+!data/abilities/
+!data/precons/
+
+# Tauri sidecar binaries (built by CI)
+client/src-tauri/binaries/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.worktrees/
+.wrangler/
+.deploy-cache

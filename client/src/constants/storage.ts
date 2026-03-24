@@ -1,0 +1,154 @@
+import type { Feed, FeedSubscription } from "../types/feed";
+import type { ParsedDeck } from "../services/deckParser";
+
+/** Prefix for saved deck data in localStorage. Full key: `${STORAGE_KEY_PREFIX}${deckName}` */
+export const STORAGE_KEY_PREFIX = "phase-deck:";
+
+/** Key for the currently selected/active deck name in localStorage */
+export const ACTIVE_DECK_KEY = "phase-active-deck";
+
+/** Prefix for per-game saved state. Full key: `${GAME_KEY_PREFIX}${gameId}` */
+export const GAME_KEY_PREFIX = "phase-game:";
+
+/** Prefix for per-game debug checkpoints. Full key: `${GAME_CHECKPOINTS_PREFIX}${gameId}` */
+export const GAME_CHECKPOINTS_PREFIX = "phase-game-checkpoints:";
+
+/** Key for the active game metadata (id, mode, difficulty) */
+export const ACTIVE_GAME_KEY = "phase-active-game";
+
+/** Key for deck metadata (timestamps, source tracking) */
+export const DECK_METADATA_KEY = "phase-deck-metadata";
+
+/** Key for the list of subscribed feeds */
+export const FEED_SUBSCRIPTIONS_KEY = "phase-feed-subscriptions";
+
+/** Prefix for cached feed data. Full key: `${FEED_CACHE_PREFIX}${feedId}` */
+export const FEED_CACHE_PREFIX = "phase-feed:";
+
+/** Key for mapping deck names to their originating feed ID */
+export const FEED_DECK_ORIGINS_KEY = "phase-feed-deck-origins";
+
+/** Flag to short-circuit async feed init on subsequent loads */
+export const FEEDS_INITIALIZED_KEY = "phase-feeds-initialized";
+
+export interface DeckMeta {
+  addedAt: number;
+}
+
+function loadMetadataStore(): Record<string, DeckMeta> {
+  try {
+    const raw = localStorage.getItem(DECK_METADATA_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, DeckMeta>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveMetadataStore(store: Record<string, DeckMeta>): void {
+  localStorage.setItem(DECK_METADATA_KEY, JSON.stringify(store));
+}
+
+/** Stamp metadata for a deck. Call whenever a deck is saved or seeded. */
+export function stampDeckMeta(deckName: string, addedAt?: number): void {
+  const store = loadMetadataStore();
+  if (!store[deckName]) {
+    store[deckName] = { addedAt: addedAt ?? Date.now() };
+    saveMetadataStore(store);
+  }
+}
+
+/** Get metadata for a single deck, or null if not tracked. */
+export function getDeckMeta(deckName: string): DeckMeta | null {
+  return loadMetadataStore()[deckName] ?? null;
+}
+
+/** Remove metadata for a deleted deck. */
+export function removeDeckMeta(deckName: string): void {
+  const store = loadMetadataStore();
+  delete store[deckName];
+  saveMetadataStore(store);
+}
+
+/** Delete a saved deck from localStorage, clearing metadata and active-deck if needed. */
+export function deleteDeck(deckName: string): void {
+  localStorage.removeItem(STORAGE_KEY_PREFIX + deckName);
+  removeDeckMeta(deckName);
+  if (localStorage.getItem(ACTIVE_DECK_KEY) === deckName) {
+    localStorage.removeItem(ACTIVE_DECK_KEY);
+  }
+}
+
+/** List all saved deck names from localStorage, sorted alphabetically. */
+export function listSavedDeckNames(): string[] {
+  const names: string[] = [];
+  for (let i = 0; i < localStorage.length; i++) {
+    const key = localStorage.key(i);
+    if (key?.startsWith(STORAGE_KEY_PREFIX)) {
+      names.push(key.slice(STORAGE_KEY_PREFIX.length));
+    }
+  }
+  return names.sort();
+}
+
+/** Load the currently active deck from localStorage. */
+export function loadActiveDeck(): ParsedDeck | null {
+  const activeName = localStorage.getItem(ACTIVE_DECK_KEY);
+  if (!activeName) return null;
+  const raw = localStorage.getItem(STORAGE_KEY_PREFIX + activeName);
+  if (!raw) return null;
+  try {
+    const deck = JSON.parse(raw) as ParsedDeck;
+    // CR 702.139a: Ensure companion is in sideboard for decks saved before this was fixed.
+    if (deck.companion && !deck.sideboard.some((e) => e.name === deck.companion)) {
+      deck.sideboard.push({ count: 1, name: deck.companion });
+    }
+    return deck;
+  } catch {
+    return null;
+  }
+}
+
+// --- Feed storage helpers ---
+
+export function loadFeedSubscriptions(): FeedSubscription[] {
+  try {
+    const raw = localStorage.getItem(FEED_SUBSCRIPTIONS_KEY);
+    return raw ? (JSON.parse(raw) as FeedSubscription[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveFeedSubscriptions(subs: FeedSubscription[]): void {
+  localStorage.setItem(FEED_SUBSCRIPTIONS_KEY, JSON.stringify(subs));
+}
+
+export function getCachedFeed(feedId: string): Feed | null {
+  try {
+    const raw = localStorage.getItem(FEED_CACHE_PREFIX + feedId);
+    return raw ? (JSON.parse(raw) as Feed) : null;
+  } catch {
+    return null;
+  }
+}
+
+export function setCachedFeed(feedId: string, feed: Feed): void {
+  localStorage.setItem(FEED_CACHE_PREFIX + feedId, JSON.stringify(feed));
+}
+
+export function removeCachedFeed(feedId: string): void {
+  localStorage.removeItem(FEED_CACHE_PREFIX + feedId);
+}
+
+export function loadDeckOrigins(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(FEED_DECK_ORIGINS_KEY);
+    return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveDeckOrigins(origins: Record<string, string>): void {
+  localStorage.setItem(FEED_DECK_ORIGINS_KEY, JSON.stringify(origins));
+}

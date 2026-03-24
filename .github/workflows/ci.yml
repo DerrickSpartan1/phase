@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust-check:
+    name: Rust (fmt, clippy, test, coverage-gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          targets: wasm32-unknown-unknown
+          cache-shared-key: rust-debug
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --exclude phase-tauri --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo nextest run --workspace --exclude phase-tauri
+
+      - name: Download card data from R2
+        run: |
+          mkdir -p data
+          curl -fSL -o data/card-data.json "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/card-data.json"
+
+      - name: Card support coverage report
+        run: cargo run --bin coverage-report -- data/
+
+      - name: WASM compile check
+        run: cargo check --package engine-wasm --target wasm32-unknown-unknown
+
+  frontend:
+    name: Frontend (lint, type-check, test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: client/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: cd client && pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: cd client && pnpm run lint
+
+      - name: Type check
+        run: cd client && pnpm run type-check
+
+      - name: Run tests with coverage
+        run: cd client && pnpm test -- --run --coverage
