@@ -9,17 +9,19 @@ HOST="phase-vps"
 echo "Building phase-server for linux x86_64..."
 cargo zigbuild --release --bin phase-server --target x86_64-unknown-linux-gnu
 
-echo "Uploading..."
+echo "Uploading binary and card data..."
 scp target/x86_64-unknown-linux-gnu/release/phase-server "${HOST}:/tmp/phase-server"
+scp client/public/card-data.json "${HOST}:/tmp/card-data.json"
 
 echo "Deploying..."
 ssh "${HOST}" "\
   sudo systemctl stop phase-server || true \
   && sudo cp /tmp/phase-server /opt/phase-server/phase-server \
   && sudo chmod +x /opt/phase-server/phase-server \
-  && sudo chown phase:phase /opt/phase-server/phase-server \
+  && sudo cp /tmp/card-data.json /opt/phase-server/data/card-data.json \
+  && sudo chown -R phase:phase /opt/phase-server \
   && sudo systemctl start phase-server \
-  && rm -f /tmp/phase-server \
+  && rm -f /tmp/phase-server /tmp/card-data.json \
   && echo 'Service status:' \
   && sudo systemctl is-active phase-server"
 
