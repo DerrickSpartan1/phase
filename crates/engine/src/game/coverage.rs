@@ -268,7 +268,16 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
         }
     }
     if let Some(ctrl) = &tf.controller {
-        parts.push(fmt_controller(ctrl));
+        if tf.type_filters.is_empty() {
+            // Player-targeting filter (e.g. "target opponent") — label as player, not permanent
+            let label = match ctrl {
+                ControllerRef::You => "you",
+                ControllerRef::Opponent => "opponent",
+            };
+            parts.push(label.into());
+        } else {
+            parts.push(fmt_controller(ctrl));
+        }
     }
     let type_str = if tf.type_filters.is_empty() {
         String::new()
