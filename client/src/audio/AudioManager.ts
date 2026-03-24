@@ -35,6 +35,8 @@ class AudioManager {
   private crossfadeInProgress = false;
   /** Incremented on every context/theme change to invalidate stale timeouts. */
   private generation = 0;
+  /** Separate element for victory/defeat stingers, so setContext can stop them. */
+  private stingerAudio: HTMLAudioElement | null = null;
 
   // Theme & context state
   private activeTheme: ResolvedTheme = resolveTheme(PLANESWALKER_THEME);
@@ -158,6 +160,7 @@ class AudioManager {
 
     this.activeContext = context;
     this.generation++;
+    this.stopStinger();
 
     if (this.currentAudio) {
       // Crossfade: fade out old track, then fade in new track after overlap
@@ -198,6 +201,7 @@ class AudioManager {
     // Rebuild and restart with phase-appropriate tracks
     if (this.currentAudio) {
       this.crossfadeInProgress = true;
+      this.generation++;
       const gen = this.generation;
       this.stopMusic(2.5);
       setTimeout(() => {
@@ -233,6 +237,8 @@ class AudioManager {
       return;
     }
 
+    // Invalidate any in-flight crossfade/ended timeouts before stopping music
+    this.generation++;
     // Stop current music immediately
     this.stopMusic(0);
 
@@ -248,12 +254,21 @@ class AudioManager {
       now,
     );
 
+    // Stop any previously playing stinger
+    this.stopStinger();
+
     // Play stinger on a separate Audio element — NOT stored in this.currentAudio
     const track = tracks[Math.floor(Math.random() * tracks.length)];
     const audio = new Audio(track.url);
     audio.crossOrigin = "anonymous";
     const source = this.ctx.createMediaElementSource(audio);
     source.connect(this.musicGain);
+
+    this.stingerAudio = audio;
+    audio.addEventListener("ended", () => {
+      if (this.stingerAudio === audio) this.stingerAudio = null;
+    });
+
     audio.play().catch(() => {
       /* stinger playback failed — silent fallback */
     });
@@ -310,17 +325,22 @@ class AudioManager {
   stopMusic(fadeOut = 2.0): void {
     if (!this.ctx || !this.musicGain || !this.currentAudio) return;
 
-    const now = this.ctx.currentTime;
-    this.musicGain.gain.cancelScheduledValues(now);
-    this.musicGain.gain.setValueAtTime(this.musicGain.gain.value, now);
-    this.musicGain.gain.linearRampToValueAtTime(0, now + fadeOut);
-
     const audio = this.currentAudio;
-    setTimeout(() => {
-      audio.pause();
-    }, fadeOut * 1000);
-
     this.currentAudio = null;
+
+    if (fadeOut <= 0) {
+      // Immediate stop — no deferred pause that can race with new playback
+      audio.pause();
+    } else {
+      const now = this.ctx.currentTime;
+      this.musicGain.gain.cancelScheduledValues(now);
+      this.musicGain.gain.setValueAtTime(this.musicGain.gain.value, now);
+      this.musicGain.gain.linearRampToValueAtTime(0, now + fadeOut);
+
+      setTimeout(() => {
+        audio.pause();
+      }, fadeOut * 1000);
+    }
   }
 
   /**
@@ -358,6 +378,7 @@ class AudioManager {
 
   /** Stop music, close AudioContext. */
   dispose(): void {
+    this.stopStinger();
     if (this.currentAudio) {
       this.currentAudio.pause();
       this.currentAudio = null;
@@ -375,6 +396,13 @@ class AudioManager {
   // ---------------------------------------------------------------------------
   // Private helpers
   // ---------------------------------------------------------------------------
+
+  private stopStinger(): void {
+    if (this.stingerAudio) {
+      this.stingerAudio.pause();
+      this.stingerAudio = null;
+    }
+  }
 
   /**
    * Map a GameEvent to an SFX key. Splits LifeChanged into LifeGained/LifeLost
@@ -433,7 +461,11 @@ class AudioManager {
 
     this.currentAudio = audio;
 
+    // Capture generation so the ended handler becomes a no-op if a context
+    // change or stopMusic has occurred since this track started.
+    const gen = this.generation;
     audio.addEventListener("ended", () => {
+      if (this.generation !== gen) return;
       this.crossfadeTo(this.nextTrackIndex());
     });
 
@@ -457,9 +489,15 @@ class AudioManager {
     this.musicGain.gain.linearRampToValueAtTime(0, now + duration);
 
     const oldAudio = this.currentAudio;
+    const gen = this.generation;
 
     setTimeout(() => {
       oldAudio?.pause();
+      this.crossfadeInProgress = false;
+
+      // Bail if a context change occurred during the crossfade
+      if (this.generation !== gen) return;
+
       this.trackIndex = nextIndex;
       this.playTrack();
 
@@ -473,8 +511,6 @@ class AudioManager {
           fadeInNow + duration,
         );
       }
-
-      this.crossfadeInProgress = false;
     }, duration * 1000);
   }
 
