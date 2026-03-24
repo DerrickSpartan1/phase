@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
@@ -31,6 +32,39 @@ type SharedLobby = Arc<Mutex<LobbyManager>>;
 type SharedLobbySubscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<ServerMessage>>>>;
 type SharedPlayerCount = Arc<AtomicU32>;
 type SharedGameDb = Arc<persistence::GameDb>;
+
+/// Server-wide limits to prevent resource exhaustion and abuse.
+const MAX_CONNECTIONS: u32 = 200;
+const MAX_GAMES: usize = 100;
+const RATE_LIMIT_MESSAGES: u32 = 30;
+const RATE_LIMIT_WINDOW_SECS: u64 = 1;
+const MAX_WS_MESSAGE_BYTES: usize = 8 * 1024; // 8 KB
+
+/// Simple per-socket token bucket rate limiter.
+struct RateLimiter {
+    count: u32,
+    window_start: Instant,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self {
+            count: 0,
+            window_start: Instant::now(),
+        }
+    }
+
+    /// Returns `true` if the message is allowed, `false` if rate-limited.
+    fn check(&mut self) -> bool {
+        let now = Instant::now();
+        if now.duration_since(self.window_start).as_secs() >= RATE_LIMIT_WINDOW_SECS {
+            self.count = 0;
+            self.window_start = now;
+        }
+        self.count += 1;
+        self.count <= RATE_LIMIT_MESSAGES
+    }
+}
 
 /// phase-server: multiplayer game server for phase.rs
 #[derive(Parser)]
@@ -298,18 +332,26 @@ async fn ws_handler(
         AppState,
     >,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| {
-        handle_socket(
-            socket,
-            state,
-            connections,
-            db,
-            lobby,
-            lobby_subscribers,
-            player_count,
-            game_db,
-        )
-    })
+    let current = player_count.load(Ordering::Relaxed);
+    if current >= MAX_CONNECTIONS {
+        warn!(current, limit = MAX_CONNECTIONS, "connection limit reached, rejecting");
+        return (http::StatusCode::SERVICE_UNAVAILABLE, "Server full").into_response();
+    }
+
+    ws.max_message_size(MAX_WS_MESSAGE_BYTES)
+        .on_upgrade(move |socket| {
+            handle_socket(
+                socket,
+                state,
+                connections,
+                db,
+                lobby,
+                lobby_subscribers,
+                player_count,
+                game_db,
+            )
+        })
+        .into_response()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -335,6 +377,7 @@ async fn handle_socket(
         player_token: None,
         lobby_subscribed: false,
     };
+    let mut rate_limiter = RateLimiter::new();
 
     loop {
         tokio::select! {
@@ -354,6 +397,11 @@ async fn handle_socket(
                             Message::Close(_) => break,
                             _ => continue,
                         };
+
+                        if !rate_limiter.check() {
+                            debug!("rate limit exceeded, dropping message");
+                            continue;
+                        }
 
                         let client_msg: ClientMessage = match serde_json::from_str(&text) {
                             Ok(m) => m,
@@ -515,6 +563,19 @@ async fn handle_client_message(
     match client_msg {
         ClientMessage::CreateGame { deck } => {
             info!(deck_size = deck.main_deck.len(), "CreateGame");
+            {
+                let mgr = state.lock().await;
+                if mgr.sessions.len() >= MAX_GAMES {
+                    warn!(limit = MAX_GAMES, "max games reached, rejecting CreateGame");
+                    let msg = ServerMessage::Error {
+                        message: "Server is at game capacity, please try again later".to_string(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            }
             let resolved = match resolve_deck(db, &deck) {
                 Ok(entries) => entries,
                 Err(e) => {
@@ -1008,6 +1069,19 @@ async fn handle_client_message(
                 ai_seats = ai_seats.len(),
                 "CreateGameWithSettings"
             );
+            {
+                let mgr = state.lock().await;
+                if mgr.sessions.len() >= MAX_GAMES {
+                    warn!(limit = MAX_GAMES, "max games reached, rejecting CreateGameWithSettings");
+                    let msg = ServerMessage::Error {
+                        message: "Server is at game capacity, please try again later".to_string(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+            }
             let resolved = match resolve_deck(db, &deck) {
                 Ok(entries) => entries,
                 Err(e) => {
