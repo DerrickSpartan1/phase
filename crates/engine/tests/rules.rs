@@ -34,6 +34,11 @@ pub fn run_combat(
         .act(GameAction::DeclareAttackers { attacks })
         .expect("DeclareAttackers should succeed");
 
+    // CR 508.2: Active player gets priority after attackers — pass through it.
+    if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+        runner.pass_both_players();
+    }
+
     if matches!(
         runner.state().waiting_for,
         WaitingFor::DeclareBlockers { .. }
@@ -43,6 +48,11 @@ pub fn run_combat(
                 assignments: blocker_assignments,
             })
             .expect("DeclareBlockers should succeed");
+
+        // CR 509.2: Active player gets priority after blockers — pass through it.
+        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+            runner.pass_both_players();
+        }
     }
 }
 

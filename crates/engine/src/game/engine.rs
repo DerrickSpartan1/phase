@@ -1330,15 +1330,12 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 super::layers::prune_end_of_combat_effects(state);
                 turns::advance_phase(state, &mut events);
                 turns::auto_advance(state, &mut events)
-            } else if !state.stack.is_empty() {
+            } else {
+                // CR 508.2: After attackers are declared, the active player gets priority.
                 priority::reset_priority(state);
                 WaitingFor::Priority {
                     player: state.active_player,
                 }
-            } else {
-                // Advance to DeclareBlockers
-                turns::advance_phase(state, &mut events);
-                turns::auto_advance(state, &mut events)
             }
         }
         (
@@ -1359,15 +1356,10 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 });
             }
 
-            if !state.stack.is_empty() {
-                priority::reset_priority(state);
-                WaitingFor::Priority {
-                    player: state.active_player,
-                }
-            } else {
-                // Advance to CombatDamage
-                turns::advance_phase(state, &mut events);
-                turns::auto_advance(state, &mut events)
+            // CR 509.2: After blockers are declared, the active player gets priority.
+            priority::reset_priority(state);
+            WaitingFor::Priority {
+                player: state.active_player,
             }
         }
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
