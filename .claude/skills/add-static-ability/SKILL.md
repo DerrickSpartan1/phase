@@ -7,7 +7,7 @@ description: Use when adding or modifying static abilities, continuous effects, 
 
 Static abilities produce continuous effects that modify game objects through the layer system (MTG Rule 613). Unlike triggered or activated abilities, they don't use the stack — they simply exist while their source is on the battlefield.
 
-**Before you start:** Trace how Changeling's `AddAllCreatureTypes` works from parser to layers. It's the best reference for type-changing effects: `synthesize_changeling_cda()` in `oracle_loader.rs` → `StaticDefinition` with `ContinuousModification::AddAllCreatureTypes` → `gather_active_continuous_effects()` → `apply_continuous_effect()` in `layers.rs`.
+**Before you start:** Trace how Changeling's `AddAllCreatureTypes` works from parser to layers. It's the best reference for type-changing effects: `synthesize_changeling_cda()` in `synthesis.rs` → `StaticDefinition` with `ContinuousModification::AddAllCreatureTypes` → `gather_active_continuous_effects()` → `apply_continuous_effect()` in `layers.rs`.
 
 > **CR Verification Rule:** Every CR number in annotations MUST be verified by grepping `docs/MagicCompRules.txt` before writing. Do NOT rely on memory — 701.x and 702.x numbers are arbitrary sequential assignments that LLMs consistently hallucinate. Run `grep -n "^613.1" docs/MagicCompRules.txt` (etc.) for every number. If you cannot find it, do not write the annotation.
 
@@ -230,7 +230,7 @@ If your static uses a mode other than `Continuous`, it's evaluated outside the l
 | Global effect | "All creatures get -1/-1" | All-creatures block |
 | Conditional | "~ has indestructible as long as..." | As-long-as block |
 | Turn-scoped | "During your turn, ~ has first strike" | During-your-turn block |
-| CDA | Changeling → all creature types | `synthesize_changeling_cda()` in `oracle_loader.rs` |
+| CDA | Changeling → all creature types | `synthesize_changeling_cda()` in `synthesis.rs` |
 | Type changing | "This land is the chosen type" | **Not yet implemented** — see `add-replacement-effect` skill |
 | Cost reduction | "Spells you cast cost {1} less" | Cost reduction block |
 | Restriction | "~ can't be blocked" | Can't-be-blocked block |
