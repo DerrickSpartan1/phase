@@ -52,7 +52,7 @@ export function MenuPage() {
     const saved = loadActiveGame();
     if (saved) {
       const hasState = saved.mode === "online"
-        ? sessionStorage.getItem("phase-ws-session") !== null
+        ? localStorage.getItem("phase-ws-session") !== null
         : loadGame(saved.id) !== null;
       if (hasState) {
         setActiveGame(saved);

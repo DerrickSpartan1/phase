@@ -19,8 +19,8 @@ class MockWebSocket {
 // Replace global WebSocket with mock
 vi.stubGlobal("WebSocket", MockWebSocket);
 
-// Mock sessionStorage
-vi.stubGlobal("sessionStorage", {
+// Mock localStorage (ws-adapter uses localStorage for session persistence)
+vi.stubGlobal("localStorage", {
   getItem: vi.fn(() => null),
   setItem: vi.fn(),
   removeItem: vi.fn(),

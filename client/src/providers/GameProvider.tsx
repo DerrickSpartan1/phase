@@ -163,7 +163,7 @@ export function GameProvider({
 
     const isOnline = mode === "online";
     const isP2P = mode === "p2p-host" || mode === "p2p-join";
-    const hasSession = sessionStorage.getItem("phase-ws-session") !== null;
+    const hasSession = localStorage.getItem("phase-ws-session") !== null;
     const isReconnect = isOnline && !joinCode && hasSession;
 
     let cancelled = false;

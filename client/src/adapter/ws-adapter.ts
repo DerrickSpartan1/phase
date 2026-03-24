@@ -41,10 +41,17 @@ export type WsAdapterEvent =
 type WsAdapterEventListener = (event: WsAdapterEvent) => void;
 
 const WS_STORAGE_KEY = "phase-ws-session";
+const SESSION_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
 
 interface SessionData {
   gameCode: string;
   playerToken: string;
+  serverUrl: string;
+  timestamp: number;
+}
+
+function isSessionValid(session: SessionData): boolean {
+  return Date.now() - (session.timestamp ?? 0) < SESSION_TTL_MS;
 }
 
 /**
@@ -68,6 +75,7 @@ export class WebSocketAdapter implements EngineAdapter {
   private readonly maxReconnectAttempts = 3;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private disposed = false;
+  private gameEnded = false;
 
   constructor(
     private readonly serverUrl: string,
@@ -240,15 +248,21 @@ export class WebSocketAdapter implements EngineAdapter {
     this.initResolve = null;
     this.initReject = null;
     this.listeners = [];
-    sessionStorage.removeItem(WS_STORAGE_KEY);
+    if (this.gameEnded) {
+      localStorage.removeItem(WS_STORAGE_KEY);
+    }
   }
 
   /** Attempt reconnection using stored session data. */
   tryReconnect(): boolean {
-    const raw = sessionStorage.getItem(WS_STORAGE_KEY);
+    const raw = localStorage.getItem(WS_STORAGE_KEY);
     if (!raw) return false;
 
     const session: SessionData = JSON.parse(raw);
+    if (!isSessionValid(session)) {
+      localStorage.removeItem(WS_STORAGE_KEY);
+      return false;
+    }
     this._gameCode = session.gameCode;
     this.playerToken = session.playerToken;
 
@@ -376,6 +390,8 @@ export class WebSocketAdapter implements EngineAdapter {
 
       case "GameOver": {
         const data = msg.data as { winner: PlayerId | null; reason: string };
+        this.gameEnded = true;
+        localStorage.removeItem(WS_STORAGE_KEY);
         this.emit({
           type: "gameOver",
           winner: data.winner,
@@ -471,8 +487,10 @@ export class WebSocketAdapter implements EngineAdapter {
       const session: SessionData = {
         gameCode: this._gameCode,
         playerToken: this.playerToken,
+        serverUrl: this.serverUrl,
+        timestamp: Date.now(),
       };
-      sessionStorage.setItem(WS_STORAGE_KEY, JSON.stringify(session));
+      localStorage.setItem(WS_STORAGE_KEY, JSON.stringify(session));
     }
   }
 }

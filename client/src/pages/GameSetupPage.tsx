@@ -205,7 +205,7 @@ export function GameSetupPage() {
         setStep("deck-select");
         return;
       }
-      sessionStorage.removeItem("phase-ws-session");
+      localStorage.removeItem("phase-ws-session");
       setHostIsPublic(settings.public);
 
       const deck = loadActiveDeck();
@@ -255,9 +255,9 @@ export function GameSetupPage() {
         if (msg.type === "GameCreated") {
           const data = msg.data as { game_code: string; player_token: string };
           setHostGameCode(data.game_code);
-          sessionStorage.setItem(
+          localStorage.setItem(
             "phase-ws-session",
-            JSON.stringify({ gameCode: data.game_code, playerToken: data.player_token }),
+            JSON.stringify({ gameCode: data.game_code, playerToken: data.player_token, timestamp: Date.now() }),
           );
           // AI games get GameStarted immediately — skip the waiting step
           if (!settings.aiSeats.length) {
@@ -308,7 +308,7 @@ export function GameSetupPage() {
         return;
       }
 
-      sessionStorage.removeItem("phase-ws-session");
+      localStorage.removeItem("phase-ws-session");
       const gameId = crypto.randomUUID();
       saveActiveGame({ id: gameId, mode: "online", difficulty: "" });
       useGameStore.setState({ gameId });
@@ -327,7 +327,7 @@ export function GameSetupPage() {
       hostWsRef.current = null;
     }
     setHostGameCode(null);
-    sessionStorage.removeItem("phase-ws-session");
+    localStorage.removeItem("phase-ws-session");
     setStep("lobby");
   }, []);
 

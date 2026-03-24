@@ -112,7 +112,7 @@ export function MultiplayerPage() {
         return;
       }
 
-      sessionStorage.removeItem("phase-ws-session");
+      localStorage.removeItem("phase-ws-session");
       const gameId = crypto.randomUUID();
       saveActiveGame({ id: gameId, mode: "online", difficulty: "" });
       useGameStore.setState({ gameId });
