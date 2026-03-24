@@ -9,6 +9,7 @@ import { fetchCardImageUrl } from "../../services/scryfall.ts";
 import { useAnimationStore } from "../../stores/animationStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
+import { audioManager } from "../../audio/AudioManager.ts";
 import { hexToRgb } from "./particleEffects.ts";
 import { CardRevealBurst } from "./CardRevealBurst.tsx";
 import { applyCardSlam } from "./CardSlamAnimation.tsx";
@@ -146,7 +147,8 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
               );
               if (sourceEl) {
                 applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
-                  // Impact effects: shockwave, floating number, screen shake
+                  // Impact effects: SFX, shockwave, floating number, screen shake
+                  audioManager.playSfx("DamageDealt");
                   particleRef.current?.slamImpact(pos.x, pos.y, amount);
 
                   const id = ++floatIdCounter;
@@ -164,7 +166,8 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
               }
             }
 
-            // Paired return or source element not found: just show floating damage
+            // Paired return or source element not found: just show floating damage + immediate SFX
+            audioManager.playSfx("DamageDealt");
             const floatId = ++floatIdCounter;
             setActiveFloats((prev) => [
               ...prev,
@@ -180,6 +183,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             );
             if (sourceEl && vfxQuality !== "minimal") {
               applyCardSlam(sourceEl, pos.x, pos.y, speedMultiplier, () => {
+                audioManager.playSfx("DamageDealt");
                 particleRef.current?.playerDamage(pos.x, pos.y, amount);
 
                 const fid = ++floatIdCounter;
@@ -199,6 +203,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
                 }
               });
             } else {
+              audioManager.playSfx("DamageDealt");
               const fid = ++floatIdCounter;
               setActiveFloats((prev) => [
                 ...prev,
@@ -304,6 +309,7 @@ export function AnimationOverlay({ containerRef }: AnimationOverlayProps) {
             );
             if (blockerEl) {
               applyCardSlam(blockerEl, attackerPos.x, attackerPos.y, speedMultiplier, () => {
+                audioManager.playSfx("BlockersDeclared");
                 particleRef.current?.blockClash(attackerPos.x, attackerPos.y);
               });
             }

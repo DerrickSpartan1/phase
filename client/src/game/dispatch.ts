@@ -11,15 +11,25 @@ import { useMultiplayerStore } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
 
+/**
+ * Event types whose SFX is deferred to the card slam onImpact callback
+ * in AnimationOverlay, so sound aligns with the visual impact moment.
+ */
+const SLAM_DEFERRED_SFX = new Set(["DamageDealt", "BlockersDeclared"]);
+
 /** Schedule SFX for each animation step, offset to sync with visual timing. */
 function scheduleSfxForSteps(steps: AnimationStep[], multiplier: number): void {
   let offset = 0;
   for (const step of steps) {
-    if (offset === 0) {
-      audioManager.playSfxForStep(step.effects);
-    } else {
-      const delay = offset;
-      setTimeout(() => audioManager.playSfxForStep(step.effects), delay);
+    // Filter out slam-deferred events — their SFX fires at impact time instead
+    const immediate = step.effects.filter((e) => !SLAM_DEFERRED_SFX.has(e.event.type));
+    if (immediate.length > 0) {
+      if (offset === 0) {
+        audioManager.playSfxForStep(immediate);
+      } else {
+        const delay = offset;
+        setTimeout(() => audioManager.playSfxForStep(immediate), delay);
+      }
     }
     offset += step.duration * multiplier;
   }
