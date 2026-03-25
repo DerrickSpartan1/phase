@@ -63,6 +63,16 @@ EARLY_MAX = 3   # turns 1-3
 MID_MAX = 7     # turns 4-7
 # turns 8+ = late
 
+# Column suffixes needed per turn-side prefix.
+_TURN_SUFFIXES = [
+    "_eot_user_life", "_eot_oppo_life",
+    "_eot_user_creatures_in_play", "_eot_oppo_creatures_in_play",
+    "_eot_user_cards_in_hand", "_eot_oppo_cards_in_hand",
+    "_eot_user_lands_in_play", "_eot_oppo_lands_in_play",
+    "_eot_user_non_creatures_in_play", "_eot_oppo_non_creatures_in_play",
+    "_user_mana_spent", "_oppo_mana_spent",
+]
+
 
 def turn_phase(turn: int) -> str:
     """Classify a turn number into a game phase."""
@@ -74,31 +84,50 @@ def turn_phase(turn: int) -> str:
         return "late"
 
 
-def count_ids(value) -> int:
-    """Count pipe-separated IDs. Returns 0 for NaN/empty."""
-    if pd.isna(value):
-        return 0
-    s = str(value).strip()
-    if s == "" or s == "nan":
-        return 0
-    return len(s.split("|"))
+def needed_columns() -> list[str]:
+    """Pre-compute all column names we need from the CSV."""
+    cols = ["won", "user_game_win_rate_bucket", "user_n_games_bucket"]
+    for turn in range(1, 31):
+        for side in ["user", "oppo"]:
+            prefix = f"{side}_turn_{turn}"
+            for suffix in _TURN_SUFFIXES:
+                cols.append(f"{prefix}{suffix}")
+    return cols
 
 
-def sum_mv(value, card_mv: dict) -> float:
-    """Sum mana values for pipe-separated Arena IDs."""
-    if pd.isna(value):
+def count_ids_vec(series: pd.Series) -> np.ndarray:
+    """Vectorized: count pipe-separated IDs. Returns 0 for NaN/empty."""
+    str_series = series.astype(str)
+    mask = series.notna() & (str_series != "") & (str_series != "nan")
+    result = np.zeros(len(series), dtype=np.float64)
+    if mask.any():
+        result[mask.values] = str_series[mask].str.count(r"\|").values + 1
+    return result
+
+
+def _sum_mv_one(val: object, card_mv: dict) -> float:
+    """Sum mana values for a single pipe-separated Arena ID string."""
+    if pd.isna(val):
         return 0.0
-    s = str(value).strip()
+    s = str(val).strip()
     if s == "" or s == "nan":
         return 0.0
     total = 0.0
     for part in s.split("|"):
         try:
-            arena_id = int(float(part))
-            total += card_mv.get(arena_id, 0.0)
+            total += card_mv.get(int(float(part)), 0.0)
         except (ValueError, OverflowError):
             continue
     return total
+
+
+def sum_mv_vec(series: pd.Series, card_mv: dict) -> np.ndarray:
+    """Sum mana values for pipe-separated Arena IDs across a Series.
+
+    Uses apply() with a tight loop — faster than explode+groupby for short
+    pipe-lists (typically 3-7 creature IDs per cell).
+    """
+    return series.apply(_sum_mv_one, args=(card_mv,)).values.astype(np.float64)
 
 
 def load_card_data(data_dir: str) -> dict:
@@ -146,78 +175,29 @@ def discover_replay_files(data_dir: str) -> list[str]:
     return files
 
 
-def extract_turn_features(
-    row: pd.Series,
-    prefix: str,
-    card_mv: dict,
-) -> list[float] | None:
-    """Extract differential features for one turn.
-
-    Returns feature vector or None if turn data is missing.
-    """
-    life_col = f"{prefix}_eot_user_life"
-    if life_col not in row.index or pd.isna(row.get(life_col)):
-        return None
-
-    user_life = float(row[f"{prefix}_eot_user_life"])
-    oppo_life = float(row[f"{prefix}_eot_oppo_life"])
-
-    user_creatures = row.get(f"{prefix}_eot_user_creatures_in_play")
-    oppo_creatures = row.get(f"{prefix}_eot_oppo_creatures_in_play")
-    user_hand = row.get(f"{prefix}_eot_user_cards_in_hand")
-    oppo_hand = row.get(f"{prefix}_eot_oppo_cards_in_hand")
-    user_lands = row.get(f"{prefix}_eot_user_lands_in_play")
-    oppo_lands = row.get(f"{prefix}_eot_oppo_lands_in_play")
-    user_nc = row.get(f"{prefix}_eot_user_non_creatures_in_play")
-    oppo_nc = row.get(f"{prefix}_eot_oppo_non_creatures_in_play")
-
-    # Mana spent columns use a different naming pattern (no _eot_ prefix)
-    user_mana = row.get(f"{prefix}_user_mana_spent", 0.0)
-    oppo_mana = row.get(f"{prefix}_oppo_mana_spent", 0.0)
-    user_mana = float(user_mana) if pd.notna(user_mana) else 0.0
-    oppo_mana = float(oppo_mana) if pd.notna(oppo_mana) else 0.0
-
-    life_diff = user_life - oppo_life
-    creature_count_diff = count_ids(user_creatures) - count_ids(oppo_creatures)
-    creature_mv_diff = sum_mv(user_creatures, card_mv) - sum_mv(oppo_creatures, card_mv)
-
-    # Hand: user hand is pipe-separated IDs, opponent hand is a count
-    user_hand_count = count_ids(user_hand)
-    oppo_hand_count = float(oppo_hand) if pd.notna(oppo_hand) else 0.0
-    hand_diff = user_hand_count - oppo_hand_count
-
-    land_diff = count_ids(user_lands) - count_ids(oppo_lands)
-    non_creature_diff = count_ids(user_nc) - count_ids(oppo_nc)
-    mana_spent_diff = user_mana - oppo_mana
-
-    return [
-        life_diff,
-        creature_count_diff,
-        creature_mv_diff,
-        hand_diff,
-        land_diff,
-        non_creature_diff,
-        mana_spent_diff,
-    ]
-
-
 def process_replay_files(
     files: list[str],
     card_mv: dict,
     min_win_rate: float,
     min_games: int,
-) -> tuple[dict[str, list], dict[str, list], list[str]]:
+) -> tuple[dict[str, np.ndarray], dict[str, np.ndarray], list[str]]:
     """Stream replay CSVs and extract training features bucketed by game phase.
 
-    Returns (phase_features, phase_labels, set_codes) where phase_features and
-    phase_labels are dicts keyed by "early", "mid", "late".
+    Uses vectorized pandas operations instead of row iteration for performance.
+    Only reads the ~720 columns needed (out of ~2800) via usecols filtering.
+
+    Returns (phase_features, phase_labels, set_codes) where phase_features
+    values are (N, 7) numpy arrays and phase_labels values are (N,) arrays.
     """
-    phase_features: dict[str, list] = {"early": [], "mid": [], "late": []}
-    phase_labels: dict[str, list] = {"early": [], "mid": [], "late": []}
+    phase_feat_chunks: dict[str, list[np.ndarray]] = {"early": [], "mid": [], "late": []}
+    phase_label_chunks: dict[str, list[np.ndarray]] = {"early": [], "mid": [], "late": []}
     set_codes = []
     total_games = 0
     total_filtered_games = 0
     total_samples = 0
+
+    # Pre-compute column names we need.
+    want_cols = set(needed_columns())
 
     for filepath in files:
         set_code = Path(filepath).name.split(".")[1]
@@ -228,7 +208,14 @@ def process_replay_files(
 
         print(f"\nProcessing {set_code}...", file=sys.stderr)
 
-        for chunk in pd.read_csv(filepath, chunksize=10000, low_memory=False):
+        # Read header to find which of our wanted columns actually exist.
+        header = pd.read_csv(filepath, nrows=0).columns.tolist()
+        use_cols = [c for c in header if c in want_cols]
+        print(f"  Reading {len(use_cols)}/{len(header)} columns", file=sys.stderr)
+
+        for chunk in pd.read_csv(
+            filepath, chunksize=50000, usecols=use_cols, low_memory=False
+        ):
             file_games += len(chunk)
 
             # Skill and experience filters
@@ -238,28 +225,95 @@ def process_replay_files(
                 chunk = chunk[chunk["user_n_games_bucket"] >= min_games]
 
             file_filtered += len(chunk)
+            if chunk.empty:
+                continue
 
-            for _, row in chunk.iterrows():
-                won = bool(row.get("won", False))
+            # Filter out rows with unknown game outcomes (NaN → True if not caught)
+            chunk = chunk[chunk["won"].notna()]
+            if chunk.empty:
+                continue
 
-                for turn in range(1, 31):
-                    phase = turn_phase(turn)
+            won = chunk["won"].values.astype(bool)
 
-                    # User's turn
-                    user_prefix = f"user_turn_{turn}"
-                    feats = extract_turn_features(row, user_prefix, card_mv)
-                    if feats is not None:
-                        phase_features[phase].append(feats)
-                        phase_labels[phase].append(1 if won else 0)
-                        file_samples += 1
+            # Process each turn vectorized across all rows in the chunk.
+            for turn in range(1, 31):
+                phase = turn_phase(turn)
 
-                    # Opponent's turn
-                    oppo_prefix = f"oppo_turn_{turn}"
-                    feats = extract_turn_features(row, oppo_prefix, card_mv)
-                    if feats is not None:
-                        phase_features[phase].append(feats)
-                        phase_labels[phase].append(1 if won else 0)
-                        file_samples += 1
+                for side in ["user", "oppo"]:
+                    prefix = f"{side}_turn_{turn}"
+                    life_col = f"{prefix}_eot_user_life"
+
+                    oppo_life_col = f"{prefix}_eot_oppo_life"
+                    if life_col not in chunk.columns or oppo_life_col not in chunk.columns:
+                        continue
+
+                    # Rows where this turn exists (life column is not NaN)
+                    valid = chunk[life_col].notna()
+                    if not valid.any():
+                        continue
+
+                    sub = chunk[valid]
+                    sub_won = won[valid.values]
+
+                    # All features computed vectorized across the sub-DataFrame
+                    life_diff = (
+                        sub[f"{prefix}_eot_user_life"].values
+                        - sub[f"{prefix}_eot_oppo_life"].values
+                    )
+
+                    creature_count_diff = (
+                        count_ids_vec(sub[f"{prefix}_eot_user_creatures_in_play"])
+                        - count_ids_vec(sub[f"{prefix}_eot_oppo_creatures_in_play"])
+                    )
+
+                    creature_mv_diff = (
+                        sum_mv_vec(sub[f"{prefix}_eot_user_creatures_in_play"], card_mv)
+                        - sum_mv_vec(sub[f"{prefix}_eot_oppo_creatures_in_play"], card_mv)
+                    )
+
+                    user_hand_count = count_ids_vec(
+                        sub[f"{prefix}_eot_user_cards_in_hand"]
+                    )
+                    oppo_hand = (
+                        sub[f"{prefix}_eot_oppo_cards_in_hand"]
+                        .fillna(0)
+                        .values.astype(np.float64)
+                    )
+                    hand_diff = user_hand_count - oppo_hand
+
+                    land_diff = (
+                        count_ids_vec(sub[f"{prefix}_eot_user_lands_in_play"])
+                        - count_ids_vec(sub[f"{prefix}_eot_oppo_lands_in_play"])
+                    )
+
+                    nc_diff = (
+                        count_ids_vec(sub[f"{prefix}_eot_user_non_creatures_in_play"])
+                        - count_ids_vec(sub[f"{prefix}_eot_oppo_non_creatures_in_play"])
+                    )
+
+                    mana_user_col = f"{prefix}_user_mana_spent"
+                    mana_oppo_col = f"{prefix}_oppo_mana_spent"
+                    user_mana = (
+                        sub[mana_user_col].fillna(0).values.astype(np.float64)
+                        if mana_user_col in sub.columns
+                        else np.zeros(len(sub))
+                    )
+                    oppo_mana = (
+                        sub[mana_oppo_col].fillna(0).values.astype(np.float64)
+                        if mana_oppo_col in sub.columns
+                        else np.zeros(len(sub))
+                    )
+                    mana_diff = user_mana - oppo_mana
+
+                    # Stack into (N, 7) feature matrix
+                    features = np.column_stack([
+                        life_diff, creature_count_diff, creature_mv_diff,
+                        hand_diff, land_diff, nc_diff, mana_diff,
+                    ])
+
+                    phase_feat_chunks[phase].append(features)
+                    phase_label_chunks[phase].append(sub_won.astype(np.int64))
+                    file_samples += len(features)
 
         total_games += file_games
         total_filtered_games += file_filtered
@@ -275,7 +329,17 @@ def process_replay_files(
         f"{total_samples} training samples",
         file=sys.stderr,
     )
+
+    # Concatenate all arrays per phase
+    phase_features = {}
+    phase_labels = {}
     for phase in ["early", "mid", "late"]:
+        if phase_feat_chunks[phase]:
+            phase_features[phase] = np.vstack(phase_feat_chunks[phase])
+            phase_labels[phase] = np.concatenate(phase_label_chunks[phase])
+        else:
+            phase_features[phase] = np.empty((0, 7))
+            phase_labels[phase] = np.empty(0)
         print(
             f"  {phase}: {len(phase_features[phase])} samples",
             file=sys.stderr,
@@ -288,6 +352,14 @@ def train_model(
     X: np.ndarray, y: np.ndarray, phase_name: str
 ) -> tuple[LogisticRegression, float, float]:
     """Train logistic regression for a single phase and return model + accuracy."""
+    # Clean out rows with inf or NaN (corrupt data from extreme game states)
+    finite_mask = np.isfinite(X).all(axis=1)
+    if not finite_mask.all():
+        n_bad = (~finite_mask).sum()
+        print(f"  {phase_name}: dropping {n_bad} rows with inf/NaN values", file=sys.stderr)
+        X = X[finite_mask]
+        y = y[finite_mask]
+
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=y
     )
@@ -413,8 +485,8 @@ def main():
     phase_results = {}
 
     for phase in ["early", "mid", "late"]:
-        X = np.array(phase_features[phase], dtype=np.float64)
-        y = np.array(phase_labels[phase], dtype=np.float64)
+        X = phase_features[phase].astype(np.float64)
+        y = phase_labels[phase].astype(np.float64)
 
         if len(X) < 100:
             print(f"  WARNING: {phase} has only {len(X)} samples, skipping", file=sys.stderr)
@@ -424,7 +496,7 @@ def main():
         raw_coefs, weights = extract_and_scale_weights(model, phase)
 
         phase_results[phase] = {
-            "sample_count": len(X),
+            "sample_count": int(len(X)),
             "train_accuracy": round(train_acc, 4),
             "test_accuracy": round(test_acc, 4),
             "raw_coefficients": raw_coefs,

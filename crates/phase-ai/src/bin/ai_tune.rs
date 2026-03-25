@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use phase_ai::auto_play::run_ai_actions;
 use phase_ai::config::{create_config, AiConfig, AiDifficulty, AiProfile, Platform};
-use phase_ai::eval::EvalWeights;
+use phase_ai::eval::{EvalWeightSet, EvalWeights};
 
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{resolve_deck_list, DeckList, DeckPayload, PlayerDeckList};
@@ -11,54 +11,82 @@ use engine::game::engine::start_game_skip_mulligan;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
 
-// Parameter vector layout (9 parameters):
+// Parameter vector layout (12 parameters):
 //
-// Indices 0-5: EvalWeights (6 params)
+// Indices 0-8: EvalWeights (9 params, optimized as late-game weights)
 //   0=life, 1=aggression, 2=board_presence, 3=board_power,
-//   4=board_toughness, 5=hand_size
+//   4=board_toughness, 5=hand_size, 6=zone_quality, 7=card_advantage,
+//   8=synergy
 //
-// Indices 6-8: AiProfile (3 params)
-//   6=risk_tolerance, 7=interaction_patience, 8=stabilize_bias
+// Indices 9-11: AiProfile (3 params)
+//   9=risk_tolerance, 10=interaction_patience, 11=stabilize_bias
 //
-// Future extensions: archetype multipliers and keyword bonuses
-// require adjust_weights()/evaluate_creature() refactoring to accept
-// parameterized values. The 9 parameters above are the immediate
-// optimization target — all fields that AiConfig can directly carry.
-const PARAM_COUNT: usize = 9;
+// CMA-ES optimizes the late-game weights directly. Early and mid phases
+// are derived by applying the ratios from the 17Lands-trained weight set,
+// since the relative importance shift across phases is well-established
+// from 90M+ training samples and doesn't need evolutionary optimization.
+const PARAM_COUNT: usize = 12;
 
 /// Maximum turns before declaring a draw (prevents infinite games).
 const MAX_TURNS: u32 = 100;
 
 /// Convert a parameter vector into an AiConfig.
 /// Uses Medium difficulty search settings (depth 2, 24 nodes).
-/// All values are clamped to [0.01, 10.0] to prevent degenerate configs.
+/// Optimizes late-game weights directly; early/mid derived from 17Lands ratios.
+/// All weight values are clamped to [0.01, 10.0] to prevent degenerate configs.
 fn params_to_config(params: &[f64]) -> AiConfig {
     let clamp = |v: f64| v.clamp(0.01, 10.0);
 
-    let weights = EvalWeights {
+    let late = EvalWeights {
         life: clamp(params[0]),
         aggression: clamp(params[1]),
         board_presence: clamp(params[2]),
         board_power: clamp(params[3]),
         board_toughness: clamp(params[4]),
         hand_size: clamp(params[5]),
+        zone_quality: clamp(params[6]),
+        card_advantage: clamp(params[7]),
+        synergy: clamp(params[8]),
     };
 
+    // Derive early/mid phases from 17Lands-learned ratios applied to CMA-ES late weights.
+    // Ratios are learned_early/learned_late and learned_mid/learned_late per field.
+    let learned = EvalWeightSet::learned();
+    let early = scale_from_ratios(&late, &learned.early, &learned.late);
+    let mid = scale_from_ratios(&late, &learned.mid, &learned.late);
+
     let profile = AiProfile {
-        risk_tolerance: params[6].clamp(0.01, 2.0),
-        interaction_patience: params[7].clamp(0.01, 2.0),
-        stabilize_bias: params[8].clamp(0.01, 3.0),
+        risk_tolerance: params[9].clamp(0.01, 2.0),
+        interaction_patience: params[10].clamp(0.01, 2.0),
+        stabilize_bias: params[11].clamp(0.01, 3.0),
     };
 
     let mut config = create_config(AiDifficulty::Medium, Platform::Native);
-    config.weights = weights;
+    config.weights = EvalWeightSet { early, mid, late };
     config.profile = profile;
     config
 }
 
-/// Extract the initial parameter vector from current defaults.
+/// Scale a base weight set by the ratio between a target phase and a reference phase.
+/// For each field: result = base * (target / reference), clamped to [0.01, 10.0].
+fn scale_from_ratios(base: &EvalWeights, target: &EvalWeights, reference: &EvalWeights) -> EvalWeights {
+    let ratio = |t: f64, r: f64| if r > 0.001 { (t / r).clamp(0.1, 10.0) } else { 1.0 };
+    EvalWeights {
+        life: (base.life * ratio(target.life, reference.life)).clamp(0.01, 10.0),
+        aggression: (base.aggression * ratio(target.aggression, reference.aggression)).clamp(0.01, 10.0),
+        board_presence: (base.board_presence * ratio(target.board_presence, reference.board_presence)).clamp(0.01, 10.0),
+        board_power: (base.board_power * ratio(target.board_power, reference.board_power)).clamp(0.01, 10.0),
+        board_toughness: (base.board_toughness * ratio(target.board_toughness, reference.board_toughness)).clamp(0.01, 10.0),
+        hand_size: (base.hand_size * ratio(target.hand_size, reference.hand_size)).clamp(0.01, 10.0),
+        zone_quality: (base.zone_quality * ratio(target.zone_quality, reference.zone_quality)).clamp(0.01, 10.0),
+        card_advantage: (base.card_advantage * ratio(target.card_advantage, reference.card_advantage)).clamp(0.01, 10.0),
+        synergy: (base.synergy * ratio(target.synergy, reference.synergy)).clamp(0.01, 10.0),
+    }
+}
+
+/// Extract the initial parameter vector from current learned defaults.
 fn initial_params() -> Vec<f64> {
-    let w = EvalWeights::default();
+    let w = EvalWeightSet::learned().late;
     let p = AiProfile::default();
     vec![
         w.life,
@@ -67,6 +95,9 @@ fn initial_params() -> Vec<f64> {
         w.board_power,
         w.board_toughness,
         w.hand_size,
+        w.zone_quality,
+        w.card_advantage,
+        w.synergy,
         p.risk_tolerance,
         p.interaction_patience,
         p.stabilize_bias,
@@ -881,22 +912,26 @@ fn run_cmaes(
     let final_params = cma.best_mean();
     let final_config = params_to_config(final_params);
 
-    let w = &final_config.weights;
+    let w = &final_config.weights.late;
     let p = &final_config.profile;
 
+    let r3 = |v: f64| (v * 1000.0).round() / 1000.0;
     let result = serde_json::json!({
         "source": "cma-es-self-play",
         "generations": generations,
         "population": population,
         "games_per_eval": games,
-        "best_fitness": (best_fitness * 1000.0).round() / 1000.0,
+        "best_fitness": r3(best_fitness),
         "weights": {
-            "life": (w.life * 1000.0).round() / 1000.0,
-            "aggression": (w.aggression * 1000.0).round() / 1000.0,
-            "board_presence": (w.board_presence * 1000.0).round() / 1000.0,
-            "board_power": (w.board_power * 1000.0).round() / 1000.0,
-            "board_toughness": (w.board_toughness * 1000.0).round() / 1000.0,
-            "hand_size": (w.hand_size * 1000.0).round() / 1000.0,
+            "life": r3(w.life),
+            "aggression": r3(w.aggression),
+            "board_presence": r3(w.board_presence),
+            "board_power": r3(w.board_power),
+            "board_toughness": r3(w.board_toughness),
+            "hand_size": r3(w.hand_size),
+            "zone_quality": r3(w.zone_quality),
+            "card_advantage": r3(w.card_advantage),
+            "synergy": r3(w.synergy),
         },
         "profile": {
             "risk_tolerance": (p.risk_tolerance * 1000.0).round() / 1000.0,
@@ -952,11 +987,11 @@ mod tests {
 
     #[test]
     fn params_to_config_clamps_values() {
-        let params = vec![-5.0, 100.0, 0.0, 1.0, 2.0, 3.0, -1.0, 5.0, 0.005];
+        let params = vec![-5.0, 100.0, 0.0, 1.0, 2.0, 3.0, 0.5, 1.5, 0.8, -1.0, 5.0, 0.005];
         let config = params_to_config(&params);
 
-        assert!(config.weights.life >= 0.01);
-        assert!(config.weights.aggression <= 10.0);
+        assert!(config.weights.late.life >= 0.01);
+        assert!(config.weights.late.aggression <= 10.0);
         assert!(config.profile.risk_tolerance >= 0.01);
         assert!(config.profile.interaction_patience <= 2.0);
     }

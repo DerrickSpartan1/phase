@@ -6,8 +6,6 @@ use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 use serde::{Deserialize, Serialize};
 
-use serde::{Deserialize, Serialize};
-
 use crate::planner::ValueEstimate;
 
 /// Weights for board evaluation heuristics.
@@ -89,66 +87,49 @@ impl EvalWeightSet {
     }
 
     /// Phase-aware weights learned from 17Lands Premier Draft replay data.
-    /// Trained on 12.9M samples from skilled players (win_rate >= 0.55, games >= 50).
+    /// Trained on 90.4M samples across 6 sets (DFT, EOE, FDN, FIN, PIO, TDM)
+    /// from skilled players (win_rate >= 0.55, games >= 50).
     /// Five fields per phase are data-driven; four retain hand-tuned defaults.
     /// See scripts/train_eval_weights.py and data/learned-weights.json.
     pub fn learned() -> Self {
         EvalWeightSet {
             early: EvalWeights {
-                life: 0.4427,
+                life: 0.4636,
                 aggression: 0.5,
-                board_presence: 2.4426,
-                board_power: 0.9193,
+                board_presence: 2.0636,
+                board_power: 1.0174,
                 board_toughness: 1.0,
-                hand_size: 1.5159,
+                hand_size: 1.3716,
                 zone_quality: 0.3,
                 card_advantage: 2.5,
                 synergy: 0.5,
             },
             mid: EvalWeights {
-                life: 0.6544,
+                life: 0.5838,
                 aggression: 0.5,
-                board_presence: 2.5,
-                board_power: 0.8014,
+                board_presence: 1.9888,
+                board_power: 0.8031,
                 board_toughness: 1.0,
-                hand_size: 2.4419,
+                hand_size: 2.396,
                 zone_quality: 0.3,
-                card_advantage: 2.3926,
+                card_advantage: 2.5,
                 synergy: 0.5,
             },
             late: EvalWeights {
-                life: 0.575,
+                life: 0.4912,
                 aggression: 0.5,
-                board_presence: 2.0891,
-                board_power: 0.6705,
+                board_presence: 1.7317,
+                board_power: 0.6686,
                 board_toughness: 1.0,
                 hand_size: 2.5,
                 zone_quality: 0.3,
-                card_advantage: 1.7904,
+                card_advantage: 1.945,
                 synergy: 0.5,
             },
         }
     }
 }
 
-impl EvalWeights {
-    /// Weights refined by CMA-ES self-play optimization.
-    /// Seeded from 17Lands logistic regression (life, board_presence, board_power, hand_size)
-    /// then optimized via evolutionary strategy across 3 deck matchups.
-    /// Fields that 17Lands cannot measure (board_toughness, aggression) were
-    /// discovered by CMA-ES from scratch.
-    /// See data/learned-weights.json for the full output.
-    pub fn learned() -> Self {
-        EvalWeights {
-            life: 0.762,
-            aggression: 0.304,
-            board_presence: 2.084,
-            board_power: 1.240,
-            board_toughness: 1.125,
-            hand_size: 0.307,
-        }
-    }
-}
 
 const WIN_SCORE: f64 = 10000.0;
 const LOSS_SCORE: f64 = -10000.0;
