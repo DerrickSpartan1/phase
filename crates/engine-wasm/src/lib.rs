@@ -163,9 +163,7 @@ pub fn initialize_game(
         if let Ok(deck_list) = serde_wasm_bindgen::from_value::<DeckList>(deck_data) {
             let validation_error: Option<Vec<String>> = CARD_DB.with(|cell| {
                 let borrow = cell.borrow();
-                let Some(db) = borrow.as_ref() else {
-                    return None;
-                };
+                let db = borrow.as_ref()?;
 
                 // Validate player deck against the selected format before loading
                 let validation_request = DeckCompatibilityRequest {
