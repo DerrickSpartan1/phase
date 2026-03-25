@@ -259,7 +259,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
         play_lookahead,
         combat_lookahead,
         search,
-        weights: EvalWeights::default(),
+        weights: EvalWeights::learned(),
         player_count: 2,
     };
 
