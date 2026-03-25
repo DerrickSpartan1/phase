@@ -223,15 +223,21 @@ fn strip_article(text: &str) -> &str {
 /// (for compound action splitting like "tap target creature and put a counter on it").
 pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<TargetedImperativeAst> {
     if lower.starts_with("tap ") {
-        let (target, _) = parse_target(strip_article(&text[4..]));
+        let (target, rem) = parse_target(strip_article(&text[4..]));
+        #[cfg(debug_assertions)]
+        super::types::assert_no_compound_remainder(rem, text);
         return Some(TargetedImperativeAst::Tap { target });
     }
     if lower.starts_with("untap ") {
-        let (target, _) = parse_target(strip_article(&text[6..]));
+        let (target, rem) = parse_target(strip_article(&text[6..]));
+        #[cfg(debug_assertions)]
+        super::types::assert_no_compound_remainder(rem, text);
         return Some(TargetedImperativeAst::Untap { target });
     }
     if lower.starts_with("sacrifice ") {
-        let (target, _) = parse_target(strip_article(&text[10..]));
+        let (target, rem) = parse_target(strip_article(&text[10..]));
+        #[cfg(debug_assertions)]
+        super::types::assert_no_compound_remainder(rem, text);
         return Some(TargetedImperativeAst::Sacrifice { target });
     }
     if lower.starts_with("discard ") {
@@ -241,7 +247,9 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
     if lower.starts_with("return ") {
         let rest = &text[7..];
         let (target_text, dest) = super::strip_return_destination_ext(rest);
-        let (target, _) = parse_target(target_text);
+        let (target, rem) = parse_target(target_text);
+        #[cfg(debug_assertions)]
+        super::types::assert_no_compound_remainder(rem, text);
         return match dest {
             Some(d) if d.zone == Zone::Battlefield => {
                 Some(TargetedImperativeAst::ReturnToBattlefield {
@@ -253,11 +261,15 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
         };
     }
     if lower.starts_with("fight ") {
-        let (target, _) = parse_target(&text[6..]);
+        let (target, rem) = parse_target(&text[6..]);
+        #[cfg(debug_assertions)]
+        super::types::assert_no_compound_remainder(rem, text);
         return Some(TargetedImperativeAst::Fight { target });
     }
     if lower.starts_with("gain control of ") {
-        let (target, _) = parse_target(&text[16..]);
+        let (target, rem) = parse_target(&text[16..]);
+        #[cfg(debug_assertions)]
+        super::types::assert_no_compound_remainder(rem, text);
         return Some(TargetedImperativeAst::GainControl { target });
     }
     // Earthbend: "earthbend [N] [target <type>]" → Animate with haste + is_earthbend
@@ -576,7 +588,9 @@ pub(super) fn parse_utility_imperative_ast(
         });
     }
     if lower.starts_with("copy ") {
-        let (target, _) = parse_target(&text[5..]);
+        let (target, rem) = parse_target(&text[5..]);
+        #[cfg(debug_assertions)]
+        super::types::assert_no_compound_remainder(rem, text);
         return Some(UtilityImperativeAst::Copy { target });
     }
     if matches!(
@@ -602,7 +616,9 @@ pub(super) fn parse_utility_imperative_ast(
     }
     if lower.starts_with("attach ") {
         let to_pos = lower.find(" to ").map(|p| p + 4).unwrap_or(7);
-        let (target, _) = parse_target(&text[to_pos..]);
+        let (target, rem) = parse_target(&text[to_pos..]);
+        #[cfg(debug_assertions)]
+        super::types::assert_no_compound_remainder(rem, text);
         return Some(UtilityImperativeAst::Attach { target });
     }
     None
@@ -1048,11 +1064,15 @@ fn with_shuffle_sub_ability(effect: Effect) -> ParsedEffectClause {
 
 pub(super) fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
     if lower.starts_with("destroy all ") || lower.starts_with("destroy each ") {
-        let (target, _) = parse_target(&text[8..]);
+        let (target, rem) = parse_target(&text[8..]);
+        #[cfg(debug_assertions)]
+        super::types::assert_no_compound_remainder(rem, text);
         return Some(ZoneCounterImperativeAst::Destroy { target, all: true });
     }
     if lower.starts_with("destroy ") {
-        let (target, _) = parse_target(&text[8..]);
+        let (target, rem) = parse_target(&text[8..]);
+        #[cfg(debug_assertions)]
+        super::types::assert_no_compound_remainder(rem, text);
         return Some(ZoneCounterImperativeAst::Destroy { target, all: false });
     }
     None
@@ -1061,7 +1081,9 @@ pub(super) fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
 pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
     if lower.starts_with("exile all ") || lower.starts_with("exile each ") {
         let rest_lower = &lower[6..]; // after "exile "
-        let (target, _) = parse_target(&text[6..]);
+        let (target, rem) = parse_target(&text[6..]);
+        #[cfg(debug_assertions)]
+        super::types::assert_no_compound_remainder(rem, text);
         let origin = super::infer_origin_zone(rest_lower);
         return Some(ZoneCounterImperativeAst::Exile {
             origin,
@@ -1071,7 +1093,9 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
     }
 
     let rest_lower = lower.strip_prefix("exile ")?;
-    let (target, _) = parse_target(&text[6..]);
+    let (target, rem) = parse_target(&text[6..]);
+    #[cfg(debug_assertions)]
+    super::types::assert_no_compound_remainder(rem, text);
     let origin = super::infer_origin_zone(rest_lower);
     Some(ZoneCounterImperativeAst::Exile {
         origin,
@@ -1092,7 +1116,9 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         });
     }
 
-    let (target, _) = parse_target(&text[8..]);
+    let (target, rem) = parse_target(&text[8..]);
+    #[cfg(debug_assertions)]
+    super::types::assert_no_compound_remainder(rem, text);
     let target = if rest.contains("spell") {
         super::constrain_filter_to_stack(target)
     } else {

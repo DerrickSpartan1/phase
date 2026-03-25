@@ -845,6 +845,11 @@ fn lower_imperative_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause
         return clause;
     }
 
+    // CR 608.2c: Compound damage actions: "~ deals 3 damage to any target and you gain 3 life"
+    if let Some(clause) = try_split_damage_compound(text, ctx) {
+        return clause;
+    }
+
     let (stripped, duration) = strip_trailing_duration(text);
     let mut clause = parse_imperative_effect(stripped, ctx);
     if clause.duration.is_none() {
@@ -1088,6 +1093,65 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
 
     // Parse the sub-effect
     let mut sub_clause = parse_imperative_effect(sub_text, ctx);
+
+    // If the remainder contains anaphoric references ("it", "that creature", "them"),
+    // replace the sub_effect's target with ParentTarget so it inherits the parent's targets.
+    let sub_lower = sub_text.to_lowercase();
+    if has_anaphoric_reference(&sub_lower) {
+        replace_target_with_parent(&mut sub_clause.effect);
+    }
+
+    let mut sub_ability = AbilityDefinition::new(AbilityKind::Spell, sub_clause.effect);
+    sub_ability.sub_ability = sub_clause.sub_ability;
+
+    Some(ParsedEffectClause {
+        effect: primary_effect,
+        duration: None,
+        sub_ability: Some(Box::new(sub_ability)),
+        distribute: None,
+        multi_target: None,
+    })
+}
+
+/// CR 608.2c: Split compound damage actions like "~ deals 3 damage to any target
+/// and you gain 3 life" into a primary DealDamage effect with a sub_ability chain
+/// for the remainder clause. Instructions within a single spell or ability are
+/// followed in order; each " and "-connected clause becomes a chained sub_ability.
+///
+/// Uses `parse_target`'s unconsumed remainder as the compound boundary oracle —
+/// this correctly handles compound filter phrases like "you own and control"
+/// because `parse_target` consumes them as part of the target filter.
+fn try_split_damage_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    if !lower.contains(" and ") {
+        return None;
+    }
+
+    let (primary_effect, remainder) = try_parse_damage_with_remainder(text, &lower)?;
+
+    if remainder.is_empty() {
+        return None;
+    }
+
+    // The remainder must start with " and " to be a compound connector.
+    // Do NOT trim — the leading space is the boundary marker.
+    let after_and = remainder.strip_prefix(" and ")?;
+    let sub_text = after_and.trim();
+    if sub_text.is_empty() {
+        return None;
+    }
+
+    // Parse the sub-effect through the full clause pipeline (not just imperative),
+    // because the sub-text may have a subject prefix like "you gain 3 life".
+    let sub_clause = parse_effect_clause(sub_text, ctx);
+
+    // Guard: if the sub-text parsed to Unimplemented, it's likely a target phrase
+    // continuation ("each creature and planeswalker they control") rather than an
+    // independent clause. Bail out and let the damage parser handle the full text.
+    if matches!(sub_clause.effect, Effect::Unimplemented { .. }) {
+        return None;
+    }
+    let mut sub_clause = sub_clause;
 
     // If the remainder contains anaphoric references ("it", "that creature", "them"),
     // replace the sub_effect's target with ParentTarget so it inherits the parent's targets.
@@ -3845,7 +3909,26 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
     })
 }
 
-fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
+/// Thin wrapper around `try_parse_damage_with_remainder` for callers that don't
+/// need the remainder (e.g., `parse_cost_resource_ast`). The remainder is only
+/// safely discardable when `try_split_damage_compound` has already run and found
+/// no compound connector.
+fn try_parse_damage(lower: &str, text: &str) -> Option<Effect> {
+    let (effect, _remainder) = try_parse_damage_with_remainder(text, lower)?;
+    Some(effect)
+}
+
+/// Parse damage effects, returning both the Effect and `parse_target`'s unconsumed
+/// remainder. The remainder is the compound boundary oracle — if it starts with
+/// `" and "`, the caller can chain the trailing clause as a sub_ability.
+///
+/// Signature follows `try_parse_verb_and_target`: `text` (original case) bears the
+/// return lifetime since the remainder is a sub-slice of it; `lower` is elided.
+///
+/// Safety: `pos` is computed from `lower.find(...)` and used to slice both `text`
+/// and `lower` at the same byte offset. This is sound because Oracle text is ASCII
+/// and `to_lowercase()` preserves byte length for ASCII characters.
+fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Effect, &'a str)> {
     // Match: "~ deals N damage to {target}" / "deal N damage to {target}"
     // and variable forms like "deal that much damage" or
     // "deal damage equal to its power".
@@ -3855,7 +3938,7 @@ fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
     } else {
         5
     };
-    let after = &_text[pos + verb_len..];
+    let after = &text[pos + verb_len..];
     let after_lower = &lower[pos + verb_len..];
 
     let (amount, after_target) = if let Some((n, rest)) = parse_number(after_lower) {
@@ -3913,11 +3996,14 @@ fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
                         },
                         other => other.clone(),
                     };
-                    return Some(Effect::DealDamage {
-                        amount: qty,
-                        target: TargetFilter::ParentTarget,
-                        damage_source: Some(DamageSource::Target),
-                    });
+                    return Some((
+                        Effect::DealDamage {
+                            amount: qty,
+                            target: TargetFilter::ParentTarget,
+                            damage_source: Some(DamageSource::Target),
+                        },
+                        "",
+                    ));
                 } else if target_phrase.starts_with("each ") {
                     // "each player" → DamageEachPlayer (per-player varying damage)
                     // "each creature" → DamageAll (uniform damage to objects)
@@ -3927,29 +4013,41 @@ fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
                         } else {
                             PlayerFilter::All
                         };
-                        return Some(Effect::DamageEachPlayer {
-                            amount: qty,
-                            player_filter,
-                        });
+                        return Some((
+                            Effect::DamageEachPlayer {
+                                amount: qty,
+                                player_filter,
+                            },
+                            "",
+                        ));
                     }
                     let (filter, _) = parse_target(target_phrase);
-                    return Some(Effect::DamageAll {
-                        amount: qty,
-                        target: filter,
-                    });
+                    return Some((
+                        Effect::DamageAll {
+                            amount: qty,
+                            target: filter,
+                        },
+                        "",
+                    ));
                 } else if let Some(target) = parse_event_context_ref(target_phrase) {
-                    return Some(Effect::DealDamage {
-                        amount: qty,
-                        target,
-                        damage_source: None,
-                    });
+                    return Some((
+                        Effect::DealDamage {
+                            amount: qty,
+                            target,
+                            damage_source: None,
+                        },
+                        "",
+                    ));
                 } else {
                     let (target, _) = parse_target(target_phrase);
-                    return Some(Effect::DealDamage {
-                        amount: qty,
-                        target,
-                        damage_source: None,
-                    });
+                    return Some((
+                        Effect::DealDamage {
+                            amount: qty,
+                            target,
+                            damage_source: None,
+                        },
+                        "",
+                    ));
                 }
             }
         }
@@ -3975,35 +4073,44 @@ fn try_parse_damage(lower: &str, _text: &str) -> Option<Effect> {
         .unwrap_or(after_target)
         .trim();
     if after_to.starts_with("each ") {
-        let (target, _) = parse_target(after_to);
-        return Some(Effect::DamageAll { amount, target });
+        let (target, rem) = parse_target(after_to);
+        return Some((Effect::DamageAll { amount, target }, rem));
     }
 
     // CR 120.3: "itself" — the source creature is both damage source and recipient.
     let after_to_lower = after_to.to_lowercase();
     if after_to_lower == "itself" || after_to_lower.starts_with("itself ") {
-        return Some(Effect::DealDamage {
-            amount,
-            target: TargetFilter::ParentTarget,
-            damage_source: Some(DamageSource::Target),
-        });
+        return Some((
+            Effect::DealDamage {
+                amount,
+                target: TargetFilter::ParentTarget,
+                damage_source: Some(DamageSource::Target),
+            },
+            "",
+        ));
     }
 
     // CR 603.7c: Check for event-context references before standard target parsing.
     if let Some(target) = parse_event_context_ref(after_to) {
-        return Some(Effect::DealDamage {
-            amount: amount.clone(),
-            target,
-            damage_source: None,
-        });
+        return Some((
+            Effect::DealDamage {
+                amount: amount.clone(),
+                target,
+                damage_source: None,
+            },
+            "",
+        ));
     }
 
-    let (target, _) = parse_target(after_to);
-    Some(Effect::DealDamage {
-        amount,
-        target,
-        damage_source: None,
-    })
+    let (target, rem) = parse_target(after_to);
+    Some((
+        Effect::DealDamage {
+            amount,
+            target,
+            damage_source: None,
+        },
+        rem,
+    ))
 }
 
 fn try_parse_pump(lower: &str, text: &str) -> Option<Effect> {
@@ -4466,6 +4573,158 @@ mod tests {
             ),
             "expected DealDamage with TargetPower/ParentTarget, got: {:?}",
             clause.effect
+        );
+    }
+
+    #[test]
+    fn try_split_damage_compound_lightning_helix() {
+        let ctx = ParseContext::default();
+        let clause =
+            try_split_damage_compound("~ deals 3 damage to any target and you gain 3 life", &ctx);
+        let clause = clause.expect("should split damage + life gain compound");
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Any,
+                    ..
+                }
+            ),
+            "primary effect should be DealDamage, got: {:?}",
+            clause.effect
+        );
+        let sub = clause
+            .sub_ability
+            .expect("should have sub_ability for life gain");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    ..
+                }
+            ),
+            "sub_ability should be GainLife(3), got: {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
+    fn try_split_damage_compound_no_compound() {
+        let ctx = ParseContext::default();
+        let result = try_split_damage_compound("~ deals 3 damage to target creature", &ctx);
+        assert!(
+            result.is_none(),
+            "no compound connector — should return None"
+        );
+    }
+
+    #[test]
+    fn try_split_damage_compound_false_and_in_filter() {
+        let ctx = ParseContext::default();
+        let result = try_split_damage_compound(
+            "~ deals 3 damage to target creature you own and control",
+            &ctx,
+        );
+        // parse_target consumes "you own and control" as part of the filter,
+        // leaving empty remainder — no false split.
+        assert!(
+            result.is_none(),
+            "filter 'and' should not trigger compound split"
+        );
+    }
+
+    #[test]
+    fn try_split_damage_compound_anaphoric() {
+        let ctx = ParseContext::default();
+        let clause = try_split_damage_compound(
+            "~ deals 2 damage to target creature and that creature gets -2/-2 until end of turn",
+            &ctx,
+        );
+        let clause = clause.expect("should split damage + pump compound");
+        assert!(matches!(clause.effect, Effect::DealDamage { .. }));
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        // "that creature" is anaphoric → target should be ParentTarget
+        match &*sub.effect {
+            Effect::Pump { target, .. } | Effect::PumpAll { target, .. } => {
+                assert_eq!(
+                    *target,
+                    TargetFilter::ParentTarget,
+                    "anaphoric reference should resolve to ParentTarget"
+                );
+            }
+            other => panic!("sub_ability should be Pump, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn try_split_damage_compound_multi_target_not_split() {
+        // "each opponent and each creature" is a multi-phrase target, not a compound.
+        // Goblin Chainwhirler: "deals 1 damage to each opponent and each creature
+        // and planeswalker they control"
+        let ctx = ParseContext::default();
+        let result = try_split_damage_compound(
+            "deal 1 damage to each opponent and each creature and planeswalker they control",
+            &ctx,
+        );
+        assert!(
+            result.is_none(),
+            "multi-target 'and' should not trigger compound split"
+        );
+    }
+
+    #[test]
+    fn try_split_damage_compound_deconjugated() {
+        // Subject-stripped form: "deals" → "deal" after deconjugation
+        let ctx = ParseContext::default();
+        let clause =
+            try_split_damage_compound("deal 3 damage to any target and you gain 3 life", &ctx);
+        let clause = clause.expect("deconjugated form should work");
+        assert!(matches!(
+            clause.effect,
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: TargetFilter::Any,
+                ..
+            }
+        ));
+        assert!(clause.sub_ability.is_some());
+    }
+
+    #[test]
+    fn try_split_damage_compound_full_pipeline() {
+        // End-to-end: full text through parse_effect_chain
+        let def = parse_effect_chain(
+            "~ deals 3 damage to any target and you gain 3 life.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    target: TargetFilter::Any,
+                    ..
+                }
+            ),
+            "full pipeline: primary effect should be DealDamage, got: {:?}",
+            def.effect
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("full pipeline: should chain sub_ability");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::GainLife {
+                    amount: QuantityExpr::Fixed { value: 3 },
+                    ..
+                }
+            ),
+            "full pipeline: sub_ability should be GainLife(3), got: {:?}",
+            sub.effect
         );
     }
 

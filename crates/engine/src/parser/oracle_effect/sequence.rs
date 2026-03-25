@@ -227,7 +227,7 @@ pub(super) fn starts_clause_text(text: &str) -> bool {
 /// excludes pronouns/determiners like "all", "each", "it", "that", "those",
 /// "they", "you" which commonly appear in noun phrases after "and"
 /// (e.g. "target creature and all other creatures").
-fn starts_bare_and_clause(text: &str) -> bool {
+pub(super) fn starts_bare_and_clause(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     let prefixes = [
         "create ",
