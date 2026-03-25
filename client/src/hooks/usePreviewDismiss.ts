@@ -10,18 +10,25 @@ import { useUiStore } from "../stores/uiStore.ts";
  *
  * Uses `document.elementFromPoint()` on a 300ms interval to verify the pointer
  * is still over an element with `[data-card-hover]`.
+ *
+ * When `previewSticky` is true (set by long-press on touch devices), the
+ * interval-based dismiss is skipped. Instead, a global touchstart listener
+ * dismisses the preview when the user taps outside a card-hover element.
  */
 export function usePreviewDismiss() {
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
+  const previewSticky = useUiStore((s) => s.previewSticky);
   const inspectObject = useUiStore((s) => s.inspectObject);
   const hoverObject = useUiStore((s) => s.hoverObject);
   const pointerRef = useRef({ x: 0, y: 0 });
 
-  // Track pointer position (only while preview is active)
+  // Track pointer position (only while preview is active, mouse only)
   useEffect(() => {
     if (inspectedObjectId == null) return;
 
     function onMove(e: PointerEvent) {
+      // Only track mouse pointer, not touch — touch uses sticky dismiss
+      if (e.pointerType === "touch") return;
       pointerRef.current = { x: e.clientX, y: e.clientY };
     }
 
@@ -29,12 +36,11 @@ export function usePreviewDismiss() {
     return () => document.removeEventListener("pointermove", onMove);
   }, [inspectedObjectId]);
 
-  // Periodically verify the pointer is still over a card-hover element
+  // Mouse: periodically verify the pointer is still over a card-hover element
+  // Skipped when preview is sticky (touch-initiated)
   useEffect(() => {
-    if (inspectedObjectId == null) return;
+    if (inspectedObjectId == null || previewSticky) return;
 
-    // Grace period: skip the first check to avoid dismissing immediately
-    // when the inspection was just set (e.g., via click rather than hover)
     let skipFirst = true;
 
     const id = setInterval(() => {
@@ -43,7 +49,6 @@ export function usePreviewDismiss() {
         return;
       }
       const { x, y } = pointerRef.current;
-      // If pointer is at 0,0 it hasn't moved yet — don't dismiss
       if (x === 0 && y === 0) return;
 
       const el = document.elementFromPoint(x, y);
@@ -57,5 +62,35 @@ export function usePreviewDismiss() {
     }, 300);
 
     return () => clearInterval(id);
-  }, [inspectedObjectId, inspectObject, hoverObject]);
+  }, [inspectedObjectId, previewSticky, inspectObject, hoverObject]);
+
+  // Touch: tap outside a card-hover element dismisses sticky preview
+  useEffect(() => {
+    if (inspectedObjectId == null || !previewSticky) return;
+
+    function onTouch(e: TouchEvent) {
+      const touch = e.touches[0];
+      if (!touch) return;
+      const el = document.elementFromPoint(touch.clientX, touch.clientY);
+      if (!el) return;
+
+      // Don't dismiss if tapping on a card or the preview itself
+      const isOverCard = el.closest("[data-card-hover]") !== null;
+      const isOverPreview = el.closest("[data-card-preview]") !== null;
+      if (!isOverCard && !isOverPreview) {
+        inspectObject(null);
+        hoverObject(null);
+      }
+    }
+
+    // Use a small delay so the touchstart that opened the preview doesn't immediately dismiss
+    const timer = setTimeout(() => {
+      document.addEventListener("touchstart", onTouch, { passive: true });
+    }, 100);
+
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("touchstart", onTouch);
+    };
+  }, [inspectedObjectId, previewSticky, inspectObject, hoverObject]);
 }

@@ -3,6 +3,7 @@ import type { CSSProperties } from "react";
 import { motion } from "framer-motion";
 
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useLongPress } from "../../hooks/useLongPress.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
@@ -24,6 +25,12 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const objects = useGameStore((s) => s.gameState?.objects);
   const waitingFor = useGameStore((s) => s.gameState?.waiting_for);
   const inspectObject = useUiStore((s) => s.inspectObject);
+
+  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
+    inspectObject(entry.source_id);
+    setPreviewSticky(true);
+  });
 
   const sourceObj = objects?.[entry.source_id];
   const sourceName = sourceObj?.name ?? "Unknown";
@@ -54,6 +61,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
     : "ring-1 ring-white/10";
 
   const handleClick = () => {
+    if (longPressFired.current) { longPressFired.current = false; return; }
     if (isValidTarget) {
       dispatchAction({ type: "ChooseTarget", data: { target: { Object: entry.id } } });
     } else {
@@ -81,6 +89,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         inspectObject(null);
         onHoverChange?.(false);
       }}
+      {...longPressHandlers}
     >
       {/* Card image with explicit inline dimensions (Tailwind can't handle dynamic values) */}
       <div

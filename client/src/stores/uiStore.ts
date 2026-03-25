@@ -16,6 +16,7 @@ interface UiStoreState {
   selectedAttackers: ObjectId[];
   blockerAssignments: Map<ObjectId, ObjectId>;
   combatClickHandler: ((id: ObjectId) => void) | null;
+  previewSticky: boolean;
   isDragging: boolean;
   showTurnBanner: boolean;
   turnBannerText: string;
@@ -39,6 +40,7 @@ interface UiStoreActions {
   removeBlockerAssignment: (blockerId: ObjectId) => void;
   clearCombatSelection: () => void;
   setCombatClickHandler: (handler: ((id: ObjectId) => void) | null) => void;
+  setPreviewSticky: (sticky: boolean) => void;
   setDragging: (dragging: boolean) => void;
   flashTurnBanner: (text: string) => void;
   setFocusedOpponent: (id: number | null) => void;
@@ -60,6 +62,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   selectedAttackers: [],
   blockerAssignments: new Map(),
   combatClickHandler: null,
+  previewSticky: false,
   isDragging: false,
   showTurnBanner: false,
   turnBannerText: "",
@@ -69,7 +72,12 @@ export const useUiStore = create<UiStore>()((set) => ({
 
   selectObject: (id) => set({ selectedObjectId: id }),
   hoverObject: (id) => set({ hoveredObjectId: id }),
-  inspectObject: (id, faceIndex) => set({ inspectedObjectId: id, inspectedFaceIndex: faceIndex ?? 0 }),
+  inspectObject: (id, faceIndex) => set({
+    inspectedObjectId: id,
+    inspectedFaceIndex: faceIndex ?? 0,
+    // Clearing inspection also clears sticky; setting it does not auto-stick
+    ...(id == null ? { previewSticky: false } : {}),
+  }),
 
   addSelectedCard: (cardId) =>
     set((state) => ({
@@ -121,6 +129,7 @@ export const useUiStore = create<UiStore>()((set) => ({
     }),
 
   setCombatClickHandler: (handler) => set({ combatClickHandler: handler }),
+  setPreviewSticky: (sticky) => set({ previewSticky: sticky }),
   setDragging: (dragging) => set({ isDragging: dragging }),
   flashTurnBanner: (text) => {
     set({ showTurnBanner: true, turnBannerText: text });

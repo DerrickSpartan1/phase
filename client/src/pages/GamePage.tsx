@@ -380,6 +380,7 @@ function GamePageContent({
       ? inspectedObj.back_face.name
       : inspectedObj.name
     : null;
+  const inspectedBackFaceName = inspectedObj?.back_face?.name ?? null;
 
   useKeyboardShortcuts();
   usePreviewDismiss();
@@ -766,10 +767,8 @@ function GamePageContent({
       <BlockAssignmentLines />
 
 
-      {/* Card preview overlay — hidden on compact viewports (phones) */}
-      <div className="hidden lg:block">
-        <CardPreview cardName={inspectedCardName} />
-      </div>
+      {/* Card preview overlay */}
+      <CardPreview cardName={inspectedCardName} backFaceName={inspectedBackFaceName} />
 
       {/* WaitingFor-driven prompt overlays (only for human player) */}
       {(waitingFor?.type === "TargetSelection" ||

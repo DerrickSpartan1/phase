@@ -7,6 +7,7 @@ import { dispatchAction } from "../../game/dispatch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
+import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -119,10 +120,12 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
     hoverObject(null); inspectObject(null);
   }, [hoverObject, inspectObject]);
 
-  const longPressHandlers = useLongPress(
+  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
     useCallback(() => {
       inspectObject(objectId);
-    }, [inspectObject, objectId]),
+      setPreviewSticky(true);
+    }, [inspectObject, setPreviewSticky, objectId]),
   );
 
   if (!obj) return null;
@@ -186,6 +189,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
   const attackSlide = isAttacking ? (obj.controller === playerId ? -30 : 30) : 0;
 
   const handleClick = () => {
+    if (longPressFired.current) { longPressFired.current = false; return; }
     if (combatMode === "attackers") {
       if (isValidAttacker) toggleAttacker(objectId);
     } else if (combatMode === "blockers" && combatClickHandler) {
@@ -360,7 +364,7 @@ interface ExileGhostCardProps {
 
 const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileGhostCardProps) {
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
-  const inspectObject = useUiStore((s) => s.inspectObject);
+  const { handlers: hoverHandlers } = useCardHover(objectId);
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
 
   if (!obj) return null;
@@ -379,8 +383,7 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
       className="absolute z-0 cursor-default opacity-70"
       style={{ bottom: `-${offset}px`, left: `${offset}px` }}
       data-card-hover
-      onMouseEnter={() => inspectObject(objectId)}
-      onMouseLeave={() => inspectObject(null)}
+      {...hoverHandlers}
     >
       {/* Purple exile tint */}
       <div className="absolute inset-0 z-10 rounded-lg bg-purple-600/30 pointer-events-none" />

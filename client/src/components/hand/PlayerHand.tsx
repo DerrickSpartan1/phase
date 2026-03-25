@@ -242,8 +242,10 @@ const HandCard = memo(function HandCard({
   const setDragging = useUiStore((s) => s.setDragging);
   const playedRef = useRef(false);
 
-  const longPressHandlers = useLongPress(() => {
+  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(() => {
     inspectObject(objectId);
+    setPreviewSticky(true);
   });
 
   const glowClass = hasPriority
@@ -291,6 +293,7 @@ const HandCard = memo(function HandCard({
       }}
       onClick={(e) => {
         e.stopPropagation();
+        if (longPressFired.current) { longPressFired.current = false; return; }
         onClick(objectId);
       }}
       onDoubleClick={(e) => {

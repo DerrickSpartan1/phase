@@ -1,8 +1,9 @@
-import { useMemo } from "react";
+import { useCallback, useMemo } from "react";
 
 import type { GameObject, TargetRef } from "../../adapter/types.ts";
 import { CardImage } from "../card/CardImage.tsx";
 import { ModalPanelShell } from "../ui/ModalPanelShell.tsx";
+import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
@@ -31,7 +32,6 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
   const gameState = useGameStore((s) => s.gameState);
   const dispatch = useGameStore((s) => s.dispatch);
   const dispatchAction = useGameDispatch();
-  const inspectObject = useUiStore((s) => s.inspectObject);
   const currentPlayerId = usePlayerId();
 
   const cards = useMemo(() => {
@@ -77,37 +77,71 @@ export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
               const isValidTarget = isHumanTargetSelection
                 && isObjectATarget(currentLegalTargets, obj.id);
               return (
-                <div
+                <ZoneCard
                   key={obj.id}
-                  className={`shrink-0 cursor-pointer rounded transition-colors ${
-                    isValidTarget
-                      ? "ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]"
-                      : canCastAdventure
-                        ? "ring-1 ring-amber-500/60 hover:ring-amber-400"
-                        : "hover:ring-1 hover:ring-white/20"
-                  }`}
-                  data-card-hover
-                  onMouseEnter={() => inspectObject(obj.id)}
-                  onMouseLeave={() => inspectObject(null)}
-                  onClick={isValidTarget
-                    ? () => dispatchAction({ type: "ChooseTarget", data: { target: { Object: obj.id } } })
-                    : undefined}
-                >
-                  <CardImage cardName={obj.name} size="normal" />
-                  {canCastAdventure && !isValidTarget && (
-                    <button
-                      onClick={() => dispatch({ type: "CastSpell", data: { object_id: obj.id, card_id: obj.card_id, targets: [] } })}
-                      className="mt-1 w-full rounded-md bg-amber-600/80 px-2 py-1 text-xs font-semibold text-white transition hover:bg-amber-500"
-                    >
-                      Cast Creature
-                    </button>
-                  )}
-                </div>
+                  obj={obj}
+                  isValidTarget={isValidTarget}
+                  canCastAdventure={canCastAdventure}
+                  onTarget={() => dispatchAction({ type: "ChooseTarget", data: { target: { Object: obj.id } } })}
+                  onCastAdventure={() => dispatch({ type: "CastSpell", data: { object_id: obj.id, card_id: obj.card_id, targets: [] } })}
+                />
               );
             })}
           </div>
         )}
       </div>
     </ModalPanelShell>
+  );
+}
+
+function ZoneCard({
+  obj,
+  isValidTarget,
+  canCastAdventure,
+  onTarget,
+  onCastAdventure,
+}: {
+  obj: GameObject;
+  isValidTarget: boolean;
+  canCastAdventure: boolean;
+  onTarget: () => void;
+  onCastAdventure: () => void;
+}) {
+  const inspectObject = useUiStore((s) => s.inspectObject);
+  const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const { handlers: longPressHandlers, firedRef: longPressFired } = useLongPress(
+    useCallback(() => {
+      inspectObject(obj.id);
+      setPreviewSticky(true);
+    }, [inspectObject, setPreviewSticky, obj.id]),
+  );
+
+  return (
+    <div
+      className={`shrink-0 cursor-pointer rounded transition-colors ${
+        isValidTarget
+          ? "ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]"
+          : canCastAdventure
+            ? "ring-1 ring-amber-500/60 hover:ring-amber-400"
+            : "hover:ring-1 hover:ring-white/20"
+      }`}
+      data-card-hover
+      onMouseEnter={() => inspectObject(obj.id)}
+      onMouseLeave={() => inspectObject(null)}
+      onClick={isValidTarget
+        ? () => { if (!longPressFired.current) onTarget(); else longPressFired.current = false; }
+        : undefined}
+      {...longPressHandlers}
+    >
+      <CardImage cardName={obj.name} size="normal" />
+      {canCastAdventure && !isValidTarget && (
+        <button
+          onClick={onCastAdventure}
+          className="mt-1 w-full rounded-md bg-amber-600/80 px-2 py-1 text-xs font-semibold text-white transition hover:bg-amber-500"
+        >
+          Cast Creature
+        </button>
+      )}
+    </div>
   );
 }

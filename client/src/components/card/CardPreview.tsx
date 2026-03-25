@@ -13,12 +13,14 @@ import {
 
 interface CardPreviewProps {
   cardName: string | null;
+  backFaceName?: string | null;
   faceIndex?: number;
   position?: { x: number; y: number };
 }
 
 export function CardPreview({
   cardName,
+  backFaceName,
   faceIndex,
   position,
 }: CardPreviewProps) {
@@ -27,6 +29,7 @@ export function CardPreview({
   return (
     <CardPreviewInner
       cardName={cardName}
+      backFaceName={backFaceName ?? null}
       faceIndex={faceIndex}
       position={position}
     />
@@ -35,10 +38,12 @@ export function CardPreview({
 
 function CardPreviewInner({
   cardName,
+  backFaceName,
   faceIndex,
   position,
 }: {
   cardName: string;
+  backFaceName: string | null;
   faceIndex?: number;
   position?: { x: number; y: number };
 }) {
@@ -47,12 +52,25 @@ function CardPreviewInner({
     faceIndex,
   });
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
+  const inspectObject = useUiStore((s) => s.inspectObject);
   const obj = useGameStore((s) =>
     inspectedObjectId != null ? s.gameState?.objects[inspectedObjectId] ?? null : null,
   );
   const classLevel = obj?.class_level;
   const [pointerPosition, setPointerPosition] = useState<{ x: number; y: number } | null>(null);
   const [altHeld, setAltHeld] = useState(false);
+  const [ctrlHeld, setCtrlHeld] = useState(false);
+  const [isMobile, setIsMobile] = useState(
+    typeof window !== "undefined" && window.innerWidth < 1024,
+  );
+
+  useEffect(() => {
+    function handleResize() {
+      setIsMobile(window.innerWidth < 1024);
+    }
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
@@ -64,10 +82,12 @@ function CardPreviewInner({
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Alt") setAltHeld(true);
+      if (event.key === "Control") setCtrlHeld(true);
     }
 
     function handleKeyUp(event: KeyboardEvent) {
       if (event.key === "Alt") setAltHeld(false);
+      if (event.key === "Control") setCtrlHeld(false);
     }
 
     window.addEventListener("mousemove", handlePointerMove);
@@ -80,6 +100,24 @@ function CardPreviewInner({
     };
   }, []);
 
+  // On desktop, Ctrl swaps to the back face
+  const showBackFace = !isMobile && ctrlHeld && backFaceName != null;
+  const displayName = showBackFace ? backFaceName! : cardName;
+
+  // Mobile overlay mode: centered with backdrop
+  if (isMobile) {
+    return (
+      <MobilePreviewOverlay
+        cardName={cardName}
+        backFaceName={backFaceName}
+        faceIndex={faceIndex}
+        obj={obj}
+        onDismiss={() => inspectObject(null)}
+      />
+    );
+  }
+
+  // Desktop mode: cursor-following or fixed position
   const showInfoPanel = obj?.zone === "Battlefield";
   const infoPanelHeight = showInfoPanel ? 120 : 0;
   const previewWidth =
@@ -128,32 +166,171 @@ function CardPreviewInner({
     <div
       className="fixed z-[100] pointer-events-none"
       style={style}
+      data-card-preview
     >
       {altHeld && obj ? (
         <ParsedAbilitiesPanel obj={obj} />
-      ) : isLoading || !src ? (
-        <div className="max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] aspect-[5/7] rounded-[4%] border border-gray-600 bg-gray-700 shadow-2xl animate-pulse md:max-w-[45vw]" />
       ) : (
-        <div className={`border border-gray-600 overflow-hidden shadow-2xl ${showInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
-          <div className="relative rounded-[4%] overflow-hidden">
-            <img
-              src={src}
-              alt={cardName}
-              className="max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] object-cover md:max-w-[45vw]"
-              draggable={false}
-            />
-            {classLevel != null && (
-              <div className="absolute bottom-3 left-3 z-10">
-                <div className="rounded-t-[4px] rounded-b-none bg-gradient-to-b from-amber-950 to-stone-900 px-3 pt-1.5 pb-2 border border-amber-800/60 shadow-lg clip-bookmark">
-                  <span className="font-serif text-base font-bold text-amber-300 drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">
-                    {toRoman(classLevel)}
-                  </span>
-                </div>
-              </div>
-            )}
-          </div>
-          {showInfoPanel && obj && <CardInfoPanel obj={obj} />}
+        <CardImagePreview
+          cardName={displayName}
+          faceIndex={showBackFace ? 1 : faceIndex}
+          classLevel={classLevel}
+          showInfoPanel={showInfoPanel}
+          obj={obj}
+          isLoading={isLoading}
+          src={src}
+          backFaceHint={backFaceName != null && !showBackFace ? "Hold Ctrl for back face" : null}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Mobile/tablet: centered overlay with backdrop dismiss and side-by-side DFCs */
+function MobilePreviewOverlay({
+  cardName,
+  backFaceName,
+  faceIndex,
+  obj,
+  onDismiss,
+}: {
+  cardName: string;
+  backFaceName: string | null;
+  faceIndex?: number;
+  obj: GameObject | null;
+  onDismiss: () => void;
+}) {
+  const { src, isLoading } = useCardImage(cardName, { size: "normal", faceIndex });
+  const showInfoPanel = obj?.zone === "Battlefield";
+  const classLevel = obj?.class_level;
+  const hasDualFace = backFaceName != null;
+
+  return (
+    <div
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      data-card-preview
+      onClick={(e) => {
+        // Dismiss when tapping the backdrop (not the card images)
+        if (e.target === e.currentTarget) onDismiss();
+      }}
+    >
+      <div className={`flex ${hasDualFace ? "gap-3" : ""} items-start max-h-[85vh] max-w-[95vw]`}>
+        {/* Front face */}
+        <div className="shrink-0">
+          <CardImagePreview
+            cardName={cardName}
+            faceIndex={faceIndex}
+            classLevel={classLevel}
+            showInfoPanel={showInfoPanel}
+            obj={obj}
+            isLoading={isLoading}
+            src={src}
+            backFaceHint={null}
+            mobileMode
+          />
         </div>
+
+        {/* Back face — shown side by side on mobile for DFCs */}
+        {hasDualFace && (
+          <div className="shrink-0">
+            <BackFaceImage cardName={backFaceName!} mobileMode />
+          </div>
+        )}
+      </div>
+
+      {/* Dismiss hint */}
+      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 rounded-full bg-black/60 px-4 py-1.5 text-xs text-gray-300">
+        Tap outside to dismiss
+      </div>
+    </div>
+  );
+}
+
+/** Renders the back face image for side-by-side DFC display */
+function BackFaceImage({ cardName, mobileMode }: { cardName: string; mobileMode?: boolean }) {
+  const { src, isLoading } = useCardImage(cardName, { size: "normal", faceIndex: 1 });
+
+  const sizeClass = mobileMode
+    ? "max-h-[75vh] w-[40vw] max-w-[300px]"
+    : "max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] md:max-w-[45vw]";
+
+  if (isLoading || !src) {
+    return (
+      <div className={`${sizeClass} aspect-[5/7] rounded-[4%] border border-gray-600 bg-gray-700 shadow-2xl animate-pulse`} />
+    );
+  }
+
+  return (
+    <div className="border border-gray-600 overflow-hidden shadow-2xl rounded-[4%]">
+      <img
+        src={src}
+        alt={cardName}
+        className={`${sizeClass} object-cover`}
+        draggable={false}
+      />
+    </div>
+  );
+}
+
+/** Shared card image preview used by both desktop and mobile modes */
+function CardImagePreview({
+  cardName,
+  faceIndex,
+  classLevel,
+  showInfoPanel,
+  obj,
+  isLoading,
+  src,
+  backFaceHint,
+  mobileMode,
+}: {
+  cardName: string;
+  faceIndex?: number;
+  classLevel?: number | null;
+  showInfoPanel?: boolean;
+  obj: GameObject | null;
+  isLoading: boolean;
+  src: string | null;
+  backFaceHint: string | null;
+  mobileMode?: boolean;
+}) {
+  // When displaying back face on desktop (via Ctrl), use its own image
+  const backFaceImg = useCardImage(cardName, { size: "normal", faceIndex });
+  const displaySrc = faceIndex != null ? backFaceImg.src : src;
+  const displayLoading = faceIndex != null ? backFaceImg.isLoading : isLoading;
+
+  const sizeClass = mobileMode
+    ? "max-h-[75vh] w-[40vw] max-w-[300px]"
+    : "max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] md:max-w-[45vw]";
+
+  if (displayLoading || !displaySrc) {
+    return (
+      <div className={`${sizeClass} aspect-[5/7] rounded-[4%] border border-gray-600 bg-gray-700 shadow-2xl animate-pulse`} />
+    );
+  }
+
+  return (
+    <div className={`border border-gray-600 overflow-hidden shadow-2xl ${showInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
+      <div className="relative rounded-[4%] overflow-hidden">
+        <img
+          src={displaySrc}
+          alt={cardName}
+          className={`${sizeClass} object-cover`}
+          draggable={false}
+        />
+        {classLevel != null && (
+          <div className="absolute bottom-3 left-3 z-10">
+            <div className="rounded-t-[4px] rounded-b-none bg-gradient-to-b from-amber-950 to-stone-900 px-3 pt-1.5 pb-2 border border-amber-800/60 shadow-lg clip-bookmark">
+              <span className="font-serif text-base font-bold text-amber-300 drop-shadow-[0_1px_2px_rgba(0,0,0,0.8)]">
+                {toRoman(classLevel)}
+              </span>
+            </div>
+          </div>
+        )}
+      </div>
+      {showInfoPanel && obj && <CardInfoPanel obj={obj} />}
+      {backFaceHint && (
+        <div className="bg-gray-900/80 text-center py-1 text-[10px] text-gray-400">{backFaceHint}</div>
       )}
     </div>
   );

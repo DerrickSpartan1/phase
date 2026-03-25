@@ -1,6 +1,7 @@
 import { motion, AnimatePresence } from "framer-motion";
 
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
@@ -84,7 +85,7 @@ const cardStyle = {
 /** Renders a single opponent hand card — face or back, same sizing either way. */
 function OpponentCardThumbnail({ cardId, cardName }: { cardId: ObjectId; cardName: string | null }) {
   const { src } = useCardImage(cardName ?? "", { size: "small" });
-  const inspectObject = useUiStore((s) => s.inspectObject);
+  const { handlers: hoverHandlers } = useCardHover(cardName ? cardId : null);
 
   if (cardName && src) {
     return (
@@ -94,9 +95,8 @@ function OpponentCardThumbnail({ cardId, cardName }: { cardId: ObjectId; cardNam
         className="rounded-lg border border-gray-600 shadow-md object-cover"
         style={cardStyle}
         data-card-hover
-        onMouseEnter={() => inspectObject(cardId)}
-        onMouseLeave={() => inspectObject(null)}
         draggable={false}
+        {...hoverHandlers}
       />
     );
   }
