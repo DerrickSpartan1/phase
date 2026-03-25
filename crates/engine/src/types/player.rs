@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -78,6 +78,11 @@ pub struct Player {
     #[serde(default)]
     pub bending_types_this_turn: HashSet<BendingType>,
 
+    /// CR 122.1: Generic player counters (experience, rad, ticket, etc.).
+    /// Poison counters have a dedicated field due to SBA rules (CR 104.3d).
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub player_counters: HashMap<String, u32>,
+
     /// CR 702.139: The player's declared companion (if any). Lives outside the game.
     /// Stored as card data (not a GameObject) until moved to hand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,8 +114,31 @@ impl Default for Player {
             drew_from_empty_library: false,
             is_eliminated: false,
             bending_types_this_turn: HashSet::new(),
+            player_counters: HashMap::new(),
             companion: None,
             can_look_at_top_of_library: false,
+        }
+    }
+}
+
+impl Player {
+    /// CR 122.1: Get the current count of a named player counter.
+    /// Poison counters use the dedicated field; all others use the generic map.
+    pub fn player_counter(&self, kind: &str) -> u32 {
+        if kind == "poison" {
+            self.poison_counters
+        } else {
+            self.player_counters.get(kind).copied().unwrap_or(0)
+        }
+    }
+
+    /// CR 122.1: Add counters of a named type to this player.
+    /// Poison counters use the dedicated field (has SBA at CR 104.3d); all others use the generic map.
+    pub fn add_player_counters(&mut self, kind: &str, count: u32) {
+        if kind == "poison" {
+            self.poison_counters += count;
+        } else {
+            *self.player_counters.entry(kind.to_string()).or_insert(0) += count;
         }
     }
 }

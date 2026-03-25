@@ -1221,6 +1221,21 @@ pub(super) fn parse_imperative_family_ast(
 ) -> Option<ImperativeFamilyAst> {
     let first_word = lower.split_whitespace().next().unwrap_or("");
 
+    // CR 500.8: "additional combat phase" can appear in various sentence structures
+    // ("there is an additional combat phase", "after this phase, there is an additional...").
+    // Intercept early regardless of first_word.
+    if lower.contains("additional combat phase") {
+        let with_main = lower.contains("followed by an additional main phase");
+        return Some(ImperativeFamilyAst::GainKeyword(
+            Effect::AdditionalCombatPhase {
+                target: TargetFilter::Controller,
+                with_main_phase: with_main,
+            },
+        ));
+    }
+
+    // NOTE: when adding verbs here, also add them to IMPERATIVE_EXTRA_VERBS
+    // in game/gap_analysis.rs so the parser gap analyzer can classify them.
     match first_word {
         // ── Unambiguous single-category verbs ──
 
@@ -1500,9 +1515,11 @@ pub(super) fn parse_imperative_family_ast(
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::HandReveal(ast)))
             }),
 
-        // "gets"/"get" → pump (step 3)
-        "gets" | "get" => parse_numeric_imperative_ast(text, lower)
-            .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast))),
+        // "gets"/"get" → try player counter first, then pump (step 3)
+        "gets" | "get" => try_parse_player_counter(lower).or_else(|| {
+            parse_numeric_imperative_ast(text, lower)
+                .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
+        }),
 
         // "deals"/"deal" → damage (via cost_resource, which contains try_parse_damage)
         "deals" | "deal" => {
@@ -1538,6 +1555,62 @@ pub(super) fn parse_imperative_family_ast(
             None
         }
     }
+}
+
+/// CR 122.1: Parse "get/gets a/an/N [type] counter(s)" into a GivePlayerCounter AST.
+/// Handles patterns like:
+/// - "get a poison counter"
+/// - "gets two experience counters"
+/// - "get ten rad counters"
+fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAst> {
+    // Strip "get/gets " prefix
+    let rest = lower
+        .strip_prefix("gets ")
+        .or_else(|| lower.strip_prefix("get "))?;
+
+    // Must end with "counter" or "counters"
+    let (before_counter, plural) = if let Some(s) = rest.strip_suffix(" counters") {
+        (s, true)
+    } else if let Some(s) = rest.strip_suffix(" counter") {
+        (s, false)
+    } else {
+        return None;
+    };
+
+    // Parse quantity + counter kind from the remaining text.
+    // Patterns: "a poison" / "an experience" / "two rad" / "10 poison"
+    let (count, counter_kind) = if let Some(kind) = before_counter.strip_prefix("a ") {
+        (1u32, kind.trim())
+    } else if let Some(kind) = before_counter.strip_prefix("an ") {
+        (1u32, kind.trim())
+    } else if let Some((n, rest)) = parse_number(before_counter) {
+        (n, rest.trim())
+    } else {
+        return None;
+    };
+
+    // Validate: counter kind should be a single word (no spaces) to avoid false positives
+    // like "gets +1/+1 counter" which is an object counter, not a player counter.
+    if counter_kind.is_empty() || counter_kind.contains('+') || counter_kind.contains('-') {
+        return None;
+    }
+
+    // Known player counter types — reject anything that's clearly an object counter.
+    // Energy counters are NOT included — they use the dedicated GainEnergy effect.
+    let known_player_counters = ["poison", "experience", "rad", "ticket"];
+
+    // Only match known player counter types to avoid capturing object counter patterns
+    if !known_player_counters.contains(&counter_kind) {
+        return None;
+    }
+
+    let _ = plural; // plural is just grammatical, doesn't affect semantics
+    Some(ImperativeFamilyAst::GivePlayerCounter {
+        counter_kind: counter_kind.to_string(),
+        count: QuantityExpr::Fixed {
+            value: count as i32,
+        },
+    })
 }
 
 /// CR 706: Parse die side count from "roll a dN" / "roll a six-sided die" patterns.
@@ -1661,6 +1734,15 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         },
         ImperativeFamilyAst::Put(ast) => lower_put_ast(ast),
         ImperativeFamilyAst::YouMay { text } => super::parse_effect(&text),
+        // CR 122.1: Player counter manipulation. Target is set by subject injection.
+        ImperativeFamilyAst::GivePlayerCounter {
+            counter_kind,
+            count,
+        } => Effect::GivePlayerCounter {
+            counter_kind,
+            count,
+            target: TargetFilter::Controller,
+        },
         // Shuffle is handled in `lower_imperative_family_ast` directly.
         ImperativeFamilyAst::Shuffle(_) => unreachable!(),
     }
@@ -2081,5 +2163,138 @@ mod tests {
             }
             other => panic!("Expected Monstrosity, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_get_a_poison_counter() {
+        let result = try_parse_player_counter("get a poison counter");
+        assert!(result.is_some(), "Should parse 'get a poison counter'");
+        match result.unwrap() {
+            ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            } => {
+                assert_eq!(counter_kind, "poison");
+                assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_gets_two_experience_counters() {
+        let result = try_parse_player_counter("gets two experience counters");
+        assert!(
+            result.is_some(),
+            "Should parse 'gets two experience counters'"
+        );
+        match result.unwrap() {
+            ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            } => {
+                assert_eq!(counter_kind, "experience");
+                assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_get_three_rad_counters() {
+        let result = try_parse_player_counter("get three rad counters");
+        assert!(result.is_some(), "Should parse 'get three rad counters'");
+        match result.unwrap() {
+            ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            } => {
+                assert_eq!(counter_kind, "rad");
+                assert!(matches!(count, QuantityExpr::Fixed { value: 3 }));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_get_an_experience_counter() {
+        let result = try_parse_player_counter("get an experience counter");
+        assert!(result.is_some(), "Should parse 'get an experience counter'");
+        match result.unwrap() {
+            ImperativeFamilyAst::GivePlayerCounter {
+                counter_kind,
+                count,
+            } => {
+                assert_eq!(counter_kind, "experience");
+                assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
+            }
+            other => panic!("Expected GivePlayerCounter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_player_counter_rejects_plus1_counter() {
+        // "+1/+1 counter" is an object counter, not a player counter
+        let result = try_parse_player_counter("gets a +1/+1 counter");
+        assert!(
+            result.is_none(),
+            "Should NOT parse '+1/+1 counter' as player counter"
+        );
+    }
+
+    #[test]
+    fn parse_player_counter_rejects_unknown_type() {
+        // "charge counter" is an object counter, not a known player counter
+        let result = try_parse_player_counter("get a charge counter");
+        assert!(
+            result.is_none(),
+            "Should NOT parse unknown counter type as player counter"
+        );
+    }
+
+    #[test]
+    fn parse_additional_combat_phase() {
+        let text = "there is an additional combat phase after this phase";
+        let lower = text.to_lowercase();
+        let result = parse_imperative_family_ast(text, &lower, &ParseContext::default());
+        assert!(result.is_some(), "Should parse additional combat phase");
+        let effect = lower_imperative_family_effect(result.unwrap());
+        assert!(
+            matches!(
+                effect,
+                Effect::AdditionalCombatPhase {
+                    with_main_phase: false,
+                    ..
+                }
+            ),
+            "Expected AdditionalCombatPhase without main phase, got {effect:?}"
+        );
+    }
+
+    #[test]
+    fn parse_additional_combat_with_main_phase() {
+        let text = "there is an additional combat phase followed by an additional main phase";
+        let lower = text.to_lowercase();
+        let result = parse_imperative_family_ast(text, &lower, &ParseContext::default());
+        assert!(result.is_some(), "Should parse additional combat + main");
+        let effect = lower_imperative_family_effect(result.unwrap());
+        assert!(
+            matches!(
+                effect,
+                Effect::AdditionalCombatPhase {
+                    with_main_phase: true,
+                    ..
+                }
+            ),
+            "Expected AdditionalCombatPhase with main phase, got {effect:?}"
+        );
+    }
+
+    #[test]
+    fn parse_after_this_phase_additional_combat() {
+        let text = "after this phase, there is an additional combat phase";
+        let lower = text.to_lowercase();
+        let result = parse_imperative_family_ast(text, &lower, &ParseContext::default());
+        assert!(result.is_some(), "Should parse 'after this phase' variant");
     }
 }

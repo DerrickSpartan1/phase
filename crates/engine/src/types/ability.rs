@@ -2108,6 +2108,14 @@ pub enum Effect {
     GainEnergy {
         amount: u32,
     },
+    /// CR 122.1: Give player counters (poison, experience, rad, ticket, etc.).
+    /// Uses string-based counter kind for extensibility, paralleling CounterType::Generic(String).
+    /// Poison counters have dedicated SBA rules (CR 104.3d / CR 122.1f).
+    GivePlayerCounter {
+        counter_kind: String,
+        count: QuantityExpr,
+        target: TargetFilter,
+    },
     /// CR 702.84a: Exile cards from the top of your library one at a time until you
     /// exile a card matching the filter. The hit card is passed to the sub_ability chain
     /// as an injected target.
@@ -2167,6 +2175,16 @@ pub enum Effect {
     ExtraTurn {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
+    },
+    /// CR 500.8: Add an additional combat phase (and optionally an additional main phase)
+    /// after the current phase. Uses a LIFO stack on GameState.extra_phases.
+    /// CR 500.10a: Only adds phases to the controller's own turn.
+    AdditionalCombatPhase {
+        #[serde(default = "default_target_filter_controller")]
+        target: TargetFilter,
+        /// If true, also adds an additional main phase after the combat phase.
+        #[serde(default)]
+        with_main_phase: bool,
     },
     /// CR 701.10d-f: Double counters on a permanent, a player's life total, or mana pool.
     /// Uses `DoubleTarget` enum per D-05 to distinguish the three variants.
@@ -2370,6 +2388,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ChooseFromZone { .. } => "ChooseFromZone",
         Effect::Exploit { .. } => "Exploit",
         Effect::GainEnergy { .. } => "GainEnergy",
+        Effect::GivePlayerCounter { .. } => "GivePlayerCounter",
         Effect::ExileFromTopUntil { .. } => "ExileFromTopUntil",
         Effect::Discover { .. } => "Discover",
         Effect::PutAtLibraryPosition { .. } => "PutAtLibraryPosition",
@@ -2382,6 +2401,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Monstrosity { .. } => "Monstrosity",
         Effect::ManifestDread => "ManifestDread",
         Effect::ExtraTurn { .. } => "ExtraTurn",
+        Effect::AdditionalCombatPhase { .. } => "AdditionalCombatPhase",
         Effect::Double { .. } => "Double",
         Effect::RuntimeHandled { handler } => match handler {
             RuntimeHandler::NinjutsuFamily => "RuntimeHandled:NinjutsuFamily",
@@ -2479,6 +2499,7 @@ pub enum EffectKind {
     ChooseFromZone,
     Exploit,
     GainEnergy,
+    GivePlayerCounter,
     ExileFromTopUntil,
     Discover,
     PutAtLibraryPosition,
@@ -2491,6 +2512,7 @@ pub enum EffectKind {
     Monstrosity,
     ManifestDread,
     ExtraTurn,
+    AdditionalCombatPhase,
     Double,
     RuntimeHandled,
     Forage,
@@ -2587,6 +2609,7 @@ impl From<&Effect> for EffectKind {
             Effect::ChooseFromZone { .. } => EffectKind::ChooseFromZone,
             Effect::Exploit { .. } => EffectKind::Exploit,
             Effect::GainEnergy { .. } => EffectKind::GainEnergy,
+            Effect::GivePlayerCounter { .. } => EffectKind::GivePlayerCounter,
             Effect::ExileFromTopUntil { .. } => EffectKind::ExileFromTopUntil,
             Effect::Discover { .. } => EffectKind::Discover,
             Effect::PutAtLibraryPosition { .. } => EffectKind::PutAtLibraryPosition,
@@ -2599,6 +2622,7 @@ impl From<&Effect> for EffectKind {
             Effect::Monstrosity { .. } => EffectKind::Monstrosity,
             Effect::ManifestDread => EffectKind::ManifestDread,
             Effect::ExtraTurn { .. } => EffectKind::ExtraTurn,
+            Effect::AdditionalCombatPhase { .. } => EffectKind::AdditionalCombatPhase,
             Effect::Double { .. } => EffectKind::Double,
             Effect::RuntimeHandled { .. } => EffectKind::RuntimeHandled,
             Effect::Forage => EffectKind::Forage,

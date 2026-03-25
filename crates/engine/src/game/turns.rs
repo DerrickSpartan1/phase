@@ -36,7 +36,13 @@ pub fn next_phase(phase: Phase) -> Phase {
 
 /// CR 500.4: Advance to the next phase/step, clearing mana pools.
 pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    let next = next_phase(state.phase);
+    // CR 500.8: Check for extra phases before using the normal phase order.
+    // Extra phases are pushed by AdditionalCombatPhase resolver and consumed here.
+    let next = if !state.extra_phases.is_empty() {
+        state.extra_phases.pop().unwrap()
+    } else {
+        next_phase(state.phase)
+    };
 
     // If wrapping from Cleanup to Untap, start next turn
     if state.phase == Phase::Cleanup && next == Phase::Untap {
@@ -112,6 +118,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.players_who_had_artifact_etb_this_turn.clear();
     state.cards_left_graveyard_this_turn.clear();
     state.creature_died_this_turn = false;
+    // CR 500.8: Clear any leftover extra phases from the previous turn.
+    state.extra_phases.clear();
     // CR 700.14: Reset cumulative mana spent on spells for Expend triggers.
     state.mana_spent_on_spells_this_turn.clear();
     state.modal_modes_chosen_this_turn.clear();

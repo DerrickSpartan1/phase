@@ -1058,6 +1058,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::GrantCastingPermission { .. }
         | Effect::ChooseFromZone { .. }
         | Effect::GainEnergy { .. }
+        | Effect::GivePlayerCounter { .. }
+        | Effect::AdditionalCombatPhase { .. }
         | Effect::ExileFromTopUntil { .. }
         | Effect::Discover { .. }
         | Effect::PutAtLibraryPosition { .. }

@@ -12,6 +12,7 @@ use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 
 pub mod add_restriction;
+pub mod additional_combat;
 pub mod amass;
 pub mod animate;
 pub mod attach;
@@ -60,6 +61,7 @@ pub mod mill;
 pub mod monstrosity;
 pub mod pay;
 pub mod phase_out;
+pub mod player_counter;
 pub mod prevent_damage;
 pub mod proliferate;
 pub mod pump;
@@ -224,6 +226,8 @@ pub fn resolve_effect(
         Effect::ChooseFromZone { .. } => choose_from_zone::resolve(state, ability, events),
         Effect::Exploit { .. } => exploit::resolve(state, ability, events),
         Effect::GainEnergy { .. } => energy::resolve_gain(state, ability, events),
+        Effect::GivePlayerCounter { .. } => player_counter::resolve(state, ability, events),
+        Effect::AdditionalCombatPhase { .. } => additional_combat::resolve(state, ability, events),
         Effect::ExileFromTopUntil { .. } => exile_from_top_until::resolve(state, ability, events),
         Effect::Discover { .. } => discover::resolve(state, ability, events),
         Effect::PutAtLibraryPosition { .. } => put_on_top::resolve(state, ability, events),

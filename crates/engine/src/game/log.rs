@@ -164,6 +164,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
         | GameEvent::CompanionRevealed { .. }
         | GameEvent::CompanionMovedToHand { .. }
         | GameEvent::EnergyChanged { .. }
+        | GameEvent::PlayerCounterChanged { .. }
         | GameEvent::ManaExpended { .. } => LogCategory::Special,
     }
 }
@@ -639,6 +640,20 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
                 ]
             }
         }
+
+        GameEvent::PlayerCounterChanged {
+            player,
+            counter_kind,
+            delta,
+        } => vec![
+            player_seg(state, *player),
+            text(&format!(
+                " gets {} {} counter{}",
+                delta,
+                counter_kind,
+                if *delta != 1 { "s" } else { "" }
+            )),
+        ],
 
         GameEvent::ManaExpended {
             player_id,

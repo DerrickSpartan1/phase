@@ -2624,6 +2624,11 @@ fn map_keyword(text: &str) -> Option<Keyword> {
     if word.is_empty() {
         return None;
     }
+    // CR 702.73a: "all creature types" is the Changeling CDA effect.
+    // Granting Changeling keyword triggers layer system post-fixup to add all types.
+    if word.eq_ignore_ascii_case("all creature types") {
+        return Some(Keyword::Changeling);
+    }
     if let Some(keyword) = parse_landwalk_keyword(word) {
         return Some(keyword);
     }
@@ -5447,5 +5452,26 @@ mod tests {
         let def = parse_static_line("This creature gets +1/+1.").unwrap();
         assert_ne!(def.mode, StaticMode::MustAttack);
         assert_ne!(def.mode, StaticMode::MustBlock);
+    }
+
+    #[test]
+    fn map_keyword_all_creature_types_returns_changeling() {
+        // CR 702.73a: "all creature types" is the Changeling CDA effect.
+        assert_eq!(map_keyword("all creature types"), Some(Keyword::Changeling));
+        assert_eq!(map_keyword("All Creature Types"), Some(Keyword::Changeling));
+    }
+
+    #[test]
+    fn gain_all_creature_types_produces_add_keyword_changeling() {
+        let mods = parse_continuous_modifications("gain all creature types");
+        assert!(
+            mods.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Changeling
+                }
+            )),
+            "Should produce AddKeyword(Changeling), got: {mods:?}"
+        );
     }
 }

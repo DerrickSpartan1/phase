@@ -1134,6 +1134,8 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
         | Effect::Goad { target, .. }
         | Effect::TargetOnly { target, .. }
         | Effect::ExtraTurn { target, .. }
+        | Effect::GivePlayerCounter { target, .. }
+        | Effect::AdditionalCombatPhase { target, .. }
         | Effect::Double { target, .. }
         | Effect::BlightEffect { target, .. } => {
             if matches!(

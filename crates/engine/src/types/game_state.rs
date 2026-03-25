@@ -935,6 +935,12 @@ pub struct GameState {
     #[serde(default)]
     pub extra_turns: Vec<PlayerId>,
 
+    /// CR 500.8: Extra phases granted by effects, stored as a LIFO stack.
+    /// Most recently created phase occurs first (pop from end).
+    /// Consumed by `advance_phase()` — popped when transitioning between phases.
+    #[serde(default)]
+    pub extra_phases: Vec<Phase>,
+
     // N-player support
     #[serde(default)]
     pub seat_order: Vec<PlayerId>,
@@ -1212,6 +1218,7 @@ impl GameState {
             next_tracked_set_id: 1,
             commander_cast_count: HashMap::new(),
             extra_turns: Vec::new(),
+            extra_phases: Vec::new(),
             seat_order,
             format_config: config,
             eliminated_players: Vec::new(),

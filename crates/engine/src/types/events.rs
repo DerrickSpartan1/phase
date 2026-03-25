@@ -264,6 +264,12 @@ pub enum GameEvent {
         player: PlayerId,
         delta: i32,
     },
+    /// CR 122.1: A player counter (poison, experience, rad, ticket, etc.) changed.
+    PlayerCounterChanged {
+        player: PlayerId,
+        counter_kind: String,
+        delta: i32,
+    },
     /// CR 700.14: Mana was spent on a spell cast, updating the cumulative total this turn.
     ManaExpended {
         player_id: PlayerId,

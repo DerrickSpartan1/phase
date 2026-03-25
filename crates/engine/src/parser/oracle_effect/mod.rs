@@ -1435,6 +1435,14 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         Effect::ExtraTurn { target } if *target == TargetFilter::Controller => {
             *target = subject_filter;
         }
+        // CR 122.1: "target player gets a poison counter" — inject subject target
+        Effect::GivePlayerCounter { target, .. } if *target == TargetFilter::Controller => {
+            *target = subject_filter;
+        }
+        // CR 500.8: "target player gets an additional combat phase" — inject subject target
+        Effect::AdditionalCombatPhase { target, .. } if *target == TargetFilter::Controller => {
+            *target = subject_filter;
+        }
         // CR 701.14a: "enchanted creature fights target creature" — the subject
         // of the fight is the enchanted/equipped creature, not the Aura/Equipment.
         Effect::Fight {
