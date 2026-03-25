@@ -64,9 +64,12 @@ export function useLongPress(
     clear();
   }, [clear]);
 
-  // Prevent the native context menu on long press (iOS/Android)
+  // Prevent the native context menu on long press (iOS/Android) but allow desktop right-click
   const onContextMenu = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
+    // Only suppress context menu triggered by touch (long-press), not mouse right-click
+    if (timerRef.current || firedRef.current) {
+      e.preventDefault();
+    }
   }, []);
 
   return {

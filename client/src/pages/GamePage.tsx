@@ -380,7 +380,10 @@ function GamePageContent({
       ? inspectedObj.back_face.name
       : inspectedObj.name
     : null;
-  const inspectedBackFaceName = inspectedObj?.back_face?.name ?? null;
+  // The "other" face: when viewing front, this is back_face; when viewing back, this is the front
+  const inspectedOtherFaceName = inspectedObj?.back_face
+    ? inspectedFaceIndex === 1 ? inspectedObj.name : inspectedObj.back_face.name
+    : null;
 
   useKeyboardShortcuts();
   usePreviewDismiss();
@@ -768,7 +771,7 @@ function GamePageContent({
 
 
       {/* Card preview overlay */}
-      <CardPreview cardName={inspectedCardName} backFaceName={inspectedBackFaceName} />
+      <CardPreview cardName={inspectedCardName} backFaceName={inspectedOtherFaceName} />
 
       {/* WaitingFor-driven prompt overlays (only for human player) */}
       {(waitingFor?.type === "TargetSelection" ||

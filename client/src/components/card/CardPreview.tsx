@@ -102,7 +102,12 @@ function CardPreviewInner({
 
   // On desktop, Ctrl swaps to the back face
   const showBackFace = !isMobile && ctrlHeld && backFaceName != null;
-  const displayName = showBackFace ? backFaceName! : cardName;
+  // Fetch back face image when Ctrl is held (hook must always be called, but with empty
+  // string when not needed so useCardImage short-circuits without a network request)
+  const backFaceImgResult = useCardImage(showBackFace ? backFaceName! : "", {
+    size: "normal",
+    faceIndex: 1,
+  });
 
   // Mobile overlay mode: centered with backdrop
   if (isMobile) {
@@ -118,6 +123,9 @@ function CardPreviewInner({
   }
 
   // Desktop mode: cursor-following or fixed position
+  const activeSrc = showBackFace ? backFaceImgResult.src : src;
+  const activeLoading = showBackFace ? backFaceImgResult.isLoading : isLoading;
+  const displayName = showBackFace ? backFaceName! : cardName;
   const showInfoPanel = obj?.zone === "Battlefield";
   const infoPanelHeight = showInfoPanel ? 120 : 0;
   const previewWidth =
@@ -173,12 +181,11 @@ function CardPreviewInner({
       ) : (
         <CardImagePreview
           cardName={displayName}
-          faceIndex={showBackFace ? 1 : faceIndex}
           classLevel={classLevel}
           showInfoPanel={showInfoPanel}
           obj={obj}
-          isLoading={isLoading}
-          src={src}
+          isLoading={activeLoading}
+          src={activeSrc}
           backFaceHint={backFaceName != null && !showBackFace ? "Hold Ctrl for back face" : null}
         />
       )}
@@ -219,7 +226,6 @@ function MobilePreviewOverlay({
         <div className="shrink-0">
           <CardImagePreview
             cardName={cardName}
-            faceIndex={faceIndex}
             classLevel={classLevel}
             showInfoPanel={showInfoPanel}
             obj={obj}
@@ -275,7 +281,6 @@ function BackFaceImage({ cardName, mobileMode }: { cardName: string; mobileMode?
 /** Shared card image preview used by both desktop and mobile modes */
 function CardImagePreview({
   cardName,
-  faceIndex,
   classLevel,
   showInfoPanel,
   obj,
@@ -285,7 +290,6 @@ function CardImagePreview({
   mobileMode,
 }: {
   cardName: string;
-  faceIndex?: number;
   classLevel?: number | null;
   showInfoPanel?: boolean;
   obj: GameObject | null;
@@ -294,16 +298,11 @@ function CardImagePreview({
   backFaceHint: string | null;
   mobileMode?: boolean;
 }) {
-  // When displaying back face on desktop (via Ctrl), use its own image
-  const backFaceImg = useCardImage(cardName, { size: "normal", faceIndex });
-  const displaySrc = faceIndex != null ? backFaceImg.src : src;
-  const displayLoading = faceIndex != null ? backFaceImg.isLoading : isLoading;
-
   const sizeClass = mobileMode
     ? "max-h-[75vh] w-[40vw] max-w-[300px]"
     : "max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] md:max-w-[45vw]";
 
-  if (displayLoading || !displaySrc) {
+  if (isLoading || !src) {
     return (
       <div className={`${sizeClass} aspect-[5/7] rounded-[4%] border border-gray-600 bg-gray-700 shadow-2xl animate-pulse`} />
     );
@@ -313,7 +312,7 @@ function CardImagePreview({
     <div className={`border border-gray-600 overflow-hidden shadow-2xl ${showInfoPanel ? "rounded-t-[4%] rounded-b-lg bg-gray-900" : "rounded-[4%]"}`}>
       <div className="relative rounded-[4%] overflow-hidden">
         <img
-          src={displaySrc}
+          src={src}
           alt={cardName}
           className={`${sizeClass} object-cover`}
           draggable={false}
