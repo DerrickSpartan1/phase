@@ -384,10 +384,11 @@ pub(super) fn apply_clause_continuation(
                 _ => {}
             }
         }
-        ContinuationAst::PutBackInAnyOrder => {
-            // CR 401.5: Absorbed into preceding Dig/RevealTop — the engine's DigChoice
-            // handler places remaining cards. If the Dig already has rest_destination
-            // set (e.g., by a preceding DigFromAmong), this is a no-op.
+        ContinuationAst::PutRest { destination } => {
+            // Absorbed into preceding Dig — sets rest_destination for unchosen cards.
+            // If the Dig already has rest_destination set (e.g., by a preceding
+            // DigFromAmong), this is a no-op. Note: RevealTop has no rest_destination
+            // field, so this is silently skipped for RevealTop predecessors.
             let Some(previous) = defs.last_mut() else {
                 return;
             };
@@ -396,8 +397,7 @@ pub(super) fn apply_clause_continuation(
             } = &mut *previous.effect
             {
                 if rest_destination.is_none() {
-                    // Default: rest goes to bottom of library (not graveyard)
-                    *rest_destination = Some(Zone::Library);
+                    *rest_destination = Some(destination);
                 }
             }
         }
@@ -484,7 +484,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::SearchDestination { .. } => false,
         ContinuationAst::SuspectLastCreated => matches!(current_effect, Effect::Suspect { .. }),
         ContinuationAst::CantRegenerate => true,
-        ContinuationAst::PutBackInAnyOrder => true,
+        ContinuationAst::PutRest { .. } => true,
         ContinuationAst::ChooseFromExile { .. } => true,
         ContinuationAst::EntersTappedAttacking => true,
         ContinuationAst::DigFromAmong { .. } => true,
@@ -644,15 +644,24 @@ pub(super) fn parse_followup_continuation_ast(
                 ])),
             })
         }
-        // CR 401.5: "put them back in any order" / "put the rest on top in any order"
-        // after Dig/RevealTop — signals player-chosen ordering of remaining cards.
+        // "put the rest on the bottom" / "put them back" / "put those cards into your graveyard"
+        // after Dig/RevealTop — sets rest_destination on the preceding Dig effect.
         Effect::Dig { .. } | Effect::RevealTop { .. }
-            if lower.contains("in any order")
-                && (lower.contains("put them back")
-                    || lower.contains("put the rest")
-                    || lower.contains("put those cards")) =>
+            if lower.contains("put them back")
+                || lower.contains("put the rest")
+                || lower.contains("put those cards") =>
         {
-            Some(ContinuationAst::PutBackInAnyOrder)
+            let destination = if lower.contains("into your graveyard")
+                || lower.contains("into their graveyard")
+            {
+                Zone::Graveyard
+            } else if lower.contains("into your hand") || lower.contains("into their hand") {
+                Zone::Hand
+            } else {
+                // Default: bottom of library (covers "on the bottom", "back in any order", etc.)
+                Zone::Library
+            };
+            Some(ContinuationAst::PutRest { destination })
         }
         // "create a ... token and suspect it" → chain suspect on last created token
         Effect::Token { .. } if lower.starts_with("suspect ") => {
@@ -898,5 +907,112 @@ mod tests {
         assert!(!starts_with_damage_clause("all creatures deal"));
         assert!(!starts_with_damage_clause("each player deals"));
         assert!(!starts_with_damage_clause("you lose 3 life"));
+    }
+
+    // --- parse_followup_continuation_ast: PutRest destination parsing ---
+
+    fn make_dig_effect() -> Effect {
+        Effect::Dig {
+            count: 3,
+            destination: None,
+            keep_count: None,
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: None,
+        }
+    }
+
+    #[test]
+    fn put_rest_bottom_of_library_with_any_order() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Put the rest on the bottom of your library in any order.",
+            &dig,
+        );
+        assert_eq!(
+            result,
+            Some(ContinuationAst::PutRest {
+                destination: Zone::Library
+            })
+        );
+    }
+
+    #[test]
+    fn put_rest_bottom_of_library_without_any_order() {
+        let dig = make_dig_effect();
+        let result =
+            parse_followup_continuation_ast("Put the rest on the bottom of your library.", &dig);
+        assert_eq!(
+            result,
+            Some(ContinuationAst::PutRest {
+                destination: Zone::Library
+            })
+        );
+    }
+
+    #[test]
+    fn put_rest_into_graveyard() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast("Put the rest into your graveyard.", &dig);
+        assert_eq!(
+            result,
+            Some(ContinuationAst::PutRest {
+                destination: Zone::Graveyard
+            })
+        );
+    }
+
+    #[test]
+    fn put_rest_random_order_bottom() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Put the rest on the bottom of your library in a random order.",
+            &dig,
+        );
+        assert_eq!(
+            result,
+            Some(ContinuationAst::PutRest {
+                destination: Zone::Library
+            })
+        );
+    }
+
+    #[test]
+    fn put_them_back_any_order() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast("Put them back in any order.", &dig);
+        assert_eq!(
+            result,
+            Some(ContinuationAst::PutRest {
+                destination: Zone::Library
+            })
+        );
+    }
+
+    #[test]
+    fn put_rest_into_hand() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast("Put the rest into your hand.", &dig);
+        assert_eq!(
+            result,
+            Some(ContinuationAst::PutRest {
+                destination: Zone::Hand
+            })
+        );
+    }
+
+    #[test]
+    fn put_those_cards_on_bottom() {
+        let dig = make_dig_effect();
+        let result = parse_followup_continuation_ast(
+            "Put those cards on the bottom of your library in any order.",
+            &dig,
+        );
+        assert_eq!(
+            result,
+            Some(ContinuationAst::PutRest {
+                destination: Zone::Library
+            })
+        );
     }
 }

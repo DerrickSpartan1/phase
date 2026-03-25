@@ -2,8 +2,8 @@ use super::animation::{animation_modifications, parse_animation_spec};
 use super::types::*;
 use super::{resolve_it_pronoun, ParseContext};
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ContinuousModification, Duration, Effect, FilterProp,
-    GainLifePlayer, PtValue, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
+    AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
+    FilterProp, GainLifePlayer, PtValue, QuantityExpr, QuantityRef, StaticDefinition, TargetFilter,
     TypedFilter,
 };
 use crate::types::statics::StaticMode;
@@ -202,6 +202,26 @@ fn parse_subject_application(subject: &str, ctx: &ParseContext) -> Option<Subjec
             return subject_filter_application(filter, true);
         }
     }
+    // "each of your opponents" / "each of those creatures" / "each of them" — variant of
+    // "each" with an interposed "of" that parse_target doesn't handle directly.
+    // Must check before "each " to avoid the generic "each" path swallowing "each of".
+    if let Some(remainder) = lower.strip_prefix("each of ") {
+        if remainder.starts_with("your opponents") || remainder.starts_with("your opponent") {
+            return subject_filter_application(
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                false,
+            );
+        }
+        // "each of those [creatures/players/...]" / "each of them" — anaphoric reference
+        // to the targets declared in the parent ability's sub_ability chain.
+        if remainder.starts_with("those ") || remainder.starts_with("them") {
+            return subject_filter_application(TargetFilter::ParentTarget, false);
+        }
+        // Fallback: strip "of " and re-route through parse_target as "each <remainder>"
+        let normalized = format!("each {remainder}");
+        let (filter, _) = parse_target(&normalized);
+        return subject_filter_application(filter, false);
+    }
     if lower.starts_with("all ") || lower.starts_with("each ") {
         let (filter, _) = parse_target(subject);
         return subject_filter_application(filter, false);
@@ -236,11 +256,18 @@ fn parse_subject_application(subject: &str, ctx: &ParseContext) -> Option<Subjec
             target: None,
         });
     }
-    if lower == "that player" {
+    if lower == "that player" || lower == "the player" {
         return Some(SubjectApplication {
             affected: TargetFilter::Player,
             target: None,
         });
+    }
+    // "an opponent" as subject — single opponent (two-player: equivalent to "each opponent").
+    if lower.starts_with("an opponent") {
+        return subject_filter_application(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            false,
+        );
     }
     // CR 506.3d: "defending player" as subject — resolves from combat state.
     if lower == "defending player" {
@@ -701,10 +728,12 @@ pub(super) fn deconjugate_verb(text: &str) -> String {
     format!("{}{}", base, rest)
 }
 
-pub(super) fn starts_with_subject_prefix(lower: &str) -> bool {
+pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
     [
         "all ",
+        "an opponent ",
         "defending player ",
+        "each of ",
         "each opponent ",
         "each player ",
         "enchanted ",
@@ -714,6 +743,7 @@ pub(super) fn starts_with_subject_prefix(lower: &str) -> bool {
         "target ",
         "that ",
         "the chosen ",
+        "the player ",
         "they ",
         "this ",
         "those ",
@@ -724,48 +754,50 @@ pub(super) fn starts_with_subject_prefix(lower: &str) -> bool {
     .any(|prefix| lower.starts_with(prefix))
 }
 
-pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
-    const VERBS: &[&str] = &[
-        "add",
-        "attack",
-        "become",
-        "block",
-        "can",
-        "cast",
-        "choose",
-        "connive",
-        "copy",
-        "counter",
-        "create",
-        "deal",
-        "discard",
-        "draw",
-        "exile",
-        "explore",
-        "fight",
-        "gain",
-        "get",
-        "have",
-        "look",
-        "lose",
-        "mill",
-        "pay",
-        "phase",
-        "put",
-        "regenerate",
-        "reveal",
-        "return",
-        "sacrifice",
-        "scry",
-        "search",
-        "shuffle",
-        "surveil",
-        "tap",
-        "transform",
-        "untap",
-        "win",
-    ];
+/// Verbs recognized for subject-predicate splitting in Oracle text.
+/// Also used by `gap_analysis` to classify unimplemented effect text.
+pub(crate) const PREDICATE_VERBS: &[&str] = &[
+    "add",
+    "attack",
+    "become",
+    "block",
+    "can",
+    "cast",
+    "choose",
+    "connive",
+    "copy",
+    "counter",
+    "create",
+    "deal",
+    "discard",
+    "draw",
+    "exile",
+    "explore",
+    "fight",
+    "gain",
+    "get",
+    "have",
+    "look",
+    "lose",
+    "mill",
+    "pay",
+    "phase",
+    "put",
+    "regenerate",
+    "reveal",
+    "return",
+    "sacrifice",
+    "scry",
+    "search",
+    "shuffle",
+    "surveil",
+    "tap",
+    "transform",
+    "untap",
+    "win",
+];
 
+pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
     let lower = text.to_lowercase();
     let mut word_start = None;
 
@@ -773,7 +805,7 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
         if ch.is_whitespace() {
             if let Some(start) = word_start.take() {
                 let token = &lower[start..idx];
-                if VERBS.contains(&super::normalize_verb_token(token).as_str()) {
+                if PREDICATE_VERBS.contains(&super::normalize_verb_token(token).as_str()) {
                     return Some(start);
                 }
             }
@@ -787,7 +819,7 @@ pub(super) fn find_predicate_start(text: &str) -> Option<usize> {
 
     if let Some(start) = word_start {
         let token = &lower[start..];
-        if VERBS.contains(&super::normalize_verb_token(token).as_str()) {
+        if PREDICATE_VERBS.contains(&super::normalize_verb_token(token).as_str()) {
             return Some(start);
         }
     }
@@ -809,5 +841,85 @@ fn add_another_property(filter: TargetFilter) -> TargetFilter {
             TargetFilter::Typed(tf)
         }
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn starts_with_subject_prefix_each_of() {
+        assert!(starts_with_subject_prefix("each of your opponents"));
+        assert!(starts_with_subject_prefix("each of those creatures"));
+        assert!(starts_with_subject_prefix("each of them"));
+    }
+
+    #[test]
+    fn starts_with_subject_prefix_an_opponent() {
+        assert!(starts_with_subject_prefix("an opponent discards a card"));
+        assert!(starts_with_subject_prefix(
+            "an opponent sacrifices a creature"
+        ));
+    }
+
+    #[test]
+    fn starts_with_subject_prefix_the_player() {
+        assert!(starts_with_subject_prefix("the player draws a card"));
+    }
+
+    #[test]
+    fn parse_subject_each_of_your_opponents() {
+        let ctx = ParseContext::default();
+        let result = parse_subject_application("each of your opponents", &ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert_eq!(
+            app.affected,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+        assert!(
+            app.target.is_none(),
+            "each of your opponents is non-targeted"
+        );
+    }
+
+    #[test]
+    fn parse_subject_each_of_them() {
+        let ctx = ParseContext::default();
+        let result = parse_subject_application("each of them", &ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert_eq!(app.affected, TargetFilter::ParentTarget);
+    }
+
+    #[test]
+    fn parse_subject_each_of_those_creatures() {
+        let ctx = ParseContext::default();
+        let result = parse_subject_application("each of those creatures", &ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert_eq!(app.affected, TargetFilter::ParentTarget);
+    }
+
+    #[test]
+    fn parse_subject_an_opponent() {
+        let ctx = ParseContext::default();
+        let result = parse_subject_application("an opponent", &ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert_eq!(
+            app.affected,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+    }
+
+    #[test]
+    fn parse_subject_the_player() {
+        let ctx = ParseContext::default();
+        let result = parse_subject_application("the player", &ctx);
+        assert!(result.is_some());
+        let app = result.unwrap();
+        assert_eq!(app.affected, TargetFilter::Player);
     }
 }

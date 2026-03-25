@@ -136,10 +136,12 @@ pub(super) enum ContinuationAst {
         count: u32,
         chooser: crate::types::ability::Chooser,
     },
-    /// CR 401.5: "Put them back in any order" / "put the rest on top in any order"
-    /// after Dig/RevealTop — the remaining cards go back to the library top.
-    /// The ordering choice is handled by the engine's WaitingFor flow.
-    PutBackInAnyOrder,
+    /// "Put the rest on the bottom/into your graveyard" after Dig/RevealTop —
+    /// sets `rest_destination` on the preceding Dig effect. The destination is
+    /// parsed from the text (bottom of library, graveyard, hand, etc.).
+    PutRest {
+        destination: Zone,
+    },
     /// CR 701.20e + CR 608.2c: "Put up to N [filter] from among them onto the battlefield/into
     /// your hand" after Dig — patches the Dig's keep_count, filter, destination, and rest_destination.
     DigFromAmong {
@@ -203,6 +205,11 @@ pub(super) enum ImperativeFamilyAst {
     Put(PutImperativeAst),
     YouMay {
         text: String,
+    },
+    /// CR 122.1: Give a player counters of a named type (poison, experience, rad, ticket, etc.).
+    GivePlayerCounter {
+        counter_kind: String,
+        count: QuantityExpr,
     },
 }
 
