@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getCachedImage, cacheImage, revokeImageUrl } from "../services/imageCache.ts";
+import { getCachedImage, revokeImageUrl } from "../services/imageCache.ts";
 import { fetchCardImageUrl, fetchTokenImageUrl } from "../services/scryfall.ts";
 
 interface UseCardImageOptions {
@@ -52,26 +52,16 @@ export function useCardImage(
           return;
         }
 
-        // Cache miss — resolve image URL from Scryfall API, then fetch and cache the blob
+        // Cache miss — resolve Scryfall CDN URL and set directly as img src
+        // (cross-origin images can't be fetched as blobs without CORS headers,
+        // but <img src> bypasses CORS; the browser HTTP cache handles repeat loads)
         const imageUrl = isToken
           ? await fetchTokenImageUrl(cardName, size)
           : await fetchCardImageUrl(cardName, faceIndex, size);
-        if (cancelled) return;
-
-        const response = await fetch(imageUrl);
-        if (cancelled) return;
-
-        if (response.ok) {
-          const blob = await response.blob();
-          if (cancelled) return;
-          await cacheImage(key, size, blob);
-          objectUrl = URL.createObjectURL(blob);
-          setSrc(objectUrl);
-        } else {
-          // Fallback to direct CDN URL if blob fetch fails
+        if (!cancelled) {
           setSrc(imageUrl);
+          setIsLoading(false);
         }
-        setIsLoading(false);
       } catch {
         if (!cancelled) {
           setIsLoading(false);
