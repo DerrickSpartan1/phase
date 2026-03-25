@@ -23,6 +23,10 @@ echo "Step 2/3: Installing frontend dependencies..."
 (cd client && pnpm install)
 
 echo ""
-echo "Step 3/3: Done!"
+echo "Step 3/3: Configuring git hooks..."
+git config core.hooksPath .githooks
+
+echo ""
+echo "Done!"
 echo ""
 echo "Run 'cd client && pnpm dev' to start the dev server."

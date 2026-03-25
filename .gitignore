@@ -34,8 +34,10 @@ data/mtgjson/AtomicCards.json
 !data/precons/
 !data/learned-weights.json
 
-# Tauri sidecar binaries (built by CI)
+# Tauri build output
 client/src-tauri/binaries/
+client/src-tauri/target/
+client/src-tauri/Cargo.lock
 
 # OS
 .DS_Store

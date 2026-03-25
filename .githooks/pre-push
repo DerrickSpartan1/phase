@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Running pre-push checks..."
+
+# Rust
+echo "  [rust] cargo fmt --check"
+cargo fmt --all -- --check
+
+echo "  [rust] cargo clippy"
+cargo clippy --all-targets -- -D warnings
+
+# Frontend
+echo "  [client] pnpm lint"
+(cd client && pnpm lint)
+
+echo "  [client] pnpm type-check"
+(cd client && pnpm run type-check)
+
+echo "All pre-push checks passed."

@@ -106,7 +106,10 @@ mod tests {
 
     #[test]
     fn additional_combat_pushes_begin_combat() {
-        let mut state = GameState { active_player: PlayerId(0), ..Default::default() };
+        let mut state = GameState {
+            active_player: PlayerId(0),
+            ..Default::default()
+        };
         let mut events = Vec::new();
         let ability = make_ability(TargetFilter::Controller, false, PlayerId(0));
 
@@ -117,7 +120,10 @@ mod tests {
 
     #[test]
     fn additional_combat_with_main_pushes_both() {
-        let mut state = GameState { active_player: PlayerId(0), ..Default::default() };
+        let mut state = GameState {
+            active_player: PlayerId(0),
+            ..Default::default()
+        };
         let mut events = Vec::new();
         let ability = make_ability(TargetFilter::Controller, true, PlayerId(0));
 
@@ -132,7 +138,10 @@ mod tests {
 
     #[test]
     fn cr_500_8_lifo_ordering() {
-        let mut state = GameState { active_player: PlayerId(0), ..Default::default() };
+        let mut state = GameState {
+            active_player: PlayerId(0),
+            ..Default::default()
+        };
         let mut events = Vec::new();
 
         // First effect: additional combat
@@ -156,7 +165,10 @@ mod tests {
     #[test]
     fn cr_500_10a_opponent_turn_no_phases_added() {
         // Active player is 1, but controller is 0
-        let mut state = GameState { active_player: PlayerId(1), ..Default::default() };
+        let mut state = GameState {
+            active_player: PlayerId(1),
+            ..Default::default()
+        };
         let mut events = Vec::new();
         let ability = make_ability(TargetFilter::Controller, false, PlayerId(0));
 
