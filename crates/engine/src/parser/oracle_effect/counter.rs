@@ -107,9 +107,9 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &ParseContext) -> Optio
         // CR 608.2k: Bare pronoun — context-dependent
         resolve_it_pronoun(ctx)
     } else {
-        let (t, rem) = parse_target(target_text);
+        let (t, _rem) = parse_target(target_text);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(rem, target_text);
+        super::types::assert_no_compound_remainder(_rem, target_text);
         t
     };
 
@@ -182,9 +182,9 @@ pub(super) fn try_parse_multiply_counter(lower: &str, ctx: &ParseContext) -> Opt
         // CR 608.2k: Bare pronoun — context-dependent
         resolve_it_pronoun(ctx)
     } else {
-        let (t, rem) = parse_target(target_text);
+        let (t, _rem) = parse_target(target_text);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(rem, target_text);
+        super::types::assert_no_compound_remainder(_rem, target_text);
         t
     };
 
@@ -201,9 +201,9 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &ParseContext) -> Option
     // CR 701.10e: "double the number of each kind of counter on ..." → all counter types
     if let Some(rest) = lower.strip_prefix("double the number of each kind of counter on ") {
         let target = if rest.starts_with("target ") {
-            let (t, rem) = parse_target(rest);
+            let (t, _rem) = parse_target(rest);
             #[cfg(debug_assertions)]
-            super::types::assert_no_compound_remainder(rem, rest);
+            super::types::assert_no_compound_remainder(_rem, rest);
             t
         } else if rest.starts_with("~") || rest.starts_with("this ") {
             TargetFilter::SelfRef
@@ -211,9 +211,9 @@ pub(super) fn try_parse_double_effect(lower: &str, ctx: &ParseContext) -> Option
             // CR 608.2k: Bare pronoun — context-dependent
             resolve_it_pronoun(ctx)
         } else {
-            let (t, rem) = parse_target(rest);
+            let (t, _rem) = parse_target(rest);
             #[cfg(debug_assertions)]
-            super::types::assert_no_compound_remainder(rem, rest);
+            super::types::assert_no_compound_remainder(_rem, rest);
             t
         };
         return Some(Effect::Double {

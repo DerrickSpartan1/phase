@@ -1143,7 +1143,7 @@ fn try_split_damage_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEff
 
     // Parse the sub-effect through the full clause pipeline (not just imperative),
     // because the sub-text may have a subject prefix like "you gain 3 life".
-    let sub_clause = parse_effect_clause(sub_text, ctx);
+    let mut sub_clause = parse_effect_clause(sub_text, ctx);
 
     // Guard: if the sub-text parsed to Unimplemented, it's likely a target phrase
     // continuation ("each creature and planeswalker they control") rather than an
@@ -1151,7 +1151,6 @@ fn try_split_damage_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEff
     if matches!(sub_clause.effect, Effect::Unimplemented { .. }) {
         return None;
     }
-    let mut sub_clause = sub_clause;
 
     // If the remainder contains anaphoric references ("it", "that creature", "them"),
     // replace the sub_effect's target with ParentTarget so it inherits the parent's targets.
