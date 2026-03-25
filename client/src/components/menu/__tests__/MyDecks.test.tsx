@@ -28,7 +28,7 @@ describe("MyDecks", () => {
     cleanup();
   });
 
-  it("prefilters commander selection context and allows show-all override", async () => {
+  it("prefilters commander selection context and hides incompatible decks", async () => {
     saveDeck("Commander Ready", {
       main: [{ name: "Island", count: 99 }],
       sideboard: [],
@@ -77,8 +77,8 @@ describe("MyDecks", () => {
     });
     expect(screen.getByText("Commander Ready")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Show all decks" }));
-    expect(screen.getByText("Off Format")).toBeInTheDocument();
+    // In select mode, no show-all override — incompatible decks stay hidden
+    expect(screen.queryByRole("button", { name: "Show all decks" })).not.toBeInTheDocument();
   });
 
   it("does not prefilter in free-for-all context", async () => {

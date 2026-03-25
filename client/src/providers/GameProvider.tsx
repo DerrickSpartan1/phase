@@ -11,7 +11,7 @@ import { STORAGE_KEY_PREFIX, loadActiveDeck } from "../constants/storage";
 import { getCachedFeed, listSubscriptions } from "../services/feedService";
 import type { FeedDeck } from "../types/feed";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
-import { dispatchAction } from "../game/dispatch";
+import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
 import { hostRoom, joinRoom } from "../network/connection";
 import { createPeerSession } from "../network/peer";
 import type { ParsedDeck } from "../services/deckParser";
@@ -228,11 +228,7 @@ export function GameProvider({
 
             p2pUnsubscribe = adapter.onEvent((event) => {
               if (event.type === "stateChanged") {
-                useGameStore.setState({
-                  gameState: event.state,
-                  waitingFor: event.state.waiting_for,
-                  legalActions: event.legalActions,
-                });
+                processRemoteUpdate(event.state, event.events, event.legalActions);
               }
               onP2PEventRef.current?.(event);
             });
@@ -254,11 +250,7 @@ export function GameProvider({
 
             p2pUnsubscribe = adapter.onEvent((event) => {
               if (event.type === "stateChanged") {
-                useGameStore.setState({
-                  gameState: event.state,
-                  waitingFor: event.state.waiting_for,
-                  legalActions: event.legalActions,
-                });
+                processRemoteUpdate(event.state, event.events, event.legalActions);
               }
               onP2PEventRef.current?.(event);
             });
@@ -323,15 +315,12 @@ export function GameProvider({
 
         wsUnsubscribe = wsAdapter.onEvent((event) => {
           if (event.type === "stateChanged") {
-            // Batch all state updates atomically so the auto-pass controller
-            // sees consistent waitingFor + legalActions in a single subscription tick.
+            // Ensure adapter is set before animating so state updates land correctly
             const needAdapter = !useGameStore.getState().adapter && wsAdapter;
-            useGameStore.setState({
-              gameState: event.state,
-              waitingFor: event.state.waiting_for,
-              legalActions: event.legalActions,
-              ...(needAdapter ? { adapter: wsAdapter } : {}),
-            });
+            if (needAdapter) {
+              useGameStore.setState({ adapter: wsAdapter });
+            }
+            processRemoteUpdate(event.state, event.events, event.legalActions);
             useMultiplayerStore.getState().setConnectionStatus("connected");
             if (
               event.state.match_phase === "Completed"

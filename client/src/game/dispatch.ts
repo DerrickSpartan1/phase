@@ -40,17 +40,29 @@ function scheduleSfxForSteps(steps: AnimationStep[], multiplier: number): void {
  */
 export let currentSnapshot = useAnimationStore.getState().captureSnapshot();
 
-interface PendingAction {
+interface PendingLocalAction {
+  kind: "local";
   action: GameAction;
   resolve: () => void;
   reject: (err: unknown) => void;
 }
 
+interface PendingRemoteUpdate {
+  kind: "remote";
+  state: GameState;
+  events: GameEvent[];
+  legalActions: GameAction[];
+  resolve: () => void;
+  reject: (err: unknown) => void;
+}
+
+type PendingWork = PendingLocalAction | PendingRemoteUpdate;
+
 /** Module-level mutex — replaces useRef from the hook version. */
 let isAnimating = false;
 
-/** Module-level queue — replaces pendingQueueRef from the hook version. */
-const pendingQueue: PendingAction[] = [];
+/** Unified queue for local actions and remote state updates. */
+const pendingQueue: PendingWork[] = [];
 
 async function processAction(action: GameAction): Promise<void> {
   const { adapter, gameState } = useGameStore.getState();
@@ -175,7 +187,11 @@ async function processQueue(): Promise<void> {
   while (pendingQueue.length > 0) {
     const next = pendingQueue.shift()!;
     try {
-      await processAction(next.action);
+      if (next.kind === "local") {
+        await processAction(next.action);
+      } else {
+        await processRemoteUpdateInner(next.state, next.events, next.legalActions);
+      }
       next.resolve();
     } catch (err) {
       next.reject(err);
@@ -199,13 +215,117 @@ async function processQueue(): Promise<void> {
 export async function dispatchAction(action: GameAction): Promise<void> {
   if (isAnimating) {
     return new Promise<void>((resolve, reject) => {
-      pendingQueue.push({ action, resolve, reject });
+      pendingQueue.push({ kind: "local", action, resolve, reject });
     });
   }
 
   isAnimating = true;
   try {
     await processAction(action);
+  } finally {
+    if (pendingQueue.length > 0) {
+      processQueue();
+    } else {
+      isAnimating = false;
+    }
+  }
+}
+
+/**
+ * Inner implementation for remote state updates — runs the animation pipeline.
+ */
+async function processRemoteUpdateInner(
+  state: GameState,
+  events: GameEvent[],
+  legalActions: GameAction[],
+): Promise<void> {
+  // 1. Capture snapshot before updating state (for position lookups during animation)
+  const snapshot = useAnimationStore.getState().captureSnapshot();
+  currentSnapshot = snapshot;
+
+  // 2. Flash turn banner
+  const turnEvent = events.find((e) => e.type === "TurnStarted");
+  if (turnEvent && "data" in turnEvent) {
+    const turnPlayerId = (turnEvent.data as { player_id: number }).player_id;
+    const myId = getPlayerId();
+    const gamePlayerCount = useGameStore.getState().gameState?.players.length ?? 2;
+    let bannerText: string;
+    if (turnPlayerId === myId) {
+      bannerText = "YOUR TURN";
+    } else if (gamePlayerCount > 2) {
+      const oppName = useMultiplayerStore.getState().opponentDisplayName;
+      bannerText = `${oppName ?? `OPP ${turnPlayerId + 1}`}'S TURN`;
+    } else {
+      const oppName = useMultiplayerStore.getState().opponentDisplayName;
+      bannerText = oppName ? `${oppName}'S TURN` : "THEIR TURN";
+    }
+    useUiStore.getState().flashTurnBanner(bannerText);
+  }
+
+  // 3. Normalize events into animation steps
+  const combatPacing = usePreferencesStore.getState().combatPacing;
+  const steps = normalizeEvents(events, { combatPacing });
+
+  // 4. Play animations (unless instant)
+  const speed = usePreferencesStore.getState().animationSpeed;
+  const multiplier = SPEED_MULTIPLIERS[speed];
+
+  if (steps.length > 0 && multiplier > 0) {
+    useAnimationStore.getState().enqueueSteps(steps);
+    scheduleSfxForSteps(steps, multiplier);
+
+    const totalDuration = steps.reduce(
+      (sum, step) => sum + step.duration * multiplier,
+      0,
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, totalDuration));
+  } else if (steps.length > 0) {
+    for (const step of steps) {
+      audioManager.playSfxForStep(step.effects);
+    }
+  }
+
+  // 5. Update game state after animations complete
+  useGameStore.setState((prev) => ({
+    gameState: state,
+    events,
+    eventHistory: [...prev.eventHistory, ...events].slice(-1000),
+    waitingFor: state.waiting_for,
+    legalActions,
+  }));
+
+  // 6. Play victory/defeat stinger on GameOver
+  const gameOverEvent = events.find((e) => e.type === "GameOver");
+  if (gameOverEvent && gameOverEvent.type === "GameOver") {
+    const winner = (gameOverEvent.data as { winner: number | null }).winner;
+    if (winner === null) {
+      audioManager.stopMusic(2.0);
+    } else {
+      const myId = getPlayerId();
+      audioManager.playStinger(winner === myId ? "victory" : "defeat");
+    }
+  }
+}
+
+/**
+ * Process an incoming remote state update (opponent's action in multiplayer/P2P).
+ * Shares the animation mutex with dispatchAction so remote updates queue behind
+ * local actions and vice versa — no overlapping animations.
+ */
+export async function processRemoteUpdate(
+  state: GameState,
+  events: GameEvent[],
+  legalActions: GameAction[],
+): Promise<void> {
+  if (isAnimating) {
+    return new Promise<void>((resolve, reject) => {
+      pendingQueue.push({ kind: "remote", state, events, legalActions, resolve, reject });
+    });
+  }
+
+  isAnimating = true;
+  try {
+    await processRemoteUpdateInner(state, events, legalActions);
   } finally {
     if (pendingQueue.length > 0) {
       processQueue();
