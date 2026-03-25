@@ -43,22 +43,6 @@ export default defineConfig({
             },
           },
           {
-            urlPattern: /^https:\/\/api\.scryfall\.com\//,
-            handler: "NetworkFirst",
-            options: {
-              cacheName: "scryfall-api",
-              expiration: { maxEntries: 500, maxAgeSeconds: 86400 },
-            },
-          },
-          {
-            urlPattern: /^https:\/\/cards\.scryfall\.io\//,
-            handler: "CacheFirst",
-            options: {
-              cacheName: "scryfall-images",
-              expiration: { maxEntries: 2000, maxAgeSeconds: 604800 },
-            },
-          },
-          {
             urlPattern: /^https:\/\/pub-fc5b5c2c6e774356ae3e730bb0326394\.r2\.dev\/audio\//,
             handler: "CacheFirst",
             options: {

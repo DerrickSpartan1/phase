@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getCachedImage, revokeImageUrl } from "../services/imageCache.ts";
+import { getCachedImage, cacheImage, revokeImageUrl } from "../services/imageCache.ts";
 import { fetchCardImageUrl, fetchTokenImageUrl } from "../services/scryfall.ts";
 
 interface UseCardImageOptions {
@@ -24,6 +24,12 @@ export function useCardImage(
   const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
+    if (!cardName) {
+      setSrc(null);
+      setIsLoading(false);
+      return;
+    }
+
     let cancelled = false;
     let objectUrl: string | null = null;
 
@@ -32,9 +38,9 @@ export function useCardImage(
       setSrc(null);
 
       try {
-        // Check cache first (tokens use a prefixed key to avoid collisions)
-        const cacheKey = isToken ? `token:${cardName}` : cardName;
-        const cached = await getCachedImage(cacheKey, size);
+        // Check IndexedDB cache first (tokens use a prefixed key to avoid collisions)
+        const key = isToken ? `token:${cardName}` : cardName;
+        const cached = await getCachedImage(key, size);
         if (cached) {
           if (!cancelled) {
             objectUrl = cached;
@@ -46,14 +52,26 @@ export function useCardImage(
           return;
         }
 
-        // Cache miss - fetch from Scryfall
-        const directUrl = isToken
+        // Cache miss — resolve image URL from Scryfall API, then fetch and cache the blob
+        const imageUrl = isToken
           ? await fetchTokenImageUrl(cardName, size)
           : await fetchCardImageUrl(cardName, faceIndex, size);
-        if (!cancelled) {
-          setSrc(directUrl);
-          setIsLoading(false);
+        if (cancelled) return;
+
+        const response = await fetch(imageUrl);
+        if (cancelled) return;
+
+        if (response.ok) {
+          const blob = await response.blob();
+          if (cancelled) return;
+          await cacheImage(key, size, blob);
+          objectUrl = URL.createObjectURL(blob);
+          setSrc(objectUrl);
+        } else {
+          // Fallback to direct CDN URL if blob fetch fails
+          setSrc(imageUrl);
         }
+        setIsLoading(false);
       } catch {
         if (!cancelled) {
           setIsLoading(false);
