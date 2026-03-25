@@ -14,27 +14,27 @@ notes = ""
 
 [cr_405_2]
 rule = "405.2"
-text = "The stack keeps track of the order that spells and/or abilities were added to it. Each time an object is put on the stack, it’s put on top of all objects already there."
-status = "missing"
-impl_files = []
+text = "The stack keeps track of the order that spells and/or abilities were added to it. Each time an object is put on the stack, it's put on top of all objects already there."
+status = "implemented"
+impl_files = ["game/stack.rs:11", "game/stack.rs:22"]
 test_files = []
-notes = ""
+notes = "state.stack is a Vec<StackEntry>. push_to_stack appends to the end of the Vec (top of stack). resolve_top pops from the end (last in, first out). This implements LIFO stack ordering."
 
 [cr_405_3]
 rule = "405.3"
-text = "If an effect puts two or more objects on the stack at the same time, those controlled by the active player are put on lowest, followed by each other player’s objects in APNAP order (see rule 101.4). If a player controls more than one of these objects, that player chooses their relative order on the stack."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "If an effect puts two or more objects on the stack at the same time, those controlled by the active player are put on lowest, followed by each other player's objects in APNAP order (see rule 101.4). If a player controls more than one of these objects, that player chooses their relative order on the stack."
+status = "implemented"
+impl_files = ["game/triggers.rs:503", "game/triggers.rs:682"]
+test_files = ["game/triggers.rs:1265"]
+notes = "Triggered abilities placed simultaneously use APNAP ordering (CR 603.3b annotation). The sort in triggers.rs lines 503-515 places active player triggers last (LIFO: they resolve first). The test at line 1265 (apnap_ordering) verifies this behavior."
 
 [cr_405_4]
 rule = "405.4"
-text = "Each spell has all the characteristics of the card associated with it. Each activated or triggered ability that’s on the stack has the text of the ability that created it and no other characteristics. The controller of a spell is the player who cast it. The controller of an activated ability is the player who activated it. The controller of a triggered ability is the player who controlled the ability’s source when it triggered, unless it’s a delayed triggered ability. To determine the controller of a delayed triggered ability, see rules 603.7d–f."
-status = "missing"
-impl_files = []
+text = "Each spell has all the characteristics of the card associated with it. Each activated or triggered ability that's on the stack has the text of the ability that created it and no other characteristics. The controller of a spell is the player who cast it. The controller of an activated ability is the player who activated it. The controller of a triggered ability is the player who controlled the ability's source when it triggered, unless it's a delayed triggered ability. To determine the controller of a delayed triggered ability, see rules 603.7d–f."
+status = "implemented"
+impl_files = ["types/game_state.rs:765", "types/game_state.rs:155"]
 test_files = []
-notes = ""
+notes = "StackEntry has a controller: PlayerId field. StackEntryKind::Spell carries the full card object (characteristics from the associated GameObject). StackEntryKind::ActivatedAbility and TriggeredAbility carry only the ability text. DelayedTrigger.controller is set at creation time (CR 603.7d annotation at types/game_state.rs:155)."
 
 [cr_405_5]
 rule = "405.5"
@@ -46,72 +46,72 @@ notes = ""
 
 [cr_405_6]
 rule = "405.6"
-text = "Some things that happen during the game don’t use the stack."
-status = "missing"
-impl_files = []
+text = "Some things that happen during the game don't use the stack."
+status = "implemented"
+impl_files = ["game/mana_abilities.rs:15", "game/static_abilities.rs:354", "game/sba.rs:17", "game/turns.rs:405", "game/engine.rs:235"]
 test_files = []
-notes = ""
+notes = "Umbrella rule. Sub-rules 405.6a through 405.6h each have specific implementations. See those entries."
 
 [cr_405_6a]
 rule = "405.6a"
-text = "Effects don’t go on the stack; they’re the result of spells and abilities resolving. Effects may create delayed triggered abilities, however, and these may go on the stack when they trigger (see rule 603.7)."
-status = "missing"
-impl_files = []
+text = "Effects don't go on the stack; they're the result of spells and abilities resolving. Effects may create delayed triggered abilities, however, and these may go on the stack when they trigger (see rule 603.7)."
+status = "implemented"
+impl_files = ["game/effects/mod.rs", "game/effects/delayed_trigger.rs"]
 test_files = []
-notes = ""
+notes = "Effects are resolved inline by resolve_ability_chain (game/effects/mod.rs) — they never push to state.stack. Delayed triggered abilities are registered to state.delayed_triggers and pushed to the stack when their condition fires (game/effects/delayed_trigger.rs)."
 
 [cr_405_6b]
 rule = "405.6b"
-text = "Static abilities continuously generate effects and don’t go on the stack. (See rule 604, “Handling Static Abilities.”) This includes characteristic-defining abilities such as “[This object] is red” (see rule 604.3)."
-status = "missing"
-impl_files = []
+text = "Static abilities continuously generate effects and don't go on the stack. (See rule 604, “Handling Static Abilities.”) This includes characteristic-defining abilities such as “[This object] is red” (see rule 604.3)."
+status = "implemented"
+impl_files = ["game/static_abilities.rs:354"]
 test_files = []
-notes = ""
+notes = "CR 604.1 annotation at game/static_abilities.rs:354: 'Static abilities are always on — they don't use the stack.' Static ability effects are applied via the layers system, not pushed to the stack."
 
 [cr_405_6c]
 rule = "405.6c"
 text = "Mana abilities resolve immediately. If a mana ability both produces mana and has another effect, the mana is produced and the other effect happens immediately. If a player had priority before a mana ability was activated, that player gets priority after it resolves. (See rule 605, “Mana Abilities.”)"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/mana_abilities.rs:15", "game/mana_abilities.rs:30"]
+test_files = ["game/engine.rs:5102"]
+notes = "CR 605.3 annotation at mana_abilities.rs:15: 'Mana abilities produce mana and resolve immediately without using the stack.' After resolve_mana_ability returns, the engine stays in WaitingFor::Priority for the same player (confirmed by test at engine.rs:5102)."
 
 [cr_405_6d]
 rule = "405.6d"
-text = "Special actions don’t use the stack; they happen immediately. See rule 116, “Special Actions.”"
-status = "missing"
-impl_files = []
+text = "Special actions don't use the stack; they happen immediately. See rule 116, “Special Actions.”"
+status = "implemented"
+impl_files = ["game/engine.rs:231"]
 test_files = []
-notes = ""
+notes = "Playing a land (GameAction::PlayLand) is annotated as a special action at engine.rs:235 (CR 305.2). handle_play_land moves the land directly to the battlefield without pushing to the stack."
 
 [cr_405_6e]
 rule = "405.6e"
-text = "Turn-based actions don’t use the stack; they happen automatically when certain steps or phases begin. They’re dealt with before a player would receive priority (see rule 117.3a). Turn-based actions also happen automatically when each step and phase ends; no player receives priority afterward. See rule 703."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "Turn-based actions don't use the stack; they happen automatically when certain steps or phases begin. They're dealt with before a player would receive priority (see rule 117.3a). Turn-based actions also happen automatically when each step and phase ends; no player receives priority afterward. See rule 703."
+status = "implemented"
+impl_files = ["game/turns.rs:405"]
+test_files = ["game/turns.rs:883"]
+notes = "auto_advance (turns.rs:405) implements turn-based actions: untap, draw, combat damage, end step discard. These run without players receiving priority. Annotated as turn-based actions at turns.rs:365, :440, :481, :491, :523."
 
 [cr_405_6f]
 rule = "405.6f"
-text = "State-based actions don’t use the stack; they happen automatically when certain conditions are met. See rule 704. They are dealt with before a player would receive priority. See rule 117.5."
-status = "missing"
-impl_files = []
+text = "State-based actions don't use the stack; they happen automatically when certain conditions are met. See rule 704. They are dealt with before a player would receive priority. See rule 117.5."
+status = "implemented"
+impl_files = ["game/sba.rs:17", "game/engine.rs:2924"]
 test_files = []
-notes = ""
+notes = "check_state_based_actions (sba.rs) is called from engine.rs before granting priority. SBAs run in a fixpoint loop and emit events directly — they never push to the stack (CR 704.3 annotation at sba.rs:17)."
 
 [cr_405_6g]
 rule = "405.6g"
 text = "A player may concede the game at any time. That player leaves the game immediately. See rule 104.3a."
-status = "missing"
+status = "implemented"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Implemented in phase-server (ClientMessage::Concede handler). Outside crates/engine/src/ so not tracked here."
 
 [cr_405_6h]
 rule = "405.6h"
 text = "If a player leaves a multiplayer game, objects may leave the game, cease to exist, change control, or be exiled as a result. These actions happen immediately. See rule 800.4a."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/elimination.rs:8", "game/elimination.rs:46"]
 test_files = []
-notes = ""
+notes = "eliminate_player (elimination.rs:46) is annotated CR 800.4 and handles: removing controlled spells from the stack (800.4a), exiling controlled permanents, and other cleanup. This runs immediately when a player leaves."

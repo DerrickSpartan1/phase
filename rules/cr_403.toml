@@ -6,19 +6,19 @@ title = "Battlefield"
 
 [cr_403_1]
 rule = "403.1"
-text = "Most of the area between the players represents the battlefield. The battlefield starts out empty. Permanents a player controls are normally kept in front of them on the battlefield, though there are some cases (such as an Aura attached to another player’s permanent) when a permanent one player controls is kept closer to a different player."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "Most of the area between the players represents the battlefield. The battlefield starts out empty. Permanents a player controls are normally kept in front of them on the battlefield, though there are some cases (such as an Aura attached to another player's permanent) when a permanent one player controls is kept closer to a different player."
+status = "implemented"
+impl_files = ["types/game_state.rs:1187"]
+test_files = ["types/game_state.rs:1452"]
+notes = "GameState::new_two_player initializes state.battlefield as Vec::new() (empty). The test at line 1452 asserts state.battlefield.is_empty() at game start. Controller vs. owner distinction is tracked via GameObject.controller and .owner fields."
 
 [cr_403_2]
 rule = "403.2"
 text = "A spell or ability affects and checks only the battlefield unless it specifically mentions a player or another zone."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/filter.rs:163"]
 test_files = []
-notes = ""
+notes = "The default TargetFilter evaluation in game/filter.rs checks Zone::Battlefield for permanents (CR 403.3 annotation at line 163). Effects and filters that operate on other zones explicitly specify them (e.g., Zone::Graveyard, Zone::Hand). The default assumption is battlefield-only."
 
 [cr_403_3]
 rule = "403.3"
@@ -39,7 +39,7 @@ notes = ""
 [cr_403_5]
 rule = "403.5"
 text = "Previously, the battlefield was called the “in-play zone.” Cards that were printed with text that contains the phrases “in play,” “from play,” “into play,” or the like are referring to the battlefield. Cards that were printed with that text have received errata in the Oracle card reference."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "This is an errata/legacy rule for pre-M10 card text. All Oracle text in this engine comes from MTGJSON which uses current errata'd wording. No engine code needs to handle the old 'in play' phrasing."

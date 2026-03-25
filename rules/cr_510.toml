@@ -6,7 +6,7 @@ title = "Combat Damage Step"
 
 [cr_510_1]
 rule = "510.1"
-text = "First, the active player announces how each attacking creature assigns its combat damage, then the defending player announces how each blocking creature assigns its combat damage. This turn-based action doesn’t use the stack. A player assigns a creature’s combat damage according to the following rules:"
+text = "First, the active player announces how each attacking creature assigns its combat damage, then the defending player announces how each blocking creature assigns its combat damage. This turn-based action doesn't use the stack. A player assigns a creature's combat damage according to the following rules:"
 status = "implemented"
 impl_files = ["game/combat_damage.rs:18", "game/combat_damage.rs:60", "game/filter.rs:354", "game/game_object.rs:266", "game/turns.rs:523", "parser/oracle_target.rs:1177", "parser/oracle_target.rs:1235", "types/ability.rs:843"]
 test_files = []
@@ -14,7 +14,7 @@ notes = ""
 
 [cr_510_1a]
 rule = "510.1a"
-text = "Each attacking creature and each blocking creature assigns combat damage equal to its power. Creatures that would assign 0 or less damage this way don’t assign combat damage at all."
+text = "Each attacking creature and each blocking creature assigns combat damage equal to its power. Creatures that would assign 0 or less damage this way don't assign combat damage at all."
 status = "implemented"
 impl_files = ["game/combat_damage.rs:13", "game/combat_damage.rs:21"]
 test_files = []
@@ -22,7 +22,7 @@ notes = ""
 
 [cr_510_1b]
 rule = "510.1b"
-text = "An unblocked creature assigns its combat damage to the player, planeswalker, or battle it’s attacking. If it isn’t currently attacking anything (if, for example, it was attacking a planeswalker that has left the battlefield), it assigns no combat damage."
+text = "An unblocked creature assigns its combat damage to the player, planeswalker, or battle it's attacking. If it isn't currently attacking anything (if, for example, it was attacking a planeswalker that has left the battlefield), it assigns no combat damage."
 status = "implemented"
 impl_files = ["game/combat_damage.rs:365"]
 test_files = []
@@ -38,7 +38,7 @@ notes = ""
 
 [cr_510_1d]
 rule = "510.1d"
-text = "A blocking creature assigns combat damage to the creatures it’s blocking. If it isn’t currently blocking any creatures (if, for example, they were destroyed or removed from combat), it assigns no combat damage. If it’s blocking exactly one creature, it assigns all its combat damage to that creature. If it’s blocking two or more creatures, it assigns its combat damage divided as its controller chooses among them."
+text = "A blocking creature assigns combat damage to the creatures it's blocking. If it isn't currently blocking any creatures (if, for example, they were destroyed or removed from combat), it assigns no combat damage. If it's blocking exactly one creature, it assigns all its combat damage to that creature. If it's blocking two or more creatures, it assigns its combat damage divided as its controller chooses among them."
 status = "implemented"
 impl_files = ["game/combat_damage.rs:243", "game/combat_damage.rs:286"]
 test_files = []
@@ -46,15 +46,15 @@ notes = ""
 
 [cr_510_1e]
 rule = "510.1e"
-text = "Once a player has assigned combat damage from each attacking or blocking creature they control, the total damage assignment (not solely the damage assignment of any individual attacking or blocking creature) is checked to see if it complies with the above rules. If it doesn’t, the combat damage assignment is illegal; the game returns to the moment before that player began to assign combat damage. (See rule 732, “Handling Illegal Actions.”)"
-status = "missing"
-impl_files = []
+text = "Once a player has assigned combat damage from each attacking or blocking creature they control, the total damage assignment (not solely the damage assignment of any individual attacking or blocking creature) is checked to see if it complies with the above rules. If it doesn't, the combat damage assignment is illegal; the game returns to the moment before that player began to assign combat damage. (See rule 732, \"Handling Illegal Actions.\")"
+status = "partial"
+impl_files = ["game/combat_damage.rs:191", "game/combat_damage.rs:329"]
 test_files = []
-notes = ""
+notes = "The engine validates that each individual creature's damage assignment is legal (non-negative, assigns to valid targets) but does not perform a post-declaration total-legality check across all assignments simultaneously."
 
 [cr_510_2]
 rule = "510.2"
-text = "Second, all combat damage that’s been assigned is dealt simultaneously. This turn-based action doesn’t use the stack. No player has the chance to cast spells or activate abilities between the time combat damage is assigned and the time it’s dealt."
+text = "Second, all combat damage that's been assigned is dealt simultaneously. This turn-based action doesn't use the stack. No player has the chance to cast spells or activate abilities between the time combat damage is assigned and the time it's dealt."
 status = "implemented"
 impl_files = ["game/combat.rs:36", "game/combat_damage.rs:100", "game/combat_damage.rs:118", "game/combat_damage.rs:428", "game/turns.rs:523"]
 test_files = []
@@ -62,19 +62,19 @@ notes = ""
 
 [cr_510_3]
 rule = "510.3"
-text = "Third, the active player gets priority. (See rule 117, “Timing and Priority.”)"
-status = "missing"
-impl_files = []
+text = "Third, the active player gets priority. (See rule 117, \"Timing and Priority.\")"
+status = "implemented"
+impl_files = ["game/turns.rs:535"]
 test_files = []
-notes = ""
+notes = "After resolve_combat_damage() completes and any triggers/SBAs fire, auto_advance() returns WaitingFor::Priority if the stack is non-empty, otherwise advances to EndCombat and checks for end-of-combat triggers before granting priority."
 
 [cr_510_3a]
 rule = "510.3a"
-text = "Any abilities that triggered on damage being dealt or while state-based actions are performed afterward are put onto the stack before the active player gets priority; the order in which they triggered doesn’t matter. (See rule 603, “Handling Triggered Abilities.”)"
-status = "missing"
-impl_files = []
+text = "Any abilities that triggered on damage being dealt or while state-based actions are performed afterward are put onto the stack before the active player gets priority; the order in which they triggered doesn't matter. (See rule 603, \"Handling Triggered Abilities.\")"
+status = "implemented"
+impl_files = ["game/combat_damage.rs:428", "game/turns.rs:533"]
 test_files = []
-notes = ""
+notes = "combat_damage::resolve_combat_damage() processes SBAs and triggers after dealing damage. auto_advance() then grants priority if the stack is non-empty, ensuring all triggered abilities are on the stack before priority is given."
 
 [cr_510_4]
 rule = "510.4"

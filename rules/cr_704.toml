@@ -6,31 +6,31 @@ title = "State-Based Actions"
 
 [cr_704_1]
 rule = "704.1"
-text = "State-based actions are game actions that happen automatically whenever certain conditions (listed below) are met. State-based actions don’t use the stack."
-status = "missing"
+text = "State-based actions are game actions that happen automatically whenever certain conditions (listed below) are met. State-based actions don't use the stack."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Definitional rule describing what SBAs are. No code implementation required; the check_state_based_actions function in game/sba.rs is the operational embodiment."
 
 [cr_704_1a]
 rule = "704.1a"
-text = "Abilities that watch for a specified game state are triggered abilities, not state-based actions. (See rule 603, “Handling Triggered Abilities.”)"
-status = "missing"
+text = "Abilities that watch for a specified game state are triggered abilities, not state-based actions. (See rule 603, \"Handling Triggered Abilities.\")"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Informational/definitional rule distinguishing triggered abilities from SBAs. No code required; the distinction is maintained architecturally (triggers in game/triggers.rs, SBAs in game/sba.rs)."
 
 [cr_704_2]
 rule = "704.2"
 text = "State-based actions are checked throughout the game and are not controlled by any player."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Informational rule. The automatic, uncontrolled nature is implemented by calling check_state_based_actions from game/engine.rs at priority grant points."
 
 [cr_704_3]
 rule = "704.3"
-text = "Whenever a player would get priority (see rule 117, “Timing and Priority”), the game checks for any of the listed conditions for state-based actions, then performs all applicable state-based actions simultaneously as a single event. If any state-based actions are performed as a result of a check, the check is repeated; otherwise all triggered abilities that are waiting to be put on the stack are put on the stack, then the check is repeated. Once no more state-based actions have been performed as the result of a check and no triggered abilities are waiting to be put on the stack, the appropriate player gets priority. This process also occurs during the cleanup step (see rule 514), except that if no state-based actions are performed as the result of the step’s first check and no triggered abilities are waiting to be put on the stack, then no player gets priority and the step ends."
+text = "Whenever a player would get priority (see rule 117, \"Timing and Priority\"), the game checks for any of the listed conditions for state-based actions, then performs all applicable state-based actions simultaneously as a single event. If any state-based actions are performed as a result of a check, the check is repeated; otherwise all triggered abilities that are waiting to be put on the stack are put on the stack, then the check is repeated. Once no more state-based actions have been performed as the result of a check and no triggered abilities are waiting to be put on the stack, the appropriate player gets priority. This process also occurs during the cleanup step (see rule 514), except that if no state-based actions are performed as the result of the step's first check and no triggered abilities are waiting to be put on the stack, then no player gets priority and the step ends."
 status = "implemented"
 impl_files = ["game/combat_damage.rs:26", "game/combat_damage.rs:43", "game/combat_damage.rs:1188", "game/combat_damage.rs:1253", "game/engine.rs:2889", "game/sba.rs:17", "game/turns.rs:529"]
 test_files = []
@@ -39,10 +39,10 @@ notes = ""
 [cr_704_4]
 rule = "704.4"
 text = "Unlike triggered abilities, state-based actions pay no attention to what happens during the resolution of a spell or ability."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Informational rule. The engine enforces this implicitly: check_state_based_actions is only called at priority-grant points (game/engine.rs), never during spell/ability resolution. No executable code needed."
 
 [cr_704_5]
 rule = "704.5"
@@ -90,11 +90,11 @@ text = "If a copy of a spell is in a zone other than the stack, it ceases to exi
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No check_copy_cease_to_exist function in game/sba.rs. The check_token_cease_to_exist function (sba.rs:581) only handles tokens (is_token flag), not spell/card copies. The copy_spell effect (game/effects/copy_spell.rs) creates copies on the stack but no SBA cleanup is wired for copies that end up in other zones."
 
 [cr_704_5f]
 rule = "704.5f"
-text = "If a creature has toughness 0 or less, it’s put into its owner’s graveyard. Regeneration can’t replace this event."
+text = "If a creature has toughness 0 or less, it's put into its owner's graveyard. Regeneration can't replace this event."
 status = "implemented"
 impl_files = ["game/sba.rs:89", "game/sba.rs:213"]
 test_files = []
@@ -110,7 +110,7 @@ notes = ""
 
 [cr_704_5h]
 rule = "704.5h"
-text = "If a creature has toughness greater than 0, and it’s been dealt damage by a source with deathtouch since the last time state-based actions were checked, that creature is destroyed. Regeneration can replace this event."
+text = "If a creature has toughness greater than 0, and it's been dealt damage by a source with deathtouch since the last time state-based actions were checked, that creature is destroyed. Regeneration can replace this event."
 status = "implemented"
 impl_files = ["game/sba.rs:241"]
 test_files = []
@@ -118,7 +118,7 @@ notes = ""
 
 [cr_704_5i]
 rule = "704.5i"
-text = "If a planeswalker has loyalty 0, it’s put into its owner’s graveyard."
+text = "If a planeswalker has loyalty 0, it's put into its owner's graveyard."
 status = "implemented"
 impl_files = ["game/sba.rs:111", "game/sba.rs:446"]
 test_files = []
@@ -126,7 +126,7 @@ notes = ""
 
 [cr_704_5j]
 rule = "704.5j"
-text = "If two or more legendary permanents with the same name are controlled by the same player, that player chooses one of them, and the rest are put into their owners’ graveyards. This is called the “legend rule.”"
+text = "If two or more legendary permanents with the same name are controlled by the same player, that player chooses one of them, and the rest are put into their owners' graveyards. This is called the \"legend rule.\""
 status = "implemented"
 impl_files = ["ai_support/candidates.rs:522", "game/engine.rs:2148", "game/engine.rs:2155", "game/sba.rs:100", "game/sba.rs:324", "game/sba.rs:361", "game/sba.rs:755", "game/sba.rs:1352", "types/actions.rs:139", "types/game_state.rs:588"]
 test_files = []
@@ -134,15 +134,15 @@ notes = ""
 
 [cr_704_5k]
 rule = "704.5k"
-text = "If two or more permanents have the supertype world, all except the one that has had the world supertype for the shortest amount of time are put into their owners’ graveyards. In the event of a tie for the shortest amount of time, all are put into their owners’ graveyards. This is called the “world rule.”"
+text = "If two or more permanents have the supertype world, all except the one that has had the world supertype for the shortest amount of time are put into their owners' graveyards. In the event of a tie for the shortest amount of time, all are put into their owners' graveyards. This is called the \"world rule.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Supertype::World is recognized in the type system (types/card_type.rs:25) but no SBA check for the world rule exists in game/sba.rs. No check_world_rule function is present."
 
 [cr_704_5m]
 rule = "704.5m"
-text = "If an Aura is attached to an illegal object or player, or is not attached to an object or player, that Aura is put into its owner’s graveyard."
+text = "If an Aura is attached to an illegal object or player, or is not attached to an object or player, that Aura is put into its owner's graveyard."
 status = "implemented"
 impl_files = ["game/sba.rs:104", "game/sba.rs:378"]
 test_files = []
@@ -158,11 +158,11 @@ notes = ""
 
 [cr_704_5p]
 rule = "704.5p"
-text = "If a battle or creature is attached to an object or player, it becomes unattached and remains on the battlefield. Similarly, if any nonbattle, noncreature permanent that’s neither an Aura, an Equipment, nor a Fortification is attached to an object or player, it becomes unattached and remains on the battlefield."
+text = "If a battle or creature is attached to an object or player, it becomes unattached and remains on the battlefield. Similarly, if any nonbattle, noncreature permanent that's neither an Aura, an Equipment, nor a Fortification is attached to an object or player, it becomes unattached and remains on the battlefield."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No SBA check for illegally attached non-Aura, non-Equipment permanents. game/sba.rs only checks Auras (check_unattached_auras) and Equipment (check_unattached_equipment). A battle or creature or other permanent with an attached_to set would not be caught and unattached."
 
 [cr_704_5q]
 rule = "704.5q"
@@ -174,15 +174,15 @@ notes = ""
 
 [cr_704_5r]
 rule = "704.5r"
-text = "If a permanent with an ability that says it can’t have more than N counters of a certain kind on it has more than N counters of that kind on it, all but N of those counters are removed from it."
+text = "If a permanent with an ability that says it can't have more than N counters of a certain kind on it has more than N counters of that kind on it, all but N of those counters are removed from it."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No SBA for maximum counter caps. The engine has no concept of a 'max counter' property on game objects and no check_max_counters function in game/sba.rs. Cards with this constraint (e.g. Darksteel Reactor's \"remove this from game\" when it has 20 charge counters, or Blade of the Oni's cap) would not be enforced."
 
 [cr_704_5s]
 rule = "704.5s"
-text = "If the number of lore counters on a Saga permanent with one or more chapter abilities is greater than or equal to its final chapter number and it isn’t the source of a chapter ability that has triggered but not yet left the stack, that Saga’s controller sacrifices it. See rule 714, “Saga Cards.”"
+text = "If the number of lore counters on a Saga permanent with one or more chapter abilities is greater than or equal to its final chapter number and it isn't the source of a chapter ability that has triggered but not yet left the stack, that Saga's controller sacrifices it. See rule 714, \"Saga Cards.\""
 status = "implemented"
 impl_files = ["game/sba.rs:114", "game/sba.rs:474"]
 test_files = []
@@ -190,87 +190,87 @@ notes = ""
 
 [cr_704_5t]
 rule = "704.5t"
-text = "If a player’s venture marker is on the bottommost room of a dungeon card, and that dungeon card isn’t the source of a room ability that has triggered but not yet left the stack, the dungeon card’s owner removes it from the game. See rule 309, “Dungeons.”"
+text = "If a player's venture marker is on the bottommost room of a dungeon card, and that dungeon card isn't the source of a room ability that has triggered but not yet left the stack, the dungeon card's owner removes it from the game. See rule 309, \"Dungeons.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Dungeon/venture mechanic is not implemented. CoreType::Dungeon exists in the type system (types/card_type.rs:82) and is listed in game/gap_analysis.rs as an unsupported mechanic. No venture marker, dungeon room tracking, or dungeon SBA check exists."
 
 [cr_704_5u]
 rule = "704.5u"
-text = "If a permanent with space sculptor and any creatures without a sector designation are on the battlefield, each player who controls one or more of those creatures and doesn’t control a permanent with space sculptor chooses a sector designation for each of those creatures they control. Then, each other player who controls one or more of those creatures chooses a sector designation for each of those creatures they control. See rule 702.158, “Space Sculptor.”"
+text = "If a permanent with space sculptor and any creatures without a sector designation are on the battlefield, each player who controls one or more of those creatures and doesn't control a permanent with space sculptor chooses a sector designation for each of those creatures they control. Then, each other player who controls one or more of those creatures chooses a sector designation for each of those creatures they control. See rule 702.158, \"Space Sculptor.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Space Sculptor keyword and sector designation mechanic are not implemented in the engine. No sector designation field on game objects, no space sculptor keyword in Keyword enum, and no SBA check."
 
 [cr_704_5v]
 rule = "704.5v"
-text = "If a battle has defense 0 and it isn’t the source of an ability that has triggered but not yet left the stack, it’s put into its owner’s graveyard."
+text = "If a battle has defense 0 and it isn't the source of an ability that has triggered but not yet left the stack, it's put into its owner's graveyard."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Battle card type exists (CoreType::Battle in types/card_type.rs:59) but battle SBA checks are not implemented. A TODO comment in game/effects/deal_damage.rs:336 notes that damage to a battle should remove defense counters (CR 120.3h), which is a prerequisite. No check_battle_defense_zero function in game/sba.rs."
 
 [cr_704_5w]
 rule = "704.5w"
-text = "If a battle has no player in the game designated as its protector and no attacking creatures are currently attacking that battle, that battle’s controller chooses an appropriate player to be its protector based on its battle type. If no player can be chosen this way, the battle is put into its owner’s graveyard. See rule 310, “Battles.”"
+text = "If a battle has no player in the game designated as its protector and no attacking creatures are currently attacking that battle, that battle's controller chooses an appropriate player to be its protector based on its battle type. If no player can be chosen this way, the battle is put into its owner's graveyard. See rule 310, \"Battles.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Battle protector mechanic is not implemented. No protector field on game objects and no SBA check for missing protectors."
 
 [cr_704_5x]
 rule = "704.5x"
-text = "If a Siege’s controller is also its designated protector, that player chooses an opponent to become its protector. If no player can be chosen this way, the battle is put into its owner’s graveyard. See rule 310, “Battles.”"
+text = "If a Siege's controller is also its designated protector, that player chooses an opponent to become its protector. If no player can be chosen this way, the battle is put into its owner's graveyard. See rule 310, \"Battles.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Siege subtype and protector mechanic are not implemented. No SBA check for Siege protector reassignment."
 
 [cr_704_5y]
 rule = "704.5y"
-text = "If a permanent has more than one Role controlled by the same player attached to it, each of those Roles except the one with the most recent timestamp is put into its owner’s graveyard."
+text = "If a permanent has more than one Role controlled by the same player attached to it, each of those Roles except the one with the most recent timestamp is put into its owner's graveyard."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Role enchantment subtype and the role-deduplication SBA are not implemented. No Role-specific type, timestamp tracking for roles, or SBA check in game/sba.rs."
 
 [cr_704_5z]
 rule = "704.5z"
-text = "If a player controls a permanent with start your engines! and that player has no speed, that player’s speed becomes 1. See rule 702.179, “Start Your Engines!”"
+text = "If a player controls a permanent with start your engines! and that player has no speed, that player's speed becomes 1. See rule 702.179, \"Start Your Engines!\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Start Your Engines! keyword and the speed mechanic are not implemented. No speed field on player state and no SBA check."
 
 [cr_704_6]
 rule = "704.6"
-text = "Some variant games include additional state-based actions that aren’t normally applicable:"
-status = "missing"
+text = "Some variant games include additional state-based actions that aren't normally applicable:"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Section header with no directly executable behavior. Variant-specific SBAs are listed individually in 704.6a–704.6f."
 
 [cr_704_6a]
 rule = "704.6a"
-text = "In a Two-Headed Giant game, if a team has 0 or less life, that team loses the game. See rule 810, “Two-Headed Giant Variant.”"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "In a Two-Headed Giant game, if a team has 0 or less life, that team loses the game. See rule 810, \"Two-Headed Giant Variant.\""
+status = "partial"
+impl_files = ["game/sba.rs:130", "game/elimination.rs:16", "game/elimination.rs:29"]
+test_files = ["game/sba.rs:1115"]
+notes = "The engine uses per-player life totals rather than a shared team life total. When any player hits 0 life in a 2HG game, eliminate_player propagates elimination to the whole team via the team_based flag (elimination.rs:29). This achieves the correct game outcome but does not model the 2HG shared life pool (CR 810.8): in 2HG both players on a team share a single life total starting at 30, and damage can be redirected to either player."
 
 [cr_704_6b]
 rule = "704.6b"
-text = "In a Two-Headed Giant game, if a team has fifteen or more poison counters, that team loses the game. See rule 810, “Two-Headed Giant Variant.”"
+text = "In a Two-Headed Giant game, if a team has fifteen or more poison counters, that team loses the game. See rule 810, \"Two-Headed Giant Variant.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No shared team poison counter tracking exists. The individual player poison check (check_poison_counters, sba.rs:72) uses a threshold of 10 and applies to each player independently, but CR 704.6c explicitly says to ignore 704.5c in 2HG games and instead use the team-level 15-counter threshold. No team-level poison check or format-conditional threshold switching is implemented."
 
 [cr_704_6c]
 rule = "704.6c"
-text = "In a Commander game, a player who’s been dealt 21 or more combat damage by the same commander over the course of the game loses the game. See rule 903, “Commander.”"
+text = "In a Commander game, a player who's been dealt 21 or more combat damage by the same commander over the course of the game loses the game. See rule 903, \"Commander.\""
 status = "implemented"
 impl_files = ["game/combat_damage.rs:490", "game/sba.rs:80", "game/sba.rs:187"]
 test_files = []
@@ -278,40 +278,40 @@ notes = ""
 
 [cr_704_6d]
 rule = "704.6d"
-text = "In a Commander game, if a commander is in a graveyard or in exile and that object was put into that zone since the last time state-based actions were checked, its owner may put it into the command zone. See rule 903, “Commander.”"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "In a Commander game, if a commander is in a graveyard or in exile and that object was put into that zone since the last time state-based actions were checked, its owner may put it into the command zone. See rule 903, \"Commander.\""
+status = "implemented"
+impl_files = ["game/commander.rs:29", "game/zones.rs:37"]
+test_files = ["game/commander.rs:256", "game/commander.rs:269"]
+notes = "Implemented as a zone-change redirect in move_to_zone (zones.rs:37) rather than a discrete SBA loop entry. When any zone move would send a commander to Graveyard or Exile, should_redirect_to_command_zone (commander.rs:29) intercepts and routes to Zone::Command instead. This is architecturally equivalent to the SBA described in CR 704.6d."
 
 [cr_704_6e]
 rule = "704.6e"
-text = "In an Archenemy game, if a non-ongoing scheme card is face up in the command zone, and no triggered abilities of any scheme are on the stack or waiting to be put on the stack, that scheme card is turned face down and put on the bottom of its owner’s scheme deck. See rule 904, “Archenemy.”"
+text = "In an Archenemy game, if a non-ongoing scheme card is face up in the command zone, and no triggered abilities of any scheme are on the stack or waiting to be put on the stack, that scheme card is turned face down and put on the bottom of its owner's scheme deck. See rule 904, \"Archenemy.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Archenemy variant is not implemented in the engine. No scheme card type, scheme deck, or related SBA check."
 
 [cr_704_6f]
 rule = "704.6f"
-text = "In a Planechase game, if a phenomenon card is face up in the command zone, and it isn’t the source of a triggered ability that has triggered but not yet left the stack, the planar controller planeswalks. See rule 901, “Planechase.”"
+text = "In a Planechase game, if a phenomenon card is face up in the command zone, and it isn't the source of a triggered ability that has triggered but not yet left the stack, the planar controller planeswalks. See rule 901, \"Planechase.\""
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Planechase variant is not implemented in the engine. No phenomenon card type, planar die, or planeswalking mechanic exists."
 
 [cr_704_7]
 rule = "704.7"
 text = "If multiple state-based actions would have the same result at the same time, a single replacement effect will replace all of them."
-status = "missing"
-impl_files = []
+status = "partial"
+impl_files = ["game/sba.rs:241", "game/replacement.rs"]
 test_files = []
-notes = ""
+notes = "The check_lethal_damage function (sba.rs:241) routes each destruction through the replacement pipeline via replacement::replace_event. However, the engine processes SBA candidates sequentially in a loop (sba.rs:53) rather than collecting all triggered replacements for simultaneous application. A single replacement effect would correctly fire once per creature group but the simultaneous-application guarantee of CR 704.7 is not fully modeled."
 
 [cr_704_8]
 rule = "704.8"
-text = "If a state-based action results in a permanent leaving the battlefield at the same time other state-based actions were performed, that permanent’s last known information is derived from the game state before any of those state-based actions were performed."
+text = "If a state-based action results in a permanent leaving the battlefield at the same time other state-based actions were performed, that permanent's last known information is derived from the game state before any of those state-based actions were performed."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Last Known Information (LKI) snapshotting for simultaneous SBA processing is not implemented. The SBA fixpoint loop (sba.rs:53) applies actions sequentially, meaning each action sees the game state after all prior actions in the same iteration. No pre-SBA-pass snapshot is taken or consulted."

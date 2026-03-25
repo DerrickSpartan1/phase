@@ -6,7 +6,7 @@ title = "Main Phase"
 
 [cr_505_1]
 rule = "505.1"
-text = "There are two main phases in a turn. In each turn, the first main phase (also known as the precombat main phase) and the second main phase (also known as the postcombat main phase) are separated by the combat phase (see rule 506, “Combat Phase”). The precombat and postcombat main phases are individually and collectively known as the main phase."
+text = "There are two main phases in a turn. In each turn, the first main phase (also known as the precombat main phase) and the second main phase (also known as the postcombat main phase) are separated by the combat phase (see rule 506, \"Combat Phase\"). The precombat and postcombat main phases are individually and collectively known as the main phase."
 status = "implemented"
 impl_files = ["game/turns.rs:444", "parser/oracle_trigger.rs:1546", "parser/oracle_trigger.rs:1549", "parser/oracle_trigger.rs:4462", "parser/oracle_trigger.rs:4474", "types/phase.rs:21", "types/phase.rs:36", "types/phase.rs:37"]
 test_files = []
@@ -15,58 +15,58 @@ notes = ""
 [cr_505_1a]
 rule = "505.1a"
 text = "Only the first main phase of the turn is a precombat main phase. All other main phases are postcombat main phases. This includes the second main phase of a turn in which the combat phase has been skipped. It is also true of a turn in which an effect has caused an additional combat phase and an additional main phase to be created."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["types/phase.rs:21", "types/phase.rs:38", "game/turns.rs:438"]
 test_files = []
-notes = ""
+notes = "Phase::PreCombatMain and Phase::PostCombatMain are distinct enum variants. auto_advance() always transitions Cleanup -> Untap -> ... -> PreCombatMain -> ... -> PostCombatMain in the defined order, so only the first main phase has the PreCombatMain identity. The second clause about skipped combat or additional combat phases is not applicable since neither mechanic is implemented."
 
 [cr_505_1b]
 rule = "505.1b"
-text = "In card text, phrases such as “first main phase,” “second main phase,” and so on count the number of main phases that have occurred only in the current turn unless that text specifies otherwise."
-status = "missing"
+text = "In card text, phrases such as \"first main phase,\" \"second main phase,\" and so on count the number of main phases that have occurred only in the current turn unless that text specifies otherwise."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Definitional clarification for card text parsing. The parser handles precombat/postcombat as named phases, not ordinal counts, covering all current card text in the supported set."
 
 [cr_505_2]
 rule = "505.2"
 text = "The main phase has no steps, so a main phase ends when all players pass in succession while the stack is empty. (See rule 500.2.)"
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/priority.rs:25", "game/priority.rs:30", "game/turns.rs:444"]
 test_files = []
-notes = ""
+notes = "Main phases return WaitingFor::Priority and end only when all players pass in succession with an empty stack via handle_priority_pass() in priority.rs."
 
 [cr_505_3]
 rule = "505.3"
-text = "First, but only if the players are playing an Archenemy game (see rule 904), the active player is the archenemy, and it’s the active player’s precombat main phase, the active player sets the top card of their scheme deck in motion (see rule 701.32). This turn-based action doesn’t use the stack."
-status = "missing"
+text = "First, but only if the players are playing an Archenemy game (see rule 904), the active player is the archenemy, and it's the active player's precombat main phase, the active player sets the top card of their scheme deck in motion (see rule 701.32). This turn-based action doesn't use the stack."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Archenemy variant is not implemented."
 
 [cr_505_4]
 rule = "505.4"
-text = "Second, if the active player controls one or more Saga enchantments and it’s the active player’s precombat main phase, the active player puts a lore counter on each Saga they control with one or more chapter abilities. (See rule 714, “Saga Cards.”) This turn-based action doesn’t use the stack."
-status = "missing"
-impl_files = []
+text = "Second, if the active player controls one or more Saga enchantments and it's the active player's precombat main phase, the active player puts a lore counter on each Saga they control with one or more chapter abilities. (See rule 714, \"Saga Cards.\") This turn-based action doesn't use the stack."
+status = "implemented"
+impl_files = ["game/turns.rs:364", "game/turns.rs:441"]
 test_files = []
-notes = ""
+notes = "add_lore_counters_to_sagas() is called as a turn-based action at the start of the precombat main phase in auto_advance()."
 
 [cr_505_5]
 rule = "505.5"
-text = "Third, if the active player controls one or more Attractions and it’s the active player’s precombat main phase, the active player rolls to visit their Attractions. (See rule 701.52, “Roll to Visit Your Attractions.”) This turn-based action doesn’t use the stack."
-status = "missing"
+text = "Third, if the active player controls one or more Attractions and it's the active player's precombat main phase, the active player rolls to visit their Attractions. (See rule 701.52, \"Roll to Visit Your Attractions.\") This turn-based action doesn't use the stack."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Attractions (Unfinity set mechanic) are not implemented in the engine."
 
 [cr_505_6]
 rule = "505.6"
-text = "Fourth, the active player gets priority. (See rule 117, “Timing and Priority.”)"
-status = "missing"
-impl_files = []
+text = "Fourth, the active player gets priority. (See rule 117, \"Timing and Priority.\")"
+status = "implemented"
+impl_files = ["game/turns.rs:444"]
 test_files = []
-notes = ""
+notes = "auto_advance() returns WaitingFor::Priority for the active player at the start of each main phase."
 
 [cr_505_6a]
 rule = "505.6a"
@@ -78,7 +78,7 @@ notes = ""
 
 [cr_505_6b]
 rule = "505.6b"
-text = "During either main phase, the active player may play one land card from their hand if the stack is empty, if the player has priority, and if they haven’t played a land this turn (unless an effect states the player may play additional lands). This action doesn’t use the stack. Neither the land nor the action of playing the land is a spell or ability, so it can’t be countered, and players can’t respond to it with instants or activated abilities. (See rule 305, “Lands.”)"
+text = "During either main phase, the active player may play one land card from their hand if the stack is empty, if the player has priority, and if they haven't played a land this turn (unless an effect states the player may play additional lands). This action doesn't use the stack. Neither the land nor the action of playing the land is a spell or ability, so it can't be countered, and players can't respond to it with instants or activated abilities. (See rule 305, \"Lands.\")"
 status = "implemented"
 impl_files = ["game/engine.rs:3228", "game/static_abilities.rs:430", "types/triggers.rs:194"]
 test_files = []

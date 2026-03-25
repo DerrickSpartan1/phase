@@ -14,19 +14,19 @@ notes = ""
 
 [cr_500_2]
 rule = "500.2"
-text = "A phase or step in which players receive priority ends when the stack is empty and all players pass in succession. Simply having the stack become empty doesn’t cause such a phase or step to end; all players have to pass in succession with the stack empty. Because of this, each player gets a chance to add new things to the stack before that phase or step ends."
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+text = "A phase or step in which players receive priority ends when the stack is empty and all players pass in succession. Simply having the stack become empty doesn't cause such a phase or step to end; all players have to pass in succession with the stack empty. Because of this, each player gets a chance to add new things to the stack before that phase or step ends."
+status = "implemented"
+impl_files = ["game/priority.rs:14", "game/priority.rs:25", "game/priority.rs:30"]
+test_files = ["game/priority.rs:156"]
+notes = "Implemented via BTreeSet priority_passes tracking in handle_priority_pass. Phase only advances when all living players have passed consecutively with an empty stack."
 
 [cr_500_3]
 rule = "500.3"
 text = "A step in which no players receive priority ends when all specified actions that take place during that step are completed. The only such steps are the untap step (see rule 502) and certain cleanup steps (see rule 514)."
-status = "missing"
-impl_files = []
+status = "implemented"
+impl_files = ["game/turns.rs:412", "game/turns.rs:414", "game/turns.rs:565"]
 test_files = []
-notes = ""
+notes = "auto_advance() executes the untap step actions and immediately calls advance_phase without returning a WaitingFor::Priority. Cleanup similarly skips priority unless SBAs or triggers fire."
 
 [cr_500_4]
 rule = "500.4"
@@ -38,7 +38,7 @@ notes = ""
 
 [cr_500_5]
 rule = "500.5"
-text = "As a step or phase ends, if there are effects that last until the end of that step or phase, those effects expire. Then any unspent mana left in a player’s mana pool empties. This is a turn-based action that doesn’t use the stack (see rule 703.4q)."
+text = "As a step or phase ends, if there are effects that last until the end of that step or phase, those effects expire. Then any unspent mana left in a player's mana pool empties. This is a turn-based action that doesn't use the stack (see rule 703.4q)."
 status = "implemented"
 impl_files = ["game/turns.rs:48"]
 test_files = []
@@ -46,27 +46,27 @@ notes = ""
 
 [cr_500_5a]
 rule = "500.5a"
-text = "Effects that last “until end of combat” expire at the end of the combat phase, not at the beginning of the end of combat step."
-status = "missing"
-impl_files = []
+text = "Effects that last \"until end of combat\" expire at the end of the combat phase, not at the beginning of the end of combat step."
+status = "implemented"
+impl_files = ["game/layers.rs:34", "game/turns.rs:548"]
 test_files = []
-notes = ""
+notes = "Duration::UntilEndOfCombat exists in the type system; prune_end_of_combat_effects() is called during the EndCombat phase in auto_advance(), which correctly implements expiry at the end of the combat phase rather than at the start of the end-of-combat step."
 
 [cr_500_5b]
 rule = "500.5b"
-text = "Effects that last “until end of turn” are subject to special rules; see rule 514.2."
-status = "missing"
-impl_files = []
+text = "Effects that last \"until end of turn\" are subject to special rules; see rule 514.2."
+status = "implemented"
+impl_files = ["game/layers.rs:22", "game/turns.rs:244"]
 test_files = []
-notes = ""
+notes = "Duration::UntilEndOfTurn effects are pruned by prune_end_of_turn_effects() called during execute_cleanup(), cross-referencing CR 514.2."
 
 [cr_500_6]
 rule = "500.6"
-text = "When a phase or step begins, any abilities that trigger “at the beginning of” that phase or step trigger. They are put on the stack the next time a player would receive priority. (See rule 117, “Timing and Priority.”)"
-status = "missing"
-impl_files = []
+text = "When a phase or step begins, any abilities that trigger \"at the beginning of\" that phase or step trigger. They are put on the stack the next time a player would receive priority. (See rule 117, \"Timing and Priority.\")"
+status = "implemented"
+impl_files = ["game/turns.rs:395", "game/turns.rs:398"]
 test_files = []
-notes = ""
+notes = "process_phase_triggers() fabricates a PhaseChanged event for the current phase and runs trigger matching, placing matching triggers on the stack before priority is granted."
 
 [cr_500_7]
 rule = "500.7"
@@ -82,7 +82,7 @@ text = "Some effects can add phases to a turn. They do this by adding the phases
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No extra-phase mechanism exists in the turn order. The PHASE_ORDER array in turns.rs is static."
 
 [cr_500_9]
 rule = "500.9"
@@ -90,7 +90,7 @@ text = "Some effects can add steps to a phase. They do this by adding the steps 
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No extra-step mechanism exists."
 
 [cr_500_10]
 rule = "500.10"
@@ -98,28 +98,28 @@ text = "Some effects add a step after a particular phase. In that case, that eff
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No extra-step mechanism exists."
 
 [cr_500_10a]
 rule = "500.10a"
-text = "If an effect that says “you get” an additional step or phase would add a step or phase to a turn other than its controller’s, no steps or phases are added."
-status = "missing"
+text = "If an effect that says \"you get\" an additional step or phase would add a step or phase to a turn other than its controller's, no steps or phases are added."
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Definitional sub-rule of the unimplemented extra-step/phase mechanic (CR 500.8–500.10). Not applicable until that mechanic is implemented."
 
 [cr_500_11]
 rule = "500.11"
-text = "Some effects can cause a step, phase, or turn to be skipped. To skip a step, phase, or turn is to proceed past it as though it didn’t exist. See rule 614.10."
+text = "Some effects can cause a step, phase, or turn to be skipped. To skip a step, phase, or turn is to proceed past it as though it didn't exist. See rule 614.10."
 status = "missing"
 impl_files = []
 test_files = []
-notes = ""
+notes = "No step/phase-skipping mechanic is implemented."
 
 [cr_500_12]
 rule = "500.12"
 text = "No game events can occur between steps, phases, or turns."
-status = "missing"
+status = "not-applicable"
 impl_files = []
 test_files = []
-notes = ""
+notes = "Definitional/structural rule. The engine's synchronous apply() model naturally enforces this — state transitions are atomic and no interleaved game actions can occur between phase boundaries."

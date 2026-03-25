@@ -15,10 +15,10 @@ notes = ""
 [cr_408_2]
 rule = "408.2"
 text = "Emblems may be created in the command zone. See rule 114, “Emblems.”"
-status = "missing"
-impl_files = []
-test_files = []
-notes = ""
+status = "implemented"
+impl_files = ["game/effects/create_emblem.rs:8", "game/effects/create_emblem.rs:20"]
+test_files = ["game/effects/create_emblem.rs:75"]
+notes = "CreateEmblem effect (create_emblem.rs) creates an object in Zone::Command. The object has is_emblem = true, is not a permanent, and cannot be destroyed or exiled. Annotated CR 114.1."
 
 [cr_408_3]
 rule = "408.3"

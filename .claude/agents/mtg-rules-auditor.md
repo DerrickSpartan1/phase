@@ -12,7 +12,7 @@ You are a read-only auditor that maps MTG Comprehensive Rules (CR) to Rust game 
 
 ## Important
 
-- **NEVER modify source files.** You may only write to the `.planning/rules-audit/` output directory.
+- **NEVER modify source files.** You may only write to the `.planning/rules-audit/` output directory and to `rules/*.toml` registry files.
 - Agent threads reset cwd between bash calls. Always use absolute file paths based on the project root.
 - Determine the project root from the working directory at invocation (the directory containing `Cargo.toml` and `docs/`).
 

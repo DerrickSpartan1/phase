@@ -6,7 +6,7 @@ title = "Beginning of Combat Step"
 
 [cr_507_1]
 rule = "507.1"
-text = "First, if the game being played is a multiplayer game in which the active player’s opponents don’t all automatically become defending players, the active player chooses one of their opponents. That player becomes the defending player. This turn-based action doesn’t use the stack. (See rule 506.2.)"
+text = "First, if the game being played is a multiplayer game in which the active player's opponents don't all automatically become defending players, the active player chooses one of their opponents. That player becomes the defending player. This turn-based action doesn't use the stack. (See rule 506.2.)"
 status = "implemented"
 impl_files = ["game/engine.rs:6792", "game/engine.rs:6849", "game/turns.rs:395", "game/turns.rs:450", "game/turns.rs:451", "parser/oracle_trigger.rs:1557"]
 test_files = []
@@ -14,8 +14,8 @@ notes = ""
 
 [cr_507_2]
 rule = "507.2"
-text = "Second, the active player gets priority. (See rule 117, “Timing and Priority.”)"
-status = "missing"
-impl_files = []
+text = "Second, the active player gets priority. (See rule 117, \"Timing and Priority.\")"
+status = "partial"
+impl_files = ["game/turns.rs:457", "game/turns.rs:475"]
 test_files = []
-notes = ""
+notes = "Priority is granted when BeginCombat triggers fire (turns.rs:457) or when combat is skipped entirely (turns.rs:475). However, when no triggers fire but potential attackers exist, auto_advance() immediately advances to DeclareAttackers without granting priority at the BeginCombat step (turns.rs:462-464). CR 507.2 requires the active player to always receive priority during the beginning of combat step, even when no triggers fired."
