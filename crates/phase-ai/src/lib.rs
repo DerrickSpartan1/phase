@@ -19,9 +19,10 @@ pub use config::{
     create_config, create_config_for_players, AiConfig, AiDifficulty, AiProfile, HiddenInfoMode,
     MctsConfig, OpponentModel, PlannerMode, Platform, SearchConfig,
 };
+pub use deck_profile::ArchetypeMultipliers;
 pub use eval::{
-    evaluate_creature, evaluate_for_planner, evaluate_state, evaluate_state_breakdown,
-    strategic_intent, threat_level, EvalWeightSet, EvalWeights, EvaluationBreakdown,
-    StrategicIntent,
+    evaluate_creature, evaluate_creature_with_bonuses, evaluate_for_planner, evaluate_state,
+    evaluate_state_breakdown, strategic_intent, threat_level, EvalWeightSet, EvalWeights,
+    EvaluationBreakdown, KeywordBonuses, StrategicIntent,
 };
 pub use search::{choose_action, score_candidates, softmax_select_pairs};

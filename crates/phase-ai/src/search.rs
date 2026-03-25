@@ -133,7 +133,7 @@ fn build_ai_context(state: &GameState, player: PlayerId, config: &AiConfig) -> A
     if deck.is_empty() {
         return AiContext::empty(&config.weights);
     }
-    AiContext::analyze(deck, &config.weights)
+    AiContext::analyze_with(deck, &config.weights, &config.archetype_multipliers)
 }
 
 /// Handle deterministic decisions that don't benefit from search or parallelism.

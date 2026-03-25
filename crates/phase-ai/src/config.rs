@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::eval::EvalWeightSet;
+use crate::deck_profile::ArchetypeMultipliers;
+use crate::eval::{EvalWeightSet, KeywordBonuses};
 
 /// AI difficulty level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -113,6 +114,8 @@ pub struct AiConfig {
     pub combat_lookahead: bool,
     pub search: SearchConfig,
     pub weights: EvalWeightSet,
+    pub keyword_bonuses: KeywordBonuses,
+    pub archetype_multipliers: ArchetypeMultipliers,
     /// Number of players in the game (used for search budget scaling).
     pub player_count: u8,
 }
@@ -260,6 +263,8 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
         combat_lookahead,
         search,
         weights: EvalWeightSet::learned(),
+        keyword_bonuses: KeywordBonuses::default(),
+        archetype_multipliers: ArchetypeMultipliers::default(),
         player_count: 2,
     };
 

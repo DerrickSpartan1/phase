@@ -725,7 +725,7 @@ fn run_validate(
             match expected {
                 Some(0) => p0_wr - 0.5,       // positive = correct (deck_a wins more)
                 Some(1) => 0.5 - p0_wr,       // positive = correct (deck_b wins more)
-                _ => (0.5 - p0_wr).abs() * -1.0, // closer to 50% = better for even matchups
+                _ => -(0.5 - p0_wr).abs(), // closer to 50% = better for even matchups
             }
         };
 

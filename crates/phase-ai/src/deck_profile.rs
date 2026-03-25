@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use engine::game::DeckEntry;
 use engine::types::ability::Effect;
 use engine::types::card_type::CoreType;
@@ -106,25 +108,26 @@ impl DeckProfile {
     /// Apply archetype-based multipliers to base evaluation weights.
     /// Returns new weights tuned for this deck's strategy.
     pub fn adjust_weights(&self, base: &EvalWeights) -> EvalWeights {
-        let (life, aggression, presence, power, toughness, hand, zone, card_adv, syn) =
-            match self.archetype {
-                DeckArchetype::Aggro => (0.6, 2.0, 1.5, 2.0, 0.5, 0.3, 0.15, 0.1, 0.3),
-                DeckArchetype::Midrange => (1.0, 1.0, 1.5, 1.2, 1.2, 0.8, 0.3, 0.4, 0.5),
-                DeckArchetype::Control => (1.5, 0.3, 0.8, 0.5, 0.8, 2.0, 0.6, 0.8, 0.4),
-                DeckArchetype::Combo => (0.8, 0.5, 0.5, 0.5, 0.5, 2.5, 0.5, 0.6, 0.7),
-                DeckArchetype::Ramp => (1.0, 0.7, 1.0, 1.0, 1.0, 1.0, 0.4, 0.3, 0.4),
-            };
+        self.adjust_weights_with(&ArchetypeMultipliers::default(), base)
+    }
 
+    /// Apply custom archetype multipliers to base evaluation weights.
+    pub fn adjust_weights_with(
+        &self,
+        multipliers: &ArchetypeMultipliers,
+        base: &EvalWeights,
+    ) -> EvalWeights {
+        let m = multipliers.for_archetype(self.archetype);
         EvalWeights {
-            life: base.life * life,
-            aggression: base.aggression * aggression,
-            board_presence: base.board_presence * presence,
-            board_power: base.board_power * power,
-            board_toughness: base.board_toughness * toughness,
-            hand_size: base.hand_size * hand,
-            zone_quality: zone,
-            card_advantage: card_adv,
-            synergy: syn,
+            life: base.life * m[0],
+            aggression: base.aggression * m[1],
+            board_presence: base.board_presence * m[2],
+            board_power: base.board_power * m[3],
+            board_toughness: base.board_toughness * m[4],
+            hand_size: base.hand_size * m[5],
+            zone_quality: base.zone_quality * m[6],
+            card_advantage: base.card_advantage * m[7],
+            synergy: base.synergy * m[8],
         }
     }
 }
@@ -138,6 +141,44 @@ impl Default for DeckProfile {
             removal_ratio: 0.0,
             draw_ratio: 0.0,
             ramp_ratio: 0.0,
+        }
+    }
+}
+
+/// Per-archetype weight multipliers (9 values each: life, aggression, presence,
+/// power, toughness, hand, zone_quality, card_advantage, synergy).
+/// These scale the base EvalWeights to reflect how each archetype values
+/// different board dimensions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArchetypeMultipliers {
+    pub aggro: [f64; 9],
+    pub midrange: [f64; 9],
+    pub control: [f64; 9],
+    pub combo: [f64; 9],
+    pub ramp: [f64; 9],
+}
+
+impl Default for ArchetypeMultipliers {
+    fn default() -> Self {
+        Self {
+            aggro:    [0.6, 2.0, 1.5, 2.0, 0.5, 0.3, 0.15, 0.1, 0.3],
+            midrange: [1.0, 1.0, 1.5, 1.2, 1.2, 0.8, 0.3,  0.4, 0.5],
+            control:  [1.5, 0.3, 0.8, 0.5, 0.8, 2.0, 0.6,  0.8, 0.4],
+            combo:    [0.8, 0.5, 0.5, 0.5, 0.5, 2.5, 0.5,  0.6, 0.7],
+            ramp:     [1.0, 0.7, 1.0, 1.0, 1.0, 1.0, 0.4,  0.3, 0.4],
+        }
+    }
+}
+
+impl ArchetypeMultipliers {
+    /// Get the 9-element multiplier array for a given archetype.
+    pub fn for_archetype(&self, archetype: DeckArchetype) -> &[f64; 9] {
+        match archetype {
+            DeckArchetype::Aggro => &self.aggro,
+            DeckArchetype::Midrange => &self.midrange,
+            DeckArchetype::Control => &self.control,
+            DeckArchetype::Combo => &self.combo,
+            DeckArchetype::Ramp => &self.ramp,
         }
     }
 }

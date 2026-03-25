@@ -1,6 +1,7 @@
 use engine::game::DeckEntry;
 
 use crate::deck_profile::DeckProfile;
+use crate::deck_profile::ArchetypeMultipliers;
 use crate::eval::EvalWeightSet;
 use crate::synergy::SynergyGraph;
 
@@ -20,12 +21,21 @@ pub struct AiContext {
 impl AiContext {
     /// Analyze a deck list to build the context.
     pub fn analyze(deck: &[DeckEntry], base_weights: &EvalWeightSet) -> Self {
+        Self::analyze_with(deck, base_weights, &ArchetypeMultipliers::default())
+    }
+
+    /// Analyze a deck list with custom archetype multipliers.
+    pub fn analyze_with(
+        deck: &[DeckEntry],
+        base_weights: &EvalWeightSet,
+        multipliers: &ArchetypeMultipliers,
+    ) -> Self {
         let deck_profile = DeckProfile::analyze(deck);
         let synergy_graph = SynergyGraph::build(deck);
         let adjusted_weights = EvalWeightSet {
-            early: deck_profile.adjust_weights(&base_weights.early),
-            mid: deck_profile.adjust_weights(&base_weights.mid),
-            late: deck_profile.adjust_weights(&base_weights.late),
+            early: deck_profile.adjust_weights_with(multipliers, &base_weights.early),
+            mid: deck_profile.adjust_weights_with(multipliers, &base_weights.mid),
+            late: deck_profile.adjust_weights_with(multipliers, &base_weights.late),
         };
         Self {
             deck_profile,

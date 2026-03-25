@@ -426,9 +426,51 @@ fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32, i32) {
     (creatures, total_power, total_toughness, non_creatures)
 }
 
+/// Configurable keyword bonuses for creature evaluation.
+/// Multiplicative bonuses scale with power; flat bonuses are constant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeywordBonuses {
+    pub flying_mult: f64,
+    pub trample_mult: f64,
+    pub deathtouch_flat: f64,
+    pub lifelink_mult: f64,
+    pub hexproof_flat: f64,
+    pub indestructible_flat: f64,
+    pub first_strike_mult: f64,
+    pub vigilance_flat: f64,
+    pub menace_mult: f64,
+    pub tapped_penalty: f64,
+}
+
+impl Default for KeywordBonuses {
+    fn default() -> Self {
+        Self {
+            flying_mult: 1.0,
+            trample_mult: 0.5,
+            deathtouch_flat: 3.0,
+            lifelink_mult: 0.5,
+            hexproof_flat: 2.0,
+            indestructible_flat: 4.0,
+            first_strike_mult: 0.8,
+            vigilance_flat: 1.0,
+            menace_mult: 0.5,
+            tapped_penalty: 1.5,
+        }
+    }
+}
+
 /// Evaluate a single creature's combat value.
 /// Higher scores indicate more valuable creatures.
 pub fn evaluate_creature(state: &GameState, obj_id: ObjectId) -> f64 {
+    evaluate_creature_with_bonuses(state, obj_id, &KeywordBonuses::default())
+}
+
+/// Evaluate a creature using configurable keyword bonuses.
+pub fn evaluate_creature_with_bonuses(
+    state: &GameState,
+    obj_id: ObjectId,
+    bonuses: &KeywordBonuses,
+) -> f64 {
     let obj = match state.objects.get(&obj_id) {
         Some(o) => o,
         None => return 0.0,
@@ -442,36 +484,36 @@ pub fn evaluate_creature(state: &GameState, obj_id: ObjectId) -> f64 {
 
     // Keyword bonuses
     if obj.has_keyword(&Keyword::Flying) {
-        value += power;
+        value += power * bonuses.flying_mult;
     }
     if obj.has_keyword(&Keyword::Trample) {
-        value += power * 0.5;
+        value += power * bonuses.trample_mult;
     }
     if obj.has_keyword(&Keyword::Deathtouch) {
-        value += 3.0;
+        value += bonuses.deathtouch_flat;
     }
     if obj.has_keyword(&Keyword::Lifelink) {
-        value += power * 0.5;
+        value += power * bonuses.lifelink_mult;
     }
     if obj.has_keyword(&Keyword::Hexproof) {
-        value += 2.0;
+        value += bonuses.hexproof_flat;
     }
     if obj.has_keyword(&Keyword::Indestructible) {
-        value += 4.0;
+        value += bonuses.indestructible_flat;
     }
     if obj.has_keyword(&Keyword::FirstStrike) || obj.has_keyword(&Keyword::DoubleStrike) {
-        value += power * 0.8;
+        value += power * bonuses.first_strike_mult;
     }
     if obj.has_keyword(&Keyword::Vigilance) {
-        value += 1.0;
+        value += bonuses.vigilance_flat;
     }
     if obj.has_keyword(&Keyword::Menace) {
-        value += power * 0.5;
+        value += power * bonuses.menace_mult;
     }
 
     // Tapped creatures are less valuable
     if obj.tapped {
-        value -= 1.5;
+        value -= bonuses.tapped_penalty;
     }
 
     value

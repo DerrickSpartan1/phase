@@ -364,8 +364,8 @@ def main():
     )
     parser.add_argument(
         "--data-dir",
-        default=os.path.expanduser("~/Downloads"),
-        help="Directory containing replay CSVs and cards.csv (default: ~/Downloads)",
+        default="data/17lands",
+        help="Directory containing replay CSVs and cards.csv (default: data/17lands)",
     )
     parser.add_argument(
         "--output",
