@@ -1,0 +1,38 @@
+{
+  "source": "17lands_PremierDraft",
+  "sets": [
+    "EOE"
+  ],
+  "filter": "win_rate >= 0.55, games >= 50",
+  "sample_count": 12949620,
+  "train_accuracy": 0.6384,
+  "test_accuracy": 0.6382,
+  "feature_names": [
+    "life_diff",
+    "creature_count_diff",
+    "creature_mv_diff",
+    "hand_diff",
+    "land_diff",
+    "non_creature_diff",
+    "mana_spent_diff",
+    "total_permanent_diff"
+  ],
+  "raw_coefficients": {
+    "life_diff": 0.083698,
+    "creature_count_diff": 0.103573,
+    "creature_mv_diff": 0.103269,
+    "hand_diff": 0.269348,
+    "land_diff": 0.02054,
+    "non_creature_diff": 0.085526,
+    "mana_spent_diff": -0.076742,
+    "total_permanent_diff": 0.209639
+  },
+  "weights": {
+    "life": 0.7769,
+    "board_presence": 0.9613,
+    "board_power": 0.9585,
+    "hand_size": 2.5,
+    "board_toughness": 1.0,
+    "aggression": 0.5
+  }
+}
