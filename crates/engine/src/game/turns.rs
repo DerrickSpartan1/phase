@@ -333,14 +333,23 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
 /// were deferred while waiting for player input).
 /// CR 514.1: Discard down to maximum hand size at cleanup.
 /// Routes through the replacement pipeline so Madness (CR 702.35) etc. can intercept.
+/// Returns `true` if a replacement choice interrupted the discard loop.
 pub fn finish_cleanup_discard(
     state: &mut GameState,
     player: PlayerId,
     chosen: &[crate::types::identifiers::ObjectId],
     events: &mut Vec<GameEvent>,
-) {
+) -> bool {
     for &card_id in chosen {
-        super::effects::discard::discard_as_cost(state, card_id, player, events);
+        if let super::effects::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
+            super::effects::discard::discard_as_cost(state, card_id, player, events)
+        {
+            state.waiting_for =
+                super::replacement::replacement_choice_waiting_for(choice_player, state);
+            // Known limitation: remaining discards and damage clearing (CR 514.2)
+            // are skipped when a replacement choice interrupts mid-cleanup.
+            return true;
+        }
     }
 
     // Clear damage on all battlefield creatures (deferred from execute_cleanup)
@@ -364,6 +373,7 @@ pub fn finish_cleanup_discard(
             events.push(GameEvent::DamageCleared { object_id: id });
         }
     }
+    false
 }
 
 /// CR 103.8a: The player who goes first skips their first draw step.

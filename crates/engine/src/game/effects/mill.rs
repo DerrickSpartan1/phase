@@ -1,6 +1,6 @@
 use crate::game::quantity::resolve_quantity;
 use crate::game::zones;
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetRef};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::zones::Zone;
@@ -18,19 +18,8 @@ pub fn resolve(
         _ => 1,
     };
 
-    // CR 701.13a: Find target player — first TargetRef::Player, or default to controller
-    // (self-mill when no explicit target, e.g. "mill a card").
-    let target_player = ability
-        .targets
-        .iter()
-        .find_map(|t| {
-            if let TargetRef::Player(pid) = t {
-                Some(*pid)
-            } else {
-                None
-            }
-        })
-        .unwrap_or(ability.controller);
+    // CR 701.17a: Find target player, or default to controller (self-mill).
+    let target_player = ability.target_player();
 
     let player = state
         .players
@@ -60,7 +49,7 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{QuantityExpr, TargetFilter};
+    use crate::types::ability::{QuantityExpr, TargetFilter, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;

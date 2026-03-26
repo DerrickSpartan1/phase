@@ -113,7 +113,15 @@ pub(crate) fn handle_discard_for_cost(
     // CR 601.2h: Discard each chosen card through the replacement pipeline
     // so Madness (CR 702.35) etc. can intercept.
     for &card_id in chosen {
-        super::effects::discard::discard_as_cost(state, card_id, player, events);
+        match super::effects::discard::discard_as_cost(state, card_id, player, events) {
+            super::effects::discard::DiscardOutcome::Complete => {}
+            super::effects::discard::DiscardOutcome::NeedsReplacementChoice(_) => {
+                // CR 118.3: Replacement choice during cost payment is extremely rare.
+                // TODO: Surface replacement choice to player during cost payment.
+                // For now, proceed — the discard was not completed, but the
+                // replacement pipeline has already handled the event.
+            }
+        }
     }
 
     pay_and_push(

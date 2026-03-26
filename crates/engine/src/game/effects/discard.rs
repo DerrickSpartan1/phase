@@ -11,6 +11,15 @@ use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
 
+/// Outcome of a discard attempt routed through the replacement pipeline.
+pub(crate) enum DiscardOutcome {
+    /// Discard completed (normally or via replacement redirect).
+    Complete,
+    /// A replacement effect requires player choice before discard can proceed.
+    /// Callers must handle this by surfacing the replacement choice to the player.
+    NeedsReplacementChoice(PlayerId),
+}
+
 /// CR 701.9a: To discard a card, move it from owner's hand to their graveyard.
 /// If targets specify specific cards, discard those; otherwise discard from end of hand.
 pub fn resolve(
@@ -97,11 +106,14 @@ pub fn resolve(
             }
         }
     } else {
+        // CR 701.9a: Find discard player — first TargetRef::Player, or default to controller.
+        let discard_player = ability.target_player();
+
         // CR 701.9b: Player chooses which card(s) to discard (not "at random").
         let hand_cards: Vec<ObjectId> = state
             .players
             .iter()
-            .find(|p| p.id == ability.controller)
+            .find(|p| p.id == discard_player)
             .ok_or(EffectError::PlayerNotFound)?
             .hand
             .to_vec();
@@ -112,12 +124,20 @@ pub fn resolve(
         } else if hand_cards.len() <= count {
             // Forced discard — no choice needed, discard all eligible cards.
             for obj_id in &hand_cards {
-                super::discard::discard_as_cost(state, *obj_id, ability.controller, events);
+                if let DiscardOutcome::NeedsReplacementChoice(player) =
+                    discard_as_cost(state, *obj_id, discard_player, events)
+                {
+                    state.waiting_for =
+                        crate::game::replacement::replacement_choice_waiting_for(player, state);
+                    // Known limitation: EffectResolved is not emitted when replacement
+                    // choice interrupts forced-discard (same systemic gap as sacrifice).
+                    return Ok(());
+                }
             }
         } else {
             // CR 701.9b: Player chooses — present interactive selection.
             state.waiting_for = crate::types::game_state::WaitingFor::DiscardChoice {
-                player: ability.controller,
+                player: discard_player,
                 count,
                 cards: hand_cards,
                 source_id: ability.source_id,
@@ -138,12 +158,12 @@ pub fn resolve(
 
 /// CR 207.2c + CR 118.12a: Discard a card as part of an ability cost (Channel).
 /// Routes through the replacement pipeline so Madness (CR 702.35) etc. can intercept.
-pub fn discard_as_cost(
+pub(crate) fn discard_as_cost(
     state: &mut GameState,
     object_id: ObjectId,
     player: PlayerId,
     events: &mut Vec<GameEvent>,
-) {
+) -> DiscardOutcome {
     let proposed = ProposedEvent::Discard {
         player_id: player,
         object_id,
@@ -182,11 +202,11 @@ pub fn discard_as_cost(
             // CR 614.1a: If the discard is prevented, the cost was not fully paid.
             // This is extremely rare during cost payment. The card stays in hand.
         }
-        ReplacementResult::NeedsChoice(_) => {
-            // Replacement choice during cost payment is not yet supported
-            // (same limitation as sacrifice-as-cost in casting.rs:851-856).
+        ReplacementResult::NeedsChoice(choice_player) => {
+            return DiscardOutcome::NeedsReplacementChoice(choice_player);
         }
     }
+    DiscardOutcome::Complete
 }
 
 #[cfg(test)]
@@ -456,5 +476,159 @@ mod tests {
         }
         // Hand unchanged until player selects
         assert_eq!(state.players[0].hand.len(), 5);
+    }
+
+    #[test]
+    fn opponent_discard_targets_opponent_hand() {
+        use crate::types::game_state::WaitingFor;
+
+        let mut state = GameState::new_two_player(42);
+        // Give player 1 (opponent) 3 cards
+        let _c1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opp A".into(),
+            Zone::Hand,
+        );
+        let _c2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opp B".into(),
+            Zone::Hand,
+        );
+        let _c3 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opp C".into(),
+            Zone::Hand,
+        );
+        // Give player 0 (controller) 1 card
+        create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Mine".into(),
+            Zone::Hand,
+        );
+
+        // "Target opponent discards a card" — controller is P0, target is P1
+        let ability = ResolvedAbility::new(
+            Effect::DiscardCard {
+                count: 1,
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Opponent (P1) should see the discard choice, not controller (P0)
+        match &state.waiting_for {
+            WaitingFor::DiscardChoice {
+                player,
+                count,
+                cards,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(1), "Opponent should make the choice");
+                assert_eq!(*count, 1);
+                assert_eq!(
+                    cards.len(),
+                    3,
+                    "Should show opponent's 3 cards, not controller's 1"
+                );
+            }
+            other => panic!("Expected DiscardChoice, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn opponent_discard_auto_when_one_card() {
+        let mut state = GameState::new_two_player(42);
+        // Opponent has exactly 1 card — should auto-discard without choice
+        let opp_card = create_object(&mut state, CardId(1), PlayerId(1), "Opp".into(), Zone::Hand);
+        // Controller has cards too (should not be affected)
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Mine".into(),
+            Zone::Hand,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::DiscardCard {
+                count: 1,
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Opponent's card should be discarded
+        assert!(!state.players[1].hand.contains(&opp_card));
+        assert!(state.players[1].graveyard.contains(&opp_card));
+        // Controller's hand unchanged
+        assert_eq!(state.players[0].hand.len(), 1);
+    }
+
+    #[test]
+    fn target_player_defaults_to_controller() {
+        let ability = ResolvedAbility::new(
+            Effect::DiscardCard {
+                count: 1,
+                target: TargetFilter::Any,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        assert_eq!(ability.target_player(), PlayerId(0));
+    }
+
+    #[test]
+    fn target_player_extracts_from_mixed_targets() {
+        let ability = ResolvedAbility::new(
+            Effect::DiscardCard {
+                count: 1,
+                target: TargetFilter::Any,
+            },
+            vec![
+                TargetRef::Object(ObjectId(50)),
+                TargetRef::Player(PlayerId(1)),
+            ],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        assert_eq!(ability.target_player(), PlayerId(1));
+    }
+
+    #[test]
+    fn discard_as_cost_returns_complete() {
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Hand,
+        );
+        let mut events = Vec::new();
+
+        let outcome = discard_as_cost(&mut state, card, PlayerId(0), &mut events);
+
+        assert!(matches!(outcome, DiscardOutcome::Complete));
+        assert!(!state.players[0].hand.contains(&card));
+        assert!(state.players[0].graveyard.contains(&card));
     }
 }

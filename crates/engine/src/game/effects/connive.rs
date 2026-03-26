@@ -116,7 +116,12 @@ pub fn resolve(
         // No cards to discard — skip
     } else if hand_cards.len() <= discard_count {
         // Auto-discard all cards in hand (no choice needed)
-        let nonland_count = discard_all_and_count_nonlands(state, &hand_cards, controller, events);
+        let Some(nonland_count) =
+            discard_all_and_count_nonlands(state, &hand_cards, controller, events)
+        else {
+            // Replacement choice interrupted the discard loop — waiting_for already set.
+            return Ok(());
+        };
         add_connive_counters(state, conniver_id, nonland_count, events);
     } else {
         // Player must choose which cards to discard
@@ -139,21 +144,29 @@ pub fn resolve(
 }
 
 /// Discard all given cards and return how many were nonland.
-fn discard_all_and_count_nonlands(
+/// Returns `None` if a replacement effect needs a player choice (interrupts the loop).
+/// Caller is responsible for setting `state.waiting_for` when `None` is returned.
+pub(crate) fn discard_all_and_count_nonlands(
     state: &mut GameState,
     cards: &[ObjectId],
     player: crate::types::player::PlayerId,
     events: &mut Vec<GameEvent>,
-) -> u32 {
+) -> Option<u32> {
     let mut nonland_count = 0;
     for &card_id in cards {
         let is_nonland = is_nonland_card(state, card_id);
-        super::discard::discard_as_cost(state, card_id, player, events);
+        if let super::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
+            super::discard::discard_as_cost(state, card_id, player, events)
+        {
+            state.waiting_for =
+                crate::game::replacement::replacement_choice_waiting_for(choice_player, state);
+            return None;
+        }
         if is_nonland {
             nonland_count += 1;
         }
     }
-    nonland_count
+    Some(nonland_count)
 }
 
 /// Check if a card is nonland (before discarding it, while it's still accessible).

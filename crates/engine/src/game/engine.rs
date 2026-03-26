@@ -1994,7 +1994,14 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 }
             }
 
-            super::turns::finish_cleanup_discard(state, p, &chosen, &mut events);
+            if super::turns::finish_cleanup_discard(state, p, &chosen, &mut events) {
+                // Replacement choice interrupted — waiting_for already set.
+                return Ok(ActionResult {
+                    events,
+                    waiting_for: state.waiting_for.clone(),
+                    log_entries: vec![],
+                });
+            }
 
             // Continue the turn: advance past cleanup into next turn
             super::turns::advance_phase(state, &mut events);
@@ -2047,19 +2054,19 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
 
             // Discard each chosen card and count nonlands.
-            // Check nonland BEFORE discarding (card type is accessible while in hand).
-            let mut nonland_count = 0u32;
-            for &card_id in &chosen {
-                let is_nonland = state.objects.get(&card_id).is_some_and(|obj| {
-                    !obj.card_types
-                        .core_types
-                        .contains(&crate::types::card_type::CoreType::Land)
+            let Some(nonland_count) = super::effects::connive::discard_all_and_count_nonlands(
+                state,
+                &chosen,
+                p,
+                &mut events,
+            ) else {
+                // Replacement choice interrupted — waiting_for already set by helper.
+                return Ok(ActionResult {
+                    events,
+                    waiting_for: state.waiting_for.clone(),
+                    log_entries: vec![],
                 });
-                super::effects::discard::discard_as_cost(state, card_id, p, &mut events);
-                if is_nonland {
-                    nonland_count += 1;
-                }
-            }
+            };
 
             // CR 701.50a: Add +1/+1 counters for nonland discards
             super::effects::connive::add_connive_counters(
@@ -2126,12 +2133,19 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 }
             }
 
-            // TODO: discard_as_cost silently drops ReplacementResult::NeedsChoice.
-            // When a replacement effect requires a player choice (e.g., competing
-            // replacements on discard), that choice is lost. This is a pre-existing
-            // limitation shared with ConniveDiscard/DiscardToHandSize handlers.
             for &card_id in &chosen {
-                super::effects::discard::discard_as_cost(state, card_id, p, &mut events);
+                if let super::effects::discard::DiscardOutcome::NeedsReplacementChoice(
+                    choice_player,
+                ) = super::effects::discard::discard_as_cost(state, card_id, p, &mut events)
+                {
+                    state.waiting_for =
+                        super::replacement::replacement_choice_waiting_for(choice_player, state);
+                    return Ok(ActionResult {
+                        events,
+                        waiting_for: state.waiting_for.clone(),
+                        log_entries: vec![],
+                    });
+                }
             }
 
             events.push(GameEvent::EffectResolved {

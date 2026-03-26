@@ -3911,6 +3911,18 @@ impl ResolvedAbility {
         self.context = context;
         self
     }
+
+    /// Extract the first `TargetRef::Player` from targets, or default to controller.
+    /// Used by effects that target a player (mill, discard, life loss, shuffle, etc.).
+    pub fn target_player(&self) -> PlayerId {
+        self.targets
+            .iter()
+            .find_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                _ => None,
+            })
+            .unwrap_or(self.controller)
+    }
 }
 
 // ---------------------------------------------------------------------------

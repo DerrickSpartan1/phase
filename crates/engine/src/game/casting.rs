@@ -1420,7 +1420,15 @@ pub fn pay_ability_cost(
         }
         // CR 207.2c + CR 602.1: Discard the source card itself as part of the cost (Channel).
         AbilityCost::Discard { self_ref: true, .. } => {
-            super::effects::discard::discard_as_cost(state, source_id, player, events);
+            match super::effects::discard::discard_as_cost(state, source_id, player, events) {
+                super::effects::discard::DiscardOutcome::Complete => {}
+                super::effects::discard::DiscardOutcome::NeedsReplacementChoice(_) => {
+                    // CR 118.3: Replacement choice during cost payment is extremely rare.
+                    // TODO: Surface replacement choice to player during cost payment.
+                    // For now, proceed — the discard was not completed, but the
+                    // replacement pipeline has already handled the event.
+                }
+            }
         }
         // Waterbend cost was already paid via ManaPayment before reaching pay_ability_cost.
         AbilityCost::Waterbend { .. } => {}
