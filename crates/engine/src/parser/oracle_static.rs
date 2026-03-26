@@ -1036,9 +1036,10 @@ fn parse_subject_continuous_static(text: &str) -> Option<StaticDefinition> {
     }
     let affected = parse_continuous_subject_filter(subject)?;
 
-    // CR 613.4c: Route "for each" predicates through parse_continuous_gets_has
-    // which handles dynamic P/T via AddDynamicPower/AddDynamicToughness.
-    if predicate.to_lowercase().contains("for each ") {
+    // CR 613.4c / CR 611.3a: Route "for each" and "as long as" predicates through
+    // parse_continuous_gets_has which handles dynamic P/T and condition splitting.
+    let pred_lower = predicate.to_lowercase();
+    if pred_lower.contains("for each ") || pred_lower.contains(" as long as ") {
         return parse_continuous_gets_has(predicate, affected, text);
     }
 

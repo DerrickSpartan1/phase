@@ -415,10 +415,11 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // CR 603.4: "if you have N or more life" — life-total threshold condition.
     if let Some(pos) = tp.find("if you have ") {
         let after = &lower[pos + "if you have ".len()..];
-        if let Some(life_text) = after.strip_suffix(" or more life") {
+        if let Some(or_more_pos) = after.find(" or more life") {
+            let life_text = &after[..or_more_pos];
             if let Some((n, remainder)) = parse_number(life_text) {
                 if remainder.trim().is_empty() {
-                    let clause_len = "if you have ".len() + life_text.len() + " or more life".len();
+                    let clause_len = "if you have ".len() + or_more_pos + " or more life".len();
                     return (
                         strip_condition_clause(text, pos, clause_len),
                         Some(TriggerCondition::LifeTotalGE { minimum: n as i32 }),
