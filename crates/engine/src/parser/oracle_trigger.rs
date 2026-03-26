@@ -1871,16 +1871,34 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             ));
         }
 
-        // Parse the spell quality (e.g., "multicolored spell")
+        // Parse the spell quality generically (e.g., "creature spell", "multicolored spell")
+        // using the same parse_type_phrase building block as the "you cast" branch above.
+        // Truncate at ", " to avoid passing the effect clause (e.g., ", you gain 1 life")
+        // into parse_type_phrase where it would cause infinite recursion.
         let after_casts = &lower[casts_pos + " casts a".len()..].trim_start();
         let after_article = after_casts
             .strip_prefix("n ") // "an" → strip the trailing "n "
             .unwrap_or(after_casts)
             .trim_start();
-        if after_article.starts_with("multicolored") {
+        let spell_clause = after_article
+            .split_once(", ")
+            .map(|(before, _)| before)
+            .unwrap_or(after_article);
+        // Handle "multicolored" as a spell property (not a type phrase)
+        if spell_clause.contains("multicolored") {
             def.valid_card = Some(TargetFilter::Typed(
                 TypedFilter::default().properties(vec![FilterProp::Multicolored]),
             ));
+        } else {
+            let (filter, _rest) = parse_type_phrase(spell_clause);
+            let is_meaningful = match &filter {
+                TargetFilter::Typed(tf) => tf.has_meaningful_type_constraint(),
+                TargetFilter::Or { .. } => true,
+                _ => false,
+            };
+            if is_meaningful {
+                def.valid_card = Some(filter);
+            }
         }
 
         return Some((TriggerMode::SpellCast, def));

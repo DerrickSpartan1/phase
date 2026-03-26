@@ -528,10 +528,24 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
         }
     }
 
+    // Check for "the top [N] card(s) of [their/your] library" BEFORE the catch-all
+    // "hand" check — text like "reveals the top card...then puts it into their hand"
+    // contains "hand" as a destination, not as the reveal source.
+    if lower.contains("the top ") && lower.contains("librar") {
+        let count = if let Some(pos) = lower.find("the top ") {
+            let after_top = &lower[pos + 8..];
+            parse_number(after_top).map(|(n, _)| n).unwrap_or(1)
+        } else {
+            1
+        };
+        return Some(HandRevealImperativeAst::RevealTop { count });
+    }
+
     if lower.contains("hand") {
         return Some(HandRevealImperativeAst::RevealHand);
     }
 
+    // Fallback: reveal from top of library without explicit "library" mention
     let count = if let Some(pos) = lower.find("the top ") {
         let after_top = &lower[pos + 8..];
         parse_number(after_top).map(|(n, _)| n).unwrap_or(1)
