@@ -11,25 +11,28 @@ import { CommanderDisplay } from "./CommanderDisplay.tsx";
 import { CommanderDamage } from "./CommanderDamage.tsx";
 import { CommandZone } from "../zone/CommandZone.tsx";
 
-/** Scale for land column — ~45% of creature size, matching Arena's land-to-creature ratio */
-const LAND_SCALE = 0.56;
+/** Base scales — used when few cards; shrinks as more are added */
+const LAND_BASE_SCALE = 0.62;
+const OTHER_BASE_SCALE = 0.8;
+/** Minimum scale floor */
+const MIN_ZONE_SCALE = 0.35;
 
-const LAND_COL_STYLE = {
-  "--art-crop-w": `calc(var(--art-crop-base) * var(--card-size-scale) * ${LAND_SCALE})`,
-  "--art-crop-h": `calc(var(--art-crop-base) * var(--card-size-scale) * ${LAND_SCALE} * 0.85)`,
-  "--card-w": `calc(var(--card-base) * var(--card-size-scale) * ${LAND_SCALE})`,
-  "--card-h": `calc(var(--card-base) * var(--card-size-scale) * ${LAND_SCALE} * 1.4)`,
-} as React.CSSProperties;
+/** Compute dynamic scale that shrinks as group count increases */
+function zoneScale(baseScale: number, groupCount: number): number {
+  if (groupCount <= 3) return baseScale;
+  // Inverse-sqrt decay past threshold, floored at MIN_ZONE_SCALE
+  const excess = groupCount - 3;
+  return Math.max(MIN_ZONE_SCALE, baseScale / Math.sqrt(1 + excess * 0.2));
+}
 
-/** Scale for enchantment/artifact column (right) — larger than lands for readability */
-const OTHER_SCALE = 0.75;
-
-const OTHER_COL_STYLE = {
-  "--art-crop-w": `calc(var(--art-crop-base) * var(--card-size-scale) * ${OTHER_SCALE})`,
-  "--art-crop-h": `calc(var(--art-crop-base) * var(--card-size-scale) * ${OTHER_SCALE} * 0.85)`,
-  "--card-w": `calc(var(--card-base) * var(--card-size-scale) * ${OTHER_SCALE})`,
-  "--card-h": `calc(var(--card-base) * var(--card-size-scale) * ${OTHER_SCALE} * 1.4)`,
-} as React.CSSProperties;
+function zoneStyle(scale: number): React.CSSProperties {
+  return {
+    "--art-crop-w": `calc(var(--art-crop-base) * var(--card-size-scale) * ${scale})`,
+    "--art-crop-h": `calc(var(--art-crop-base) * var(--card-size-scale) * ${scale} * 0.85)`,
+    "--card-w": `calc(var(--card-base) * var(--card-size-scale) * ${scale})`,
+    "--card-h": `calc(var(--card-base) * var(--card-size-scale) * ${scale} * 1.4)`,
+  } as React.CSSProperties;
+}
 
 export type PlayerAreaMode = "full" | "focused" | "compact";
 
@@ -111,14 +114,19 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
     </div>
   ) : null;
   const landAlignClass = isMirrored
-    ? "flex-wrap items-start justify-start"
-    : "flex-wrap content-end items-end justify-start";
+    ? "flex-wrap items-center justify-start"
+    : "flex-wrap items-center content-end justify-start";
+
+  const landCount = partitioned?.lands.length ?? 0;
+  const supportCount = partitioned?.support.length ?? 0;
+  const landStyle = zoneStyle(zoneScale(LAND_BASE_SCALE, landCount));
+  const supportStyle = zoneStyle(zoneScale(OTHER_BASE_SCALE, supportCount));
 
   const middleRow = (
-    <div className="flex min-h-0 items-stretch justify-between gap-4" data-debug-label="Middle Row">
+    <div className="flex min-h-0 items-center justify-between gap-4" data-debug-label="Middle Row">
       <div
         className={`z-10 flex min-w-0 basis-0 flex-1 gap-2 pl-2 ${landAlignClass}`}
-        style={LAND_COL_STYLE}
+        style={landStyle}
         data-debug-label="Lands"
       >
         {partitioned?.lands.map((g) => (
@@ -127,8 +135,8 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
         {landColumnExtra}
       </div>
       <div
-        className="z-10 flex min-w-0 basis-0 flex-1 justify-end pr-2"
-        style={OTHER_COL_STYLE}
+        className="z-10 flex min-w-0 basis-0 flex-1 items-center justify-end pr-2"
+        style={supportStyle}
         data-debug-label="Support"
       >
         <BattlefieldRow
@@ -147,7 +155,7 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
     >
       <div
         className={`flex min-w-0 flex-1 flex-col gap-2 px-1 ${
-          mode === "full" ? "pt-2 pb-4" : "justify-end py-2"
+          mode === "full" ? "pt-1 pb-2" : "justify-end py-1"
         } ${
           isCommander ? (mode === "focused" ? "pb-16" : "pb-24") : ""
         }`}
@@ -158,13 +166,13 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
             <div className="shrink-0">
               {middleRow}
             </div>
-            <div className="flex min-h-0 flex-1 items-end px-2" data-debug-label="Opp Creatures">
+            <div className="flex min-h-0 flex-[2] items-end px-2" data-debug-label="Opp Creatures">
               <BattlefieldRow groups={creatures} rowType="creatures" className="w-full" />
             </div>
           </>
         ) : (
           <>
-            <div className="min-h-0 flex-1 px-2" data-debug-label="Creatures">
+            <div className="min-h-0 flex-[2] px-2" data-debug-label="Creatures">
               <BattlefieldRow groups={creatures} rowType="creatures" />
             </div>
             <div className="shrink-0">

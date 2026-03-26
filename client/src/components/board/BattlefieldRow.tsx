@@ -73,10 +73,13 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
 
   // Non-creature rows keep a min-height from CSS vars
   const minH = rowType !== "creatures"
-    ? (isArtCrop ? "min-h-[calc(var(--art-crop-h)+24px)]" : "min-h-[calc(var(--card-h)+8px)]")
+    ? (isArtCrop ? "min-h-[calc(var(--art-crop-h)+8px)]" : "min-h-[calc(var(--card-h)+8px)]")
     : "";
 
   let rowStyle: React.CSSProperties | undefined;
+  /** Minimum readable card height — below this, switch to multi-row wrapping */
+  const MIN_CARD_H = 70;
+  let creatureWrap = false;
 
   if (rowType === "creatures") {
     if (containerSize && containerSize.height > 0) {
@@ -90,23 +93,43 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
       const staggerPx = 20;
       const totalStagger = groups.reduce((sum, g) => sum + Math.max(0, g.count - 1) * staggerPx, 0);
 
-      // Width per card if all groups fit in one row
+      // Try single-row first
       const availableForCards = cw - (n - 1) * gap - totalStagger;
       const widthPerGroup = n > 0 ? availableForCards / n : cw;
-      // Max card height from width constraint (all groups fit in one row)
-      const fromWidth = widthPerGroup / activeAr;
-      // Max card height from container height
-      const fromHeight = ch;
+      const singleRowCardH = Math.max(40, Math.min(ch, widthPerGroup / activeAr));
 
-      // Use the tighter constraint; minimum 40px
-      const cardH = Math.max(40, Math.min(fromHeight, fromWidth));
+      if (singleRowCardH >= MIN_CARD_H) {
+        // Single row — cards fit at readable size
+        rowStyle = {
+          "--art-crop-w": `${singleRowCardH * ART_CROP_AR}px`,
+          "--art-crop-h": `${singleRowCardH}px`,
+          "--card-w": `${singleRowCardH * FULL_CARD_AR}px`,
+          "--card-h": `${singleRowCardH}px`,
+        } as React.CSSProperties;
+      } else {
+        // Multi-row wrapping — pick the row count that gives the largest card height
+        creatureWrap = true;
+        const rowGap = 12; // gap-y-3
+        let bestH = 40;
+        for (let rows = 2; rows <= 4; rows++) {
+          const cardHFromHeight = (ch - (rows - 1) * rowGap) / rows;
+          const groupsPerRow = Math.ceil(n / rows);
+          const staggerPerRow = totalStagger / rows; // approximate
+          const cardW = (cw - (groupsPerRow - 1) * gap - staggerPerRow) / groupsPerRow;
+          const cardHFromWidth = cardW / activeAr;
+          const cardH = Math.max(40, Math.min(cardHFromHeight, cardHFromWidth));
+          if (cardH > bestH) {
+            bestH = cardH;
+          }
+        }
 
-      rowStyle = {
-        "--art-crop-w": `${cardH * ART_CROP_AR}px`,
-        "--art-crop-h": `${cardH}px`,
-        "--card-w": `${cardH * FULL_CARD_AR}px`,
-        "--card-h": `${cardH}px`,
-      } as React.CSSProperties;
+        rowStyle = {
+          "--art-crop-w": `${bestH * ART_CROP_AR}px`,
+          "--art-crop-h": `${bestH}px`,
+          "--card-w": `${bestH * FULL_CARD_AR}px`,
+          "--card-h": `${bestH}px`,
+        } as React.CSSProperties;
+      }
     } else {
       // Fallback before measurement
       const creatureScale = getCreatureScale(groups.length, battlefieldCardDisplay);
@@ -119,10 +142,14 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
     }
   }
 
+  const creatureClass = creatureWrap
+    ? "flex-wrap items-end content-end"
+    : "flex-nowrap items-end";
+
   return (
     <div
       ref={containerRef}
-      className={`flex ${minH} ${rowType === "creatures" ? "flex-nowrap items-end" : "flex-wrap items-center"} gap-2 ${ROW_JUSTIFY[rowType]} ${className ?? ""}`}
+      className={`flex ${minH} ${rowType === "creatures" ? `${creatureClass} ${creatureWrap ? "gap-x-2 gap-y-3" : "gap-2"}` : "flex-wrap items-center gap-2"} ${ROW_JUSTIFY[rowType]} ${className ?? ""}`}
       style={rowStyle}
     >
       {groups.map((group) => (
