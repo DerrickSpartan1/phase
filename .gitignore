@@ -18,6 +18,7 @@ client/dist/
 
 # Generated data files (built by gen-card-data.sh, served from R2)
 client/public/card-data.json
+client/public/card-data-meta.json
 client/public/coverage-data.json
 client/public/coverage-summary.json
 

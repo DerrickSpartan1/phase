@@ -3,7 +3,7 @@ import { useNavigate } from "react-router";
 
 import { ConnectionDot } from "../multiplayer/ConnectionDot.tsx";
 import { clearGame } from "../../stores/gameStore.ts";
-import { BuildBadge } from "./BuildBadge.tsx";
+import { useCardDataMeta } from "../../hooks/useCardDataMeta.ts";
 
 interface GameMenuProps {
   gameId: string;
@@ -27,6 +27,7 @@ export function GameMenu({
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
+  const cardDataMeta = useCardDataMeta();
 
   useEffect(() => {
     if (!open) return;
@@ -88,10 +89,8 @@ export function GameMenu({
         </button>
         {isOnlineMode && <ConnectionDot />}
       </div>
-      <BuildBadge inline className="z-0 mt-1 hidden lg:block" />
-
       {open && (
-        <div className="absolute left-0 top-full mt-1 w-44 rounded-lg border border-gray-700 bg-gray-900/95 py-1 shadow-xl backdrop-blur-sm">
+        <div className="absolute left-0 top-full mt-1 w-52 rounded-lg border border-gray-700 bg-gray-900/95 py-1 shadow-xl backdrop-blur-sm">
           <MenuButton label="Resume" onClick={() => setOpen(false)} />
           {isAiMode && (
             <MenuButton
@@ -120,6 +119,31 @@ export function GameMenu({
             label="Main Menu"
             onClick={() => navigate("/")}
           />
+          <div className="my-1 border-t border-gray-700" />
+          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 px-3 py-1.5 text-[10px] text-slate-500">
+            <a
+              href={`${__GIT_REPO_URL__}/commit/${__BUILD_HASH__}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="transition-colors hover:text-white"
+            >
+              v{__APP_VERSION__} {__BUILD_HASH__}
+            </a>
+            {cardDataMeta && (
+              <>
+                <span className="text-slate-700">·</span>
+                <a
+                  href={`${__GIT_REPO_URL__}/commit/${cardDataMeta.commit}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="transition-colors hover:text-white"
+                  title={`Card data: ${cardDataMeta.generated_at}`}
+                >
+                  cards {cardDataMeta.commit_short}
+                </a>
+              </>
+            )}
+          </div>
         </div>
       )}
     </div>

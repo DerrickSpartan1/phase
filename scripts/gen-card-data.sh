@@ -7,6 +7,7 @@ OUTPUT="${OUTPUT_DIR}/card-data.json"
 NAMES_OUTPUT="${OUTPUT_DIR}/card-names.json"
 COVERAGE_OUTPUT="${OUTPUT_DIR}/coverage-data.json"
 COVERAGE_SUMMARY="${OUTPUT_DIR}/coverage-summary.json"
+META_OUTPUT="${OUTPUT_DIR}/card-data-meta.json"
 
 echo "=== Card Data Generation ==="
 
@@ -26,6 +27,15 @@ cargo run --profile tool --bin oracle-gen --features cli -- "$DATA_DIR" --stats 
 echo "Generating card coverage data..."
 cargo run --profile tool --bin coverage-report -- "$DATA_DIR" --all > "$COVERAGE_OUTPUT"
 jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' "$COVERAGE_OUTPUT" > "$COVERAGE_SUMMARY"
+
+# Generate metadata sidecar with generation timestamp and parser commit
+GEN_TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+GEN_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+GEN_COMMIT_SHORT=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+cat > "$META_OUTPUT" <<METAEOF
+{"generated_at":"${GEN_TIMESTAMP}","commit":"${GEN_COMMIT}","commit_short":"${GEN_COMMIT_SHORT}"}
+METAEOF
+echo "Generated $META_OUTPUT"
 
 # Summary
 FILE_SIZE=$(du -h "$OUTPUT" | cut -f1)

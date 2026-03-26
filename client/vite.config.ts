@@ -78,9 +78,13 @@ export default defineConfig({
     __COVERAGE_SUMMARY_URL__: JSON.stringify(
       process.env.COVERAGE_SUMMARY_URL || "/coverage-summary.json",
     ),
+    __CARD_DATA_META_URL__: JSON.stringify(
+      process.env.CARD_DATA_META_URL || "/card-data-meta.json",
+    ),
     __AUDIO_BASE_URL__: JSON.stringify(
       process.env.AUDIO_BASE_URL || "",
     ),
+    __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
   },
   build: {
     target: "esnext",

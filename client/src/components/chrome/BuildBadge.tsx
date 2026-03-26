@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 
+import { useCardDataMeta, formatRelativeDate } from "../../hooks/useCardDataMeta";
 import { checkForServiceWorkerUpdate } from "../../pwa/registerServiceWorker";
 import { consumeRecentAutoUpdateMarker } from "../../pwa/updateMarker";
 import {
@@ -20,6 +21,7 @@ interface BuildBadgeProps {
 
 export function BuildBadge({ className = "", inline = false }: BuildBadgeProps = {}) {
   const [showUpdatedLabel, setShowUpdatedLabel] = useState(didAutoUpdate);
+  const cardDataMeta = useCardDataMeta();
   const updateStatus = useUpdateStatus();
   const downloadProgress = useDownloadProgress();
   const updateError = useUpdateError();
@@ -43,10 +45,7 @@ export function BuildBadge({ className = "", inline = false }: BuildBadgeProps =
   const hasUpdateIssue = Boolean(updateError);
 
   const handleCheckUpdate = () => {
-    if (isTauri()) {
-      // Tauri update handled separately
-      return;
-    }
+    if (isTauri()) return;
     checkForServiceWorkerUpdate();
   };
 
@@ -55,13 +54,41 @@ export function BuildBadge({ className = "", inline = false }: BuildBadgeProps =
     window.alert(report);
   };
 
+  const commitUrl = `${__GIT_REPO_URL__}/commit/${__BUILD_HASH__}`;
+  const cardDataAge = cardDataMeta ? formatRelativeDate(cardDataMeta.generated_at) : null;
+  const cardDataCommitUrl = cardDataMeta
+    ? `${__GIT_REPO_URL__}/commit/${cardDataMeta.commit}`
+    : null;
+
   return (
     <div
       className={inline ? className : `fixed left-2 bottom-[calc(env(safe-area-inset-bottom)+0.5rem)] z-20 ${className}`.trim()}
     >
       <div className="relative flex items-center gap-1 rounded-full border border-white/10 bg-black/18 px-2.5 py-1.5 text-[10px] text-slate-400 shadow-lg shadow-black/30 backdrop-blur-md overflow-hidden">
-        <span>v{__APP_VERSION__}</span>
-        <span className="text-slate-600">{__BUILD_HASH__}</span>
+        <a
+          href={commitUrl}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="flex items-center gap-1 transition-colors hover:text-white"
+        >
+          <span>v{__APP_VERSION__}</span>
+          <span className="text-slate-600">{__BUILD_HASH__}</span>
+        </a>
+
+        {cardDataMeta && (
+          <>
+            <span className="text-slate-700">·</span>
+            <a
+              href={cardDataCommitUrl!}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-slate-500 transition-colors hover:text-white"
+              title={`Card data generated ${cardDataMeta.generated_at} from ${cardDataMeta.commit_short}`}
+            >
+              cards {cardDataAge} ({cardDataMeta.commit_short})
+            </a>
+          </>
+        )}
 
         <button
           type="button"
