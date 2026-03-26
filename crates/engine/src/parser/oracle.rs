@@ -398,6 +398,28 @@ pub fn parse_oracle_text(
             continue;
         }
 
+        // Priority 6b: Ability-word-prefixed triggers (e.g., "Heroic — Whenever ...",
+        // "Constellation — Whenever ..."). Must intercept BEFORE is_static_pattern and
+        // is_replacement_pattern checks, which would otherwise match on keywords like
+        // "prevent" in the effect text and misroute the line.
+        if let Some(effect_text) = strip_ability_word(&line) {
+            let effect_lower = effect_text.to_lowercase();
+            if effect_lower.starts_with("when ")
+                || effect_lower.starts_with("whenever ")
+                || effect_lower.starts_with("at ")
+            {
+                let mut trigger = parse_trigger_line(&effect_text, card_name);
+                i += 1;
+                if effect_lower.contains("roll a d") {
+                    if let Some(ref mut execute) = trigger.execute {
+                        i = attach_die_result_branches_to_chain(execute, &lines, i);
+                    }
+                }
+                result.triggers.push(trigger);
+                continue;
+            }
+        }
+
         // Priority 7: Static/continuous patterns
         // CR 611.2a + CR 611.3a: On permanents, "creatures you control get +1/+1"
         // is a static ability (CR 611.3a). On instants/sorceries, lines with an
@@ -407,7 +429,8 @@ pub fn parse_oracle_text(
         // parse_effect_chain handles embedded statics via split_clause_sequence.
         if is_static_pattern(&lower) {
             // Guard: ability-word-prefixed trigger lines (e.g., "Flurry — Whenever...")
-            // must fall through to Priority 14 which strips the prefix first.
+            // handled above at Priority 6b. The check below is kept as a defensive
+            // guard for any edge cases that reach Priority 7.
             let is_ability_word_trigger = strip_ability_word(&line).is_some_and(|stripped| {
                 let sl = stripped.to_lowercase();
                 sl.starts_with("when ") || sl.starts_with("whenever ") || sl.starts_with("at ")
