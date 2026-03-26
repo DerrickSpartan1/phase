@@ -124,10 +124,10 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
 
       {/* Ability badge overlay (non-spell entries: triggered/activated) */}
       {!isSpell && (
-        <div className="absolute inset-x-0 bottom-0 rounded-b-lg bg-gradient-to-t from-black/80 to-transparent px-1.5 py-1">
-          <div className="pr-8 text-[9px] text-purple-300">{abilityLabel}</div>
+        <div className="absolute inset-x-0 bottom-0 rounded-b-lg border-t border-white/10 bg-gray-900/95 px-1.5 py-1 backdrop-blur-sm">
+          <div className="pr-8 text-[9px] font-semibold text-purple-300">{abilityLabel}</div>
           {triggerDescription && (
-            <div className="mt-0.5 line-clamp-2 pr-6 text-[8px] leading-tight text-gray-300/80">
+            <div className="mt-0.5 line-clamp-3 pr-6 text-[8px] leading-tight text-gray-300">
               {triggerDescription}
             </div>
           )}

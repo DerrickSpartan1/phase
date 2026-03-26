@@ -242,10 +242,11 @@ function DeckTile({ deckName, isActive, compatibility, onClick, onDelete, onAdop
               pct >= 75 ? "bg-lime-500"
               : pct >= 50 ? "bg-amber-500"
               : "bg-red-500";
+            const totalCopiesAffected = unsupported_cards.reduce((sum, c) => sum + (c.copies ?? 1), 0);
             return (
               <div
                 className="flex w-full items-center gap-1.5"
-                title={`Unsupported (${unsupported_cards.length}):\n${unsupported_cards.map((c) => `${c.name}: ${c.gaps.join(", ")}`).join("\n")}`}
+                title={`Unsupported (${unsupported_cards.length} unique, ${totalCopiesAffected} copies):\n${unsupported_cards.map((c) => `${(c.copies ?? 1) > 1 ? `${c.copies}x ` : ""}${c.name}: ${c.gaps.join(", ")}`).join("\n")}`}
                 onMouseEnter={() => setCoverageHovered(true)}
                 onMouseLeave={() => setCoverageHovered(false)}
               >
@@ -595,13 +596,6 @@ export function MyDecks({
             Show all decks
           </button>
         )}
-        {isEvaluating && (
-          <span className="flex items-center gap-2 rounded bg-indigo-500/15 px-2.5 py-1 text-xs font-medium text-indigo-300 ring-1 ring-indigo-400/30">
-            <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
-            Evaluating compatibility…
-          </span>
-        )}
-
         <div className="ml-auto flex items-center gap-1">
           <select
             value={activeSort}
@@ -631,6 +625,13 @@ export function MyDecks({
           </button>
         </div>
       </div>
+
+      {isEvaluating && (
+        <div className="flex w-full items-center justify-center gap-2.5 rounded-xl border border-indigo-400/20 bg-indigo-500/10 px-4 py-3">
+          <span className="inline-block h-2.5 w-2.5 animate-pulse rounded-full bg-indigo-400" />
+          <span className="text-sm font-medium text-indigo-200">Evaluating deck compatibility…</span>
+        </div>
+      )}
 
       {compatibilityError && (
         <div className="w-full rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">

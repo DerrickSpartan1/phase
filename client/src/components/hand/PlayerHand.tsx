@@ -270,7 +270,7 @@ const HandCard = memo(function HandCard({
       }}
       exit={{ opacity: 0, scale: 0.8 }}
       whileHover={{ y: -30 + arcOffset, scale: 1.08, zIndex: 30 }}
-      whileDrag={{ scale: 1.05, zIndex: 50 }}
+      whileDrag={{ scale: 1.05, zIndex: 9999 }}
       transition={{ delay: index * 0.03, duration: 0.25 }}
       drag
       dragConstraints={false}
@@ -307,7 +307,7 @@ const HandCard = memo(function HandCard({
       }`}
       style={{
         marginLeft: index === 0 ? 0 : getHandOverlap(handSize),
-        zIndex: isDragging ? 50 : isSelected ? 20 : index,
+        zIndex: isDragging ? 9999 : isSelected ? 20 : index,
       }}
       {...longPressHandlers}
     >
