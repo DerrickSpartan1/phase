@@ -123,7 +123,7 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
   const supportStyle = zoneStyle(zoneScale(OTHER_BASE_SCALE, supportCount));
 
   const middleRow = (
-    <div className="flex min-h-0 items-center justify-between gap-4" data-debug-label="Middle Row">
+    <div className="flex min-h-0 items-stretch justify-between gap-4" data-debug-label="Middle Row">
       <div
         className={`z-10 flex min-w-0 basis-0 flex-1 gap-2 pl-2 ${landAlignClass}`}
         style={landStyle}

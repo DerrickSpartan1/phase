@@ -79,6 +79,8 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
   let rowStyle: React.CSSProperties | undefined;
   /** Minimum readable card height — below this, switch to multi-row wrapping */
   const MIN_CARD_H = 70;
+  /** Maximum creature card height — prevents oversized cards with few creatures */
+  const MAX_CARD_H = 150;
   let creatureWrap = false;
 
   if (rowType === "creatures") {
@@ -96,7 +98,7 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
       // Try single-row first
       const availableForCards = cw - (n - 1) * gap - totalStagger;
       const widthPerGroup = n > 0 ? availableForCards / n : cw;
-      const singleRowCardH = Math.max(40, Math.min(ch, widthPerGroup / activeAr));
+      const singleRowCardH = Math.max(40, Math.min(ch, widthPerGroup / activeAr, MAX_CARD_H));
 
       if (singleRowCardH >= MIN_CARD_H) {
         // Single row — cards fit at readable size
