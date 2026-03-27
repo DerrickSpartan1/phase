@@ -486,21 +486,21 @@ mod tests {
             for obj_id in &filtered.players[1].hand {
                 let obj = filtered.objects.get(obj_id).expect("hand object must exist");
                 prop_assert!(obj.face_down);
-                prop_assert_eq!(obj.name, "Hidden Card");
+                prop_assert_eq!(&obj.name, "Hidden Card");
                 prop_assert!(obj.abilities.is_empty());
             }
 
             prop_assert_eq!(filtered.players[0].library.len(), own_library_count);
             for obj_id in &filtered.players[0].library {
                 let obj = filtered.objects.get(obj_id).expect("own library object must exist");
-                prop_assert_eq!(obj.name, "Hidden Card");
+                prop_assert_eq!(&obj.name, "Hidden Card");
                 prop_assert!(obj.face_down);
             }
 
             prop_assert_eq!(filtered.players[1].library.len(), opp_library_count);
             for obj_id in &filtered.players[1].library {
                 let obj = filtered.objects.get(obj_id).expect("opponent library object must exist");
-                prop_assert_eq!(obj.name, "Hidden Card");
+                prop_assert_eq!(&obj.name, "Hidden Card");
                 prop_assert!(obj.face_down);
             }
         }

@@ -266,18 +266,13 @@ impl GameScenario {
 
     /// Mark an existing object as a commander and move it to the command zone.
     pub fn with_commander(&mut self, object_id: ObjectId) -> &mut Self {
-        let owner = self
+        let (owner, current_zone) = self
             .state
             .objects
             .get(&object_id)
-            .expect("object must exist")
-            .owner;
-        crate::game::zones::remove_from_zone(
-            &mut self.state,
-            object_id,
-            self.state.objects[&object_id].zone,
-            owner,
-        );
+            .map(|obj| (obj.owner, obj.zone))
+            .expect("object must exist");
+        crate::game::zones::remove_from_zone(&mut self.state, object_id, current_zone, owner);
         crate::game::zones::add_to_zone(&mut self.state, object_id, Zone::Command, owner);
         let obj = self
             .state
@@ -1035,17 +1030,22 @@ impl GameRunner {
             WaitingFor::GameOver { .. } => "GameOver",
             WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
             WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
+            WaitingFor::EquipTarget { .. } => "EquipTarget",
             WaitingFor::ScryChoice { .. } => "ScryChoice",
             WaitingFor::DigChoice { .. } => "DigChoice",
             WaitingFor::SurveilChoice { .. } => "SurveilChoice",
             WaitingFor::RevealChoice { .. } => "RevealChoice",
             WaitingFor::SearchChoice { .. } => "SearchChoice",
             WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
+            WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
             WaitingFor::ManifestDreadChoice { .. } => "ManifestDreadChoice",
             WaitingFor::TriggerTargetSelection { .. } => "TriggerTargetSelection",
+            WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",
+            WaitingFor::BetweenGamesChoosePlayDraw { .. } => "BetweenGamesChoosePlayDraw",
             WaitingFor::NamedChoice { .. } => "NamedChoice",
             WaitingFor::ModeChoice { .. } => "ModeChoice",
+            WaitingFor::DiscardToHandSize { .. } => "DiscardToHandSize",
             WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
             WaitingFor::AdventureCastChoice { .. } => "AdventureCastChoice",
             WaitingFor::WarpCostChoice { .. } => "WarpCostChoice",
@@ -1053,8 +1053,12 @@ impl GameRunner {
             WaitingFor::AbilityModeChoice { .. } => "AbilityModeChoice",
             WaitingFor::OptionalEffectChoice { .. } => "OptionalEffectChoice",
             WaitingFor::OpponentMayChoice { .. } => "OpponentMayChoice",
-            WaitingFor::DeclareCompanion { .. } => "DeclareCompanion",
+            WaitingFor::UnlessPayment { .. } => "UnlessPayment",
+            WaitingFor::CompanionReveal { .. } => "CompanionReveal",
             WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
+            WaitingFor::DiscardForCost { .. } => "DiscardForCost",
+            WaitingFor::SacrificeForCost { .. } => "SacrificeForCost",
+            WaitingFor::ExileFromGraveyardForCost { .. } => "ExileFromGraveyardForCost",
             WaitingFor::HarmonizeTapChoice { .. } => "HarmonizeTapChoice",
             WaitingFor::DiscoverChoice { .. } => "DiscoverChoice",
             WaitingFor::TopOrBottomChoice { .. } => "TopOrBottomChoice",

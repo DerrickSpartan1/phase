@@ -1,11 +1,14 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
+use engine::game::engine::apply;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::game_state::{TargetSelectionProgress, TargetSelectionSlot, WaitingFor};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
+use phase_ai::auto_play::run_ai_actions;
 use phase_ai::choose_action;
 use phase_ai::config::{create_config, AiDifficulty, Platform};
 use rand::rngs::SmallRng;
@@ -164,5 +167,59 @@ fn scenario_mcts_plays_available_land_deterministically() {
             object_id: land_id,
             card_id: runner.state().objects[&land_id].card_id,
         })
+    );
+}
+
+#[test]
+fn scenario_priority_choice_remains_reducer_legal() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_creature(P1, "Bear", 2, 2);
+    scenario.add_bolt_to_hand(P0);
+
+    let runner = scenario.build();
+    let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+    let mut rng = SmallRng::seed_from_u64(16);
+    let action = choose_action(runner.state(), P0, &config, &mut rng)
+        .expect("AI should choose a legal priority action");
+
+    let mut sim = runner.state().clone();
+    apply(&mut sim, action).expect("AI-selected action should remain reducer-legal");
+}
+
+#[test]
+fn scenario_bounded_ai_sequence_progresses_without_panicking() {
+    let mut scenario = GameScenario::new();
+    scenario.with_life(P0, 3);
+    let attacker = scenario.add_creature(P1, "Attacker", 4, 4).id();
+    let blocker = scenario.add_creature(P0, "Blocker", 1, 1).id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.phase = Phase::DeclareBlockers;
+        state.active_player = P1;
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, P0)],
+            ..Default::default()
+        });
+        state.waiting_for = WaitingFor::DeclareBlockers {
+            player: P0,
+            valid_blocker_ids: vec![blocker],
+            valid_block_targets: HashMap::from([(blocker, vec![attacker])]),
+        };
+    }
+
+    let ai_players = HashSet::from([P0]);
+    let ai_configs = HashMap::from([(P0, create_config(AiDifficulty::VeryHard, Platform::Native))]);
+    let results = run_ai_actions(runner.state_mut(), &ai_players, &ai_configs);
+
+    assert!(
+        !results.is_empty(),
+        "AI loop should take at least one action"
+    );
+    assert!(
+        results.len() <= 200,
+        "AI loop should stay within its hard safety cap"
     );
 }
