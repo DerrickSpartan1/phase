@@ -4,17 +4,18 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::card_type::CoreType;
+use super::card_type::{CoreType, Supertype};
 use super::game_state::{DistributionUnit, RetargetScope};
 use super::identifiers::ObjectId;
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaCost};
 use super::phase::Phase;
-use super::player::PlayerId;
+use super::player::{PlayerCounterKind, PlayerId};
 use super::replacements::ReplacementEvent;
 use super::statics::StaticMode;
 use super::triggers::TriggerMode;
 use super::zones::Zone;
+use crate::game::game_object::CounterType;
 
 // ---------------------------------------------------------------------------
 // Supporting types
@@ -749,6 +750,15 @@ pub enum ControllerRef {
     Opponent,
 }
 
+/// CR 700.5: Qualities that can be shared across multi-target selections.
+/// Used by `FilterProp::SharesQuality` for group constraint validation at resolution time.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum SharedQuality {
+    CreatureType,
+    Color,
+    CardType,
+}
+
 /// Individual filter properties that can be combined in a Typed filter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type")]
@@ -761,10 +771,10 @@ pub enum FilterProp {
     /// CR 302.6 / CR 110.5: Untapped status as targeting qualifier.
     Untapped,
     WithKeyword {
-        value: String,
+        value: Keyword,
     },
     CountersGE {
-        counter_type: String,
+        counter_type: CounterType,
         count: u32,
     },
     /// Matches objects with converted mana cost >= N (for "mana value N or greater").
@@ -789,7 +799,7 @@ pub enum FilterProp {
     Another,
     /// Matches objects with a specific color (for "white creature", "red spell", etc.).
     HasColor {
-        color: String,
+        color: ManaColor,
     },
     /// Matches objects with power <= N (for "creature with power 2 or less").
     PowerLE {
@@ -803,7 +813,7 @@ pub enum FilterProp {
     Multicolored,
     /// Matches objects with a specific supertype (Basic, Legendary, Snow).
     HasSupertype {
-        value: String,
+        value: Supertype,
     },
     /// Matches objects whose subtypes include the source object's chosen creature type.
     /// Used for "of the chosen type" patterns (Cavern of Souls, Metallic Mimic).
@@ -814,12 +824,12 @@ pub enum FilterProp {
     /// CR 205.4b: Matches objects that do NOT have a specific color.
     /// Parallel to `HasColor` — used for "nonblack", "nonwhite" in negation stacks.
     NotColor {
-        color: String,
+        color: ManaColor,
     },
     /// CR 205.4a: Matches objects that do NOT have a specific supertype.
     /// Parallel to `HasSupertype` — used for "nonbasic", "nonlegendary" in negation stacks.
     NotSupertype {
-        value: String,
+        value: Supertype,
     },
     /// CR 702.157a: Matches suspected creatures.
     Suspected,
@@ -840,7 +850,7 @@ pub enum FilterProp {
     /// one value of the named quality. Validated at resolution time, not per-object.
     /// Examples: "that share a creature type", "that share a color", "that share a card type".
     SharesQuality {
-        quality: String,
+        quality: SharedQuality,
     },
     /// CR 510.1: Object was dealt damage during this turn.
     /// Checks `damage_marked > 0` (damage persists until cleanup step).
@@ -1125,11 +1135,11 @@ pub enum QuantityRef {
     /// CR 603.7c: Mana value of the source object from the triggering event.
     EventContextSourceManaValue,
     /// CR 117.1: Number of spells cast this turn by a specific player,
-    /// optionally filtered by type. `None` = all spells.
+    /// optionally filtered by spell characteristics. `None` = all spells.
     /// Resolved against the controller (or scope_player in per-player iteration).
     SpellsCastThisTurn {
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        filter: Option<TypeFilter>,
+        filter: Option<TargetFilter>,
     },
     /// Count of permanents matching filter that entered the battlefield
     /// under the controller's control this turn.
@@ -1211,7 +1221,7 @@ pub enum QuantityExpr {
 }
 
 /// Comparison operator used in static conditions.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum Comparator {
     GT,
     LT,
@@ -1862,6 +1872,14 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 122.1: Place counters on all objects matching a filter (no targeting).
+    PutCounterAll {
+        counter_type: String,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     MultiplyCounter {
         counter_type: String,
         #[serde(default = "default_two_i32")]
@@ -2144,10 +2162,9 @@ pub enum Effect {
         amount: u32,
     },
     /// CR 122.1: Give player counters (poison, experience, rad, ticket, etc.).
-    /// Uses string-based counter kind for extensibility, paralleling CounterType::Generic(String).
-    /// Poison counters have dedicated SBA rules (CR 104.3d / CR 122.1f).
+    /// Poison counters route to the dedicated field via `Player::add_player_counters` (CR 104.3d).
     GivePlayerCounter {
-        counter_kind: String,
+        counter_kind: PlayerCounterKind,
         count: QuantityExpr,
         target: TargetFilter,
     },
@@ -2385,6 +2402,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::BecomeCopy { .. } => "BecomeCopy",
         Effect::ChooseCard { .. } => "ChooseCard",
         Effect::PutCounter { .. } => "PutCounter",
+        Effect::PutCounterAll { .. } => "PutCounterAll",
         Effect::MultiplyCounter { .. } => "MultiplyCounter",
         Effect::DoublePT { .. } => "DoublePT",
         Effect::DoublePTAll { .. } => "DoublePTAll",
@@ -2498,6 +2516,7 @@ pub enum EffectKind {
     BecomeCopy,
     ChooseCard,
     PutCounter,
+    PutCounterAll,
     MultiplyCounter,
     DoublePT,
     DoublePTAll,
@@ -2606,6 +2625,7 @@ impl From<&Effect> for EffectKind {
             Effect::BecomeCopy { .. } => EffectKind::BecomeCopy,
             Effect::ChooseCard { .. } => EffectKind::ChooseCard,
             Effect::PutCounter { .. } => EffectKind::PutCounter,
+            Effect::PutCounterAll { .. } => EffectKind::PutCounterAll,
             Effect::MultiplyCounter { .. } => EffectKind::MultiplyCounter,
             Effect::DoublePT { .. } => EffectKind::DoublePT,
             Effect::DoublePTAll { .. } => EffectKind::DoublePTAll,
@@ -3209,6 +3229,13 @@ pub enum TriggerCondition {
     /// a spell matching the optional filter this turn.
     CastSpellThisTurn { filter: Option<TargetFilter> },
 
+    /// Quantity comparison for trigger-side intervening-if checks.
+    QuantityComparison {
+        lhs: QuantityExpr,
+        comparator: Comparator,
+        rhs: QuantityExpr,
+    },
+
     /// CR 122.1: "if you put a counter on a permanent this turn" — true when the controller
     /// added any counter to any permanent this turn.
     CounterAddedThisTurn,
@@ -3293,7 +3320,7 @@ pub enum TriggerConstraint {
     NthSpellThisTurn {
         n: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        filter: Option<TypedFilter>,
+        filter: Option<TargetFilter>,
     },
     /// "Whenever you draw your Nth card each turn" — fires exactly when
     /// the controller's `cards_drawn_this_turn` equals `n`.
@@ -3363,6 +3390,9 @@ pub struct TriggerDefinition {
     /// CR 700.14: Expend threshold — fires when cumulative mana spent on spells crosses N.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expend_threshold: Option<u32>,
+    /// CR 508.3a: Filter for attack target type ("attacks a planeswalker").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attack_target_filter: Option<crate::types::triggers::AttackTargetFilter>,
 }
 
 impl TriggerDefinition {
@@ -3387,6 +3417,7 @@ impl TriggerDefinition {
             unless_pay: None,
             batched: false,
             expend_threshold: None,
+            attack_target_filter: None,
         }
     }
 
@@ -4169,6 +4200,7 @@ mod tests {
             unless_pay: None,
             batched: false,
             expend_threshold: None,
+            attack_target_filter: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: TriggerDefinition = serde_json::from_str(&json).unwrap();
@@ -4516,10 +4548,10 @@ mod tests {
             FilterProp::Tapped,
             FilterProp::Untapped,
             FilterProp::WithKeyword {
-                value: "Flying".to_string(),
+                value: Keyword::Flying,
             },
             FilterProp::CountersGE {
-                counter_type: "+1/+1".to_string(),
+                counter_type: CounterType::Plus1Plus1,
                 count: 3,
             },
             FilterProp::CmcGE {

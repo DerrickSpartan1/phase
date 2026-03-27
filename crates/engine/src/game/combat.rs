@@ -14,6 +14,15 @@ use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
+/// CR 702.19: Which trample variant applies to combat damage assignment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TrampleKind {
+    /// CR 702.19b: Standard trample — excess to attack target.
+    Standard,
+    /// CR 702.19c: Trample over planeswalkers — excess can spill to PW controller.
+    OverPlaneswalkers,
+}
+
 /// Represents who a creature is attacking: a player, planeswalker, or battle (CR 506.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
@@ -92,15 +101,23 @@ impl AttackerInfo {
     }
 
     /// Resolve the DamageTarget for this attacker's combat damage (CR 510.1b).
-    /// Returns `None` if attacking a planeswalker/battle that left the battlefield (CR 506.4c):
-    /// the creature is still attacking but assigns no combat damage.
-    pub fn resolve_damage_target(&self, state: &GameState) -> Option<DamageTarget> {
+    /// Returns `None` if attacking a planeswalker/battle that left the battlefield (CR 506.4c),
+    /// unless `trample_over_pw` is true — then PW removal falls back to the defending
+    /// player per CR 702.19e (exception to CR 506.4c).
+    pub fn resolve_damage_target(
+        &self,
+        state: &GameState,
+        trample_over_pw: bool,
+    ) -> Option<DamageTarget> {
         match &self.attack_target {
             AttackTarget::Player(pid) => Some(DamageTarget::Player(*pid)),
-            // CR 506.4c: If the planeswalker/battle left the battlefield, creature assigns no damage.
+            // CR 506.4c: If the planeswalker left the battlefield, creature assigns no damage.
             // Check zone == Battlefield, not just contains_key — objects persist after zone changes.
             AttackTarget::Planeswalker(pw_id) => match state.objects.get(pw_id) {
                 Some(obj) if obj.zone == Zone::Battlefield => Some(DamageTarget::Object(*pw_id)),
+                // CR 702.19e: Trample-over-PW falls back to defending player.
+                _ if trample_over_pw => Some(DamageTarget::Player(self.defending_player)),
+                // CR 506.4c: Without trample-over-PW, no damage.
                 _ => None,
             },
             // CR 310.6: Damage to a battle removes defense counters — same Object routing.
@@ -1116,6 +1133,22 @@ pub fn get_valid_attack_targets(state: &GameState) -> Vec<AttackTarget> {
                 && !state.eliminated_players.contains(&obj.controller)
             {
                 targets.push(AttackTarget::Planeswalker(id));
+            }
+        }
+    }
+
+    // CR 310.11 + CR 506.2: Battles controlled by opponents are valid attack targets.
+    for &id in &state.battlefield {
+        if let Some(obj) = state.objects.get(&id) {
+            if obj.controller != active
+                && !allies.contains(&obj.controller)
+                && obj
+                    .card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Battle)
+                && !state.eliminated_players.contains(&obj.controller)
+            {
+                targets.push(AttackTarget::Battle(id));
             }
         }
     }

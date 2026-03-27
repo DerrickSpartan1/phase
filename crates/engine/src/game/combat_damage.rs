@@ -1,4 +1,4 @@
-use crate::game::combat::{CombatState, DamageAssignment, DamageTarget};
+use crate::game::combat::{AttackTarget, CombatState, DamageAssignment, DamageTarget, TrampleKind};
 use crate::game::effects::deal_damage::{apply_damage_to_target, DamageContext, DamageResult};
 use crate::game::game_object::GameObject;
 use crate::game::sba;
@@ -186,7 +186,14 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
         }
 
         let has_deathtouch = obj.has_keyword(&Keyword::Deathtouch);
-        let has_trample = obj.has_keyword(&Keyword::Trample);
+        // CR 702.19c takes precedence when both present — it subsumes regular trample behavior
+        let trample = if obj.has_keyword(&Keyword::TrampleOverPlaneswalkers) {
+            Some(TrampleKind::OverPlaneswalkers)
+        } else if obj.has_keyword(&Keyword::Trample) {
+            Some(TrampleKind::Standard)
+        } else {
+            None
+        };
 
         // CR 510.1c: Check if interactive assignment is needed (2+ blockers).
         if needs_interactive_assignment(&combat, attacker_info.object_id) {
@@ -213,14 +220,23 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
                 .map(|o| o.controller)
                 .unwrap_or(state.active_player);
 
+            // CR 702.19c: Compute PW loyalty threshold for trample-over-PW spillover
+            let (pw_loyalty, pw_controller) = if trample == Some(TrampleKind::OverPlaneswalkers) {
+                compute_pw_loyalty_threshold(state, &attacker_info.attack_target)
+            } else {
+                (None, None)
+            };
+
             return Some(WaitingFor::AssignCombatDamage {
                 player: controller,
                 attacker_id: attacker_info.object_id,
                 total_damage: power,
                 blockers,
-                has_trample,
+                trample,
                 defending_player: attacker_info.defending_player,
                 attack_target: attacker_info.attack_target.clone(),
+                pw_loyalty,
+                pw_controller,
             });
         }
 
@@ -231,7 +247,7 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
             &combat,
             power,
             has_deathtouch,
-            has_trample,
+            trample,
         );
         if let Some(c) = &mut state.combat {
             for a in assignments {
@@ -338,6 +354,74 @@ pub(crate) fn needs_interactive_assignment(combat: &CombatState, attacker_id: Ob
         .unwrap_or(false)
 }
 
+/// CR 702.19c: Compute effective PW loyalty threshold for trample-over-PW,
+/// accounting for pending damage from other attackers in the same step.
+fn compute_pw_loyalty_threshold(
+    state: &GameState,
+    attack_target: &AttackTarget,
+) -> (Option<u32>, Option<PlayerId>) {
+    if let AttackTarget::Planeswalker(pw_id) = attack_target {
+        // CR 306.8: PW loyalty is tracked via the `loyalty` field (authoritative),
+        // synced with counters on damage application. Read the field directly.
+        let base_loyalty = state
+            .objects
+            .get(pw_id)
+            .and_then(|obj| obj.loyalty)
+            .unwrap_or(0);
+        // CR 702.19c: Account for pending damage from other attackers this step
+        let pending_to_pw: u32 = state
+            .combat
+            .as_ref()
+            .map(|c| {
+                c.pending_damage
+                    .iter()
+                    .filter(|(_, da)| da.target == DamageTarget::Object(*pw_id))
+                    .map(|(_, da)| da.amount)
+                    .sum()
+            })
+            .unwrap_or(0);
+        let effective = base_loyalty.saturating_sub(pending_to_pw);
+        let controller = state.objects.get(pw_id).map(|obj| obj.controller);
+        (Some(effective), controller)
+    } else {
+        (None, None)
+    }
+}
+
+/// Assign trample excess damage when attacking a PW with trample-over-PW.
+/// CR 702.19c: lethal to blocker(s) → loyalty-worth to PW → excess to PW controller.
+fn assign_trample_over_pw_excess(
+    state: &GameState,
+    attacker_info: &crate::game::combat::AttackerInfo,
+    excess: u32,
+) -> Vec<DamageAssignment> {
+    let mut result = Vec::new();
+    if excess == 0 {
+        return result;
+    }
+    let (pw_loyalty, _) = compute_pw_loyalty_threshold(state, &attacker_info.attack_target);
+    let effective_loyalty = pw_loyalty.unwrap_or(0);
+    let to_pw = excess.min(effective_loyalty);
+    let to_controller = excess.saturating_sub(to_pw);
+
+    if to_pw > 0 {
+        // CR 702.19e: trample_over_pw=true so PW removal falls back to defending player.
+        if let Some(target) = attacker_info.resolve_damage_target(state, true) {
+            result.push(DamageAssignment {
+                target,
+                amount: to_pw,
+            });
+        }
+    }
+    if to_controller > 0 {
+        result.push(DamageAssignment {
+            target: DamageTarget::Player(attacker_info.defending_player),
+            amount: to_controller,
+        });
+    }
+    result
+}
+
 /// Auto-assign damage for unblocked or single-blocker attackers.
 /// Multi-blocker cases (2+) are handled interactively via WaitingFor::AssignCombatDamage.
 fn assign_attacker_damage(
@@ -346,7 +430,7 @@ fn assign_attacker_damage(
     combat: &CombatState,
     power: u32,
     has_deathtouch: bool,
-    has_trample: bool,
+    trample: Option<TrampleKind>,
 ) -> Vec<DamageAssignment> {
     let attacker_id = attacker_info.object_id;
 
@@ -357,14 +441,36 @@ fn assign_attacker_damage(
 
     match blockers {
         None => {
-            // CR 509.1h + CR 510.1c: If the creature was declared blocked but all
-            // blockers have since been removed, it's still "blocked" and assigns no damage.
             if attacker_info.blocked {
+                // CR 702.19d: Trample (both variants) — blocked but no blockers remaining,
+                // assign all damage to attack target as though lethal was assigned.
+                if trample.is_some() {
+                    let is_over_pw = trample == Some(TrampleKind::OverPlaneswalkers);
+                    if is_over_pw
+                        && matches!(attacker_info.attack_target, AttackTarget::Planeswalker(..))
+                    {
+                        // CR 702.19d + CR 702.19c: Trample-over-PW with no blockers attacking PW
+                        return assign_trample_over_pw_excess(state, attacker_info, power);
+                    }
+                    // CR 702.19d: Standard trample with no blockers — all to attack target
+                    match attacker_info.resolve_damage_target(state, false) {
+                        Some(target) => {
+                            return vec![DamageAssignment {
+                                target,
+                                amount: power,
+                            }]
+                        }
+                        None => return Vec::new(),
+                    }
+                }
+                // CR 509.1h + CR 510.1c: Non-trample blocked creature with all
+                // blockers removed — still "blocked" and assigns no damage.
                 return Vec::new();
             }
             // CR 510.1b: Unblocked creature assigns damage to the player/planeswalker/battle it's attacking.
-            // CR 506.4c: If the planeswalker/battle left the battlefield, assign no damage.
-            match attacker_info.resolve_damage_target(state) {
+            // CR 506.4c / CR 702.19e: If PW left, trample-over-PW falls back to defending player.
+            let is_over_pw = trample == Some(TrampleKind::OverPlaneswalkers);
+            match attacker_info.resolve_damage_target(state, is_over_pw) {
                 Some(target) => vec![DamageAssignment {
                     target,
                     amount: power,
@@ -374,8 +480,8 @@ fn assign_attacker_damage(
         }
         Some(blockers) => {
             if blockers.len() == 1 {
-                if has_trample {
-                    // CR 702.19b: Trample — assign lethal to blocker, excess to defending player.
+                if let Some(trample_kind) = trample {
+                    // CR 702.19b: Trample — assign lethal to blocker, excess to attack target.
                     let lethal = lethal_damage_needed(state, blockers[0], has_deathtouch);
                     let to_blocker = power.min(lethal);
                     let excess = power.saturating_sub(to_blocker);
@@ -383,15 +489,27 @@ fn assign_attacker_damage(
                         target: DamageTarget::Object(blockers[0]),
                         amount: to_blocker,
                     }];
-                    // CR 702.19f: Without "trample over planeswalkers", excess goes to the
-                    // attack target (player/PW/battle), not the controlling player.
-                    // TODO: CR 702.19c — "trample over planeswalkers" allows excess to spill to PW controller.
                     if excess > 0 {
-                        if let Some(target) = attacker_info.resolve_damage_target(state) {
-                            result.push(DamageAssignment {
-                                target,
-                                amount: excess,
-                            });
+                        if trample_kind == TrampleKind::OverPlaneswalkers
+                            && matches!(attacker_info.attack_target, AttackTarget::Planeswalker(..))
+                        {
+                            // CR 702.19c: Trample-over-PW attacking PW — split excess
+                            // between PW (up to loyalty) and PW controller.
+                            result.extend(assign_trample_over_pw_excess(
+                                state,
+                                attacker_info,
+                                excess,
+                            ));
+                        } else {
+                            // CR 702.19f: Standard trample or trample-over-PW attacking
+                            // non-PW — excess goes to the attack target directly.
+                            if let Some(target) = attacker_info.resolve_damage_target(state, false)
+                            {
+                                result.push(DamageAssignment {
+                                    target,
+                                    amount: excess,
+                                });
+                            }
                         }
                     }
                     result
@@ -830,12 +948,12 @@ mod tests {
             Some(WaitingFor::AssignCombatDamage {
                 total_damage,
                 blockers,
-                has_trample,
+                trample,
                 ..
             }) => {
                 assert_eq!(*total_damage, 5);
                 assert_eq!(blockers.len(), 2);
-                assert!(!has_trample);
+                assert!(trample.is_none());
             }
             other => panic!("Expected AssignCombatDamage, got {:?}", other),
         }
@@ -1410,5 +1528,322 @@ mod tests {
             state.players[1].life, 20,
             "Player should take no damage when PW left"
         );
+    }
+
+    // ── Trample Over Planeswalkers (CR 702.19c) ────────────────────────────
+
+    // CR 702.19c: Single blocker + PW target + trample-over-PW → splits blocker/PW/controller.
+    #[test]
+    fn trample_over_pw_single_blocker_splits_damage() {
+        use crate::game::combat::AttackTarget;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        // 7/7 with trample over planeswalkers
+        let attacker = create_creature(&mut state, PlayerId(0), "Big Trampler", 7, 7);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::TrampleOverPlaneswalkers);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let pw = create_planeswalker(&mut state, PlayerId(1), "Jace", 3);
+
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(pw),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        };
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![attacker]);
+        combat
+            .attackers
+            .iter_mut()
+            .find(|a| a.object_id == attacker)
+            .unwrap()
+            .blocked = true;
+        state.combat = Some(combat);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // 7 power: 2 lethal to blocker, 3 to PW (loyalty), 2 to PW controller
+        assert_eq!(
+            state.objects[&pw].loyalty,
+            Some(0),
+            "PW should have 0 loyalty (3 - 3)"
+        );
+        assert_eq!(
+            state.players[1].life, 18,
+            "Player should take 2 damage (7 - 2 blocker - 3 PW loyalty)"
+        );
+    }
+
+    // CR 702.19f preserved: regular trample excess stays on PW, not controller.
+    #[test]
+    fn regular_trample_excess_stays_on_pw_not_controller() {
+        use crate::game::combat::AttackTarget;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Trampler", 7, 7);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Trample);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let pw = create_planeswalker(&mut state, PlayerId(1), "Jace", 3);
+
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(pw),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        };
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![attacker]);
+        combat
+            .attackers
+            .iter_mut()
+            .find(|a| a.object_id == attacker)
+            .unwrap()
+            .blocked = true;
+        state.combat = Some(combat);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // CR 702.19f: All 5 excess (7 - 2 lethal) goes to PW, not player
+        assert_eq!(
+            state.objects[&pw].loyalty,
+            Some(0),
+            "PW should lose all loyalty to excess"
+        );
+        assert_eq!(
+            state.players[1].life, 20,
+            "Player should take NO damage — CR 702.19f"
+        );
+    }
+
+    // CR 702.19e: PW removed + trample-over-PW → damage redirects to defending player.
+    #[test]
+    fn trample_over_pw_redirects_when_pw_removed() {
+        use crate::game::combat::AttackTarget;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Trampler", 5, 5);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::TrampleOverPlaneswalkers);
+        let pw = create_planeswalker(&mut state, PlayerId(1), "Doomed PW", 4);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(pw),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+
+        // Remove PW before damage
+        state.objects.get_mut(&pw).unwrap().zone = Zone::Graveyard;
+        state.battlefield.retain(|&id| id != pw);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // CR 702.19e: All damage to defending player
+        assert_eq!(
+            state.players[1].life, 15,
+            "5 damage should redirect to defending player — CR 702.19e"
+        );
+    }
+
+    // CR 702.19b: Trample-over-PW attacking a player behaves like standard trample.
+    #[test]
+    fn trample_over_pw_attacking_player_behaves_as_standard() {
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Trampler", 5, 5);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::TrampleOverPlaneswalkers);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // 5 power: 2 lethal to blocker, 3 trample to player (same as standard trample)
+        assert_eq!(
+            state.players[1].life, 17,
+            "3 trample damage to player — CR 702.19b"
+        );
+    }
+
+    // CR 702.19d: Trample + blocked but no blockers remaining → damage to attack target.
+    #[test]
+    fn trample_blocked_no_blockers_damages_attack_target() {
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Trampler", 4, 4);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Trample);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+
+        // Set up combat with blocker, then remove the blocker
+        setup_combat(&mut state, vec![attacker], vec![(attacker, vec![blocker])]);
+        // Remove blocker from the assignment list (simulating it left before damage)
+        if let Some(c) = &mut state.combat {
+            c.blocker_assignments.insert(attacker, vec![]);
+        }
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // CR 702.19d: All damage to defending player
+        assert_eq!(
+            state.players[1].life, 16,
+            "4 trample damage to player — CR 702.19d"
+        );
+    }
+
+    // CR 702.19d + 702.19c: Trample-over-PW + blocked but no blockers + attacking PW.
+    #[test]
+    fn trample_over_pw_blocked_no_blockers_splits_pw_controller() {
+        use crate::game::combat::AttackTarget;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Trampler", 5, 5);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::TrampleOverPlaneswalkers);
+        let pw = create_planeswalker(&mut state, PlayerId(1), "Jace", 3);
+
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(pw),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        };
+        // Blocker was assigned but then removed
+        combat.blocker_assignments.insert(attacker, vec![]);
+        combat
+            .attackers
+            .iter_mut()
+            .find(|a| a.object_id == attacker)
+            .unwrap()
+            .blocked = true;
+        state.combat = Some(combat);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // CR 702.19d + 702.19c: 3 to PW (loyalty), 2 to controller
+        assert_eq!(
+            state.objects[&pw].loyalty,
+            Some(0),
+            "PW should have 0 loyalty"
+        );
+        assert_eq!(
+            state.players[1].life, 18,
+            "Player should take 2 damage (5 - 3 PW loyalty)"
+        );
+    }
+
+    // CR 702.19c + CR 702.2c: Deathtouch + trample-over-PW maximizes spillover.
+    #[test]
+    fn deathtouch_trample_over_pw_maximizes_spillover() {
+        use crate::game::combat::AttackTarget;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "DT Trampler", 6, 6);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::TrampleOverPlaneswalkers);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Deathtouch);
+        let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
+        let pw = create_planeswalker(&mut state, PlayerId(1), "Jace", 3);
+
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(pw),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        };
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![attacker]);
+        combat
+            .attackers
+            .iter_mut()
+            .find(|a| a.object_id == attacker)
+            .unwrap()
+            .blocked = true;
+        state.combat = Some(combat);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // 6 power: 1 deathtouch lethal to blocker, 3 to PW (loyalty), 2 to controller
+        assert_eq!(
+            state.objects[&pw].loyalty,
+            Some(0),
+            "PW should have 0 loyalty"
+        );
+        assert_eq!(
+            state.players[1].life, 18,
+            "Player should take 2 damage (6 - 1 deathtouch - 3 PW loyalty)"
+        );
+    }
+
+    // Keyword FromStr round-trip.
+    #[test]
+    fn keyword_from_str_trample_over_planeswalkers() {
+        use crate::types::keywords::Keyword;
+        let kw: Keyword = "trample over planeswalkers".parse().unwrap();
+        assert_eq!(kw, Keyword::TrampleOverPlaneswalkers);
+        // "trample" must still parse to regular Trample
+        let kw2: Keyword = "trample".parse().unwrap();
+        assert_eq!(kw2, Keyword::Trample);
     }
 }

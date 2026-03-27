@@ -7,9 +7,9 @@ use super::oracle_util::{
     parse_ordinal, parse_subtype, strip_after, strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
-    AbilityKind, ControllerRef, DamageKindFilter, FilterProp, NinjutsuVariant, QuantityExpr,
-    QuantityRef, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter,
-    TypedFilter, UnlessCost, UnlessPayModifier,
+    AbilityKind, Comparator, ControllerRef, DamageKindFilter, FilterProp, NinjutsuVariant,
+    QuantityExpr, QuantityRef, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessCost, UnlessPayModifier,
 };
 use crate::types::card_type::CoreType;
 use crate::types::phase::Phase;
@@ -222,6 +222,16 @@ fn parse_where_x_is_trigger(text: &str) -> Option<QuantityExpr> {
         })
     } else {
         None
+    }
+}
+
+fn spells_cast_this_turn_at_least_condition(minimum: i32) -> TriggerCondition {
+    TriggerCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisTurn { filter: None },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: minimum },
     }
 }
 
@@ -456,6 +466,18 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
             return (
                 strip_condition_clause(text, pos, pattern.len()),
                 Some(TriggerCondition::AttackedThisTurn),
+            );
+        }
+    }
+
+    for pattern in &[
+        "if you've cast another spell this turn",
+        "if you cast another spell this turn",
+    ] {
+        if let Some(pos) = tp.find(pattern) {
+            return (
+                strip_condition_clause(text, pos, pattern.len()),
+                Some(spells_cast_this_turn_at_least_condition(2)),
             );
         }
     }
@@ -896,14 +918,25 @@ fn try_parse_event(
 
     // "attacks" (singular) or "attack" (plural — multi-name cards like "Raph & Leo")
     // Guard against false-matching "attacker"/"attacking".
-    if rest.starts_with("attacks")
-        || (rest.starts_with("attack")
-            && !rest.starts_with("attacker")
-            && !rest.starts_with("attacking"))
-    {
+    if let Some(after) = rest.strip_prefix("attacks").or_else(|| {
+        rest.strip_prefix("attack")
+            .filter(|r| !r.starts_with("er") && !r.starts_with("ing"))
+    }) {
+        // CR 508.3a: Detect attack target qualifier ("attacks a planeswalker" etc.)
+        use crate::types::triggers::AttackTargetFilter;
+        let attack_target_filter = if after.strip_prefix(" a planeswalker").is_some() {
+            Some(AttackTargetFilter::Planeswalker)
+        } else if after.strip_prefix(" a player").is_some() {
+            Some(AttackTargetFilter::Player)
+        } else if after.strip_prefix(" a battle").is_some() {
+            Some(AttackTargetFilter::Battle)
+        } else {
+            None
+        };
         let mut def = make_base();
         def.mode = TriggerMode::Attacks;
         def.valid_card = Some(subject.clone());
+        def.attack_target_filter = attack_target_filter;
         return Some((TriggerMode::Attacks, def));
     }
 
@@ -2165,9 +2198,8 @@ fn try_parse_nth_spell_any_player(lower: &str) -> Option<(TriggerMode, TriggerDe
     None
 }
 
-/// Extract a type filter from the qualifier between ordinal and "spell".
-/// e.g., "noncreature spell" → Some(TypedFilter with Non(Creature))
-fn extract_spell_type_filter(after_ordinal: &str) -> Option<TypedFilter> {
+/// Extract a spell filter from the qualifier between ordinal and "spell".
+fn extract_spell_type_filter(after_ordinal: &str) -> Option<TargetFilter> {
     let trimmed = after_ordinal.trim();
     if let Some(before_spell) = trimmed
         .strip_suffix("spell each turn")
@@ -2176,13 +2208,13 @@ fn extract_spell_type_filter(after_ordinal: &str) -> Option<TypedFilter> {
         .or_else(|| trimmed.strip_suffix("spell during each opponent\u{2019}s turn"))
     {
         let qualifier = before_spell.trim();
-        if qualifier.eq_ignore_ascii_case("noncreature") {
-            return Some(
-                TypedFilter::new(TypeFilter::Card)
-                    .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature))),
-            );
+        if qualifier.is_empty() {
+            return None;
         }
-        // Future: "artifact", "instant or sorcery", etc.
+        let (filter, remainder) = parse_type_phrase(qualifier);
+        if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            return Some(filter);
+        }
     }
     None
 }
@@ -2504,7 +2536,9 @@ fn try_parse_one_or_more_put_into_graveyard(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{Duration, Effect, PtValue, QuantityExpr, QuantityRef, UnlessCost};
+    use crate::types::ability::{
+        Comparator, Duration, Effect, PtValue, QuantityExpr, QuantityRef, UnlessCost,
+    };
 
     #[test]
     fn trigger_etb_self() {
@@ -3025,7 +3059,7 @@ mod tests {
                 TypedFilter::creature()
                     .controller(crate::types::ability::ControllerRef::You)
                     .properties(vec![FilterProp::HasColor {
-                        color: "White".to_string()
+                        color: crate::types::mana::ManaColor::White
                     }])
             ))
         );
@@ -3345,6 +3379,27 @@ mod tests {
     }
 
     #[test]
+    fn trigger_when_you_cast_this_spell_if_youve_cast_another_spell_this_turn() {
+        let def = parse_trigger_line(
+            "When you cast this spell, if you've cast another spell this turn, copy it.",
+            "Sage of the Skies",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.trigger_zones, vec![Zone::Stack]);
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn { filter: None },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            })
+        );
+    }
+
+    #[test]
     fn trigger_opponent_draws_a_card() {
         let def = parse_trigger_line(
             "Whenever an opponent draws a card, you gain 1 life.",
@@ -3502,14 +3557,17 @@ mod tests {
             "Esper Sentinel",
         );
         assert_eq!(def.mode, TriggerMode::SpellCast);
+        // parse_type_phrase("noncreature") produces [Non(Creature)] without a redundant
+        // Card base type — Non(Creature) alone is sufficient for spell-history filtering.
         assert_eq!(
             def.constraint,
             Some(TriggerConstraint::NthSpellThisTurn {
                 n: 1,
-                filter: Some(
-                    TypedFilter::new(TypeFilter::Card)
-                        .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature))),
-                ),
+                filter: Some(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Non(Box::new(TypeFilter::Creature))],
+                    controller: None,
+                    properties: vec![],
+                })),
             })
         );
         assert_eq!(

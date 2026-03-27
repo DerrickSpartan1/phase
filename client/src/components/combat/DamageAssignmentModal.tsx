@@ -16,14 +16,19 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
     data.blockers.map(() => 0),
   );
   const [trampleDamage, setTrampleDamage] = useState(0);
+  const [controllerDamage, setControllerDamage] = useState(0);
 
+  const isOverPw = data.trample === "OverPlaneswalkers" && data.pw_controller != null;
   const blockerTotal = amounts.reduce((acc, n) => acc + n, 0);
-  const total = blockerTotal + trampleDamage;
+  const total = blockerTotal + trampleDamage + controllerDamage;
   const remaining = data.total_damage - total;
   // CR 702.19b: Trample requires lethal to every blocker.
-  const trampleLethalMet = !data.has_trample ||
+  const trampleLethalMet = data.trample == null ||
     data.blockers.every((b, i) => amounts[i] >= b.lethal_minimum);
-  const isValid = total === data.total_damage && trampleLethalMet;
+  // CR 702.19c: Must assign at least PW loyalty before controller spillover.
+  const loyaltyMet = !isOverPw || controllerDamage === 0 ||
+    trampleDamage >= (data.pw_loyalty ?? 0);
+  const isValid = total === data.total_damage && trampleLethalMet && loyaltyMet;
 
   const getName = (id: number): string =>
     objects?.[String(id)]?.name ?? `Object ${id}`;
@@ -44,9 +49,9 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
     ]);
     dispatch({
       type: "AssignCombatDamage",
-      data: { assignments, trample_damage: trampleDamage },
+      data: { assignments, trample_damage: trampleDamage, controller_damage: controllerDamage },
     });
-  }, [dispatch, data.blockers, amounts, trampleDamage, isValid]);
+  }, [dispatch, data.blockers, amounts, trampleDamage, controllerDamage, isValid]);
 
   return (
     <ChoiceOverlay
@@ -95,10 +100,10 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
           );
         })}
 
-        {data.has_trample && (
+        {data.trample != null && (
           <div className="flex items-center justify-between gap-3 rounded-lg bg-gray-800/60 p-3 ring-1 ring-amber-600/40">
             <span className="text-sm font-medium text-amber-300">
-              Defending Player (Trample)
+              {isOverPw ? `Planeswalker (loyalty: ${data.pw_loyalty ?? 0})` : "Defending Player (Trample)"}
             </span>
             <div className="flex items-center gap-2">
               <button
@@ -114,6 +119,33 @@ export function DamageAssignmentModal({ data }: { data: AssignCombatDamage["data
               <button
                 className={gameButtonClass({ tone: "neutral", size: "xs" })}
                 onClick={() => setTrampleDamage(trampleDamage + 1)}
+                disabled={remaining <= 0}
+              >
+                +
+              </button>
+            </div>
+          </div>
+        )}
+
+        {isOverPw && (
+          <div className="flex items-center justify-between gap-3 rounded-lg bg-gray-800/60 p-3 ring-1 ring-purple-600/40">
+            <span className="text-sm font-medium text-purple-300">
+              PW Controller (Trample Over PW)
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                className={gameButtonClass({ tone: "neutral", size: "xs" })}
+                onClick={() => setControllerDamage(Math.max(0, controllerDamage - 1))}
+                disabled={controllerDamage <= 0}
+              >
+                −
+              </button>
+              <span className="w-8 text-center text-sm font-bold text-purple-200">
+                {controllerDamage}
+              </span>
+              <button
+                className={gameButtonClass({ tone: "neutral", size: "xs" })}
+                onClick={() => setControllerDamage(controllerDamage + 1)}
                 disabled={remaining <= 0}
               >
                 +

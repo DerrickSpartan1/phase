@@ -5,6 +5,14 @@ use std::str::FromStr;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// CR 508.3a: Filter for attack target type in "attacks [a target]" triggers.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum AttackTargetFilter {
+    Player,
+    Planeswalker,
+    Battle,
+}
+
 /// All trigger modes from Forge's TriggerType enum (CR 603).
 ///
 /// Triggered abilities have a trigger condition and an effect, written as

@@ -138,6 +138,33 @@ pub struct SpellCastRecord {
     pub mana_value: u32,
 }
 
+/// CR 400.7: Snapshot of an object's properties at the time of a zone change,
+/// enabling data-driven filtered counting at resolution time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct ZoneChangeRecord {
+    pub object_id: ObjectId,
+    pub name: String,
+    pub core_types: Vec<CoreType>,
+    pub subtypes: Vec<String>,
+    pub supertypes: Vec<Supertype>,
+    pub controller: PlayerId,
+    pub owner: PlayerId,
+    pub from_zone: Zone,
+    pub to_zone: Zone,
+}
+
+/// CR 403.3: Snapshot of an object's properties at the time it enters the battlefield,
+/// enabling data-driven ETB condition queries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct BattlefieldEntryRecord {
+    pub object_id: ObjectId,
+    pub name: String,
+    pub core_types: Vec<CoreType>,
+    pub subtypes: Vec<String>,
+    pub supertypes: Vec<Supertype>,
+    pub controller: PlayerId,
+}
+
 /// CR 607.2a + CR 406.6: Tracks the link between an exiling source and the exiled card.
 /// When the source leaves the battlefield, the exiled card returns (CR 610.3a).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -628,16 +655,23 @@ pub enum WaitingFor {
         target_slots: Vec<CopyTargetSlot>,
     },
     /// CR 510.1c: Attacker with multiple blockers — controller divides damage as they choose.
-    /// CR 702.19b: Trample requires lethal to each blocker before excess to defending player.
+    /// CR 702.19b/c: Trample requires lethal to each blocker before excess to defending player.
     AssignCombatDamage {
         player: PlayerId,
         attacker_id: ObjectId,
         total_damage: u32,
         blockers: Vec<DamageSlot>,
-        has_trample: bool,
+        /// CR 702.19: Which trample variant applies (None = no trample).
+        trample: Option<crate::game::combat::TrampleKind>,
         defending_player: PlayerId,
         #[serde(default = "crate::game::combat::default_attack_target")]
         attack_target: crate::game::combat::AttackTarget,
+        /// CR 702.19c: PW loyalty threshold for trample-over-PW spillover.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pw_loyalty: Option<u32>,
+        /// CR 702.19c: PW controller as additional damage target.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pw_controller: Option<PlayerId>,
     },
     /// CR 601.2d: Distribute N among targets at casting time ("divide N damage among").
     /// Infrastructure ready: handler in engine.rs, AI candidates, continuation match.
@@ -1076,20 +1110,12 @@ pub struct GameState {
     pub players_who_discarded_card_this_turn: HashSet<PlayerId>,
     #[serde(default)]
     pub players_who_sacrificed_artifact_this_turn: HashSet<PlayerId>,
-    #[serde(default)]
-    pub players_who_had_creature_etb_this_turn: HashSet<PlayerId>,
-    #[serde(default)]
-    pub players_who_had_angel_or_berserker_etb_this_turn: HashSet<PlayerId>,
-    #[serde(default)]
-    pub players_who_had_artifact_etb_this_turn: HashSet<PlayerId>,
-    #[serde(default)]
-    pub cards_left_graveyard_this_turn: HashMap<PlayerId, u32>,
-    #[serde(default)]
-    pub creature_died_this_turn: bool,
-    /// CR 400.7: Count of permanents per player that left the battlefield this turn.
-    /// Used for Revolt ("if a permanent you controlled left the battlefield this turn").
-    #[serde(default)]
-    pub permanents_left_battlefield_this_turn: HashMap<PlayerId, u32>,
+    /// CR 400.7: Zone-change snapshots this turn, enabling data-driven condition queries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zone_changes_this_turn: Vec<ZoneChangeRecord>,
+    /// CR 403.3: Battlefield entry snapshots this turn, enabling data-driven ETB queries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub battlefield_entries_this_turn: Vec<BattlefieldEntryRecord>,
     /// CR 700.14: Cumulative mana spent on spells this turn per player (for Expend triggers).
     #[serde(default)]
     pub mana_spent_on_spells_this_turn: HashMap<PlayerId, u32>,
@@ -1310,12 +1336,8 @@ impl GameState {
             players_who_added_counter_this_turn: HashSet::new(),
             players_who_discarded_card_this_turn: HashSet::new(),
             players_who_sacrificed_artifact_this_turn: HashSet::new(),
-            players_who_had_creature_etb_this_turn: HashSet::new(),
-            players_who_had_angel_or_berserker_etb_this_turn: HashSet::new(),
-            players_who_had_artifact_etb_this_turn: HashSet::new(),
-            cards_left_graveyard_this_turn: HashMap::new(),
-            creature_died_this_turn: false,
-            permanents_left_battlefield_this_turn: HashMap::new(),
+            zone_changes_this_turn: Vec::new(),
+            battlefield_entries_this_turn: Vec::new(),
             mana_spent_on_spells_this_turn: HashMap::new(),
             modal_modes_chosen_this_turn: HashSet::new(),
             modal_modes_chosen_this_game: HashSet::new(),
@@ -1454,16 +1476,8 @@ impl PartialEq for GameState {
                 == other.players_who_discarded_card_this_turn
             && self.players_who_sacrificed_artifact_this_turn
                 == other.players_who_sacrificed_artifact_this_turn
-            && self.players_who_had_creature_etb_this_turn
-                == other.players_who_had_creature_etb_this_turn
-            && self.players_who_had_angel_or_berserker_etb_this_turn
-                == other.players_who_had_angel_or_berserker_etb_this_turn
-            && self.players_who_had_artifact_etb_this_turn
-                == other.players_who_had_artifact_etb_this_turn
-            && self.cards_left_graveyard_this_turn == other.cards_left_graveyard_this_turn
-            && self.creature_died_this_turn == other.creature_died_this_turn
-            && self.permanents_left_battlefield_this_turn
-                == other.permanents_left_battlefield_this_turn
+            && self.zone_changes_this_turn == other.zone_changes_this_turn
+            && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
             && self.modal_modes_chosen_this_turn == other.modal_modes_chosen_this_turn
             && self.modal_modes_chosen_this_game == other.modal_modes_chosen_this_game
             && self.pending_continuation == other.pending_continuation

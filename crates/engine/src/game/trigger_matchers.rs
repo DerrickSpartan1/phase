@@ -540,16 +540,44 @@ pub(super) fn match_attacks(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::AttackersDeclared { attacker_ids, .. } = event {
-        // "Attacks" triggers for the specific source creature attacking
-        if trigger.valid_card.is_some() {
-            attacker_ids
-                .iter()
-                .any(|id| valid_card_matches(trigger, state, *id, source_id))
-        } else {
-            // No filter: trigger if source itself is among attackers
-            attacker_ids.contains(&source_id)
+    if let GameEvent::AttackersDeclared {
+        attacker_ids,
+        attacks,
+        ..
+    } = event
+    {
+        // Find which attacker(s) satisfy the creature filter
+        let attacker_matches = |id: &ObjectId| -> bool {
+            if trigger.valid_card.is_some() {
+                valid_card_matches(trigger, state, *id, source_id)
+            } else {
+                *id == source_id
+            }
+        };
+
+        // CR 508.3a: If no target filter, just check creature match (existing behavior)
+        if trigger.attack_target_filter.is_none() {
+            return attacker_ids.iter().any(attacker_matches);
         }
+
+        // With target filter: check creature match AND target type in one pass
+        let filter = trigger.attack_target_filter.as_ref().unwrap();
+        attacks.iter().any(|(id, target)| {
+            attacker_matches(id)
+                && matches!(
+                    (filter, target),
+                    (
+                        crate::types::triggers::AttackTargetFilter::Player,
+                        crate::game::combat::AttackTarget::Player(_)
+                    ) | (
+                        crate::types::triggers::AttackTargetFilter::Planeswalker,
+                        crate::game::combat::AttackTarget::Planeswalker(_)
+                    ) | (
+                        crate::types::triggers::AttackTargetFilter::Battle,
+                        crate::game::combat::AttackTarget::Battle(_)
+                    )
+                )
+        })
     } else {
         false
     }

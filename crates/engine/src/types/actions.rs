@@ -147,10 +147,13 @@ pub enum GameAction {
     /// Cancel any active auto-pass for the acting player.
     CancelAutoPass,
     /// CR 510.1c/d: Assign damage from an attacker to its blockers (and optionally
-    /// the defending player with trample).
+    /// the defending player/PW with trample, plus PW controller with trample-over-PW).
     AssignCombatDamage {
         assignments: Vec<(ObjectId, u32)>,
         trample_damage: u32,
+        /// CR 702.19c: Damage to PW controller when trample-over-PW spills past loyalty.
+        #[serde(default)]
+        controller_damage: u32,
     },
     /// CR 601.2d: Distribute N among targets at casting time.
     DistributeAmong {

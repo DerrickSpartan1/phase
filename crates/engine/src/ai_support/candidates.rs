@@ -619,7 +619,9 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
             player,
             total_damage,
             blockers,
-            has_trample,
+            trample,
+            pw_loyalty,
+            attack_target,
             ..
         } => {
             let mut remaining = *total_damage;
@@ -630,17 +632,32 @@ pub fn candidate_actions(state: &GameState) -> Vec<CandidateAction> {
                 remaining = remaining.saturating_sub(assign);
             }
             // Non-trample: dump remainder to last blocker so total == power.
-            if !has_trample && remaining > 0 {
+            if trample.is_none() && remaining > 0 {
                 if let Some(last) = assignments.last_mut() {
                     last.1 += remaining;
                     remaining = 0;
                 }
             }
-            let trample = if *has_trample { remaining } else { 0 };
+            // CR 702.19c: For trample-over-PW attacking a PW, split excess:
+            // loyalty-worth to PW, remainder to controller.
+            let (trample_dmg, ctrl_dmg) = if *trample
+                == Some(crate::game::combat::TrampleKind::OverPlaneswalkers)
+                && matches!(
+                    attack_target,
+                    crate::game::combat::AttackTarget::Planeswalker(_)
+                ) {
+                let loyalty = pw_loyalty.unwrap_or(0);
+                let to_pw = remaining.min(loyalty);
+                let to_ctrl = remaining.saturating_sub(to_pw);
+                (to_pw, to_ctrl)
+            } else {
+                (if trample.is_some() { remaining } else { 0 }, 0)
+            };
             vec![candidate(
                 GameAction::AssignCombatDamage {
                     assignments,
-                    trample_damage: trample,
+                    trample_damage: trample_dmg,
+                    controller_damage: ctrl_dmg,
                 },
                 TacticalClass::Selection,
                 Some(*player),

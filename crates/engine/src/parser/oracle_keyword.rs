@@ -346,6 +346,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::FirstStrike => "first strike".to_string(),
         Keyword::DoubleStrike => "double strike".to_string(),
         Keyword::Trample => "trample".to_string(),
+        Keyword::TrampleOverPlaneswalkers => "trample over planeswalkers".to_string(),
         Keyword::Deathtouch => "deathtouch".to_string(),
         Keyword::Lifelink => "lifelink".to_string(),
         Keyword::Vigilance => "vigilance".to_string(),

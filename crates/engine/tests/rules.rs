@@ -59,7 +59,7 @@ pub fn run_combat(
     while let WaitingFor::AssignCombatDamage {
         blockers,
         total_damage,
-        has_trample,
+        trample,
         ..
     } = &runner.state().waiting_for
     {
@@ -71,17 +71,18 @@ pub fn run_combat(
             remaining = remaining.saturating_sub(assign);
         }
         // Non-trample: dump remainder to last blocker so total == power.
-        if !has_trample && remaining > 0 {
+        if trample.is_none() && remaining > 0 {
             if let Some(last) = assignments.last_mut() {
                 last.1 += remaining;
                 remaining = 0;
             }
         }
-        let trample_damage = if *has_trample { remaining } else { 0 };
+        let trample_damage = if trample.is_some() { remaining } else { 0 };
         runner
             .act(GameAction::AssignCombatDamage {
                 assignments,
                 trample_damage,
+                controller_damage: 0,
             })
             .expect("AssignCombatDamage should succeed");
     }

@@ -1,7 +1,7 @@
 use rand::Rng;
 use thiserror::Error;
 
-use crate::game::combat::{AttackTarget, DamageAssignment, DamageTarget};
+use crate::game::combat::{AttackTarget, DamageAssignment, DamageTarget, TrampleKind};
 use crate::game::filter;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ChoiceType, ChoiceValue, ChosenAttribute, Effect,
@@ -2743,23 +2743,27 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 attacker_id,
                 total_damage,
                 blockers,
-                has_trample,
-                defending_player: _,
+                trample,
+                defending_player,
                 attack_target,
+                pw_loyalty,
+                pw_controller,
             },
             GameAction::AssignCombatDamage {
                 assignments,
                 trample_damage,
+                controller_damage,
             },
         ) => {
             let p = *player;
             let aid = *attacker_id;
             let total = *total_damage;
-            let trample = *has_trample;
+            let trample_kind = *trample;
 
             // CR 510.1c: Validate total equals attacker's power.
-            let assigned_total: u32 =
-                assignments.iter().map(|(_, a)| *a).sum::<u32>() + trample_damage;
+            let assigned_total: u32 = assignments.iter().map(|(_, a)| *a).sum::<u32>()
+                + trample_damage
+                + controller_damage;
             if assigned_total != total {
                 return Err(EngineError::InvalidAction(format!(
                     "Damage assignment total {} != attacker power {}",
@@ -2779,15 +2783,35 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
 
             // CR 702.19b: Trample damage only allowed with trample.
-            if trample_damage > 0 && !trample {
+            if (trample_damage > 0 || controller_damage > 0) && trample_kind.is_none() {
                 return Err(EngineError::InvalidAction(
                     "Cannot assign trample damage without trample".to_string(),
                 ));
             }
 
+            // CR 702.19c: controller_damage only allowed with trample-over-PW attacking a PW.
+            if controller_damage > 0 {
+                let is_valid = trample_kind == Some(TrampleKind::OverPlaneswalkers)
+                    && pw_controller.is_some()
+                    && matches!(attack_target, AttackTarget::Planeswalker(_));
+                if !is_valid {
+                    return Err(EngineError::InvalidAction(
+                        "Controller damage only allowed with trample over planeswalkers attacking a planeswalker".to_string(),
+                    ));
+                }
+                // CR 702.19c: Must assign at least PW loyalty to PW before spillover.
+                let loyalty_threshold = pw_loyalty.unwrap_or(0);
+                if trample_damage < loyalty_threshold {
+                    return Err(EngineError::InvalidAction(format!(
+                        "Trample over planeswalkers: must assign at least {} to PW before {} to controller",
+                        loyalty_threshold, controller_damage
+                    )));
+                }
+            }
+
             // CR 702.19b: Trample requires lethal to ALL blockers.
             // Enforced regardless of whether excess goes to the player.
-            if trample {
+            if trample_kind.is_some() {
                 for slot in blockers {
                     let assigned = assignments
                         .iter()
@@ -2819,16 +2843,26 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 // CR 702.19f: Trample excess goes to the attack target, not always the player.
                 // CR 506.4c: If PW/battle left the battlefield, no trample excess.
                 if trample_damage > 0 {
+                    let is_over_pw = trample_kind == Some(TrampleKind::OverPlaneswalkers);
                     let excess_target = match attack_target {
                         AttackTarget::Player(pid) => Some(DamageTarget::Player(*pid)),
-                        AttackTarget::Planeswalker(pw_id) | AttackTarget::Battle(pw_id) => {
+                        AttackTarget::Planeswalker(pw_id) => {
                             match state.objects.get(pw_id) {
                                 Some(obj) if obj.zone == Zone::Battlefield => {
                                     Some(DamageTarget::Object(*pw_id))
                                 }
+                                // CR 702.19e: Trample-over-PW falls back to defending player
+                                _ if is_over_pw => Some(DamageTarget::Player(*defending_player)),
+                                // CR 506.4c: Without trample-over-PW, no damage
                                 _ => None,
                             }
                         }
+                        AttackTarget::Battle(battle_id) => match state.objects.get(battle_id) {
+                            Some(obj) if obj.zone == Zone::Battlefield => {
+                                Some(DamageTarget::Object(*battle_id))
+                            }
+                            _ => None,
+                        },
                     };
                     if let Some(target) = excess_target {
                         combat.pending_damage.push((
@@ -2836,6 +2870,18 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                             DamageAssignment {
                                 target,
                                 amount: trample_damage,
+                            },
+                        ));
+                    }
+                }
+                // CR 702.19c: Route controller damage to PW's controller.
+                if controller_damage > 0 {
+                    if let Some(ctrl) = pw_controller {
+                        combat.pending_damage.push((
+                            aid,
+                            DamageAssignment {
+                                target: DamageTarget::Player(*ctrl),
+                                amount: controller_damage,
                             },
                         ));
                     }
@@ -7257,7 +7303,7 @@ mod phase_trigger_regression_tests {
                         TypedFilter::creature()
                             .controller(ControllerRef::You)
                             .properties(vec![FilterProp::HasColor {
-                                color: "White".to_string(),
+                                color: crate::types::mana::ManaColor::White,
                             }]),
                     ))
                     .execute(AbilityDefinition::new(
