@@ -70,6 +70,7 @@ impl ContinuousModification {
             ContinuousModification::AddKeyword { .. }
             | ContinuousModification::RemoveKeyword { .. }
             | ContinuousModification::GrantAbility { .. }
+            | ContinuousModification::GrantTrigger { .. }
             | ContinuousModification::RemoveAllAbilities
             | ContinuousModification::AddStaticMode { .. } => Layer::Ability,
             ContinuousModification::AddType { .. }

@@ -528,6 +528,7 @@ fn depends_on(a: &ActiveContinuousEffect, b: &ActiveContinuousEffect, _state: &G
     let b_changes_abilities = matches!(
         &b.modification,
         ContinuousModification::GrantAbility { .. }
+            | ContinuousModification::GrantTrigger { .. }
             | ContinuousModification::RemoveAllAbilities
             | ContinuousModification::AddStaticMode { .. }
     );
@@ -756,6 +757,11 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             }
             ContinuousModification::GrantAbility { definition } => {
                 obj.abilities.push(*definition.clone());
+            }
+            // CR 604.1: Push granted trigger to trigger_definitions so
+            // the trigger's event matching and condition metadata is preserved.
+            ContinuousModification::GrantTrigger { trigger } => {
+                obj.trigger_definitions.push(*trigger.clone());
             }
             ContinuousModification::AddStaticMode { mode } => {
                 let def = StaticDefinition::new(mode.clone()).affected(TargetFilter::SelfRef);
