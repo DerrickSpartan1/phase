@@ -31,6 +31,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::AdditionalLandDrop { .. }
             | StaticMode::ReduceCost { .. }
             | StaticMode::RaiseCost { .. }
+            | StaticMode::DefilerCostReduction { .. }
             | StaticMode::CantCastDuring { .. }
             | StaticMode::GraveyardCastPermission { .. }
     )
@@ -1234,6 +1235,7 @@ fn fmt_modification(m: &crate::types::ability::ContinuousModification) -> String
             format!("remove {}", keyword_label(keyword))
         }
         ContinuousModification::GrantAbility { .. } => "grant ability".into(),
+        ContinuousModification::GrantTrigger { .. } => "grant trigger".into(),
         ContinuousModification::RemoveAllAbilities => "remove all abilities".into(),
         ContinuousModification::AddType { core_type } => {
             format!("add type {}", fmt_core_type(core_type))

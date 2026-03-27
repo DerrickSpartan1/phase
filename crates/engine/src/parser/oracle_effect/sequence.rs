@@ -91,7 +91,12 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // compound action, not a separate clause.
                     let before_and = &current[..current.len() - " and ".len()];
                     let before_lower = before_and.to_ascii_lowercase();
-                    let suppress = before_lower.contains("from among");
+                    // CR 603.7a: Suppress bare-and splitting inside temporal prefix
+                    // clauses (e.g., "at the beginning of your next upkeep, draw a
+                    // card and gain 3 life"). The entire compound inner effect must
+                    // stay as one clause so CreateDelayedTrigger wraps all effects.
+                    let suppress = before_lower.contains("from among")
+                        || is_inside_temporal_prefix(&before_lower);
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();
@@ -227,6 +232,20 @@ pub(super) fn starts_clause_text(text: &str) -> bool {
     ];
 
     prefixes.iter().any(|prefix| lower.starts_with(prefix))
+}
+
+/// CR 603.7a: Check if accumulated clause text begins with a temporal prefix
+/// (delayed trigger condition), indicating the clause body should not be split.
+/// These prefixes create CreateDelayedTrigger wrappers in parse_effect_chain_impl,
+/// and splitting the inner compound effect would leave only the first sub-effect
+/// wrapped while the remainder becomes a separate top-level clause.
+fn is_inside_temporal_prefix(lower: &str) -> bool {
+    // Check the raw accumulated text (which may include a leading comma+space
+    // from a prior clause boundary). The temporal prefix starts the clause.
+    let trimmed = lower.trim_start_matches(|c: char| c == ',' || c.is_whitespace());
+    trimmed.starts_with("at the beginning of the next ")
+        || trimmed.starts_with("at the beginning of your next ")
+        || trimmed.starts_with("at the end of ")
 }
 
 /// Restricted clause-start check for bare " and " splitting (not after comma).
@@ -1100,6 +1119,30 @@ mod tests {
         assert_eq!(
             chunks,
             vec!["destroy target creature", "its controller loses 3 life"]
+        );
+    }
+
+    // --- B11: Temporal prefix suppresses bare "and" splitting ---
+
+    #[test]
+    fn temporal_prefix_suppresses_bare_and_split() {
+        // CR 603.7a: "at the beginning of your next upkeep, draw a card and gain 3 life"
+        // must NOT split at "and" — the compound inner effect is a single delayed trigger.
+        let chunks =
+            clause_texts("at the beginning of your next upkeep, draw a card and gain 3 life");
+        assert_eq!(
+            chunks,
+            vec!["at the beginning of your next upkeep, draw a card and gain 3 life"]
+        );
+    }
+
+    #[test]
+    fn temporal_prefix_end_step_suppresses_bare_and_split() {
+        let chunks =
+            clause_texts("at the beginning of the next end step, return it and lose 2 life");
+        assert_eq!(
+            chunks,
+            vec!["at the beginning of the next end step, return it and lose 2 life"]
         );
     }
 }

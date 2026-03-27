@@ -6,8 +6,8 @@ use super::oracle_effect::parse_effect_chain;
 use super::oracle_quantity::{capitalize_first, parse_cda_quantity, parse_quantity_ref};
 use super::oracle_target::{parse_combat_status_prefix, parse_counter_suffix, parse_type_phrase};
 use super::oracle_util::{
-    has_unconsumed_conditional, parse_mana_symbols, parse_number, parse_subtype, strip_after,
-    strip_reminder_text, TextPair,
+    has_unconsumed_conditional, infer_core_type_for_subtype, parse_mana_symbols, parse_number,
+    parse_subtype, strip_after, strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator,
@@ -791,14 +791,12 @@ fn try_parse_compound_subtypes(
     }
     let filters = vec![
         TargetFilter::Typed(
-            TypedFilter::creature()
-                .subtype(left_sub)
+            typed_filter_for_subtype(&left_sub)
                 .controller(ControllerRef::You)
                 .properties(all_props.clone()),
         ),
         TargetFilter::Typed(
-            TypedFilter::creature()
-                .subtype(right_sub)
+            typed_filter_for_subtype(&right_sub)
                 .controller(ControllerRef::You)
                 .properties(all_props),
         ),
@@ -854,9 +852,7 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                     )
                 } else if is_capitalized_words(descriptor) {
                     TargetFilter::Typed(
-                        TypedFilter::creature()
-                            .subtype(descriptor.to_string())
-                            .controller(ControllerRef::You),
+                        typed_filter_for_subtype(descriptor).controller(ControllerRef::You),
                     )
                 } else {
                     return None;
@@ -864,8 +860,7 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
             } else if is_capitalized_words(desc_remaining) {
                 // Combat-status prefix found + remaining is a subtype
                 TargetFilter::Typed(
-                    TypedFilter::creature()
-                        .subtype(desc_remaining.to_string())
+                    typed_filter_for_subtype(desc_remaining)
                         .controller(ControllerRef::You)
                         .properties(extra_props),
                 )
@@ -934,9 +929,7 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                         .map(|(canonical, _)| canonical)
                         .unwrap_or_else(|| descriptor.trim_end_matches('s').to_string());
                     TargetFilter::Typed(
-                        TypedFilter::creature()
-                            .subtype(subtype_name)
-                            .controller(ControllerRef::You),
+                        typed_filter_for_subtype(&subtype_name).controller(ControllerRef::You),
                     )
                 } else {
                     return None;
@@ -947,8 +940,7 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                     .map(|(canonical, _)| canonical)
                     .unwrap_or_else(|| desc_remaining.trim_end_matches('s').to_string());
                 TargetFilter::Typed(
-                    TypedFilter::creature()
-                        .subtype(subtype_name)
+                    typed_filter_for_subtype(&subtype_name)
                         .controller(ControllerRef::You)
                         .properties(extra_props),
                 )
@@ -1533,7 +1525,7 @@ fn parse_presence_filter(text: &str) -> Option<TypedFilter> {
     // receives pre-lowered text) by capitalizing the first character.
     if !trimmed.is_empty() && trimmed.chars().next().unwrap().is_alphabetic() {
         let subtype = capitalize_first(trimmed);
-        return Some(TypedFilter::creature().subtype(subtype));
+        return Some(typed_filter_for_subtype(&subtype));
     }
 
     None
@@ -2237,6 +2229,24 @@ fn parse_named_color(text: &str) -> Option<ManaColor> {
 }
 
 /// Check that a string is one or more capitalized words.
+/// Build a TypedFilter for a subtype, using the correct core type.
+/// Uses `infer_core_type_for_subtype` to map artifact/land/enchantment subtypes
+/// to their parent type instead of defaulting everything to Creature.
+fn typed_filter_for_subtype(subtype: &str) -> TypedFilter {
+    use crate::types::ability::TypeFilter;
+    if let Some(core_type) = infer_core_type_for_subtype(subtype) {
+        let type_filter = match core_type {
+            crate::types::card_type::CoreType::Artifact => TypeFilter::Artifact,
+            crate::types::card_type::CoreType::Land => TypeFilter::Land,
+            crate::types::card_type::CoreType::Enchantment => TypeFilter::Enchantment,
+            _ => TypeFilter::Creature,
+        };
+        TypedFilter::new(type_filter).subtype(subtype.to_string())
+    } else {
+        TypedFilter::creature().subtype(subtype.to_string())
+    }
+}
+
 fn is_capitalized_words(s: &str) -> bool {
     let trimmed = s.trim();
     !trimmed.is_empty()
@@ -2477,10 +2487,8 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         modifications.push(ContinuousModification::SetToughness { value: toughness });
     }
 
-    for definition in parse_quoted_abilities(text_stripped) {
-        modifications.push(ContinuousModification::GrantAbility {
-            definition: Box::new(definition),
-        });
+    for modification in parse_quoted_ability_modifications(text_stripped) {
+        modifications.push(modification);
     }
 
     // CR 702: Guard "can't have or gain [keyword]" from extract_keyword_clause —
@@ -2645,8 +2653,11 @@ fn parse_single_pt_value(text: &str) -> Option<i32> {
 /// Quoted abilities like `"{T}: Add two mana of any one color."` are parsed by splitting
 /// at the cost separator (`:` after mana/tap symbols) and reusing `parse_oracle_cost` +
 /// `parse_effect_chain`. Non-activated quoted text is parsed as a spell-like effect chain.
-fn parse_quoted_abilities(text: &str) -> Vec<AbilityDefinition> {
-    let mut definitions = Vec::new();
+/// Parse quoted abilities and return the appropriate ContinuousModification.
+/// CR 604.1: Trigger-prefix quoted text (when/whenever/at the beginning) becomes
+/// GrantTrigger to preserve trigger metadata; all others become GrantAbility.
+fn parse_quoted_ability_modifications(text: &str) -> Vec<ContinuousModification> {
+    let mut modifications = Vec::new();
     let mut start = None;
 
     for (idx, ch) in text.char_indices() {
@@ -2654,7 +2665,22 @@ fn parse_quoted_abilities(text: &str) -> Vec<AbilityDefinition> {
             if let Some(open) = start.take() {
                 let ability_text = text[open + 1..idx].trim();
                 if !ability_text.is_empty() {
-                    definitions.push(parse_quoted_ability(ability_text));
+                    let lower = ability_text.to_lowercase();
+                    // CR 603.1: Detect trigger prefixes to route to GrantTrigger.
+                    if lower.starts_with("when ")
+                        || lower.starts_with("whenever ")
+                        || lower.starts_with("at the beginning of ")
+                        || lower.starts_with("at the end of ")
+                    {
+                        let trigger = super::oracle_trigger::parse_trigger_line(ability_text, "~");
+                        modifications.push(ContinuousModification::GrantTrigger {
+                            trigger: Box::new(trigger),
+                        });
+                    } else {
+                        modifications.push(ContinuousModification::GrantAbility {
+                            definition: Box::new(parse_quoted_ability(ability_text)),
+                        });
+                    }
                 }
             } else {
                 start = Some(idx);
@@ -2662,7 +2688,7 @@ fn parse_quoted_abilities(text: &str) -> Vec<AbilityDefinition> {
         }
     }
 
-    definitions
+    modifications
 }
 
 /// Parse a single quoted ability string into a typed AbilityDefinition.

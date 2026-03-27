@@ -3898,6 +3898,13 @@ pub enum ContinuousModification {
     GrantAbility {
         definition: Box<AbilityDefinition>,
     },
+    /// CR 604.1: Grant a triggered ability to the affected object.
+    /// Unlike GrantAbility (which pushes to obj.abilities), this pushes to
+    /// obj.trigger_definitions so the trigger's event/condition metadata is
+    /// preserved and the trigger fires correctly.
+    GrantTrigger {
+        trigger: Box<TriggerDefinition>,
+    },
     RemoveAllAbilities,
     AddType {
         core_type: CoreType,
