@@ -272,6 +272,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Targets { filter } => {
                 parts.push(format!("targets {}", fmt_target(filter)));
             }
+            FilterProp::Named { name } => parts.push(format!("named \"{name}\"")),
         }
     }
     if let Some(ctrl) = &tf.controller {
