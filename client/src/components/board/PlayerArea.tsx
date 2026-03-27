@@ -113,9 +113,7 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
       <CommandZone playerId={playerId} />
     </div>
   ) : null;
-  const landAlignClass = isMirrored
-    ? "flex-wrap items-center justify-start"
-    : "flex-wrap items-center content-end justify-start";
+  const landAlignClass = "flex-wrap items-center content-center justify-start";
 
   const landCount = partitioned?.lands.length ?? 0;
   const supportCount = partitioned?.support.length ?? 0;
