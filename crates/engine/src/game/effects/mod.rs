@@ -3,7 +3,7 @@ use std::borrow::Cow;
 use crate::game::filter;
 use crate::types::ability::{
     AbilityCondition, AbilityKind, Effect, EffectError, FilterProp, PlayerFilter, QuantityExpr,
-    QuantityRef, ResolvedAbility, TargetFilter, TargetRef, UnlessCost,
+    QuantityRef, ResolvedAbility, SharedQuality, TargetFilter, TargetRef, UnlessCost,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
@@ -88,14 +88,14 @@ pub mod transform_effect;
 pub mod win_lose;
 
 /// CR 601.2c: Extract SharesQuality filter properties from an effect's target filter.
-/// Returns the quality strings that require group validation.
-fn extract_shares_quality_props(filter: &TargetFilter) -> Vec<&str> {
+/// Returns the typed qualities that require group validation.
+fn extract_shares_quality_props(filter: &TargetFilter) -> Vec<&SharedQuality> {
     match filter {
         TargetFilter::Typed(typed) => typed
             .properties
             .iter()
             .filter_map(|p| match p {
-                FilterProp::SharesQuality { quality } => Some(quality.as_str()),
+                FilterProp::SharesQuality { quality } => Some(quality),
                 _ => None,
             })
             .collect(),
@@ -187,6 +187,7 @@ pub fn resolve_effect(
         Effect::BecomeCopy { .. } => become_copy::resolve(state, ability, events),
         Effect::ChooseCard { .. } => choose_card::resolve(state, ability, events),
         Effect::PutCounter { .. } => counters::resolve_add(state, ability, events),
+        Effect::PutCounterAll { .. } => counters::resolve_add_all(state, ability, events),
         Effect::MultiplyCounter { .. } => counters::resolve_multiply(state, ability, events),
         Effect::DoublePT { .. } => pump::resolve_double_pt(state, ability, events),
         Effect::DoublePTAll { .. } => pump::resolve_double_pt_all(state, ability, events),
@@ -934,7 +935,7 @@ fn evaluate_condition(
                 ability.controller,
                 ability.source_id,
             );
-            comparator.clone().evaluate(l, r)
+            comparator.evaluate(l, r)
         }
         // "Instead" override conditions — return pure boolean value.
         // Terminal control flow (early return from resolve_ability_chain) is the caller's

@@ -9,6 +9,8 @@ The Oracle parser converts MTGJSON Oracle text into typed `AbilityDefinition` st
 
 **Before you start:** Read `docs/parser-instructions.md` for the official contribution guide. This skill supplements that document with architectural detail and the full parsing priority system.
 
+> **CR Verification Rule:** Every CR number in annotations MUST be verified by grepping `docs/MagicCompRules.txt` before writing. Do NOT rely on memory — 701.x and 702.x numbers are arbitrary sequential assignments that LLMs consistently hallucinate. Run `grep -n "^701.21" docs/MagicCompRules.txt` (etc.) for every number. If you cannot find it, do not write the annotation.
+
 ---
 
 ## Architecture Overview
@@ -129,7 +131,7 @@ The parser uses a two-phase architecture: **parse → AST → lower → Effect**
 | Variant | Sub-parser | Effect patterns |
 |---------|-----------|----------------|
 | `Numeric(NumericImperativeAst)` | `parse_numeric_imperative_ast()` | Draw, GainLife, LoseLife, Pump, Scry, Surveil, Mill |
-| `Targeted(TargetedImperativeAst)` | `parse_targeted_action_ast()` | Tap, Untap, Sacrifice, Discard, Return, Fight, GainControl |
+| `Targeted(TargetedImperativeAst)` | `parse_targeted_action_ast()` | Tap, Untap, Sacrifice, Discard, Return, ReturnToBattlefield, ReturnToZone, Fight, GainControl |
 | `SearchCreation(SearchCreationImperativeAst)` | `parse_search_and_creation_ast()` | SearchLibrary, Dig, Token, CopyTokenOf |
 | `HandReveal(HandRevealImperativeAst)` | `parse_hand_reveal_ast()` | LookAtHand, RevealHand, RevealTop |
 | `Choose(ChooseImperativeAst)` | `parse_choose_ast()` | TargetOnly, NamedChoice, RevealHandFilter |

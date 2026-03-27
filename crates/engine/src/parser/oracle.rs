@@ -1966,7 +1966,7 @@ mod tests {
                     ..
                 }
             )) if properties == &vec![crate::types::ability::FilterProp::WithKeyword {
-                value: "flying".to_string(),
+                value: Keyword::Flying,
             }]
         ));
     }

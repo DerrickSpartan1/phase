@@ -9,6 +9,8 @@ This is the authoritative checklist for adding a new effect (mechanic, keyword a
 
 **Before you start:** Read the existing effect most similar to yours. Trace it through every file below. This is how you learn the patterns — not by guessing.
 
+> **CR Verification Rule:** Every CR number in annotations MUST be verified by grepping `docs/MagicCompRules.txt` before writing. Do NOT rely on memory — 701.x and 702.x numbers are arbitrary sequential assignments that LLMs consistently hallucinate. Run `grep -n "^701.21" docs/MagicCompRules.txt` (etc.) for every number. If you cannot find it, do not write the annotation.
+
 ---
 
 ## Design Philosophy — Composability Over Completeness
@@ -78,7 +80,7 @@ When you build a helper like this, you're not adding complexity — you're **red
 
 - [ ] **`crates/engine/src/game/effects/<name>.rs` — Create resolver module**
   Write a `pub fn resolve(state, ability, events) -> Result<(), EffectError>` function.
-  - Extract typed fields from `ability.effect` via pattern match.
+  - Extract typed fields from `*ability.effect` via pattern match (`effect` is `Box<Effect>`).
   - Find targets from `ability.targets` (resolved `TargetRef` values).
   - Mutate `state`, push `GameEvent`s to `events`.
   - **Never access card data or parse text** in resolvers — only process the typed `ResolvedAbility`.
@@ -98,7 +100,7 @@ Only needed if the effect has a `target: TargetFilter` field that isn't `None`/`
 
 - [ ] **`crates/engine/src/game/targeting.rs` — verify `find_legal_targets()`**
   Check that the `TargetFilter` values your effect uses are actually resolvable. Common gaps:
-  - `TargetFilter::Typed { controller: Opponent, card_type: None }` → wants to target an opponent as a **player**, but typed targeting only searches battlefield objects. You may need to add player resolution for typed filters.
+  - `TargetFilter::Typed(TypedFilter { type_filters: vec![], controller: Some(Opponent), .. })` → wants to target an opponent as a **player**, but typed targeting only searches battlefield objects. You may need to add player resolution for typed filters.
   - Custom `FilterProp` values → ensure they're handled in the filter matching logic.
   - **Zone-aware targeting:** If the effect targets cards in non-battlefield zones (graveyard, exile, hand, library), the parser should produce `FilterProp::InZone { zone }` in the target filter properties. When `InZone` is present, `find_legal_targets` searches ONLY that zone exclusively. Per MTG rule 702.16a, hexproof/shroud only apply on the battlefield — non-battlefield targeting checks only protection.
 

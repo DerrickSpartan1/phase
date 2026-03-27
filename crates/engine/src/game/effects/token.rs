@@ -458,9 +458,6 @@ pub fn resolve(
                             ability.source_id,
                             ability.controller,
                         );
-                        if let Some(obj) = state.objects.get_mut(&obj_id) {
-                            obj.entered_battlefield_turn = Some(state.turn_number);
-                        }
                     }
 
                     // CR 111.10a–v: Inject predefined abilities for known token subtypes.
@@ -916,11 +913,14 @@ mod tests {
         let (state, _) = resolve_token("w_4_4_angel_flying");
 
         assert!(state
-            .players_who_had_creature_etb_this_turn
-            .contains(&PlayerId(0)));
+            .battlefield_entries_this_turn
+            .iter()
+            .any(|r| r.core_types.contains(&CoreType::Creature) && r.controller == PlayerId(0)));
         assert!(state
-            .players_who_had_angel_or_berserker_etb_this_turn
-            .contains(&PlayerId(0)));
+            .battlefield_entries_this_turn
+            .iter()
+            .any(|r| r.controller == PlayerId(0)
+                && r.subtypes.iter().any(|s| s.eq_ignore_ascii_case("Angel"))));
     }
 
     #[test]

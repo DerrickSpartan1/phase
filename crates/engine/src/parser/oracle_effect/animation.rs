@@ -284,3 +284,19 @@ fn split_animation_keyword_clause(text: &str) -> (&str, Vec<Keyword>) {
         .collect();
     (prefix, keywords)
 }
+
+#[cfg(test)]
+mod test_den_bugbear {
+    use super::*;
+
+    #[test]
+    fn test_animation_with_quoted_trigger() {
+        let text = r#"a 3/2 red Goblin creature with "Whenever this creature attacks, create a 1/1 red Goblin creature token that's tapped and attacking." It's still a land"#;
+        let spec = parse_animation_spec(text);
+        eprintln!("spec = {:?}", spec);
+        assert!(spec.is_some(), "animation spec should be Some");
+        let spec = spec.unwrap();
+        assert_eq!(spec.power, Some(3));
+        assert_eq!(spec.toughness, Some(2));
+    }
+}

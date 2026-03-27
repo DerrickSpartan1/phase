@@ -9,6 +9,8 @@ Triggered abilities fire in response to game events and go on the stack (MTG Rul
 
 **Before you start:** Trace how `ChangesZone` (ETB/dies) triggers work end-to-end. They're the most complete reference: `parse_trigger_line()` in `oracle_trigger.rs` → `TriggerDefinition` → `process_triggers()` → `match_changes_zone()` → stack placement → `resolve_top()`.
 
+> **CR Verification Rule:** Every CR number in annotations MUST be verified by grepping `docs/MagicCompRules.txt` before writing. Do NOT rely on memory — 701.x and 702.x numbers are arbitrary sequential assignments that LLMs consistently hallucinate. Run `grep -n "^603.2" docs/MagicCompRules.txt` (etc.) for every number. If you cannot find it, do not write the annotation.
+
 ---
 
 ## MTG Rules Reference
@@ -193,7 +195,7 @@ The trigger pipeline responds to `GameEvent` variants. If no existing event cove
       let t = parse_trigger_line("When ~ enters, draw a card.");
       assert_eq!(t.mode, TriggerMode::ChangesZone);
       assert_eq!(t.destination, Some(Zone::Battlefield));
-      assert!(matches!(t.execute.unwrap().effect, Effect::Draw { count: 1 }));
+      assert!(matches!(*t.execute.unwrap().effect, Effect::Draw { count: 1 }));
   }
   ```
 
@@ -241,7 +243,7 @@ Shared function that validates the `valid_card` filter against the event's subje
 ```
 SelfRef → subject must be the trigger source
 Another → subject must NOT be the trigger source
-Typed { card_type, controller, props } → full filter evaluation against the subject
+Typed { type_filters, controller, props } → full filter evaluation against the subject
 ```
 
 Used by all matchers — always call this instead of reimplementing filter logic.

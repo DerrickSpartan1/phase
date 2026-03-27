@@ -116,7 +116,7 @@ pub(crate) fn evaluate_condition(
             let resolve = |expr: &QuantityExpr| -> i32 {
                 crate::game::quantity::resolve_quantity(state, expr, controller, source_id)
             };
-            comparator.clone().evaluate(resolve(lhs), resolve(rhs))
+            comparator.evaluate(resolve(lhs), resolve(rhs))
         }
         StaticCondition::And { conditions } => conditions
             .iter()
@@ -1195,7 +1195,7 @@ mod tests {
                         TypedFilter::creature()
                             .controller(ControllerRef::You)
                             .properties(vec![FilterProp::WithKeyword {
-                                value: "flying".to_string(),
+                                value: Keyword::Flying,
                             }]),
                     ))
                     .modifications(vec![

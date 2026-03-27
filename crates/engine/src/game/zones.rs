@@ -15,11 +15,7 @@ use super::printed_cards::{apply_back_face_to_object, snapshot_object_face};
 /// Handles: LKI snapshot (CR 400.7), transform revert (CR 712.14),
 /// exile permission clearing (CR 113.6e), monstrous reset (CR 701.37b),
 /// counter clearing (CR 122.2), layer pruning, and mana-tap cleanup.
-fn apply_zone_exit_cleanup(
-    state: &mut GameState,
-    object_id: ObjectId,
-    from: Zone,
-) {
+fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zone) {
     // CR 400.7: Snapshot LKI before zone change from battlefield or exile.
     // Power/toughness reflect layer modifications on battlefield (Layer 7);
     // from exile they will be None (no layer computation), which is correct.

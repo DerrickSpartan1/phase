@@ -100,18 +100,16 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
     const obj = gameState.objects[id];
     return obj?.is_emblem && obj.controller === playerId;
   });
-  const planeswalkerLane = (hasPlaneswalkers || hasEmblems) ? (
-    <div
-      className={`absolute right-0 top-0 bottom-0 z-20 flex flex-col flex-wrap-reverse items-end gap-2 px-1 py-2 ${
-        isCommander ? (mode === "focused" ? "pb-16" : "pb-24") : ""
-      }`}
-      style={zoneStyle(OTHER_BASE_SCALE)}
-    >
-      {partitioned?.planeswalkers.map((g) => (
-        <GroupedPermanentDisplay key={g.ids[0]} group={g} />
-      ))}
-      <CommandZone playerId={playerId} />
-    </div>
+  const planeswalkerSection = (hasPlaneswalkers || hasEmblems) ? (
+    <>
+      <div className="mx-2 h-3/4 w-px shrink-0 bg-white/20" />
+      <div className="flex shrink-0 items-center gap-2" style={zoneStyle(OTHER_BASE_SCALE)}>
+        {partitioned?.planeswalkers.map((g) => (
+          <GroupedPermanentDisplay key={g.ids[0]} group={g} />
+        ))}
+        <CommandZone playerId={playerId} />
+      </div>
+    </>
   ) : null;
   const landAlignClass = "flex-wrap items-center content-center justify-start";
 
@@ -142,6 +140,7 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
           rowType="support"
           className="ml-auto w-full justify-end px-0"
         />
+        {planeswalkerSection}
       </div>
     </div>
   );
@@ -180,7 +179,6 @@ export function PlayerArea({ playerId, mode, onFocus, isActive, landColumnExtra,
           </>
         )}
       </div>
-      {planeswalkerLane}
       {/* Commander display overlay */}
       {isCommander && (
         <div className="absolute right-2 bottom-2 z-20 flex flex-col gap-1">

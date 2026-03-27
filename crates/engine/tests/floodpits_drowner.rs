@@ -157,7 +157,7 @@ fn activated_shuffle_both_into_owners_libraries() {
                 type_filters: vec![TypeFilter::Creature],
                 controller: None,
                 properties: vec![FilterProp::CountersGE {
-                    counter_type: "stun".to_string(),
+                    counter_type: engine::game::game_object::CounterType::Stun,
                     count: 1,
                 }],
             }),

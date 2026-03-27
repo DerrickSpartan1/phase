@@ -8,8 +8,8 @@ use crate::types::ability::{
     AggregateFunction, ChoiceType, ControllerRef, CountScope, DelayedTriggerCondition,
     DoublePTMode, Duration, Effect, FilterProp, GainLifePlayer, ManaProduction, ObjectProperty,
     PlayerFilter, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode,
-    StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
-    ZoneRef,
+    SharedQuality, StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -222,11 +222,11 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Unblocked => parts.push("unblocked".into()),
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
-            FilterProp::WithKeyword { value } => parts.push(format!("with {value}")),
+            FilterProp::WithKeyword { value } => parts.push(format!("with {value:?}")),
             FilterProp::CountersGE {
                 counter_type,
                 count,
-            } => parts.push(format!("{count}+ {counter_type} counters")),
+            } => parts.push(format!("{count}+ {} counters", counter_type.as_str())),
             FilterProp::CmcGE { value } => parts.push(format!("mv {}+", fmt_quantity(value))),
             FilterProp::CmcLE { value } => parts.push(format!("mv {}-", fmt_quantity(value))),
             FilterProp::CmcEQ { value } => parts.push(format!("mv {}", fmt_quantity(value))),
@@ -236,15 +236,19 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::EnchantedBy => parts.push("enchanted by self".into()),
             FilterProp::EquippedBy => parts.push("equipped by self".into()),
             FilterProp::Another => parts.push("another".into()),
-            FilterProp::HasColor { color } => parts.push(color.clone()),
+            FilterProp::HasColor { color } => parts.push(format!("{color:?}").to_lowercase()),
             FilterProp::PowerLE { value } => parts.push(format!("power ≤{value}")),
             FilterProp::PowerGE { value } => parts.push(format!("power ≥{value}")),
             FilterProp::Multicolored => parts.push("multicolored".into()),
-            FilterProp::HasSupertype { value } => parts.push(value.to_lowercase()),
+            FilterProp::HasSupertype { value } => {
+                parts.push(format!("{value}").to_lowercase());
+            }
             FilterProp::IsChosenCreatureType => parts.push("chosen type".into()),
-            FilterProp::NotColor { color } => parts.push(format!("non-{}", color.to_lowercase())),
+            FilterProp::NotColor { color } => {
+                parts.push(format!("non-{}", format!("{color:?}").to_lowercase()));
+            }
             FilterProp::NotSupertype { value } => {
-                parts.push(format!("non-{}", value.to_lowercase()));
+                parts.push(format!("non-{}", format!("{value}").to_lowercase()));
             }
             FilterProp::Suspected => parts.push("suspected".into()),
             FilterProp::ToughnessGTPower => parts.push("toughness > power".into()),
@@ -255,7 +259,12 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("in {}", zone_strs.join("/")));
             }
             FilterProp::SharesQuality { quality } => {
-                parts.push(format!("shares {quality}"));
+                let name = match quality {
+                    SharedQuality::CreatureType => "creature type",
+                    SharedQuality::Color => "color",
+                    SharedQuality::CardType => "card type",
+                };
+                parts.push(format!("shares {name}"));
             }
             FilterProp::WasDealtDamageThisTurn => parts.push("dealt damage this turn".into()),
             FilterProp::EnteredThisTurn => parts.push("entered this turn".into()),
@@ -485,7 +494,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::EventContextSourceToughness => "source's toughness".into(),
         QuantityRef::EventContextSourceManaValue => "source's mana value".into(),
         QuantityRef::SpellsCastThisTurn { filter } => match filter {
-            Some(tf) => format!("{} spells cast this turn", fmt_type_filter(tf)),
+            Some(filter) => format!("{} spells cast this turn", fmt_target(filter)),
             None => "spells cast this turn".into(),
         },
         QuantityRef::EnteredThisTurn { filter } => {
@@ -799,6 +808,11 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
         }
         | Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        }
+        | Effect::PutCounterAll {
             counter_type,
             count,
             target,

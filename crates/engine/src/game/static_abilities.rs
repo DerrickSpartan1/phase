@@ -8,6 +8,11 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 
+/// Handler function type for static ability modes.
+/// Receives the `StaticMode` variant the handler was registered under.
+pub type StaticAbilityHandler =
+    fn(state: &GameState, mode: &StaticMode, source_id: ObjectId) -> Vec<StaticEffect>;
+
 /// Describes what a static ability does (returned by handlers).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StaticEffect {
@@ -25,13 +30,6 @@ pub struct StaticCheckContext {
     pub player_id: Option<PlayerId>,
     pub card_name: Option<String>,
 }
-
-/// Handler function type for static ability modes.
-pub type StaticAbilityHandler = fn(
-    state: &GameState,
-    params: &HashMap<String, String>,
-    source_id: ObjectId,
-) -> Vec<StaticEffect>;
 
 /// CR 604.1: Static ability registry — maps StaticMode keys to handlers.
 pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
@@ -169,7 +167,7 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
 /// CR 604.2: Continuous effects from static abilities apply via the layer system.
 fn handle_continuous(
     _state: &GameState,
-    _params: &HashMap<String, String>,
+    _mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::Continuous]
@@ -178,17 +176,18 @@ fn handle_continuous(
 /// Handler for rule-modification modes -- returns the mode as a RuleModification effect.
 fn handle_rule_mod(
     _state: &GameState,
-    params: &HashMap<String, String>,
+    mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
-    let mode = params.get("Mode").cloned().unwrap_or_default();
-    vec![StaticEffect::RuleModification { mode }]
+    vec![StaticEffect::RuleModification {
+        mode: mode.to_string(),
+    }]
 }
 
 /// Handler for CantBeBlocked -- creature cannot be blocked.
 pub fn handle_cant_be_blocked(
     _state: &GameState,
-    _params: &HashMap<String, String>,
+    _mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::RuleModification {
@@ -198,21 +197,22 @@ pub fn handle_cant_be_blocked(
 
 /// Handler for Protection -- prevents damage, blocking, targeting, and enchanting
 /// by sources with the specified quality.
+/// CR 702.16: Protection is evaluated via keywords at runtime; the handler returns
+/// a RuleModification marker for the registry/coverage system.
 pub fn handle_protection(
     _state: &GameState,
-    params: &HashMap<String, String>,
+    _mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
-    let target = params.get("Target").cloned().unwrap_or_default();
     vec![StaticEffect::RuleModification {
-        mode: format!("Protection:{}", target),
+        mode: "Protection".to_string(),
     }]
 }
 
 /// Handler for Indestructible -- prevents destruction by lethal damage and destroy effects.
 fn handle_indestructible(
     _state: &GameState,
-    _params: &HashMap<String, String>,
+    _mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::RuleModification {
@@ -223,7 +223,7 @@ fn handle_indestructible(
 /// Handler for CantBeCountered -- spell cannot be countered.
 fn handle_cant_be_countered(
     _state: &GameState,
-    _params: &HashMap<String, String>,
+    _mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::RuleModification {
@@ -234,7 +234,7 @@ fn handle_cant_be_countered(
 /// Handler for CantBeDestroyed -- permanent cannot be destroyed.
 fn handle_cant_be_destroyed(
     _state: &GameState,
-    _params: &HashMap<String, String>,
+    _mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::RuleModification {
@@ -245,7 +245,7 @@ fn handle_cant_be_destroyed(
 /// Handler for FlashBack -- allows casting from graveyard, exiled after resolution.
 fn handle_flashback(
     _state: &GameState,
-    _params: &HashMap<String, String>,
+    _mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::RuleModification {
@@ -256,7 +256,7 @@ fn handle_flashback(
 /// Handler for Shroud -- permanent cannot be the target of spells or abilities.
 fn handle_shroud(
     _state: &GameState,
-    _params: &HashMap<String, String>,
+    _mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::RuleModification {
@@ -267,7 +267,7 @@ fn handle_shroud(
 /// Handler for static-granted Vigilance (e.g., "All creatures you control have vigilance").
 fn handle_static_vigilance(
     _state: &GameState,
-    _params: &HashMap<String, String>,
+    _mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::RuleModification {
@@ -278,7 +278,7 @@ fn handle_static_vigilance(
 /// Handler for static-granted Menace (requires 2+ blockers).
 fn handle_static_menace(
     _state: &GameState,
-    _params: &HashMap<String, String>,
+    _mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::RuleModification {
@@ -289,7 +289,7 @@ fn handle_static_menace(
 /// Handler for static-granted Reach (can block flying).
 fn handle_static_reach(
     _state: &GameState,
-    _params: &HashMap<String, String>,
+    _mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::RuleModification {
@@ -300,7 +300,7 @@ fn handle_static_reach(
 /// Handler for static-granted Flying.
 fn handle_static_flying(
     _state: &GameState,
-    _params: &HashMap<String, String>,
+    _mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::RuleModification {
@@ -311,7 +311,7 @@ fn handle_static_flying(
 /// Handler for static-granted Trample.
 fn handle_static_trample(
     _state: &GameState,
-    _params: &HashMap<String, String>,
+    _mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::RuleModification {
@@ -322,7 +322,7 @@ fn handle_static_trample(
 /// Handler for static-granted Deathtouch.
 fn handle_static_deathtouch(
     _state: &GameState,
-    _params: &HashMap<String, String>,
+    _mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::RuleModification {
@@ -333,7 +333,7 @@ fn handle_static_deathtouch(
 /// Handler for static-granted Lifelink.
 fn handle_static_lifelink(
     _state: &GameState,
-    _params: &HashMap<String, String>,
+    _mode: &StaticMode,
     _source_id: ObjectId,
 ) -> Vec<StaticEffect> {
     vec![StaticEffect::RuleModification {
@@ -342,11 +342,7 @@ fn handle_static_lifelink(
 }
 
 /// Stub handler for recognized but unimplemented modes.
-fn handle_stub(
-    _state: &GameState,
-    _params: &HashMap<String, String>,
-    _source_id: ObjectId,
-) -> Vec<StaticEffect> {
+fn handle_stub(_state: &GameState, _mode: &StaticMode, _source_id: ObjectId) -> Vec<StaticEffect> {
     Vec::new()
 }
 
@@ -556,8 +552,7 @@ mod tests {
     #[test]
     fn test_cant_be_blocked_returns_rule_modification() {
         let state = setup();
-        let params = HashMap::new();
-        let effects = handle_cant_be_blocked(&state, &params, ObjectId(1));
+        let effects = handle_cant_be_blocked(&state, &StaticMode::CantBeBlocked, ObjectId(1));
         assert_eq!(effects.len(), 1);
         match &effects[0] {
             StaticEffect::RuleModification { mode } => {
@@ -568,15 +563,13 @@ mod tests {
     }
 
     #[test]
-    fn test_protection_returns_rule_modification_with_target() {
+    fn test_protection_returns_rule_modification() {
         let state = setup();
-        let mut params = HashMap::new();
-        params.insert("Target".to_string(), "Red".to_string());
-        let effects = handle_protection(&state, &params, ObjectId(1));
+        let effects = handle_protection(&state, &StaticMode::Protection, ObjectId(1));
         assert_eq!(effects.len(), 1);
         match &effects[0] {
             StaticEffect::RuleModification { mode } => {
-                assert!(mode.starts_with("Protection:"));
+                assert_eq!(mode, "Protection");
             }
             _ => panic!("Expected RuleModification effect"),
         }
@@ -585,8 +578,7 @@ mod tests {
     #[test]
     fn test_continuous_mode_returns_effects() {
         let state = setup();
-        let params = HashMap::new();
-        let effects = handle_continuous(&state, &params, ObjectId(1));
+        let effects = handle_continuous(&state, &StaticMode::Continuous, ObjectId(1));
         assert_eq!(effects.len(), 1);
         assert_eq!(effects[0], StaticEffect::Continuous);
     }
@@ -594,8 +586,7 @@ mod tests {
     #[test]
     fn test_indestructible_returns_rule_modification() {
         let state = setup();
-        let params = HashMap::new();
-        let effects = handle_indestructible(&state, &params, ObjectId(1));
+        let effects = handle_indestructible(&state, &StaticMode::Indestructible, ObjectId(1));
         assert_eq!(effects.len(), 1);
         assert_eq!(
             effects[0],
@@ -608,8 +599,7 @@ mod tests {
     #[test]
     fn test_cant_be_countered_returns_rule_modification() {
         let state = setup();
-        let params = HashMap::new();
-        let effects = handle_cant_be_countered(&state, &params, ObjectId(1));
+        let effects = handle_cant_be_countered(&state, &StaticMode::CantBeCountered, ObjectId(1));
         assert_eq!(effects.len(), 1);
         assert_eq!(
             effects[0],
@@ -622,8 +612,7 @@ mod tests {
     #[test]
     fn test_flashback_returns_rule_modification() {
         let state = setup();
-        let params = HashMap::new();
-        let effects = handle_flashback(&state, &params, ObjectId(1));
+        let effects = handle_flashback(&state, &StaticMode::FlashBack, ObjectId(1));
         assert_eq!(effects.len(), 1);
         assert_eq!(
             effects[0],
@@ -636,8 +625,7 @@ mod tests {
     #[test]
     fn test_cant_be_destroyed_returns_rule_modification() {
         let state = setup();
-        let params = HashMap::new();
-        let effects = handle_cant_be_destroyed(&state, &params, ObjectId(1));
+        let effects = handle_cant_be_destroyed(&state, &StaticMode::CantBeDestroyed, ObjectId(1));
         assert_eq!(effects.len(), 1);
         assert_eq!(
             effects[0],
@@ -650,71 +638,37 @@ mod tests {
     #[test]
     fn test_static_keyword_handlers_return_correct_modes() {
         let state = setup();
-        let params = HashMap::new();
 
-        let vigilance = handle_static_vigilance(&state, &params, ObjectId(1));
-        assert_eq!(
-            vigilance[0],
-            StaticEffect::RuleModification {
-                mode: "Vigilance".to_string()
-            }
-        );
+        let test_cases: &[(
+            fn(&GameState, &StaticMode, ObjectId) -> Vec<StaticEffect>,
+            StaticMode,
+            &str,
+        )] = &[
+            (handle_static_vigilance, StaticMode::Vigilance, "Vigilance"),
+            (handle_static_menace, StaticMode::Menace, "Menace"),
+            (handle_static_reach, StaticMode::Reach, "Reach"),
+            (handle_static_flying, StaticMode::Flying, "Flying"),
+            (handle_static_trample, StaticMode::Trample, "Trample"),
+            (
+                handle_static_deathtouch,
+                StaticMode::Deathtouch,
+                "Deathtouch",
+            ),
+            (handle_static_lifelink, StaticMode::Lifelink, "Lifelink"),
+            (handle_shroud, StaticMode::Shroud, "Shroud"),
+        ];
 
-        let menace = handle_static_menace(&state, &params, ObjectId(1));
-        assert_eq!(
-            menace[0],
-            StaticEffect::RuleModification {
-                mode: "Menace".to_string()
-            }
-        );
-
-        let reach = handle_static_reach(&state, &params, ObjectId(1));
-        assert_eq!(
-            reach[0],
-            StaticEffect::RuleModification {
-                mode: "Reach".to_string()
-            }
-        );
-
-        let flying = handle_static_flying(&state, &params, ObjectId(1));
-        assert_eq!(
-            flying[0],
-            StaticEffect::RuleModification {
-                mode: "Flying".to_string()
-            }
-        );
-
-        let trample = handle_static_trample(&state, &params, ObjectId(1));
-        assert_eq!(
-            trample[0],
-            StaticEffect::RuleModification {
-                mode: "Trample".to_string()
-            }
-        );
-
-        let deathtouch = handle_static_deathtouch(&state, &params, ObjectId(1));
-        assert_eq!(
-            deathtouch[0],
-            StaticEffect::RuleModification {
-                mode: "Deathtouch".to_string()
-            }
-        );
-
-        let lifelink = handle_static_lifelink(&state, &params, ObjectId(1));
-        assert_eq!(
-            lifelink[0],
-            StaticEffect::RuleModification {
-                mode: "Lifelink".to_string()
-            }
-        );
-
-        let shroud = handle_shroud(&state, &params, ObjectId(1));
-        assert_eq!(
-            shroud[0],
-            StaticEffect::RuleModification {
-                mode: "Shroud".to_string()
-            }
-        );
+        for (handler, mode, expected) in test_cases {
+            let effects = handler(&state, mode, ObjectId(1));
+            assert_eq!(
+                effects[0],
+                StaticEffect::RuleModification {
+                    mode: expected.to_string()
+                },
+                "Handler for {} returned wrong mode",
+                expected,
+            );
+        }
     }
 
     #[test]
@@ -722,13 +676,12 @@ mod tests {
         let registry = build_static_registry();
         // Promoted statics should NOT return empty Vec (which stub does)
         let state = setup();
-        let params = HashMap::new();
 
         // Typed variant (CantBeCountered uses a proper enum variant, not Other)
         let cant_be_countered_handler = registry
             .get(&StaticMode::CantBeCountered)
             .expect("CantBeCountered should be in registry");
-        let effects = cant_be_countered_handler(&state, &params, ObjectId(1));
+        let effects = cant_be_countered_handler(&state, &StaticMode::CantBeCountered, ObjectId(1));
         assert!(
             !effects.is_empty(),
             "CantBeCountered should return non-empty effects"
@@ -758,7 +711,7 @@ mod tests {
             let handler = registry
                 .get(mode_key)
                 .unwrap_or_else(|| panic!("{} should be in registry", mode_key));
-            let effects = handler(&state, &params, ObjectId(1));
+            let effects = handler(&state, mode_key, ObjectId(1));
             assert!(
                 !effects.is_empty(),
                 "{} should return non-empty effects (no longer a stub)",

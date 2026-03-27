@@ -9,6 +9,7 @@ use crate::types::ability::{
     GainLifePlayer, LibraryPosition, PaymentCost, PreventionAmount, PreventionScope, PtValue,
     QuantityExpr, QuantityRef, RoundingMode, StaticDefinition, TargetFilter, TypedFilter,
 };
+use crate::types::player::PlayerCounterKind;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
@@ -1159,9 +1160,15 @@ pub(super) fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
 pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
     if lower.starts_with("exile all ") || lower.starts_with("exile each ") {
         let rest_lower = &lower[6..]; // after "exile "
-        let (target, _rem) = parse_target(&text[6..]);
+        let (parsed_target, _rem) = parse_target(&text[6..]);
         #[cfg(debug_assertions)]
         super::types::assert_no_compound_remainder(_rem, text);
+        // CR 701.5a: "exile all spells" must constrain to the stack.
+        let target = if rest_lower.contains("spell") {
+            super::constrain_filter_to_stack(parsed_target)
+        } else {
+            parsed_target
+        };
         let origin = super::infer_origin_zone(rest_lower);
         return Some(ZoneCounterImperativeAst::Exile {
             origin,
@@ -1189,9 +1196,16 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
         });
     }
 
-    let (target, _rem) = parse_target(&text[6..]);
+    let (parsed_target, _rem) = parse_target(&text[6..]);
     #[cfg(debug_assertions)]
     super::types::assert_no_compound_remainder(_rem, text);
+    // CR 701.5a: "exile target spell" must constrain targeting to the stack,
+    // mirroring parse_counter_ast at line 1218-1219.
+    let target = if rest_lower.contains("spell") {
+        super::constrain_filter_to_stack(parsed_target)
+    } else {
+        parsed_target
+    };
     let origin = super::infer_origin_zone(rest_lower);
     Some(ZoneCounterImperativeAst::Exile {
         origin,
@@ -1743,18 +1757,19 @@ fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAst> {
         return None;
     }
 
-    // Known player counter types — reject anything that's clearly an object counter.
+    // CR 122.1b: Map to typed PlayerCounterKind — reject anything that's an object counter.
     // Energy counters are NOT included — they use the dedicated GainEnergy effect.
-    let known_player_counters = ["poison", "experience", "rad", "ticket"];
-
-    // Only match known player counter types to avoid capturing object counter patterns
-    if !known_player_counters.contains(&counter_kind) {
-        return None;
-    }
+    let kind = match counter_kind {
+        "poison" => PlayerCounterKind::Poison,
+        "experience" => PlayerCounterKind::Experience,
+        "rad" => PlayerCounterKind::Rad,
+        "ticket" => PlayerCounterKind::Ticket,
+        _ => return None,
+    };
 
     let _ = plural; // plural is just grammatical, doesn't affect semantics
     Some(ImperativeFamilyAst::GivePlayerCounter {
-        counter_kind: counter_kind.to_string(),
+        counter_kind: kind,
         count: QuantityExpr::Fixed {
             value: count as i32,
         },
@@ -1928,6 +1943,11 @@ pub(super) fn parse_zone_counter_ast(
             });
         }
         // Then fixed-count put ("put N counter(s) on ...")
+        // Detect "each"/"all" to route to PutCounterAll (mass placement without targeting).
+        let is_all = lower.contains("counter on each ")
+            || lower.contains("counters on each ")
+            || lower.contains("counter on all ")
+            || lower.contains("counters on all ");
         return match try_parse_put_counter(lower, text, ctx) {
             Some((
                 Effect::PutCounter {
@@ -1937,11 +1957,21 @@ pub(super) fn parse_zone_counter_ast(
                 },
                 _remainder,
                 _multi_target,
-            )) => Some(ZoneCounterImperativeAst::PutCounter {
-                counter_type,
-                count,
-                target,
-            }),
+            )) => {
+                if is_all {
+                    Some(ZoneCounterImperativeAst::PutCounterAll {
+                        counter_type,
+                        count,
+                        target,
+                    })
+                } else {
+                    Some(ZoneCounterImperativeAst::PutCounter {
+                        counter_type,
+                        count,
+                        target,
+                    })
+                }
+            }
             _ => None,
         };
     }
@@ -2015,6 +2045,15 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
             count,
             target,
         } => Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        },
+        ZoneCounterImperativeAst::PutCounterAll {
+            counter_type,
+            count,
+            target,
+        } => Effect::PutCounterAll {
             counter_type,
             count,
             target,
@@ -2325,7 +2364,7 @@ mod tests {
                 counter_kind,
                 count,
             } => {
-                assert_eq!(counter_kind, "poison");
+                assert_eq!(counter_kind, PlayerCounterKind::Poison);
                 assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
             }
             other => panic!("Expected GivePlayerCounter, got {other:?}"),
@@ -2344,7 +2383,7 @@ mod tests {
                 counter_kind,
                 count,
             } => {
-                assert_eq!(counter_kind, "experience");
+                assert_eq!(counter_kind, PlayerCounterKind::Experience);
                 assert!(matches!(count, QuantityExpr::Fixed { value: 2 }));
             }
             other => panic!("Expected GivePlayerCounter, got {other:?}"),
@@ -2360,7 +2399,7 @@ mod tests {
                 counter_kind,
                 count,
             } => {
-                assert_eq!(counter_kind, "rad");
+                assert_eq!(counter_kind, PlayerCounterKind::Rad);
                 assert!(matches!(count, QuantityExpr::Fixed { value: 3 }));
             }
             other => panic!("Expected GivePlayerCounter, got {other:?}"),
@@ -2376,7 +2415,7 @@ mod tests {
                 counter_kind,
                 count,
             } => {
-                assert_eq!(counter_kind, "experience");
+                assert_eq!(counter_kind, PlayerCounterKind::Experience);
                 assert!(matches!(count, QuantityExpr::Fixed { value: 1 }));
             }
             other => panic!("Expected GivePlayerCounter, got {other:?}"),

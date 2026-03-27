@@ -1001,7 +1001,13 @@ fn try_parse_verb_and_target<'a>(
     // since parse_zone_suffix inside parse_type_phrase consumes zone phrases).
     if lower.starts_with("exile all ") || lower.starts_with("exile each ") {
         let rest_lower = &lower[6..]; // after "exile "
-        let (target, rem) = parse_target(&text[6..]);
+        let (parsed_target, rem) = parse_target(&text[6..]);
+        // CR 701.5a: "exile all spells" must constrain to the stack.
+        let target = if rest_lower.contains("spell") {
+            constrain_filter_to_stack(parsed_target)
+        } else {
+            parsed_target
+        };
         let origin = infer_origin_zone(rest_lower);
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Exile {
@@ -1013,7 +1019,14 @@ fn try_parse_verb_and_target<'a>(
         ));
     }
     if let Some(rest_lower) = lower.strip_prefix("exile ") {
-        let (target, rem) = parse_target(&text[6..]);
+        let (parsed_target, rem) = parse_target(&text[6..]);
+        // CR 701.5a: "exile target spell" must constrain targeting to the stack,
+        // mirroring the counter-spell parser at line 1036-1037.
+        let target = if rest_lower.contains("spell") {
+            constrain_filter_to_stack(parsed_target)
+        } else {
+            parsed_target
+        };
         let origin = infer_origin_zone(rest_lower);
         return Some((
             TargetedImperativeAst::ZoneCounterProxy(Box::new(ZoneCounterImperativeAst::Exile {
@@ -2595,7 +2608,7 @@ fn parse_search_filter(text: &str) -> TargetFilter {
             let mut properties = vec![];
             if is_basic {
                 properties.push(FilterProp::HasSupertype {
-                    value: "Basic".to_string(),
+                    value: crate::types::card_type::Supertype::Basic,
                 });
             }
             parse_search_filter_suffixes(suffix_text, &mut properties);
@@ -2623,7 +2636,7 @@ fn parse_search_filter(text: &str) -> TargetFilter {
                     let mut properties = vec![];
                     if is_basic {
                         properties.push(FilterProp::HasSupertype {
-                            value: "Basic".to_string(),
+                            value: crate::types::card_type::Supertype::Basic,
                         });
                     }
                     parse_search_filter_suffixes(suffix_text, &mut properties);
@@ -2640,7 +2653,7 @@ fn parse_search_filter(text: &str) -> TargetFilter {
                 let mut properties = vec![];
                 if is_basic {
                     properties.push(FilterProp::HasSupertype {
-                        value: "Basic".to_string(),
+                        value: crate::types::card_type::Supertype::Basic,
                     });
                 }
                 parse_search_filter_suffixes(suffix_text, &mut properties);
@@ -2688,7 +2701,7 @@ fn parse_search_filter(text: &str) -> TargetFilter {
                 let mut properties = vec![];
                 if is_basic {
                     properties.push(FilterProp::HasSupertype {
-                        value: "Basic".to_string(),
+                        value: crate::types::card_type::Supertype::Basic,
                     });
                 }
                 parse_search_filter_suffixes(suffix_text, &mut properties);
@@ -2706,7 +2719,7 @@ fn parse_search_filter(text: &str) -> TargetFilter {
     let mut properties = vec![];
     if is_basic {
         properties.push(FilterProp::HasSupertype {
-            value: "Basic".to_string(),
+            value: crate::types::card_type::Supertype::Basic,
         });
     }
     parse_search_filter_suffixes(suffix_text, &mut properties);
@@ -5737,7 +5750,7 @@ mod tests {
                     TargetFilter::Typed(tf) => {
                         assert!(tf.type_filters.contains(&TypeFilter::Land));
                         assert!(tf.properties.iter().any(
-                            |p| matches!(p, FilterProp::HasSupertype { value } if value == "Basic")
+                            |p| matches!(p, FilterProp::HasSupertype { value } if *value == crate::types::card_type::Supertype::Basic)
                         ));
                     }
                     other => panic!("Expected Typed filter, got {:?}", other),
@@ -6075,6 +6088,23 @@ mod tests {
         let e = parse_effect("put a +1/+1 counter on this creature");
         assert!(
             matches!(e, Effect::PutCounter { counter_type: ref ct, count: QuantityExpr::Fixed { value: 1 }, target: TargetFilter::SelfRef } if ct == "P1P1")
+        );
+    }
+
+    #[test]
+    fn put_counter_all_each_creature_you_control() {
+        let e = parse_effect("put a +1/+1 counter on each creature you control");
+        assert!(
+            matches!(
+                e,
+                Effect::PutCounterAll {
+                    counter_type: ref ct,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
+                } if ct == "P1P1"
+            ),
+            "Expected PutCounterAll for 'each creature you control', got {:?}",
+            e
         );
     }
 

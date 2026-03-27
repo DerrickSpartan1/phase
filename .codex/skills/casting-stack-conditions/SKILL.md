@@ -314,7 +314,7 @@ Modal abilities can now carry cross-target rules such as `DifferentTargetPlayers
 
 ## "You May" in Parser
 
-Currently in `oracle_effect.rs`, "you may" is stripped naively:
+Currently in `oracle_effect/mod.rs`, "you may" is stripped naively:
 
 ```rust
 if lower.starts_with("you may ") {

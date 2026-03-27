@@ -14,8 +14,9 @@ use crate::types::ability::{
     ContinuousModification, ControllerRef, CountScope, FilterProp, QuantityExpr, QuantityRef,
     StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
+use crate::types::card_type::Supertype;
 use crate::types::keywords::Keyword;
-use crate::types::mana::ManaCost;
+use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::statics::{CastingProhibitionCondition, CastingProhibitionScope, StaticMode};
 use crate::types::zones::Zone;
 
@@ -72,52 +73,25 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         }
     }
 
-    // --- "You control enchanted creature/permanent" (Control Magic pattern) ---
+    // --- "You control enchanted creature/permanent/land/artifact" (Control Magic pattern) ---
     // CR 303.4e + CR 613.2: Aura-based continuous control-changing effects.
-    if tp.lower == "you control enchanted creature" || tp.lower == "you control enchanted creature."
+    if let Some(type_word) = tp
+        .lower
+        .trim_end_matches('.')
+        .strip_prefix("you control enchanted ")
     {
-        return Some(
-            StaticDefinition::continuous()
-                .affected(TargetFilter::Typed(
-                    TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
-                ))
-                .modifications(vec![ContinuousModification::ChangeController])
-                .description(text.to_string()),
-        );
-    }
-    if tp.lower == "you control enchanted permanent"
-        || tp.lower == "you control enchanted permanent."
-    {
-        return Some(
-            StaticDefinition::continuous()
-                .affected(TargetFilter::Typed(
-                    TypedFilter::permanent().properties(vec![FilterProp::EnchantedBy]),
-                ))
-                .modifications(vec![ContinuousModification::ChangeController])
-                .description(text.to_string()),
-        );
-    }
-    if tp.lower == "you control enchanted land" || tp.lower == "you control enchanted land." {
-        return Some(
-            StaticDefinition::continuous()
-                .affected(TargetFilter::Typed(
-                    TypedFilter::land().properties(vec![FilterProp::EnchantedBy]),
-                ))
-                .modifications(vec![ContinuousModification::ChangeController])
-                .description(text.to_string()),
-        );
-    }
-    if tp.lower == "you control enchanted artifact" || tp.lower == "you control enchanted artifact."
-    {
-        return Some(
-            StaticDefinition::continuous()
-                .affected(TargetFilter::Typed(
-                    TypedFilter::new(TypeFilter::Artifact)
-                        .properties(vec![FilterProp::EnchantedBy]),
-                ))
-                .modifications(vec![ContinuousModification::ChangeController])
-                .description(text.to_string()),
-        );
+        let (type_filter, remainder) = parse_type_phrase(type_word);
+        if remainder.is_empty() {
+            if let TargetFilter::Typed(mut tf) = type_filter {
+                tf.properties.push(FilterProp::EnchantedBy);
+                return Some(
+                    StaticDefinition::continuous()
+                        .affected(TargetFilter::Typed(tf))
+                        .modifications(vec![ContinuousModification::ChangeController])
+                        .description(text.to_string()),
+                );
+            }
+        }
     }
 
     // --- "Enchanted creature gets +N/+M" or "has {keyword}" ---
@@ -831,9 +805,7 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                     TargetFilter::Typed(
                         TypedFilter::creature()
                             .controller(ControllerRef::You)
-                            .properties(vec![FilterProp::HasColor {
-                                color: color.to_string(),
-                            }]),
+                            .properties(vec![FilterProp::HasColor { color }]),
                     )
                 } else if is_capitalized_words(descriptor) {
                     TargetFilter::Typed(
@@ -909,9 +881,7 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                     TargetFilter::Typed(
                         TypedFilter::creature()
                             .controller(ControllerRef::You)
-                            .properties(vec![FilterProp::HasColor {
-                                color: color.to_string(),
-                            }]),
+                            .properties(vec![FilterProp::HasColor { color }]),
                     )
                 } else if is_capitalized_words(descriptor) {
                     // CR 205.3m: Normalize plural subtypes to canonical singular form
@@ -993,11 +963,8 @@ fn parse_assigns_damage_from_toughness(lower: &str, text: &str) -> Option<Static
             filter = filter.properties(vec![FilterProp::ToughnessGTPower]);
         } else {
             // Treat as keyword condition: "with defender", "with flying", etc.
-            // Validate it parses as a keyword, then store the lowercase string.
-            let _keyword: Keyword = with_clause.parse().ok()?;
-            filter = filter.properties(vec![FilterProp::WithKeyword {
-                value: with_clause.to_string(),
-            }]);
+            let keyword: Keyword = with_clause.parse().ok()?;
+            filter = filter.properties(vec![FilterProp::WithKeyword { value: keyword }]);
         }
     }
 
@@ -1831,11 +1798,9 @@ fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
     }
 
     if let Some(color) = parse_named_color(descriptor) {
-        return Some(TargetFilter::Typed(TypedFilter::creature().properties(
-            vec![FilterProp::HasColor {
-                color: color.to_string(),
-            }],
-        )));
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::HasColor { color }]),
+        ));
     }
 
     if is_capitalized_words(descriptor) {
@@ -2131,9 +2096,7 @@ fn parse_cant_be_countered_subject(tp: &TextPair) -> TargetFilter {
                     for raw_word in part.split_whitespace() {
                         let word = raw_word.trim_end_matches(',');
                         if let Some(color) = parse_named_color(word) {
-                            properties.push(FilterProp::HasColor {
-                                color: color.to_string(),
-                            });
+                            properties.push(FilterProp::HasColor { color });
                         } else {
                             // Try as card type: "creature", "instant", "sorcery", etc.
                             match word {
@@ -2215,13 +2178,13 @@ fn parse_zone_names_from_tp(tp: &TextPair) -> Vec<Zone> {
     zones
 }
 
-fn parse_named_color(text: &str) -> Option<&'static str> {
+fn parse_named_color(text: &str) -> Option<ManaColor> {
     match text.trim().to_ascii_lowercase().as_str() {
-        "white" => Some("White"),
-        "blue" => Some("Blue"),
-        "black" => Some("Black"),
-        "red" => Some("Red"),
-        "green" => Some("Green"),
+        "white" => Some(ManaColor::White),
+        "blue" => Some(ManaColor::Blue),
+        "black" => Some(ManaColor::Black),
+        "red" => Some(ManaColor::Red),
+        "green" => Some(ManaColor::Green),
         _ => None,
     }
 }
@@ -2952,6 +2915,39 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
     )
 }
 
+fn parse_first_qualified_spell_filter(lower: &str) -> Option<TargetFilter> {
+    let after_prefix = lower.strip_prefix("the first ")?;
+    let qualifier = after_prefix
+        .split_once(" you cast during each of your turns cost")
+        .or_else(|| after_prefix.split_once(" you cast during each of your turns costs"))?
+        .0
+        .trim();
+
+    let (filter, remainder) = parse_type_phrase(qualifier);
+    if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+        Some(filter)
+    } else {
+        None
+    }
+}
+
+fn first_qualified_spell_condition(filter: &TargetFilter) -> StaticCondition {
+    StaticCondition::And {
+        conditions: vec![
+            StaticCondition::DuringYourTurn,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        filter: Some(filter.clone()),
+                    },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            },
+        ],
+    }
+}
+
 /// CR 601.2f: Parse cost modification statics from Oracle text.
 /// Handles all four sub-patterns:
 /// 1. Type-filtered: "Creature spells you cast cost {1} less to cast"
@@ -2989,9 +2985,13 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
         None
     };
 
+    let first_qualified_spell_filter = parse_first_qualified_spell_filter(lower);
+
     // Extract spell type filter from the text before "cost"
     // E.g., "Creature spells you cast" → Creature, "Instant and sorcery spells" → AnyOf(Instant, Sorcery)
-    let spell_filter = if let Some(cost_idx) = lower.find(" cost") {
+    let spell_filter = if let Some(filter) = first_qualified_spell_filter.clone() {
+        Some(filter)
+    } else if let Some(cost_idx) = lower.find(" cost") {
         let prefix = &lower[..cost_idx];
         // Strip player scope suffixes first, then "spells"/"spell"
         let type_desc = prefix
@@ -3018,16 +3018,11 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
                 TargetFilter::Or { filters } if !filters.is_empty() => Some(filter),
                 _ => {
                     // Fallback: check for bare color names ("white", "blue", etc.)
-                    match type_desc {
-                        "white" | "blue" | "black" | "red" | "green" => {
-                            Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
-                                FilterProp::HasColor {
-                                    color: type_desc.to_string(),
-                                },
-                            ])))
-                        }
-                        _ => None,
-                    }
+                    parse_named_color(type_desc).map(|color| {
+                        TargetFilter::Typed(
+                            TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
+                        )
+                    })
                 }
             }
         }
@@ -3076,11 +3071,14 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
         None => TargetFilter::Typed(TypedFilter::card()),
     };
 
-    Some(
-        StaticDefinition::new(mode)
-            .affected(affected)
-            .description(text.to_string()),
-    )
+    let mut definition = StaticDefinition::new(mode)
+        .affected(affected)
+        .description(text.to_string());
+    if let Some(filter) = first_qualified_spell_filter.as_ref() {
+        definition.condition = Some(first_qualified_spell_condition(filter));
+    }
+
+    Some(definition)
 }
 
 /// Parse a basic land type name (case-insensitive) to its enum variant.
@@ -3156,7 +3154,7 @@ fn parse_land_type_change_subject(subject: &str) -> Option<TargetFilter> {
     match subject.to_lowercase().as_str() {
         "nonbasic lands" => Some(TargetFilter::Typed(TypedFilter::land().properties(vec![
             FilterProp::NotSupertype {
-                value: "Basic".to_string(),
+                value: Supertype::Basic,
             },
         ]))),
         "lands you control" => Some(TargetFilter::Typed(
@@ -3329,7 +3327,7 @@ mod tests {
                 if tf.type_filters.contains(&TypeFilter::Creature)
                     && tf.get_subtype().is_none()
                     && tf.controller == Some(ControllerRef::You)
-                    && tf.properties == vec![FilterProp::HasColor { color: "White".to_string() }]
+                    && tf.properties == vec![FilterProp::HasColor { color: ManaColor::White }]
         ));
     }
 
@@ -3372,9 +3370,9 @@ mod tests {
         if let Some(TargetFilter::Typed(tf)) = &def.affected {
             assert_eq!(tf.controller, Some(ControllerRef::You));
             assert!(
-                tf.properties
-                    .iter()
-                    .any(|p| matches!(p, FilterProp::HasColor { color } if color == "Green")),
+                tf.properties.iter().any(
+                    |p| matches!(p, FilterProp::HasColor { color } if *color == ManaColor::Green)
+                ),
                 "Expected HasColor Green, got {:?}",
                 tf.properties
             );
@@ -3513,9 +3511,9 @@ mod tests {
                     assert!(
                         tf.properties.iter().any(|p| matches!(
                             p,
-                            FilterProp::HasColor { ref color } if color == "white"
+                            FilterProp::HasColor { color } if *color == ManaColor::White
                         )),
-                        "Expected HasColor white"
+                        "Expected HasColor White"
                     );
                 }
                 _ => panic!("Expected Typed filter"),
@@ -3553,6 +3551,51 @@ mod tests {
                 _ => panic!("Expected Typed filter"),
             }
         }
+    }
+
+    #[test]
+    fn static_first_qualified_spell_costs_less_has_filter_and_condition() {
+        let def = parse_static_line(
+            "The first non-Lemur creature spell with flying you cast during each of your turns costs {1} less to cast.",
+        )
+        .unwrap();
+
+        assert!(matches!(def.mode, StaticMode::ReduceCost { .. }));
+        let StaticMode::ReduceCost {
+            ref spell_filter, ..
+        } = def.mode
+        else {
+            unreachable!();
+        };
+        let filter = spell_filter.as_ref().expect("expected spell filter");
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected typed spell filter, got {filter:?}");
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Creature));
+        assert!(filter.type_filters.iter().any(|entry| matches!(
+            entry,
+            TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Subtype(ref subtype) if subtype == "Lemur")
+        )));
+        assert!(filter.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::WithKeyword { value } if *value == Keyword::Flying
+        )));
+
+        let condition = def.condition.expect("expected first-spell condition");
+        let StaticCondition::And { conditions } = condition else {
+            panic!("expected And condition");
+        };
+        assert!(conditions.contains(&StaticCondition::DuringYourTurn));
+        assert!(conditions.iter().any(|condition| matches!(
+            condition,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn { filter: Some(inner) },
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            } if inner == spell_filter.as_ref().unwrap()
+        )));
     }
 
     // NOTE: static_enters_with_counters test moved to oracle_replacement tests —
@@ -3960,7 +4003,7 @@ mod tests {
             def.affected,
             Some(TargetFilter::Typed(TypedFilter::creature().properties(
                 vec![FilterProp::CountersGE {
-                    counter_type: "ice".to_string(),
+                    counter_type: crate::game::game_object::CounterType::Generic("ice".to_string()),
                     count: 1,
                 },]
             )))
@@ -4074,8 +4117,8 @@ mod tests {
             def.affected,
             Some(TargetFilter::Typed(TypedFilter::creature().properties(
                 vec![FilterProp::HasColor {
-                    color: "Black".to_string(),
-                },]
+                    color: ManaColor::Black,
+                }]
             )))
         );
         assert!(def
@@ -4119,7 +4162,7 @@ mod tests {
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
                     .properties(vec![FilterProp::WithKeyword {
-                        value: "flying".to_string(),
+                        value: Keyword::Flying,
                     }]),
             ))
         );
@@ -4477,7 +4520,7 @@ mod tests {
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
                     .properties(vec![FilterProp::WithKeyword {
-                        value: "defender".to_string(),
+                        value: Keyword::Defender,
                     }]),
             ))
         );
@@ -4524,9 +4567,9 @@ mod tests {
                 assert!(properties.iter().any(|p| matches!(
                     p,
                     FilterProp::CountersGE {
-                        ref counter_type,
+                        counter_type: crate::game::game_object::CounterType::Plus1Plus1,
                         count: 1,
-                    } if counter_type == "+1/+1"
+                    }
                 )));
             }
             other => panic!("Expected Typed creature filter, got {:?}", other),
@@ -4553,9 +4596,9 @@ mod tests {
                 assert!(properties.iter().any(|p| matches!(
                     p,
                     FilterProp::CountersGE {
-                        ref counter_type,
+                        counter_type: crate::game::game_object::CounterType::Plus1Plus1,
                         count: 1,
-                    } if counter_type == "+1/+1"
+                    }
                 )));
             }
             other => panic!("Expected Typed creature filter, got {:?}", other),
@@ -4581,9 +4624,9 @@ mod tests {
                 assert!(properties.iter().any(|p| matches!(
                     p,
                     FilterProp::CountersGE {
-                        ref counter_type,
+                        counter_type: crate::game::game_object::CounterType::Plus1Plus1,
                         count: 1,
-                    } if counter_type == "+1/+1"
+                    }
                 )));
             }
             other => panic!("Expected Typed creature filter, got {:?}", other),
@@ -5354,7 +5397,7 @@ mod tests {
         match &def.affected {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(tf.properties.contains(&FilterProp::WithKeyword {
-                    value: "flying".to_string(),
+                    value: Keyword::Flying,
                 }));
             }
             _ => panic!("Expected Typed filter with keyword property"),
@@ -5455,7 +5498,7 @@ mod tests {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(tf.type_filters.contains(&TypeFilter::Land));
                 assert!(tf.properties.contains(&FilterProp::NotSupertype {
-                    value: "Basic".to_string(),
+                    value: Supertype::Basic,
                 }));
             }
             _ => panic!("Expected Typed nonbasic land filter"),
@@ -5780,5 +5823,78 @@ mod tests {
         assert!(def.is_some(), "Should parse conditional CantUntap");
         let def = def.unwrap();
         assert_eq!(def.mode, StaticMode::CantUntap);
+    }
+
+    #[test]
+    fn control_enchanted_creature() {
+        // CR 303.4e + CR 613.2: "You control enchanted creature" (Control Magic pattern)
+        let def = parse_static_line("You control enchanted creature.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::ChangeController));
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+            }
+            _ => panic!("expected Typed filter"),
+        }
+        // Also works without trailing period
+        let def2 = parse_static_line("You control enchanted creature").unwrap();
+        assert_eq!(def2.mode, StaticMode::Continuous);
+    }
+
+    #[test]
+    fn control_enchanted_permanent() {
+        let def = parse_static_line("You control enchanted permanent.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+                assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+            }
+            _ => panic!("expected Typed filter"),
+        }
+    }
+
+    #[test]
+    fn control_enchanted_land() {
+        let def = parse_static_line("You control enchanted land.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+            }
+            _ => panic!("expected Typed filter"),
+        }
+    }
+
+    #[test]
+    fn control_enchanted_artifact() {
+        let def = parse_static_line("You control enchanted artifact.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+                assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+            }
+            _ => panic!("expected Typed filter"),
+        }
+    }
+
+    #[test]
+    fn control_enchanted_planeswalker() {
+        // Not yet in Oracle text but structurally valid — the generic pattern should handle it
+        let def = parse_static_line("You control enchanted planeswalker.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Planeswalker));
+                assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+            }
+            _ => panic!("expected Typed filter"),
+        }
     }
 }

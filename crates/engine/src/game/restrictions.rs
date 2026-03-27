@@ -12,6 +12,7 @@ use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
+use crate::types::SpellCastRecord;
 
 use super::engine::EngineError;
 use crate::types::identifiers::ObjectId;
@@ -116,12 +117,19 @@ pub fn record_spell_cast(
 ) {
     state.spells_cast_this_turn = state.spells_cast_this_turn.saturating_add(1);
     *state.spells_cast_this_game.entry(player).or_insert(0) += 1;
-    // CR 117.1: Record spell types for general-purpose filtered counting.
+    // CR 117.1: Record spell characteristics for general-purpose filtered counting.
     state
         .spells_cast_this_turn_by_player
         .entry(player)
         .or_default()
-        .push(obj.card_types.core_types.clone());
+        .push(SpellCastRecord {
+            core_types: obj.card_types.core_types.clone(),
+            supertypes: obj.card_types.supertypes.clone(),
+            subtypes: obj.card_types.subtypes.clone(),
+            keywords: obj.keywords.clone(),
+            colors: obj.color.clone(),
+            mana_value: obj.mana_cost.mana_value(),
+        });
 }
 
 /// CR 508.1m: Any abilities that trigger on attackers being declared trigger.
@@ -169,6 +177,7 @@ pub fn record_sacrifice(
     }
 }
 
+/// CR 403.3: Record a battlefield entry snapshot for data-driven ETB condition queries.
 pub fn record_battlefield_entry(
     state: &mut crate::types::game_state::GameState,
     object_id: ObjectId,
@@ -180,34 +189,18 @@ pub fn record_battlefield_entry(
         return;
     }
 
-    if obj.card_types.core_types.contains(&CoreType::Creature) {
-        state
-            .players_who_had_creature_etb_this_turn
-            .insert(obj.controller);
-        if obj
-            .card_types
-            .subtypes
-            .iter()
-            .any(|subtype| subtype.eq_ignore_ascii_case("Angel"))
-            || obj
-                .card_types
-                .subtypes
-                .iter()
-                .any(|subtype| subtype.eq_ignore_ascii_case("Berserker"))
-        {
-            state
-                .players_who_had_angel_or_berserker_etb_this_turn
-                .insert(obj.controller);
-        }
-    }
-    if obj.card_types.core_types.contains(&CoreType::Artifact) {
-        state
-            .players_who_had_artifact_etb_this_turn
-            .insert(obj.controller);
-    }
+    let record = crate::types::game_state::BattlefieldEntryRecord {
+        object_id,
+        name: obj.name.clone(),
+        core_types: obj.card_types.core_types.clone(),
+        subtypes: obj.card_types.subtypes.clone(),
+        supertypes: obj.card_types.supertypes.clone(),
+        controller: obj.controller,
+    };
+    state.battlefield_entries_this_turn.push(record);
 }
 
-/// CR 400.7: Track zone transitions for game-state history used by restriction conditions.
+/// CR 400.7: Record a zone-change snapshot for data-driven condition queries.
 pub fn record_zone_change(
     state: &mut crate::types::game_state::GameState,
     object_id: ObjectId,
@@ -218,28 +211,18 @@ pub fn record_zone_change(
         return;
     };
 
-    if from == Zone::Graveyard && to != Zone::Graveyard {
-        *state
-            .cards_left_graveyard_this_turn
-            .entry(obj.owner)
-            .or_insert(0) += 1;
-    }
-
-    if from == Zone::Battlefield
-        && to == Zone::Graveyard
-        && obj.card_types.core_types.contains(&CoreType::Creature)
-    {
-        // "Dies" means "is put into a graveyard from the battlefield" (CR 700.4).
-        state.creature_died_this_turn = true;
-    }
-
-    // CR 400.7: Track when any permanent leaves the battlefield (Revolt tracking).
-    if from == Zone::Battlefield {
-        *state
-            .permanents_left_battlefield_this_turn
-            .entry(obj.controller)
-            .or_insert(0) += 1;
-    }
+    let record = crate::types::game_state::ZoneChangeRecord {
+        object_id,
+        name: obj.name.clone(),
+        core_types: obj.card_types.core_types.clone(),
+        subtypes: obj.card_types.subtypes.clone(),
+        supertypes: obj.card_types.supertypes.clone(),
+        controller: obj.controller,
+        owner: obj.owner,
+        from_zone: from,
+        to_zone: to,
+    };
+    state.zone_changes_this_turn.push(record);
 
     if to == Zone::Battlefield {
         record_battlefield_entry(state, object_id);
@@ -709,7 +692,7 @@ fn evaluate_condition(
                 .filter(|candidate| candidate.id != player)
                 .all(|candidate| {
                     let rhs_val = resolve_player_quantity(state, rhs, candidate.id);
-                    comparator.clone().evaluate(lhs_val as i32, rhs_val as i32)
+                    comparator.evaluate(lhs_val as i32, rhs_val as i32)
                 })
         }
         RestrictionCondition::CreaturesYouControlTotalPowerAtLeast(minimum) => {
@@ -802,7 +785,7 @@ fn evaluate_condition(
             .is_some_and(|spells| {
                 spells
                     .iter()
-                    .any(|types| !types.contains(&CoreType::Creature))
+                    .any(|record| !record.core_types.contains(&CoreType::Creature))
             }),
         RestrictionCondition::YouCastSpellCountAtLeast(count) => {
             state
@@ -825,22 +808,37 @@ fn evaluate_condition(
         RestrictionCondition::YouSacrificedArtifactThisTurn => state
             .players_who_sacrificed_artifact_this_turn
             .contains(&player),
-        RestrictionCondition::CreatureDiedThisTurn => state.creature_died_this_turn,
+        // CR 700.4: "Dies" = creature moved from battlefield to graveyard.
+        RestrictionCondition::CreatureDiedThisTurn => {
+            state.zone_changes_this_turn.iter().any(|r| {
+                r.core_types.contains(&CoreType::Creature)
+                    && r.from_zone == Zone::Battlefield
+                    && r.to_zone == Zone::Graveyard
+            })
+        }
         RestrictionCondition::YouHadCreatureEnterThisTurn => state
-            .players_who_had_creature_etb_this_turn
-            .contains(&player),
-        RestrictionCondition::YouHadAngelOrBerserkerEnterThisTurn => state
-            .players_who_had_angel_or_berserker_etb_this_turn
-            .contains(&player),
+            .battlefield_entries_this_turn
+            .iter()
+            .any(|r| r.core_types.contains(&CoreType::Creature) && r.controller == player),
+        RestrictionCondition::YouHadAngelOrBerserkerEnterThisTurn => {
+            state.battlefield_entries_this_turn.iter().any(|r| {
+                r.core_types.contains(&CoreType::Creature)
+                    && r.controller == player
+                    && r.subtypes.iter().any(|s| {
+                        s.eq_ignore_ascii_case("Angel") || s.eq_ignore_ascii_case("Berserker")
+                    })
+            })
+        }
         RestrictionCondition::YouHadArtifactEnterThisTurn => state
-            .players_who_had_artifact_etb_this_turn
-            .contains(&player),
+            .battlefield_entries_this_turn
+            .iter()
+            .any(|r| r.core_types.contains(&CoreType::Artifact) && r.controller == player),
         RestrictionCondition::CardsLeftYourGraveyardThisTurnAtLeast(count) => {
             state
-                .cards_left_graveyard_this_turn
-                .get(&player)
-                .copied()
-                .unwrap_or(0)
+                .zone_changes_this_turn
+                .iter()
+                .filter(|r| r.from_zone == Zone::Graveyard && r.owner == player)
+                .count() as u32
                 >= *count
         }
     }
@@ -1659,7 +1657,19 @@ mod tests {
     #[test]
     fn evaluates_creature_died_this_turn_condition() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
-        state.creature_died_this_turn = true;
+        state
+            .zone_changes_this_turn
+            .push(crate::types::game_state::ZoneChangeRecord {
+                object_id: ObjectId(99),
+                name: "Grizzly Bears".to_string(),
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![],
+                supertypes: vec![],
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                from_zone: Zone::Battlefield,
+                to_zone: Zone::Graveyard,
+            });
 
         assert!(evaluate_condition_text(
             &state,
@@ -1699,7 +1709,22 @@ mod tests {
     #[test]
     fn evaluates_cards_left_graveyard_this_turn_condition() {
         let mut state = crate::types::game_state::GameState::new_two_player(42);
-        state.cards_left_graveyard_this_turn.insert(PlayerId(0), 3);
+        // Push 3 zone-change records for cards leaving the graveyard.
+        for i in 0..3 {
+            state
+                .zone_changes_this_turn
+                .push(crate::types::game_state::ZoneChangeRecord {
+                    object_id: ObjectId(100 + i),
+                    name: format!("Card {}", i),
+                    core_types: vec![],
+                    subtypes: vec![],
+                    supertypes: vec![],
+                    controller: PlayerId(0),
+                    owner: PlayerId(0),
+                    from_zone: Zone::Graveyard,
+                    to_zone: Zone::Exile,
+                });
+        }
 
         assert!(evaluate_condition_text(
             &state,

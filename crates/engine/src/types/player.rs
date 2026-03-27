@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -8,6 +9,28 @@ use super::identifiers::ObjectId;
 use super::mana::ManaPool;
 
 use crate::game::deck_loading::DeckEntry;
+
+/// CR 122.1b: Named player counter types tracked by the engine.
+/// Poison counters route to the dedicated `poison_counters` field due to SBA rules (CR 704.5c).
+/// Energy counters are excluded — they use the dedicated `energy` field and `GainEnergy` effect.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub enum PlayerCounterKind {
+    Poison,
+    Experience,
+    Rad,
+    Ticket,
+}
+
+impl fmt::Display for PlayerCounterKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Poison => write!(f, "poison"),
+            Self::Experience => write!(f, "experience"),
+            Self::Rad => write!(f, "rad"),
+            Self::Ticket => write!(f, "ticket"),
+        }
+    }
+}
 
 /// CR 702.139: Tracks a declared companion outside the game.
 /// The companion is not a `GameObject` until it moves to hand.
@@ -83,10 +106,10 @@ pub struct Player {
     #[serde(default)]
     pub bending_types_this_turn: HashSet<BendingType>,
 
-    /// CR 122.1: Generic player counters (experience, rad, ticket, etc.).
-    /// Poison counters have a dedicated field due to SBA rules (CR 104.3d).
+    /// CR 122.1: Player counters (experience, rad, ticket, etc.).
+    /// Poison counters route to the dedicated `poison_counters` field via method accessors.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub player_counters: HashMap<String, u32>,
+    pub player_counters: HashMap<PlayerCounterKind, u32>,
 
     /// CR 702.139: The player's declared companion (if any). Lives outside the game.
     /// Stored as card data (not a GameObject) until moved to hand.
@@ -128,23 +151,21 @@ impl Default for Player {
 }
 
 impl Player {
-    /// CR 122.1: Get the current count of a named player counter.
-    /// Poison counters use the dedicated field; all others use the generic map.
-    pub fn player_counter(&self, kind: &str) -> u32 {
-        if kind == "poison" {
-            self.poison_counters
-        } else {
-            self.player_counters.get(kind).copied().unwrap_or(0)
+    /// CR 122.1: Get the current count of a player counter.
+    /// Poison counters route to the dedicated field (SBA at CR 704.5c).
+    pub fn player_counter(&self, kind: &PlayerCounterKind) -> u32 {
+        match kind {
+            PlayerCounterKind::Poison => self.poison_counters,
+            _ => self.player_counters.get(kind).copied().unwrap_or(0),
         }
     }
 
-    /// CR 122.1: Add counters of a named type to this player.
-    /// Poison counters use the dedicated field (has SBA at CR 104.3d); all others use the generic map.
-    pub fn add_player_counters(&mut self, kind: &str, count: u32) {
-        if kind == "poison" {
-            self.poison_counters += count;
-        } else {
-            *self.player_counters.entry(kind.to_string()).or_insert(0) += count;
+    /// CR 122.1: Add counters of a given type to this player.
+    /// Poison counters route to the dedicated field (SBA at CR 104.3d).
+    pub fn add_player_counters(&mut self, kind: &PlayerCounterKind, count: u32) {
+        match kind {
+            PlayerCounterKind::Poison => self.poison_counters += count,
+            _ => *self.player_counters.entry(kind.clone()).or_insert(0) += count,
         }
     }
 }

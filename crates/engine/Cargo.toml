@@ -44,4 +44,6 @@ required-features = ["audit"]
 [dev-dependencies]
 tempfile = "3"
 insta = { version = "1", features = ["json"] }
-
+assert_matches = "1.5"
+pretty_assertions = "1"
+proptest = "1"

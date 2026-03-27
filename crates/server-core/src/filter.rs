@@ -179,6 +179,7 @@ mod tests {
     use engine::types::identifiers::CardId;
     use engine::types::mana::ManaCost;
     use engine::types::zones::Zone;
+    use proptest::prelude::*;
 
     fn setup_state() -> GameState {
         let mut state = GameState::new_two_player(42);
@@ -433,5 +434,75 @@ mod tests {
         // Library cards should be hidden for opponent
         let obj_a_opp = &filtered_p1.objects[&card_a];
         assert_eq!(obj_a_opp.name, "Hidden Card");
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig {
+            cases: 16,
+            .. ProptestConfig::default()
+        })]
+
+        #[test]
+        fn property_filter_hides_opponent_hidden_zones(
+            opp_hand_count in 1usize..5,
+            own_library_count in 1usize..5,
+            opp_library_count in 1usize..5,
+        ) {
+            let mut state = GameState::new_two_player(42);
+
+            for idx in 0..opp_hand_count {
+                create_object(
+                    &mut state,
+                    CardId((100 + idx) as u64),
+                    PlayerId(1),
+                    format!("Opp Hand {idx}"),
+                    Zone::Hand,
+                );
+            }
+
+            for idx in 0..own_library_count {
+                create_object(
+                    &mut state,
+                    CardId((200 + idx) as u64),
+                    PlayerId(0),
+                    format!("Own Library {idx}"),
+                    Zone::Library,
+                );
+            }
+
+            for idx in 0..opp_library_count {
+                create_object(
+                    &mut state,
+                    CardId((300 + idx) as u64),
+                    PlayerId(1),
+                    format!("Opp Library {idx}"),
+                    Zone::Library,
+                );
+            }
+
+            let filtered = filter_state_for_player(&state, PlayerId(0));
+
+            prop_assert_eq!(filtered.players[1].hand.len(), opp_hand_count);
+            for obj_id in &filtered.players[1].hand {
+                let obj = filtered.objects.get(obj_id).expect("hand object must exist");
+                prop_assert!(obj.face_down);
+                prop_assert_eq!(obj.name, "Hidden Card");
+                prop_assert!(obj.abilities.is_empty());
+            }
+
+            prop_assert_eq!(filtered.players[0].library.len(), own_library_count);
+            for obj_id in &filtered.players[0].library {
+                let obj = filtered.objects.get(obj_id).expect("own library object must exist");
+                prop_assert_eq!(obj.name, "Hidden Card");
+                prop_assert!(obj.face_down);
+            }
+
+            prop_assert_eq!(filtered.players[1].library.len(), opp_library_count);
+            for obj_id in &filtered.players[1].library {
+                let obj = filtered.objects.get(obj_id).expect("opponent library object must exist");
+                prop_assert_eq!(obj.name, "Hidden Card");
+                prop_assert!(obj.face_down);
+            }
+        }
     }
 }

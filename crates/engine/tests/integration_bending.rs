@@ -910,7 +910,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
                 type_filters: vec![engine::types::ability::TypeFilter::Land],
                 controller: None,
                 properties: vec![engine::types::ability::FilterProp::HasSupertype {
-                    value: "Basic".to_string(),
+                    value: engine::types::card_type::Supertype::Basic,
                 }],
             }),
             count: 1,
@@ -923,7 +923,7 @@ fn test_search_changezone_shuffle_continuation_completes() {
                     type_filters: vec![engine::types::ability::TypeFilter::Land],
                     controller: None,
                     properties: vec![engine::types::ability::FilterProp::HasSupertype {
-                        value: "Basic".to_string(),
+                        value: engine::types::card_type::Supertype::Basic,
                     }],
                 }),
                 count: 1,
@@ -1227,7 +1227,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 type_filters: vec![engine::types::ability::TypeFilter::Land],
                 controller: None,
                 properties: vec![engine::types::ability::FilterProp::HasSupertype {
-                    value: "Basic".to_string(),
+                    value: engine::types::card_type::Supertype::Basic,
                 }],
             }),
             count: 1,
@@ -1240,7 +1240,7 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                     type_filters: vec![engine::types::ability::TypeFilter::Land],
                     controller: None,
                     properties: vec![engine::types::ability::FilterProp::HasSupertype {
-                        value: "Basic".to_string(),
+                        value: engine::types::card_type::Supertype::Basic,
                     }],
                 }),
                 count: 1,

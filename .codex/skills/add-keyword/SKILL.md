@@ -9,6 +9,8 @@ Keywords are strongly-typed abilities stored on GameObjects and evaluated across
 
 **Before you start:** Trace how `Ward` works end-to-end — it's a parameterized keyword with targeting interaction: `Keyword::Ward(ManaCost)` in `keywords.rs` → `FromStr` parsing → `targeting.rs` check → layer grant via `AddKeyword`.
 
+> **CR Verification Rule:** Every CR number in annotations MUST be verified by grepping `docs/MagicCompRules.txt` before writing. Do NOT rely on memory — 702.x keyword ability numbers are arbitrary sequential assignments that LLMs consistently hallucinate (e.g., Crew is 702.122, not 702.148). Run `grep -n "^702.122" docs/MagicCompRules.txt` for every number. If you cannot find it, do not write the annotation.
+
 ---
 
 ## MTG Rules Reference
@@ -141,7 +143,7 @@ Keywords are granted/removed via `ContinuousModification::AddKeyword` / `RemoveK
 
 ### Phase 5 — Synthesis (if applicable)
 
-Some keywords require synthesis in `oracle_loader.rs` — converting the keyword into actual game mechanics that aren't parsed from Oracle text:
+Some keywords require synthesis in `synthesis.rs` — converting the keyword into actual game mechanics that aren't parsed from Oracle text:
 
 - [ ] **`crates/engine/src/database/synthesis.rs` — synthesis function**
   If your keyword implies game actions that aren't explicit in Oracle text (e.g., Equip → activated Attach ability, Changeling → CDA static), add a `synthesize_your_keyword()` function and register it in `synthesize_all()`. See existing functions in that file for the pattern — each takes `&mut CardFace` and adds the implied abilities/triggers/statics.
@@ -188,7 +190,7 @@ Some keywords require synthesis in `oracle_loader.rs` — converting the keyword
 | Adding variant but missing `FromStr` arm | Keyword never parsed from MTGJSON data, silently becomes `Unknown` | Add the string match |
 | Missing `keyword_from_tagged()` arm | Existing card-data.json can't deserialize the keyword | Add the JSON match arm |
 | Using equality instead of discriminant matching | `Ward({W}) != Ward({2})` — "has ward" check fails for different costs | Use `has_keyword()` which uses `std::mem::discriminant` |
-| Adding runtime behavior but no synthesis | Keyword parsed but its implied abilities (like Equip → Attach) never created | Add synthesis function in `oracle_loader.rs` |
+| Adding runtime behavior but no synthesis | Keyword parsed but its implied abilities (like Equip → Attach) never created | Add synthesis function in `synthesis.rs` |
 | Leaving keyword as `Unknown(String)` with partial support | Coverage report flags it as missing, but it partially works | Add proper enum variant |
 | Not testing parameterized parsing | `"ward:{W}"` might fail due to mana cost format | Test both `"Ward:{W}"` and `"Ward:W"` formats |
 

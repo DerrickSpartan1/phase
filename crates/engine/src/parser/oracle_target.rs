@@ -1,10 +1,13 @@
 use std::str::FromStr;
 
 use crate::types::ability::{
-    ControllerRef, FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+    ControllerRef, FilterProp, QuantityExpr, QuantityRef, SharedQuality, TargetFilter, TypeFilter,
+    TypedFilter,
 };
+use crate::types::card_type::Supertype;
 use crate::types::identifiers::TrackedSetId;
 use crate::types::keywords::Keyword;
+use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
 use super::oracle_quantity::capitalize_first;
@@ -320,15 +323,13 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     // CR 205.4a: Parse supertype prefix: "legendary", "basic", "snow"
     // Must come BEFORE color prefix so "legendary white creature" works:
     // supertype consumed first, then color at the new position.
-    for &(prefix, supertype_name) in &[
-        ("legendary ", "Legendary"),
-        ("basic ", "Basic"),
-        ("snow ", "Snow"),
+    for (prefix, supertype) in [
+        ("legendary ", Supertype::Legendary),
+        ("basic ", Supertype::Basic),
+        ("snow ", Supertype::Snow),
     ] {
         if lower[pos..].starts_with(prefix) {
-            properties.push(FilterProp::HasSupertype {
-                value: supertype_name.to_string(),
-            });
+            properties.push(FilterProp::HasSupertype { value: supertype });
             pos += prefix.len();
             break;
         }
@@ -781,29 +782,29 @@ fn classify_negation(negated: &str) -> NegationResult {
     match negated {
         // Color negation — parallel to HasColor
         "white" => NegationResult::Prop(FilterProp::NotColor {
-            color: "White".to_string(),
+            color: ManaColor::White,
         }),
         "blue" => NegationResult::Prop(FilterProp::NotColor {
-            color: "Blue".to_string(),
+            color: ManaColor::Blue,
         }),
         "black" => NegationResult::Prop(FilterProp::NotColor {
-            color: "Black".to_string(),
+            color: ManaColor::Black,
         }),
         "red" => NegationResult::Prop(FilterProp::NotColor {
-            color: "Red".to_string(),
+            color: ManaColor::Red,
         }),
         "green" => NegationResult::Prop(FilterProp::NotColor {
-            color: "Green".to_string(),
+            color: ManaColor::Green,
         }),
         // CR 205.4a: Supertype negation — parallel to HasSupertype
         "basic" => NegationResult::Prop(FilterProp::NotSupertype {
-            value: "Basic".to_string(),
+            value: Supertype::Basic,
         }),
         "legendary" => NegationResult::Prop(FilterProp::NotSupertype {
-            value: "Legendary".to_string(),
+            value: Supertype::Legendary,
         }),
         "snow" => NegationResult::Prop(FilterProp::NotSupertype {
-            value: "Snow".to_string(),
+            value: Supertype::Snow,
         }),
         // CR 205.4b: Type/subtype negation → TypeFilter::Non
         _ => {
@@ -1015,20 +1016,15 @@ fn parse_token_suffix(text: &str) -> Option<usize> {
 /// Returns (FilterProp::HasColor, bytes consumed including trailing space).
 fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
     let colors = [
-        ("white ", "White"),
-        ("blue ", "Blue"),
-        ("black ", "Black"),
-        ("red ", "Red"),
-        ("green ", "Green"),
+        ("white ", ManaColor::White),
+        ("blue ", ManaColor::Blue),
+        ("black ", ManaColor::Black),
+        ("red ", ManaColor::Red),
+        ("green ", ManaColor::Green),
     ];
-    for (prefix, color_name) in &colors {
+    for (prefix, color) in &colors {
         if text.starts_with(prefix) {
-            return Some((
-                FilterProp::HasColor {
-                    color: color_name.to_string(),
-                },
-                prefix.len(),
-            ));
+            return Some((FilterProp::HasColor { color: *color }, prefix.len()));
         }
     }
     None
@@ -1222,7 +1218,7 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
         let consumed = text.len() - rest[counter_end + suffix.len()..].len();
         return Some((
             FilterProp::CountersGE {
-                counter_type: counter_type.to_string(),
+                counter_type: crate::game::game_object::parse_counter_type(counter_type),
                 count: 1,
             },
             consumed,
@@ -1239,10 +1235,10 @@ fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let mut consumed = leading_ws + "with ".len();
     let mut properties = Vec::new();
 
-    while let Some((keyword, keyword_len)) = parse_leading_keyword(remaining) {
-        properties.push(FilterProp::WithKeyword {
-            value: keyword.to_string(),
-        });
+    while let Some((keyword_str, keyword_len)) = parse_leading_keyword(remaining) {
+        let keyword =
+            Keyword::from_str(keyword_str).unwrap_or(Keyword::Unknown(keyword_str.to_string()));
+        properties.push(FilterProp::WithKeyword { value: keyword });
         consumed += keyword_len;
         remaining = &remaining[keyword_len..];
 
@@ -1343,17 +1339,18 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
             .map(|r| (r, "a ".len()))
             .unwrap_or((rest, 0));
 
-        // Consume the quality phrase up to end of clause
+        // CR 700.5: Map quality phrase to typed SharedQuality enum.
         let quality_end = rest.find([',', '.']).unwrap_or(rest.len());
-        let quality = rest[..quality_end].trim();
-        if !quality.is_empty() {
+        let quality_str = rest[..quality_end].trim();
+        let shared_quality = match quality_str {
+            "creature type" | "creature types" => Some(SharedQuality::CreatureType),
+            "color" | "colors" => Some(SharedQuality::Color),
+            "card type" | "card types" => Some(SharedQuality::CardType),
+            _ => None,
+        };
+        if let Some(quality) = shared_quality {
             let total = that_len + share_verb_len + neg_len + a_len + quality_end;
-            return Some((
-                vec![FilterProp::SharesQuality {
-                    quality: quality.to_string(),
-                }],
-                total,
-            ));
+            return Some((vec![FilterProp::SharesQuality { quality }], total));
         }
     }
 
@@ -1709,6 +1706,7 @@ fn parse_zone_suffix(text: &str) -> Option<(FilterProp, Option<ControllerRef>, u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::game_object::CounterType;
 
     #[test]
     fn any_target() {
@@ -1897,7 +1895,7 @@ mod tests {
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
                     .properties(vec![FilterProp::HasColor {
-                        color: "White".to_string()
+                        color: ManaColor::White
                     }])
             )
         );
@@ -1909,7 +1907,7 @@ mod tests {
         assert_eq!(
             f,
             TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::HasColor {
-                color: "Red".to_string()
+                color: ManaColor::Red
             }]))
         );
     }
@@ -1958,7 +1956,7 @@ mod tests {
             f,
             TargetFilter::Typed(
                 TypedFilter::creature().properties(vec![FilterProp::CountersGE {
-                    counter_type: "ice".to_string(),
+                    counter_type: CounterType::Generic("ice".to_string()),
                     count: 1,
                 },])
             )
@@ -2049,7 +2047,7 @@ mod tests {
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
                     .properties(vec![FilterProp::WithKeyword {
-                        value: "flying".to_string(),
+                        value: Keyword::Flying,
                     }])
             )
         );
@@ -2062,10 +2060,10 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
                 FilterProp::WithKeyword {
-                    value: "first strike".to_string(),
+                    value: Keyword::FirstStrike,
                 },
                 FilterProp::WithKeyword {
-                    value: "vigilance".to_string(),
+                    value: Keyword::Vigilance,
                 },
             ]))
         );
@@ -2280,9 +2278,9 @@ mod tests {
         assert!(matches!(
             prop,
             FilterProp::CountersGE {
-                ref counter_type,
+                counter_type: CounterType::Stun,
                 count: 1,
-            } if counter_type == "stun"
+            }
         ));
     }
 
@@ -2294,9 +2292,9 @@ mod tests {
         assert!(matches!(
             prop,
             FilterProp::CountersGE {
-                ref counter_type,
+                counter_type: CounterType::Generic(ref s),
                 count: 1,
-            } if counter_type == "oil"
+            } if s == "oil"
         ));
     }
 
@@ -2317,7 +2315,7 @@ mod tests {
                     FilterProp::CountersGE {
                         ref counter_type,
                         count: 1,
-                    } if counter_type == "stun"
+                    } if *counter_type == CounterType::Stun
                 )));
             }
             other => panic!("Expected Typed, got {:?}", other),
@@ -2557,7 +2555,7 @@ mod tests {
                 TypedFilter::creature()
                     .with_type(TypeFilter::Non(Box::new(TypeFilter::Artifact)))
                     .properties(vec![FilterProp::NotColor {
-                        color: "Black".to_string()
+                        color: ManaColor::Black,
                     },])
             )
         );
@@ -2676,7 +2674,7 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
                 FilterProp::HasSupertype {
-                    value: "Legendary".to_string(),
+                    value: Supertype::Legendary,
                 }
             ]))
         );
@@ -2691,7 +2689,7 @@ mod tests {
                 TypedFilter::land()
                     .controller(ControllerRef::You)
                     .properties(vec![FilterProp::HasSupertype {
-                        value: "Basic".to_string(),
+                        value: Supertype::Basic,
                     }])
             )
         );
@@ -2704,7 +2702,7 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::permanent().properties(vec![
                 FilterProp::HasSupertype {
-                    value: "Snow".to_string(),
+                    value: Supertype::Snow,
                 }
             ]))
         );
@@ -2718,10 +2716,10 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::creature().properties(vec![
                 FilterProp::HasSupertype {
-                    value: "Legendary".to_string()
+                    value: Supertype::Legendary
                 },
                 FilterProp::HasColor {
-                    color: "White".to_string()
+                    color: ManaColor::White
                 },
             ]))
         );
@@ -2735,7 +2733,7 @@ mod tests {
             f,
             TargetFilter::Typed(
                 TypedFilter::land().properties(vec![FilterProp::NotSupertype {
-                    value: "Basic".to_string(),
+                    value: Supertype::Basic,
                 }])
             )
         );
@@ -2750,7 +2748,7 @@ mod tests {
                 TypedFilter::land()
                     .controller(ControllerRef::Opponent)
                     .properties(vec![FilterProp::NotSupertype {
-                        value: "Basic".to_string(),
+                        value: Supertype::Basic,
                     }])
             )
         );
@@ -2990,7 +2988,7 @@ mod tests {
             assert!(tf.type_filters.contains(&TypeFilter::Creature));
             assert_eq!(tf.controller, Some(ControllerRef::You));
             assert!(tf.properties.iter().any(
-                |p| matches!(p, FilterProp::SharesQuality { quality } if quality == "creature type")
+                |p| matches!(p, FilterProp::SharesQuality { quality } if *quality == SharedQuality::CreatureType)
             ));
         } else {
             panic!("expected Typed filter, got {filter:?}");
@@ -3008,7 +3006,7 @@ mod tests {
             assert!(tf
                 .properties
                 .iter()
-                .any(|p| matches!(p, FilterProp::SharesQuality { quality } if quality == "creature types")));
+                .any(|p| matches!(p, FilterProp::SharesQuality { quality } if *quality == SharedQuality::CreatureType)));
         } else {
             panic!("expected Typed filter, got {filter:?}");
         }

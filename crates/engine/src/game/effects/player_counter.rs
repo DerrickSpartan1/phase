@@ -80,17 +80,17 @@ mod tests {
     use super::*;
     use crate::types::ability::{AbilityKind, QuantityExpr, SpellContext, TargetFilter};
     use crate::types::identifiers::ObjectId;
-    use crate::types::player::PlayerId;
+    use crate::types::player::{PlayerCounterKind, PlayerId};
 
     fn make_ability(
-        counter_kind: &str,
+        counter_kind: PlayerCounterKind,
         count: QuantityExpr,
         target: TargetFilter,
         controller: PlayerId,
     ) -> ResolvedAbility {
         ResolvedAbility {
             effect: Effect::GivePlayerCounter {
-                counter_kind: counter_kind.to_string(),
+                counter_kind,
                 count,
                 target,
             },
@@ -120,7 +120,7 @@ mod tests {
         let mut state = GameState::default();
         let mut events = Vec::new();
         let ability = make_ability(
-            "poison",
+            PlayerCounterKind::Poison,
             QuantityExpr::Fixed { value: 1 },
             TargetFilter::Controller,
             PlayerId(0),
@@ -130,7 +130,12 @@ mod tests {
 
         assert_eq!(state.players[0].poison_counters, 1);
         // Should NOT be in the generic map
-        assert_eq!(state.players[0].player_counters.get("poison"), None);
+        assert_eq!(
+            state.players[0]
+                .player_counters
+                .get(&PlayerCounterKind::Poison),
+            None
+        );
     }
 
     #[test]
@@ -138,7 +143,7 @@ mod tests {
         let mut state = GameState::default();
         let mut events = Vec::new();
         let ability = make_ability(
-            "experience",
+            PlayerCounterKind::Experience,
             QuantityExpr::Fixed { value: 2 },
             TargetFilter::Controller,
             PlayerId(0),
@@ -146,7 +151,10 @@ mod tests {
 
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.players[0].player_counter("experience"), 2);
+        assert_eq!(
+            state.players[0].player_counter(&PlayerCounterKind::Experience),
+            2
+        );
     }
 
     #[test]
@@ -155,7 +163,7 @@ mod tests {
         let mut events = Vec::new();
 
         let ability = make_ability(
-            "rad",
+            PlayerCounterKind::Rad,
             QuantityExpr::Fixed { value: 3 },
             TargetFilter::Controller,
             PlayerId(0),
@@ -164,7 +172,7 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert_eq!(state.players[0].player_counter("rad"), 6);
+        assert_eq!(state.players[0].player_counter(&PlayerCounterKind::Rad), 6);
     }
 
     #[test]
@@ -172,7 +180,7 @@ mod tests {
         let mut state = GameState::default();
         let mut events = Vec::new();
         let mut ability = make_ability(
-            "poison",
+            PlayerCounterKind::Poison,
             QuantityExpr::Fixed { value: 1 },
             TargetFilter::Any,
             PlayerId(0),
@@ -190,7 +198,7 @@ mod tests {
         let mut state = GameState::default();
         let mut events = Vec::new();
         let ability = make_ability(
-            "ticket",
+            PlayerCounterKind::Ticket,
             QuantityExpr::Fixed { value: 1 },
             TargetFilter::Controller,
             PlayerId(0),
@@ -204,7 +212,7 @@ mod tests {
                 counter_kind,
                 delta: 1,
                 ..
-            } if counter_kind == "ticket"
+            } if *counter_kind == PlayerCounterKind::Ticket
         )));
     }
 }

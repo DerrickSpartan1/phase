@@ -7,6 +7,7 @@ use crate::types::game_state::DistributionUnit;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::mana::ManaCost;
+use crate::types::player::PlayerCounterKind;
 use crate::types::zones::Zone;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,7 +209,7 @@ pub(super) enum ImperativeFamilyAst {
     },
     /// CR 122.1: Give a player counters of a named type (poison, experience, rad, ticket, etc.).
     GivePlayerCounter {
-        counter_kind: String,
+        counter_kind: PlayerCounterKind,
         count: QuantityExpr,
     },
 }
@@ -443,6 +444,12 @@ pub(super) enum ZoneCounterImperativeAst {
         count: QuantityExpr,
         target: TargetFilter,
     },
+    /// CR 122.1: "Put counters on each/all" — mass counter placement without targeting.
+    PutCounterAll {
+        counter_type: String,
+        count: QuantityExpr,
+        target: TargetFilter,
+    },
     RemoveCounter {
         counter_type: String,
         count: i32,
@@ -497,12 +504,12 @@ pub(super) fn with_clause_duration(
     mut clause: ParsedEffectClause,
     duration: Duration,
 ) -> ParsedEffectClause {
-    if clause.duration.is_none() {
-        clause.duration = Some(duration.clone());
-    }
+    // Leading duration from Oracle text (e.g., "Until end of turn, ...") is authoritative —
+    // it overrides any default injected by sub-parsers (e.g., build_become_clause's Permanent).
+    clause.duration = Some(duration.clone());
     match &mut clause.effect {
         Effect::GenericEffect {
-            duration: ref mut effect_duration @ None,
+            duration: ref mut effect_duration,
             ..
         } => {
             *effect_duration = Some(duration);

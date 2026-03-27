@@ -19,7 +19,7 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::ability_utils::build_resolved_from_def;
-use super::filter::matches_target_filter;
+use super::filter::{matches_target_filter, spell_record_matches_filter};
 use super::stack;
 
 // Re-export so existing `use crate::game::triggers::build_trigger_registry` paths still work.
@@ -103,9 +103,16 @@ fn collect_matching_triggers(
     batched_this_pass: &mut HashSet<(ObjectId, usize)>,
 ) {
     for (trig_idx, trig_def) in trigger_defs.iter().enumerate() {
-        // When scanning a non-battlefield zone, only check triggers declared for that zone
+        // Zone guard: only fire a trigger if its declared zones include the zone being scanned.
+        // Empty trigger_zones defaults to battlefield-only (engine-internal triggers like
+        // prowess/ward). Parser-created non-battlefield triggers set trigger_zones explicitly.
         if let Some(zone) = zone_filter {
-            if !trig_def.trigger_zones.contains(&zone) {
+            let zones_match = if trig_def.trigger_zones.is_empty() {
+                zone == Zone::Battlefield
+            } else {
+                trig_def.trigger_zones.contains(&zone)
+            };
+            if !zones_match {
                 continue;
             }
         }
@@ -152,6 +159,28 @@ fn collect_matching_triggers(
     }
 }
 
+fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
+    match zone {
+        Zone::Battlefield => state.battlefield.clone(),
+        Zone::Graveyard => state
+            .players
+            .iter()
+            .flat_map(|player| player.graveyard.iter().copied())
+            .collect(),
+        Zone::Exile => state.exile.clone(),
+        Zone::Stack => state
+            .stack
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                StackEntryKind::Spell { .. } => Some(entry.id),
+                StackEntryKind::ActivatedAbility { .. }
+                | StackEntryKind::TriggeredAbility { .. } => None,
+            })
+            .collect(),
+        Zone::Hand | Zone::Library | Zone::Command => Vec::new(),
+    }
+}
+
 /// Process events and place triggered abilities on the stack in APNAP order.
 /// CR 603.3b: Process triggered abilities waiting to be put on the stack.
 pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
@@ -163,8 +192,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
 
     for event in events {
         // Scan all permanents on the battlefield for matching triggers
-        let battlefield_ids: Vec<ObjectId> = state.battlefield.clone();
-        for obj_id in battlefield_ids {
+        for obj_id in trigger_source_ids_for_zone(state, Zone::Battlefield) {
             let (
                 controller,
                 trigger_defs,
@@ -216,7 +244,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 controller,
                 &trigger_defs,
                 timestamp,
-                None,
+                Some(Zone::Battlefield),
                 &mut pending,
                 &mut batched_this_pass,
             );
@@ -404,33 +432,30 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
             }
         }
 
-        // CR 113.6k: Trigger conditions that can't trigger from the battlefield function in all zones they can trigger from.
-        let graveyard_ids: Vec<ObjectId> = state
-            .players
-            .iter()
-            .flat_map(|p| p.graveyard.iter().copied())
-            .collect();
-        for obj_id in graveyard_ids {
-            let (controller, trigger_defs) = {
-                let obj = match state.objects.get(&obj_id) {
-                    Some(o) => o,
-                    None => continue,
+        // CR 113.6k: Non-battlefield trigger zones are opt-in via trigger_zones.
+        for zone in [Zone::Graveyard, Zone::Exile, Zone::Stack] {
+            for obj_id in trigger_source_ids_for_zone(state, zone) {
+                let (controller, trigger_defs) = {
+                    let obj = match state.objects.get(&obj_id) {
+                        Some(o) => o,
+                        None => continue,
+                    };
+                    (obj.controller, obj.trigger_definitions.clone())
                 };
-                (obj.controller, obj.trigger_definitions.clone())
-            };
 
-            collect_matching_triggers(
-                state,
-                &registry,
-                event,
-                obj_id,
-                controller,
-                &trigger_defs,
-                0,
-                Some(Zone::Graveyard),
-                &mut pending,
-                &mut batched_this_pass,
-            );
+                collect_matching_triggers(
+                    state,
+                    &registry,
+                    event,
+                    obj_id,
+                    controller,
+                    &trigger_defs,
+                    0,
+                    Some(zone),
+                    &mut pending,
+                    &mut batched_this_pass,
+                );
+            }
         }
 
         // CR 724.2: At the beginning of the monarch's end step, that player draws a card.
@@ -838,26 +863,16 @@ fn check_trigger_constraint(
                 GameEvent::SpellCast { controller: c, .. } => *c,
                 _ => return false,
             };
-            let spells = state.spells_cast_this_turn_by_player.get(&caster);
-            let count = if let Some(spells) = spells {
-                let is_noncreature_filter = filter.as_ref().is_some_and(|f| {
-                    f.type_filters.iter().any(|tf| {
-                        matches!(tf, crate::types::ability::TypeFilter::Non(inner) if matches!(**inner, crate::types::ability::TypeFilter::Creature))
-                    })
-                });
-                if is_noncreature_filter {
-                    spells
+            let count = state
+                .spells_cast_this_turn_by_player
+                .get(&caster)
+                .map_or(0, |spells| match filter {
+                    None => spells.len() as u32,
+                    Some(filter) => spells
                         .iter()
-                        .filter(|types| {
-                            !types.contains(&crate::types::card_type::CoreType::Creature)
-                        })
-                        .count() as u32
-                } else {
-                    spells.len() as u32
-                }
-            } else {
-                0
-            };
+                        .filter(|record| spell_record_matches_filter(record, filter, caster))
+                        .count() as u32,
+                });
             count == *n
         }
         // CR 121.2: Extract the drawing player from the event (not the controller).
@@ -1020,31 +1035,29 @@ pub(crate) fn check_trigger_condition(
             state.players_attacked_this_turn.contains(&controller)
         }
         // CR 603.4: "if you cast a [type] spell this turn" — check per-player cast history.
-        TriggerCondition::CastSpellThisTurn { filter } => {
-            match filter {
-                None => state
-                    .spells_cast_this_turn_by_player
-                    .get(&controller)
-                    .is_some_and(|spells| !spells.is_empty()),
-                Some(tf) => {
-                    // Check if any spell cast this turn matches the filter.
-                    // Per-player history tracks CoreTypes; for general filter matching
-                    // we map TypeFilter variants to CoreType for comparison.
-                    state
-                        .spells_cast_this_turn_by_player
-                        .get(&controller)
-                        .is_some_and(|spells| {
-                            spells.iter().any(|core_types| match tf {
-                                TargetFilter::Typed(typed) => {
-                                    typed.type_filters.iter().all(|tf_item| {
-                                        type_filter_matches_core_types(tf_item, core_types)
-                                    })
-                                }
-                                _ => true,
-                            })
-                        })
-                }
-            }
+        TriggerCondition::CastSpellThisTurn { filter } => match filter {
+            None => state
+                .spells_cast_this_turn_by_player
+                .get(&controller)
+                .is_some_and(|spells| !spells.is_empty()),
+            Some(filter) => state
+                .spells_cast_this_turn_by_player
+                .get(&controller)
+                .is_some_and(|spells| {
+                    spells
+                        .iter()
+                        .any(|record| spell_record_matches_filter(record, filter, controller))
+                }),
+        },
+        TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => {
+            let source_id = source_id.unwrap_or(ObjectId(0));
+            let lhs = crate::game::quantity::resolve_quantity(state, lhs, controller, source_id);
+            let rhs = crate::game::quantity::resolve_quantity(state, rhs, controller, source_id);
+            comparator.evaluate(lhs, rhs)
         }
         // CR 122.1: "if you put a counter on a permanent this turn"
         TriggerCondition::CounterAddedThisTurn => state
@@ -1056,30 +1069,6 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::Or { conditions } => conditions
             .iter()
             .any(|c| check_trigger_condition(state, c, controller, source_id)),
-    }
-}
-
-/// Check if a TypeFilter variant matches a list of CoreTypes from spell history.
-fn type_filter_matches_core_types(
-    tf: &crate::types::ability::TypeFilter,
-    core_types: &[CoreType],
-) -> bool {
-    use crate::types::ability::TypeFilter;
-    match tf {
-        TypeFilter::Creature => core_types.contains(&CoreType::Creature),
-        TypeFilter::Instant => core_types.contains(&CoreType::Instant),
-        TypeFilter::Sorcery => core_types.contains(&CoreType::Sorcery),
-        TypeFilter::Artifact => core_types.contains(&CoreType::Artifact),
-        TypeFilter::Enchantment => core_types.contains(&CoreType::Enchantment),
-        TypeFilter::Planeswalker => core_types.contains(&CoreType::Planeswalker),
-        TypeFilter::Land => core_types.contains(&CoreType::Land),
-        TypeFilter::Battle => core_types.contains(&CoreType::Battle),
-        TypeFilter::Non(inner) => !type_filter_matches_core_types(inner, core_types),
-        TypeFilter::AnyOf(filters) => filters
-            .iter()
-            .any(|f| type_filter_matches_core_types(f, core_types)),
-        TypeFilter::Permanent | TypeFilter::Card | TypeFilter::Any => true,
-        TypeFilter::Subtype(_) => true, // Subtype matching not available from CoreType history
     }
 }
 
@@ -1108,7 +1097,7 @@ fn evaluate_solve_condition(
                     })
                 })
                 .count() as i32;
-            comparator.clone().evaluate(count, *threshold as i32)
+            comparator.evaluate(count, *threshold as i32)
         }
         SolveCondition::Text { .. } => false, // Undecomposed conditions never auto-solve
     }
@@ -1294,6 +1283,7 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
         | Effect::DamageAll { .. }
         | Effect::PumpAll { .. }
         | Effect::DoublePTAll { .. }
+        | Effect::PutCounterAll { .. }
         | Effect::CastFromZone { .. }
         | Effect::GrantCastingPermission { .. }
         | Effect::ChangeTargets { .. }
@@ -1356,13 +1346,16 @@ pub mod tests {
     use crate::game::filter::matches_target_filter;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, ControllerRef, GainLifePlayer, QuantityExpr, TargetFilter,
-        TriggerConstraint, TriggerDefinition, TypedFilter,
+        AbilityDefinition, AbilityKind, Comparator, ControllerRef, GainLifePlayer, QuantityExpr,
+        QuantityRef, TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition,
+        TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
-    use crate::types::game_state::GameState;
+    use crate::types::game_state::{GameState, SpellCastRecord};
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -2447,6 +2440,151 @@ pub mod tests {
 
         // Should NOT be on the stack
         assert_eq!(state.stack.len(), 0);
+    }
+
+    #[test]
+    fn stack_zone_spell_cast_trigger_fires_from_stack() {
+        let mut state = setup();
+        let spell_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sage".to_string(),
+            Zone::Stack,
+        );
+        {
+            let spell = state.objects.get_mut(&spell_id).unwrap();
+            spell.card_types.core_types.push(CoreType::Creature);
+            spell.keywords.push(Keyword::Flying);
+            let mut trigger = make_trigger(TriggerMode::SpellCast);
+            trigger.valid_card = Some(TargetFilter::SelfRef);
+            trigger.trigger_zones = vec![Zone::Stack];
+            trigger.condition = Some(TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn { filter: None },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            });
+            trigger.execute = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+            )));
+            spell.trigger_definitions.push(trigger);
+        }
+        state.stack.push(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: PlayerId(0),
+            kind: StackEntryKind::Spell {
+                card_id: CardId(1),
+                ability: ResolvedAbility::new(
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    vec![],
+                    spell_id,
+                    PlayerId(0),
+                ),
+                casting_variant: crate::types::game_state::CastingVariant::Normal,
+            },
+        });
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            vec![
+                SpellCastRecord {
+                    core_types: vec![CoreType::Instant],
+                    supertypes: vec![],
+                    subtypes: vec![],
+                    keywords: vec![],
+                    colors: vec![ManaColor::Blue],
+                    mana_value: 1,
+                },
+                SpellCastRecord {
+                    core_types: vec![CoreType::Creature],
+                    supertypes: vec![],
+                    subtypes: vec!["Bird".to_string()],
+                    keywords: vec![Keyword::Flying],
+                    colors: vec![ManaColor::Blue],
+                    mana_value: 3,
+                },
+            ],
+        );
+
+        let events = vec![GameEvent::SpellCast {
+            card_id: CardId(1),
+            controller: PlayerId(0),
+            object_id: spell_id,
+        }];
+
+        process_triggers(&mut state, &events);
+
+        assert_eq!(state.stack.len(), 2);
+        assert!(matches!(
+            state.stack.last().map(|entry| &entry.kind),
+            Some(StackEntryKind::TriggeredAbility { .. })
+        ));
+    }
+
+    #[test]
+    fn enters_trigger_matches_lowercase_with_keyword_filter() {
+        let mut state = setup();
+        let momo = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Momo".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let source = state.objects.get_mut(&momo).unwrap();
+            source.card_types.core_types.push(CoreType::Creature);
+            source.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Draw {
+                            count: QuantityExpr::Fixed { value: 1 },
+                        },
+                    ))
+                    .valid_card(TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![
+                                crate::types::ability::FilterProp::Another,
+                                crate::types::ability::FilterProp::WithKeyword {
+                                    value: Keyword::Flying,
+                                },
+                            ]),
+                    ))
+                    .destination(Zone::Battlefield),
+            );
+        }
+
+        let bird = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Bird".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let creature = state.objects.get_mut(&bird).unwrap();
+            creature.card_types.core_types.push(CoreType::Creature);
+            creature.keywords.push(Keyword::Flying);
+        }
+
+        let events = vec![GameEvent::ZoneChanged {
+            object_id: bird,
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+        }];
+
+        process_triggers(&mut state, &events);
+
+        assert_eq!(state.stack.len(), 1);
     }
 
     #[test]

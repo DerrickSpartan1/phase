@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::database::synthesis::synthesize_all;
 use crate::game::engine::{apply, EngineError};
+use crate::game::game_object::CounterType;
 use crate::game::game_object::GameObject;
 use crate::game::printed_cards::apply_card_face_to_object;
 use crate::game::zones::create_object;
@@ -23,7 +24,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::{ActionResult, GameState, WaitingFor};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
-use crate::types::mana::ManaColor;
+use crate::types::mana::{ManaColor, ManaUnit};
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
@@ -182,6 +183,109 @@ impl GameScenario {
         if let Some(p) = self.state.players.iter_mut().find(|p| p.id == player) {
             p.life = life;
         }
+        self
+    }
+
+    /// Add generic named cards to a player's hand without rules text.
+    ///
+    /// Intended for count/visibility/setup tests where full card semantics are not needed.
+    pub fn with_cards_in_hand(&mut self, player: PlayerId, names: &[&str]) -> &mut Self {
+        for &name in names {
+            let card_id = CardId(self.state.next_object_id);
+            create_object(
+                &mut self.state,
+                card_id,
+                player,
+                name.to_string(),
+                Zone::Hand,
+            );
+        }
+        self
+    }
+
+    /// Add generic named cards to the top of a player's library.
+    ///
+    /// The last supplied name becomes the current top card, matching the engine's
+    /// library-top convention (`Vec::last()` / pop-from-end flows).
+    pub fn with_library_top(&mut self, player: PlayerId, names_top_first: &[&str]) -> &mut Self {
+        for &name in names_top_first.iter().rev() {
+            let card_id = CardId(self.state.next_object_id);
+            create_object(
+                &mut self.state,
+                card_id,
+                player,
+                name.to_string(),
+                Zone::Library,
+            );
+        }
+        self
+    }
+
+    /// Add generic named cards to a player's graveyard without rules text.
+    pub fn with_graveyard(&mut self, player: PlayerId, names: &[&str]) -> &mut Self {
+        for &name in names {
+            let card_id = CardId(self.state.next_object_id);
+            create_object(
+                &mut self.state,
+                card_id,
+                player,
+                name.to_string(),
+                Zone::Graveyard,
+            );
+        }
+        self
+    }
+
+    /// Replace a player's mana pool for deterministic payment tests.
+    pub fn with_mana_pool(&mut self, player: PlayerId, mana: Vec<ManaUnit>) -> &mut Self {
+        if let Some(p) = self.state.players.iter_mut().find(|p| p.id == player) {
+            p.mana_pool.mana = mana;
+        }
+        self
+    }
+
+    /// Add counters to an existing object.
+    pub fn with_counter(
+        &mut self,
+        object_id: ObjectId,
+        counter: CounterType,
+        count: u32,
+    ) -> &mut Self {
+        if count > 0 {
+            *self
+                .state
+                .objects
+                .get_mut(&object_id)
+                .expect("object must exist")
+                .counters
+                .entry(counter)
+                .or_insert(0) += count;
+        }
+        self
+    }
+
+    /// Mark an existing object as a commander and move it to the command zone.
+    pub fn with_commander(&mut self, object_id: ObjectId) -> &mut Self {
+        let owner = self
+            .state
+            .objects
+            .get(&object_id)
+            .expect("object must exist")
+            .owner;
+        crate::game::zones::remove_from_zone(
+            &mut self.state,
+            object_id,
+            self.state.objects[&object_id].zone,
+            owner,
+        );
+        crate::game::zones::add_to_zone(&mut self.state, object_id, Zone::Command, owner);
+        let obj = self
+            .state
+            .objects
+            .get_mut(&object_id)
+            .expect("object must exist");
+        obj.zone = Zone::Command;
+        obj.is_commander = true;
         self
     }
 
@@ -788,6 +892,18 @@ impl GameRunner {
         &mut self.state
     }
 
+    /// Pass priority until a priority window is reached, or stop if progress stalls.
+    pub fn advance_to_priority_window(&mut self) {
+        for _ in 0..20 {
+            if matches!(self.state.waiting_for, WaitingFor::Priority { .. }) {
+                break;
+            }
+            if apply(&mut self.state, GameAction::PassPriority).is_err() {
+                break;
+            }
+        }
+    }
+
     /// Pass priority for both players (P0 then P1, or whichever order is appropriate).
     pub fn pass_both_players(&mut self) {
         // Pass twice -- once for each player
@@ -806,6 +922,55 @@ impl GameRunner {
             if apply(&mut self.state, GameAction::PassPriority).is_err() {
                 break;
             }
+        }
+    }
+
+    /// Pass priority until the stack is empty, or stop if the engine no longer advances.
+    pub fn advance_until_stack_empty(&mut self) {
+        for _ in 0..40 {
+            if self.state.stack.is_empty() {
+                break;
+            }
+            if apply(&mut self.state, GameAction::PassPriority).is_err() {
+                break;
+            }
+        }
+    }
+
+    /// Choose the first legal target for the current targeting-style waiting state.
+    pub fn choose_first_legal_target(&mut self) -> Result<ActionResult, EngineError> {
+        match &self.state.waiting_for {
+            WaitingFor::TargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                let slot = &target_slots[selection.current_slot];
+                let target = slot.legal_targets.first().cloned();
+                if target.is_none() && !slot.optional {
+                    return Err(EngineError::InvalidAction(
+                        "no legal target available for required slot".to_string(),
+                    ));
+                }
+                apply(&mut self.state, GameAction::ChooseTarget { target })
+            }
+            WaitingFor::TriggerTargetSelection {
+                target_slots,
+                selection,
+                ..
+            } => {
+                let slot = &target_slots[selection.current_slot];
+                let target = slot.legal_targets.first().cloned();
+                if target.is_none() && !slot.optional {
+                    return Err(EngineError::InvalidAction(
+                        "no legal target available for required trigger slot".to_string(),
+                    ));
+                }
+                apply(&mut self.state, GameAction::ChooseTarget { target })
+            }
+            _ => Err(EngineError::InvalidAction(
+                "choose_first_legal_target requires a targeting waiting state".to_string(),
+            )),
         }
     }
 
@@ -832,6 +997,76 @@ impl GameRunner {
                     .unwrap_or(false)
             })
             .count()
+    }
+
+    /// Stable battlefield names for lightweight assertions.
+    pub fn battlefield_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .state
+            .battlefield
+            .iter()
+            .filter_map(|id| self.state.objects.get(id))
+            .map(|obj| obj.name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Stable stack source names for lightweight assertions.
+    pub fn stack_names(&self) -> Vec<String> {
+        self.state
+            .stack
+            .iter()
+            .filter_map(|entry| self.state.objects.get(&entry.source_id))
+            .map(|obj| obj.name.clone())
+            .collect()
+    }
+
+    /// Returns the current waiting-state variant name for lightweight assertions.
+    pub fn waiting_for_kind(&self) -> &'static str {
+        match &self.state.waiting_for {
+            WaitingFor::Priority { .. } => "Priority",
+            WaitingFor::MulliganDecision { .. } => "MulliganDecision",
+            WaitingFor::MulliganBottomCards { .. } => "MulliganBottomCards",
+            WaitingFor::ManaPayment { .. } => "ManaPayment",
+            WaitingFor::TargetSelection { .. } => "TargetSelection",
+            WaitingFor::DeclareAttackers { .. } => "DeclareAttackers",
+            WaitingFor::DeclareBlockers { .. } => "DeclareBlockers",
+            WaitingFor::GameOver { .. } => "GameOver",
+            WaitingFor::ReplacementChoice { .. } => "ReplacementChoice",
+            WaitingFor::CopyTargetChoice { .. } => "CopyTargetChoice",
+            WaitingFor::ScryChoice { .. } => "ScryChoice",
+            WaitingFor::DigChoice { .. } => "DigChoice",
+            WaitingFor::SurveilChoice { .. } => "SurveilChoice",
+            WaitingFor::RevealChoice { .. } => "RevealChoice",
+            WaitingFor::SearchChoice { .. } => "SearchChoice",
+            WaitingFor::ChooseFromZoneChoice { .. } => "ChooseFromZoneChoice",
+            WaitingFor::DiscardChoice { .. } => "DiscardChoice",
+            WaitingFor::ManifestDreadChoice { .. } => "ManifestDreadChoice",
+            WaitingFor::TriggerTargetSelection { .. } => "TriggerTargetSelection",
+            WaitingFor::NamedChoice { .. } => "NamedChoice",
+            WaitingFor::ModeChoice { .. } => "ModeChoice",
+            WaitingFor::OptionalCostChoice { .. } => "OptionalCostChoice",
+            WaitingFor::AdventureCastChoice { .. } => "AdventureCastChoice",
+            WaitingFor::WarpCostChoice { .. } => "WarpCostChoice",
+            WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",
+            WaitingFor::AbilityModeChoice { .. } => "AbilityModeChoice",
+            WaitingFor::OptionalEffectChoice { .. } => "OptionalEffectChoice",
+            WaitingFor::OpponentMayChoice { .. } => "OpponentMayChoice",
+            WaitingFor::DeclareCompanion { .. } => "DeclareCompanion",
+            WaitingFor::ChooseRingBearer { .. } => "ChooseRingBearer",
+            WaitingFor::HarmonizeTapChoice { .. } => "HarmonizeTapChoice",
+            WaitingFor::DiscoverChoice { .. } => "DiscoverChoice",
+            WaitingFor::TopOrBottomChoice { .. } => "TopOrBottomChoice",
+            WaitingFor::ChooseLegend { .. } => "ChooseLegend",
+            WaitingFor::ProliferateChoice { .. } => "ProliferateChoice",
+            WaitingFor::CopyRetarget { .. } => "CopyRetarget",
+            WaitingFor::AssignCombatDamage { .. } => "AssignCombatDamage",
+            WaitingFor::DistributeAmong { .. } => "DistributeAmong",
+            WaitingFor::RetargetChoice { .. } => "RetargetChoice",
+            WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",
+            WaitingFor::WardSacrificeChoice { .. } => "WardSacrificeChoice",
+        }
     }
 
     /// Produce a `GameSnapshot` of the current state (no events).

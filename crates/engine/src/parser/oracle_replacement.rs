@@ -11,6 +11,7 @@ use crate::types::ability::{
     QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, TargetFilter,
     TypeFilter, TypedFilter,
 };
+use crate::types::mana::ManaColor;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -838,10 +839,8 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
             };
 
             // Check for color qualifier (e.g. "red")
-            if is_color_word(qualifier) {
-                props.push(FilterProp::HasColor {
-                    color: capitalize_first(qualifier),
-                });
+            if let Some(color) = parse_color_word(qualifier) {
+                props.push(FilterProp::HasColor { color });
             }
             // CR 205.4b: "noncreature" qualifier — negation via TypeFilter::Non
             else if let Some(rest) = qualifier.strip_prefix("non") {
@@ -899,8 +898,15 @@ fn parse_damage_target_filter(norm_lower: &str) -> Option<DamageTargetFilter> {
     None
 }
 
-fn is_color_word(word: &str) -> bool {
-    matches!(word, "white" | "blue" | "black" | "red" | "green")
+fn parse_color_word(word: &str) -> Option<ManaColor> {
+    match word {
+        "white" => Some(ManaColor::White),
+        "blue" => Some(ManaColor::Blue),
+        "black" => Some(ManaColor::Black),
+        "red" => Some(ManaColor::Red),
+        "green" => Some(ManaColor::Green),
+        _ => None,
+    }
 }
 
 fn extract_replacement_effect(text: &str) -> Option<String> {
@@ -1344,6 +1350,7 @@ fn parse_enters_tapped_unless_generic(
 mod tests {
     use super::*;
     use crate::types::ability::{QuantityExpr, ShieldKind};
+    use crate::types::card_type::Supertype;
 
     #[test]
     fn replacement_enters_tapped() {
@@ -1971,7 +1978,7 @@ mod tests {
                 };
                 assert!(tf.type_filters.contains(&TypeFilter::Land));
                 assert!(tf.properties.contains(&FilterProp::HasSupertype {
-                    value: "Basic".to_string(),
+                    value: Supertype::Basic,
                 }));
                 assert_eq!(tf.controller, Some(ControllerRef::You));
             }
@@ -1993,7 +2000,7 @@ mod tests {
                 };
                 assert!(tf.type_filters.contains(&TypeFilter::Creature));
                 assert!(tf.properties.contains(&FilterProp::HasSupertype {
-                    value: "Legendary".to_string(),
+                    value: Supertype::Legendary,
                 }));
                 assert_eq!(tf.controller, Some(ControllerRef::You));
             }
@@ -2015,10 +2022,10 @@ mod tests {
                 };
                 assert!(tf.type_filters.contains(&TypeFilter::Creature));
                 assert!(tf.properties.contains(&FilterProp::HasSupertype {
-                    value: "Legendary".to_string(),
+                    value: Supertype::Legendary,
                 }));
                 assert!(tf.properties.contains(&FilterProp::HasColor {
-                    color: "Green".to_string(),
+                    color: ManaColor::Green,
                 }));
                 assert_eq!(tf.controller, Some(ControllerRef::You));
             }
@@ -2115,7 +2122,7 @@ mod tests {
             TargetFilter::Typed(tf) => {
                 assert_eq!(tf.controller, Some(ControllerRef::You));
                 assert!(tf.properties.contains(&FilterProp::HasColor {
-                    color: "Red".to_string()
+                    color: ManaColor::Red,
                 }));
             }
             other => panic!("Expected Typed filter, got {other:?}"),

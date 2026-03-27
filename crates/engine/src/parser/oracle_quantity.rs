@@ -290,10 +290,21 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
             .or_else(|| rest.strip_suffix(" they've cast"))
             .or_else(|| rest.strip_suffix(" that player has cast"))
         {
-            let filter = if spell_part.starts_with("noncreature ") {
-                Some(TypeFilter::Non(Box::new(TypeFilter::Creature)))
-            } else {
+            let spell_part = spell_part.trim();
+            let filter = if spell_part == "spells" || spell_part == "spell" {
                 None
+            } else {
+                let qualifier = spell_part
+                    .strip_suffix(" spells")
+                    .or_else(|| spell_part.strip_suffix(" spell"))
+                    .unwrap_or(spell_part)
+                    .trim();
+                let (filter, remainder) = parse_type_phrase(qualifier);
+                if remainder.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+                    Some(filter)
+                } else {
+                    None
+                }
             };
             return Some(QuantityExpr::Ref {
                 qty: QuantityRef::SpellsCastThisTurn { filter },

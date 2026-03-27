@@ -47,15 +47,17 @@ function CardPreviewInner({
   faceIndex?: number;
   position?: { x: number; y: number };
 }) {
-  const { src, isLoading } = useCardImage(cardName, {
-    size: "normal",
-    faceIndex,
-  });
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const inspectObject = useUiStore((s) => s.inspectObject);
   const obj = useGameStore((s) =>
     inspectedObjectId != null ? s.gameState?.objects[inspectedObjectId] ?? null : null,
   );
+  const isToken = obj?.card_id === 0;
+  const { src, isLoading } = useCardImage(cardName, {
+    size: "normal",
+    faceIndex,
+    isToken,
+  });
   const classLevel = obj?.class_level;
   const [pointerPosition, setPointerPosition] = useState<{ x: number; y: number } | null>(null);
   const [altHeld, setAltHeld] = useState(false);

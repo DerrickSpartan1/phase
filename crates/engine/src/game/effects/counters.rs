@@ -122,6 +122,59 @@ pub fn resolve_add(
     Ok(())
 }
 
+/// CR 122.1: Place counters on all battlefield objects matching a filter (no targeting).
+pub fn resolve_add_all(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    let (counter_type_str, counter_num, target_filter) = match &ability.effect {
+        Effect::PutCounterAll {
+            counter_type,
+            count,
+            target,
+        } => {
+            let resolved = crate::game::quantity::resolve_quantity(
+                state,
+                count,
+                ability.controller,
+                ability.source_id,
+            )
+            .max(0) as u32;
+            (counter_type.clone(), resolved, target.clone())
+        }
+        _ => return Ok(()),
+    };
+    let ct = parse_counter_type(&counter_type_str);
+
+    // Collect matching IDs first to avoid borrow conflict during mutation.
+    let matching_ids: Vec<crate::types::identifiers::ObjectId> = state
+        .battlefield
+        .iter()
+        .filter(|id| {
+            crate::game::filter::matches_target_filter_controlled(
+                state,
+                **id,
+                &target_filter,
+                ability.source_id,
+                ability.controller,
+            )
+        })
+        .copied()
+        .collect();
+
+    for obj_id in matching_ids {
+        add_counter_with_replacement(state, obj_id, ct.clone(), counter_num, events);
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+    });
+
+    Ok(())
+}
+
 /// Multiply counters on target objects (default: double).
 pub fn resolve_multiply(
     state: &mut GameState,

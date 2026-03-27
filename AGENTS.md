@@ -1,6 +1,6 @@
-# AGENTS.md
+# CLAUDE.md
 
-This file provides guidance to AI coding agents when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
 
@@ -8,14 +8,18 @@ phase.rs is a Magic: The Gathering game engine written in Rust (compiling to nat
 
 ## Design Principles — READ THIS FIRST
 
-**Above all else, this project prioritizes idiomatic Rust and clean, extensible architecture. This is non-negotiable and overrides convenience, speed-of-delivery, or "getting it working." Every code change must pass through this lens before anything else.**
+**Above all else, this project prioritizes three co-equal pillars: idiomatic Rust, composable building-block architecture, and strict fidelity to the MTG Comprehensive Rules. These are non-negotiable and override convenience, speed-of-delivery, or "getting it working." Every code change must pass through all three lenses before anything else.**
 
 - **Idiomatic Rust, always.** Use Rust's type system, ownership model, and idioms to their fullest. Prefer `enum` over stringly-typed data. Prefer exhaustive `match` over fallback defaults. Prefer trait-based polymorphism over dynamic dispatch when the type set is known. If the idiomatic path is harder, take it anyway — shortcuts compound into debt.
-- **The engine is the source of truth.** All game logic, validation, derived state, and rules live in the `engine` crate. Transport layers (WASM bridge, Tauri IPC, WebSocket server) are thin serialization boundaries — zero game logic allowed.
-- **Push logic down, not out.** If multiple consumers need the same behavior, it belongs in the engine. Never duplicate logic across adapters. When in doubt, put it in the engine.
+- **Rules-correct over convenient — the #1 hard rule.** This is an MTG rules engine — correctness to the Comprehensive Rules is a hard requirement, not a nice-to-have. Every implementation pattern MUST be verified against the relevant CR section before it is considered complete. When a rules-correct implementation is more complex than a shortcut, take the complex path. A simpler implementation that gets the rules wrong is not simpler — it is wrong. If you are unsure whether a behavior is rules-correct, look up the CR section, annotate the code, and implement what the rules say, not what seems reasonable. "It works for most cases" is not acceptable when the CR specifies exact behavior. No game logic ships without CR validation.
+- **Build for the class, not the card.** Every new enum variant, parser pattern, effect handler, or filter must handle a *category* of cards, not a single card. Before writing any logic, ask: "How many cards does this cover?" If the answer is one, you're building a special case — find the general pattern and build that instead. A one-off that works for one card but breaks for the next card with the same pattern is not a building block; it is technical debt.
+- **The engine owns all logic.** All game rules, validation, derived state, and computed values live in the `engine` crate. Transport layers (WASM bridge, Tauri IPC, WebSocket server) are thin serialization boundaries — zero game logic allowed. If multiple consumers need the same behavior, it belongs in the engine. Never duplicate logic across adapters. When in doubt, put it in the engine.
+- **The frontend is a display layer, not a logic layer.** The React client renders engine-provided state and dispatches user actions — nothing more. It must never compute, derive, transform, or re-interpret game data. If the frontend needs a value, the engine must provide it. Formatting for display (e.g., string interpolation of engine-provided fields) is acceptable; calculating, filtering, or inferring game state is not. Any "smart" frontend code is a bug — move it to the engine.
+- **Compose from building blocks.** Every new capability should be decomposed into reusable primitives that unlock future features. Before writing specific logic, ask: "What is the general pattern here?" and build that instead. This applies equally to data modeling: when a new field or parameter needs to distinguish cases, use an existing typed enum (e.g., `ControllerRef`, `Comparator`, `Option<T>`) — never a raw `bool`. A boolean isn't composable; an existing type is self-documenting, extensible, and expresses the full design space. Examples: `contains_possessive`/`contains_object_pronoun` for Oracle text matching, `ChangeZone` + `Shuffle` composition for compound shuffles, `Option<ControllerRef>` for "whose turn is required" instead of `requires_your_turn: bool`.
 - **Extend, don't hack.** New features should slot cleanly into existing patterns (effect handlers, game modules, ability definitions). If a feature requires working around the architecture, the architecture should be extended first.
-- **Compose from building blocks.** Every new capability should be decomposed into reusable primitives that unlock future features. A one-off solution that handles one card is worse than a composable building block that handles fifty. Before writing specific logic, ask: "What is the general pattern here?" and build that instead. Examples: `contains_possessive`/`contains_object_pronoun` for Oracle text matching, `ChangeZone` + `Shuffle` composition for compound shuffles, the sub_ability chain for multi-step effects.
-- **Production quality, always.** Write code as if a professional team will audit every line. No "good enough for now." No tech debt IOUs. Every function should be clear, every abstraction should earn its keep, and every pattern should be consistent across the codebase. If you're about to write something that duplicates existing logic, stop and factor out the shared building block first.
+- **Trace before you build.** Before implementing a new pattern, trace how an existing analogous feature works end-to-end (e.g., trace `enter_tapped` before building `enter_with_counters`; trace `Changeling` before building a new CDA). This prevents reinventing existing infrastructure and ensures consistency.
+- **Production quality, always.** Write code as if a professional team will audit every line. No "good enough for now." No tech debt IOUs. Every function should be clear, every abstraction should earn its keep, and every pattern should be consistent across the codebase.
+- **Single authority for ability costs.** When an ability has costs (tap, sacrifice, pay life, discard, etc.), all cost resolution must go through one authoritative resolver function. Callers dispatch activation — they never inspect or handle individual cost components. This prevents scattered responsibility where every call site must remember to sacrifice Treasures, pay life, or handle future cost types. If you find yourself checking an ability's cost structure at a call site, you're in the wrong layer — push it into the resolver.
 
 ### When in Doubt
 
@@ -24,6 +28,56 @@ phase.rs is a Magic: The Gathering game engine written in Rust (compiling to nat
 - Should I add a special case? → Extend the existing pattern instead.
 - Am I solving one card or a pattern? → Build the building block, not the special case.
 - Is this the Rust way? → Check how `std` and well-known crates solve similar problems.
+- Does this match the Comprehensive Rules? → Look up the CR section, annotate the code, implement what it says.
+- Am I computing something in the frontend? → Move it to the engine and expose it in the state.
+
+### CRITICAL: Multi-Agent Safety — Do Not Revert Other Agents' Work
+
+**NEVER revert, overwrite, remove, or undo changes that you did not make.** Multiple AI agents may be working on this codebase concurrently. If you encounter unfamiliar code, new types, new files, or changes you don't recognize:
+
+1. **Do not delete or rewrite them.** They are another agent's in-progress work.
+2. **Work around them.** Your edits must be surgical — add only what you need without disturbing surrounding code.
+3. **Never use `Write` to replace an entire file** when `Edit` with a targeted `old_string`→`new_string` would suffice. Whole-file rewrites destroy other agents' concurrent changes.
+4. **If a file has been modified since you last read it**, re-read it before editing. The new content is intentional.
+5. **Never `git checkout`, `git restore`, or `git stash`** files you didn't modify. These operations destroy other agents' uncommitted work.
+6. **Never use `git stash` for any reason.** Do not stash to test something, compare branches, or check pre-existing state. Stashing risks merge conflicts on pop and can destroy in-progress work across the working tree. If you need to verify pre-existing behavior, use `git show` or `git diff` against a commit ref instead.
+
+Violating this rule causes cascading failures across the team. Treat every line you didn't write as load-bearing.
+
+### Agent Team Orchestration Standards
+
+When creating or participating in an agent team (whether triggered by `/batch-mechanics` or auto-initiated):
+
+1. **Use existing skills.** Every implementation must follow the relevant skill checklist (`/add-engine-effect`, `/add-keyword`, `/add-trigger`, etc.). No ad-hoc approaches.
+2. **Teammates cannot spawn subagents.** All review subagents must be spawned by the lead. The lead receives the plan/implementation from the teammate, spawns a review subagent (model: opus), and sends feedback back to the teammate. This review loop repeats until clean (max 3 rounds).
+3. **Sequential execution by default.** Multiple teammates must not implement concurrently unless their file sets are completely disjoint. Shared files like `types/ability.rs`, `effects/mod.rs`, and `parser/oracle.rs` are frequent collision points.
+4. **Verify before committing.** Run `cargo fmt`, `cargo clippy`, `cargo test -p engine`, and `cargo coverage` before any commit. For frontend changes, also run `pnpm run type-check` and `pnpm lint` in `client/` — TypeScript errors must not be committed.
+
+### CRITICAL: Building Blocks and Architecture Purity
+
+**Before writing any logic, search for existing building blocks.** Duplicating what these already do is a defect. Check these modules before writing new utility functions:
+
+| Module | What lives here |
+|--------|----------------|
+| `parser/oracle_util.rs` | Number/ordinal parsing, mana symbol parsing, reminder text stripping, possessive/pronoun phrase matching, phrase variant helpers, subtype canonicalization, filter merging, `SELF_REF_TYPE_PHRASES` (shared "this \<type\>" self-reference constant) |
+| `parser/oracle_quantity.rs` | Semantic quantity interpretation: `parse_cda_quantity`, `parse_quantity_ref`, `parse_event_context_quantity`, `parse_for_each_clause` — maps Oracle text phrases to typed `QuantityExpr`/`QuantityRef` values |
+| `parser/oracle_target.rs` | Target extraction from Oracle text (`"target creature"` → `TargetFilter`), type phrase parsing, event context refs |
+| `parser/oracle_static.rs` | Static ability line parsing, continuous modification extraction (`"gets +N/+M and has flying"` → typed modifications) |
+| `game/filter.rs` | Runtime `TargetFilter` evaluation against game objects and players |
+| `game/zones.rs` | Zone manipulation primitives — creating, moving, adding, removing objects |
+| `game/quantity.rs` | Dynamic quantity resolution (`QuantityExpr` → concrete `i32` from game state) |
+| `game/ability_utils.rs` | Ability construction, target slot wiring, chained ability building, target selection/validation |
+| `game/keywords.rs` | Keyword presence queries, protection checks, keyword string parsing |
+
+**Self-review every change as you go.** After writing code, ask:
+1. Did I duplicate logic that an existing helper already handles?
+2. Is this inline extraction something that should use a shared building block?
+3. Would this logic work for 50 cards, or just the one I'm looking at?
+4. Did I extend the general pattern, or write a special case?
+
+If the answer to any of these is wrong, **stop and refactor before moving on.** Do not leave architectural debt for later — fix it now, in the same change.
+
+**Test the building block, not the special case.** Tests should verify that composable primitives work correctly across their full input range — not just that one card's Oracle text parses. A parser test for "exile target creature" is more valuable than a test for a single card name. Effect handler tests should exercise the handler's parameters, not replay a single card's resolution. When a building block is extended, add tests for the new capability at the building-block level.
 
 ## Setup
 
@@ -63,7 +117,9 @@ Requires `wasm-bindgen-cli` (v0.2.114) and optionally `wasm-opt` (binaryen). Out
 
 ### Card Data Pipeline
 ```bash
-./scripts/gen-card-data.sh          # export cards → client/public/card-data.json
+./scripts/gen-card-data.sh                                         # export all cards → client/public/card-data.json
+cargo run --bin oracle-gen -- data --filter "card name"             # single card (debug)
+cargo run --bin oracle-gen -- data --filter "name1|name2|name3"     # multiple cards (pipe-separated, substring match)
 ```
 
 ### Card Data Lookup
@@ -111,9 +167,10 @@ phase-server    — Axum WebSocket server for multiplayer
 
 - **`types/`** — Core data types: `GameState`, `GameAction`, `GameEvent`, `GameObject`, `Phase`, `Zone`, `ManaPool`, abilities, triggers. All types use `serde` for serialization across the WASM boundary.
 - **`game/engine.rs`** — Main `apply(state, action) -> ActionResult` function. Pure reducer pattern: takes game state + action, returns events + new waiting_for state.
-- **`game/`** — Game logic modules: `turns`, `priority`, `stack`, `combat`, `combat_damage`, `sba` (state-based actions), `targeting`, `mana_payment`, `mana_abilities`, `mulligan`, `layers` (MTG Rule 613), `triggers`, `replacement`, `static_abilities`, `keywords`, `zones`, `casting`, `commander`, `day_night`, `deck_loading`, `derived`, `devotion`, `elimination`, `filter`, `game_object`, `morph`, `planeswalker`, `players`, `scenario`, `transform`, `coverage`.
-- **`game/effects/`** — Effect handlers (~28 modules), including: `animate`, `attach`, `bounce`, `change_zone`, `choose_card`, `cleanup`, `copy_spell`, `counter`, `counters`, `deal_damage`, `destroy`, `dig`, `discard`, `draw`, `explore`, `fight`, `gain_control`, `life`, `mana`, `mill`, `proliferate`, `pump`, `sacrifice`, `scry`, `surveil`, `tap_untap`, `token`. New effects are added as modules here following the existing handler pattern.
-- **`parser/`** — Oracle text parser: converts MTGJSON Oracle text into typed `AbilityDefinition` structs. See `docs/parser-instructions.md` for architecture and contribution guide.
+- **`game/`** — Game logic modules: `turns`, `priority`, `stack`, `combat`, `combat_damage`, `sba` (state-based actions), `targeting`, `mana_payment`, `mana_abilities`, `mana_sources`, `mulligan`, `layers` (MTG Rule 613), `triggers`, `trigger_matchers`, `replacement`, `static_abilities`, `keywords`, `zones`, `casting`, `casting_costs`, `casting_targets`, `commander`, `companion`, `day_night`, `deck_loading`, `deck_validation`, `derived`, `devotion`, `elimination`, `filter`, `game_object`, `log`, `match_flow`, `morph`, `planeswalker`, `players`, `printed_cards`, `quantity`, `restrictions`, `scenario`, `scenario_db`, `transform`, `coverage`, `ability_utils`, `sacrifice`.
+- **`game/effects/`** — Effect handlers (~73 modules), including: `add_restriction`, `amass`, `animate`, `attach`, `become_copy`, `become_monarch`, `bounce`, `cast_from_zone`, `change_targets`, `change_zone`, `choose`, `choose_card`, `choose_from_zone`, `cleanup`, `connive`, `copy_spell`, `counter`, `counters`, `create_emblem`, `deal_damage`, `delayed_trigger`, `destroy`, `dig`, `discard`, `discover`, `double`, `draw`, `effect`, `energy`, `exchange_control`, `exile_from_top_until`, `exploit`, `explore`, `extra_turn`, `fight`, `flip_coin`, `force_block`, `gain_control`, `gift_delivery`, `goad`, `grant_permission`, `investigate`, `life`, `mana`, `manifest_dread`, `mill`, `monstrosity`, `pay`, `phase_out`, `prevent_damage`, `proliferate`, `pump`, `put_on_top`, `put_on_top_or_bottom`, `regenerate`, `reveal_hand`, `reveal_top`, `ring`, `roll_die`, `sacrifice`, `scry`, `search_library`, `seek`, `set_class_level`, `shuffle`, `solve_case`, `surveil`, `suspect`, `tap_untap`, `token`, `token_copy`, `transform_effect`, `win_lose`. New effects are added as modules here following the existing handler pattern.
+- **`parser/`** — Oracle text parser: converts MTGJSON Oracle text into typed `AbilityDefinition` structs. Main dispatcher in `oracle.rs`, with specialized sub-parsers: `oracle_effect/` (directory with `mod.rs`, `imperative.rs`, `subject.rs`, `token.rs`, `sequence.rs`, `animation.rs`, `counter.rs`, `mana.rs`, `types.rs`), `oracle_trigger.rs`, `oracle_static.rs`, `oracle_replacement.rs`, `oracle_target.rs`, `oracle_quantity.rs`, `oracle_util.rs`, `oracle_cost.rs`, `oracle_keyword.rs`, `oracle_casting.rs`, `oracle_class.rs`, `oracle_level.rs`, `oracle_modal.rs`, `oracle_saga.rs`. See `docs/parser-instructions.md` for architecture and contribution guide.
+- **`ai_support/`** — Engine-side AI support: `legal_actions()` generates validated candidate actions for all `WaitingFor` states, `candidates.rs` implements action generation per state, `context.rs` provides game context for AI evaluation. This module lives in the engine crate so both WASM and server consumers share the same logic.
 - **`database/`** — Card database with three loading paths:
   - `CardDatabase::load_json(mtgjson_path)` — MTGJSON
   - `CardDatabase::from_export(path)` — Pre-built `card-data.json` (used at runtime by WASM and server)
@@ -121,7 +178,7 @@ phase-server    — Axum WebSocket server for multiplayer
 ### Card Data Format (`data/`)
 
 - **`mtgjson/`** — MTGJSON atomic card data
-- **`card-data.json`** → symlinked to `client/public/card-data.json` for runtime use
+- **`client/public/card-data.json`** — Pre-built card data consumed at runtime by WASM and server
 
 ### WASM Bridge (`crates/engine-wasm/`)
 
@@ -143,17 +200,18 @@ State is filtered per-player (`filter_state_for_player`) to hide opponent's hand
 
 ### React Frontend (`client/src/`)
 
-- **`adapter/`** — Transport-agnostic `EngineAdapter` interface with four implementations:
+**The frontend is strictly a display layer.** It receives fully-resolved state from the engine and renders it. It must not compute derived game values, filter game objects by rules logic, or infer anything the engine should provide. If a component needs data the engine doesn't currently expose, the fix is to add it to the engine's output — not to compute it client-side.
+
+- **`adapter/`** — Transport-agnostic `EngineAdapter` interface with three implementations:
   - `WasmAdapter` — Direct WASM calls (browser/PWA), serialized through async queue
   - `TauriAdapter` — Tauri IPC (desktop), dynamically imported to avoid bundling in web
   - `WebSocketAdapter` — WebSocket to phase-server (multiplayer), with reconnection (3 attempts)
-  - `P2PHostAdapter` / `P2PGuestAdapter` — WebRTC via PeerJS (host runs local WASM, filters state for guest)
   - `createAdapter()` auto-detects platform (Tauri vs browser)
 - **`stores/`** — Zustand stores: `gameStore` (game state + dispatch), `uiStore` (UI state), `animationStore`, `multiplayerStore` (game code, opponent, timer)
 - **`components/`** — React components organized by domain: `animation/`, `board/`, `card/`, `chrome/`, `combat/`, `controls/`, `deck-builder/`, `hand/`, `hud/`, `lobby/`, `log/`, `mana/`, `menu/`, `modal/`, `multiplayer/`, `settings/`, `splash/`, `stack/`, `targeting/`, `ui/`, `zone/`
 - **`services/`** — `scryfall.ts` (card image API), `imageCache.ts` (IndexedDB caching via idb-keyval), `deckParser.ts`
 - **`hooks/`** — `useGameDispatch`, `useCardImage`, `useKeyboardShortcuts`, `useLongPress`, `usePhaseInfo`, `usePlayerId`
-- **`pages/`** — `MenuPage`, `GamePage`, `GameSetupPage`, `PlayPage`, `MultiplayerPage`, `DeckBuilderPage` (React Router)
+- **`pages/`** — `MenuPage`, `GamePage`, `GameSetupPage`, `MultiplayerPage`, `DeckBuilderPage`, `MyDecksPage`, `CoveragePage` (React Router)
 
 ### Key Patterns
 
@@ -167,10 +225,12 @@ State is filtered per-player (`filter_state_for_player`) to hide opponent's hand
 - `PORT` — phase-server listen port (default `9374`)
 - `PHASE_DATA_DIR` — Card data root for phase-server (default `"data"`)
 - `PHASE_CARDS_PATH` — Override card data directory for binaries (`coverage-report`, `card-data-export`)
+- `PHASE_LOG_DIR` — Log directory for phase-server. When set, logs to files instead of stdout (main log: `<dir>/phase-server.log`, per-game logs: `<dir>/games/<code>.log`)
 
 ## Documentation (`docs/`)
 
 - **`docs/parser-instructions.md`** — Oracle parser architecture and contribution guide: how to add new effect types, when to intercept before subject stripping, enum patterns, and common pitfalls.
+- **`docs/MagicCompRules.txt`** — Full MTG Comprehensive Rules text from Wizards of the Coast. Use this as the authoritative source when verifying CR numbers, looking up rule text, or annotating new game logic. `grep -n "^702.180" docs/MagicCompRules.txt` to look up any rule.
 - **`.claude/skills/add-engine-effect/SKILL.md`** — Complete checklist for adding a new effect to the engine: types → parser → resolver → targeting → multiplayer filter → frontend → AI → tests. Covers every registration point that must be updated in lockstep. **Use this as the authoritative guide for any new effect work.**
 
 ## Conventions
@@ -179,11 +239,66 @@ State is filtered per-player (`filter_state_for_player`) to hide opponent's hand
 
 These patterns must be used on first write, not fixed after clippy complains:
 
-- **`strip_prefix`/`strip_suffix`** over `starts_with` + manual slicing: `if let Some(rest) = s.strip_prefix("foo")` not `if s.starts_with("foo") { &s[3..] }`
+- **`strip_prefix`/`strip_suffix`** over `starts_with` + manual slicing: `if let Some(rest) = s.strip_prefix("foo")` not `if s.starts_with("foo") { &s[3..] }`. **Compose from `std` primitives** — chain `strip_prefix` calls for multi-part patterns: `s.strip_prefix(word)?.strip_prefix(' ')?` not `format!("{word} ")` + `strip_prefix`. The standard library's string methods are building blocks; use them compositionally rather than constructing new strings to match against.
 - **Iterator methods** over range-indexed loops: `for item in slice.iter().skip(1)` not `for i in 1..slice.len()`
 - **`rsplit(' ').next()`** to get the last word, not `rsplit().collect::<Vec>().first()`
 - **Exhaustive `match`** without wildcard fallbacks when the enum is known — let the compiler catch missing arms
-- **Reuse existing building blocks** before writing one-off string logic. Search the codebase for helpers like `contains_possessive`, `contains_object_pronoun`, `parse_target`, `parse_type_phrase`, `parse_number` in `oracle_util.rs` and `oracle_target.rs`
+- **Reuse existing building blocks** before writing one-off string logic. See the helper reference table in the "Building Blocks and Architecture Purity" section above
+- **NEVER match on verbatim Oracle text strings** (e.g. `if lower == "the number of cards in your hand is greater than your life total"`). This is the single most prohibited pattern in the codebase. Every Oracle phrase must be decomposed into typed building blocks (grammar prefix/suffix stripping, composable helpers, typed enum variants). A verbatim string match handles exactly one card and poisons the parser architecture permanently. Instead: identify the grammatical structure, add typed `QuantityRef`/`Comparator`/`FilterProp` variants as needed, and parse with `strip_prefix`/`split_once` + helpers so the pattern covers every card in the class.
+- **Separate abstraction layers in enum design.** An enum variant must belong to exactly one semantic layer — do not conflate different concepts in the same type. Example: `QuantityRef` (a *reference* to a dynamic game value: `HandSize`, `LifeTotal`) must not contain `Fixed { value: i32 }` (a *constant* that requires no game-state lookup). Instead, introduce a wrapping expression type (`QuantityExpr`) that is either a `Ref(QuantityRef)` or a `Fixed(i32)`. Ask: "Does this variant belong to the same abstraction as all the others, or does it belong one level up?" Wrong layer placement creates API confusion, breaks exhaustive match semantics, and forces callers to handle heterogeneous cases that should be uniform.
+
+### MTG Comprehensive Rules Annotations
+
+**Any code that implements, enforces, or directly references an MTG game rule MUST be annotated with the corresponding Comprehensive Rules (CR) number.** This is not optional — it is a required part of every rules-related change, same as `cargo fmt`.
+
+**Lookup:** The full Comprehensive Rules text is available at `docs/MagicCompRules.txt`.
+
+**CRITICAL — Verification is mandatory, not optional:**
+Every CR number you write MUST be verified by grepping `docs/MagicCompRules.txt` BEFORE adding it to code. This is non-negotiable. Do NOT rely on memory or training data for CR numbers — the 701.x keyword action numbers and 702.x keyword ability numbers are especially prone to hallucination because they are arbitrary sequential assignments with no mnemonic pattern. A wrong CR number is worse than no CR number: it creates false confidence that code was verified against the wrong rule.
+
+```bash
+# REQUIRED before writing any CR annotation:
+grep -n "^701.21" docs/MagicCompRules.txt   # Verify: is 701.21 really Sacrifice?
+grep -n "^702.122" docs/MagicCompRules.txt  # Verify: is 702.122 really Crew?
+```
+
+If you cannot find the rule number in `docs/MagicCompRules.txt`, do NOT write the annotation. Flag it as "needs manual verification" instead.
+
+**Format — inline comments:**
+```rust
+// CR 704.5a: A player with 0 or less life loses the game.
+```
+
+**Format — doc comments (public items):**
+```rust
+/// Checks state-based actions (CR 704).
+```
+
+**Format — multiple interacting rules (use `+`):**
+```rust
+// CR 702.2c + CR 702.19b: Deathtouch with trample assigns lethal (1) to each blocker.
+```
+
+**Format — alternative/overlapping rules (use `/`):**
+```rust
+// CR 704.3 / CR 800.4: SBAs may have ended the game during phase auto-advance.
+```
+
+**Rules:**
+- **Prefix:** Always `CR` (the official MTG abbreviation for Comprehensive Rules). Never `Rule`, `MTG Rule`, or bare numbers.
+- **Number format:** `CR XXX` (section), `CR XXX.Y` (sub-rule), or `CR XXX.Ya` (lettered sub-rule). Regex: `CR \d{3}(\.\d+[a-z]?)?`
+- **Description is mandatory.** A bare `CR 704.5a` with no explanation is not acceptable — the description makes grep output self-documenting and serves as a correctness check.
+- **Placement:** Directly above or inline with the code that implements the rule. For functions that implement an entire rule section, use a doc comment on the function.
+
+**When writing or modifying engine code (`crates/engine/`):**
+1. If you are adding new game logic, identify which CR rule(s) it implements and annotate.
+2. If you are modifying existing game logic, verify existing CR annotations are present and still accurate. Add missing annotations.
+3. If existing code near your change uses an old format (`Rule 514.1`, `MTG Rule 727`, `MTG 702.36`), migrate it to the `CR` format as part of your change.
+4. Do not annotate boilerplate, serialization, or plumbing — only code that implements a game rule.
+
+**Lookup:** `grep -r "CR 704" crates/engine/` finds all state-based action implementations. `grep -rn "CR \d" crates/engine/` lists all rule annotations. The `mtg-rules-auditor` agent can produce a full coverage report on demand.
+
+### General Conventions
 
 - Rust: `cargo fmt` + `clippy -D warnings` enforced in CI
 - TypeScript: ESLint with `@typescript-eslint/recommended`, unused vars prefixed with `_`

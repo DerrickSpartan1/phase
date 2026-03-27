@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use crate::game::filter::matches_target_filter_controlled;
+use crate::game::filter::{matches_target_filter_controlled, spell_record_matches_filter};
 use crate::game::game_object::parse_counter_type;
 use crate::types::ability::{
     AggregateFunction, CountScope, ObjectProperty, PlayerFilter, QuantityExpr, QuantityRef,
@@ -16,6 +16,7 @@ use crate::types::card_type::CoreType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 /// Resolve a QuantityExpr to a concrete integer value.
 ///
@@ -350,16 +351,16 @@ fn resolve_ref(
             }
             found.len() as i32
         }
-        // CR 117.1: Count spells cast this turn by the controller, optionally filtered by type.
+        // CR 117.1: Count spells cast this turn by the controller, optionally filtered.
         QuantityRef::SpellsCastThisTurn { ref filter } => {
             let spells = state.spells_cast_this_turn_by_player.get(&controller);
             match spells {
                 None => 0,
                 Some(list) => match filter {
                     None => list.len() as i32,
-                    Some(tf) => list
+                    Some(filter) => list
                         .iter()
-                        .filter(|types| spell_types_match_filter(types, tf))
+                        .filter(|record| spell_record_matches_filter(record, filter, controller))
                         .count() as i32,
                 },
             }
@@ -381,50 +382,14 @@ fn resolve_ref(
         }
         // Life gained this turn — uses tracked counter on player.
         QuantityRef::LifeGainedThisTurn => player.map_or(0, |p| p.life_gained_this_turn as i32),
-        // CR 400.7: Count of permanents owned by controller that left the battlefield this turn.
+        // CR 400.7: Count of permanents controlled by player that left the battlefield this turn.
         QuantityRef::PermanentsLeftBattlefieldThisTurn => state
-            .permanents_left_battlefield_this_turn
-            .get(&controller)
-            .copied()
-            .unwrap_or(0) as i32,
+            .zone_changes_this_turn
+            .iter()
+            .filter(|r| r.from_zone == Zone::Battlefield && r.controller == controller)
+            .count() as i32,
         // CR 500: Cumulative turns taken by this player.
         QuantityRef::TurnsTaken => player.map_or(0, |p| p.turns_taken as i32),
-    }
-}
-
-/// Check if a spell's CoreTypes match a TypeFilter for spell-counting purposes.
-/// Operates on raw `Vec<CoreType>` from the per-player spell history,
-/// not a `GameObject` (which may no longer exist after the spell resolves).
-fn spell_types_match_filter(types: &[CoreType], tf: &TypeFilter) -> bool {
-    match tf {
-        TypeFilter::Creature => types.contains(&CoreType::Creature),
-        TypeFilter::Land => types.contains(&CoreType::Land),
-        TypeFilter::Artifact => types.contains(&CoreType::Artifact),
-        TypeFilter::Enchantment => types.contains(&CoreType::Enchantment),
-        TypeFilter::Instant => types.contains(&CoreType::Instant),
-        TypeFilter::Sorcery => types.contains(&CoreType::Sorcery),
-        TypeFilter::Planeswalker => types.contains(&CoreType::Planeswalker),
-        TypeFilter::Battle => types.contains(&CoreType::Battle),
-        TypeFilter::Permanent => types.iter().any(|ct| {
-            matches!(
-                ct,
-                CoreType::Creature
-                    | CoreType::Artifact
-                    | CoreType::Enchantment
-                    | CoreType::Land
-                    | CoreType::Planeswalker
-            )
-        }),
-        TypeFilter::Card | TypeFilter::Any => true,
-        TypeFilter::Non(inner) => !spell_types_match_filter(types, inner),
-        // Subtype cannot be matched from core types alone — always false (conservative).
-        // To support "whenever you cast an Elf spell"-style counting, the spell history
-        // would need to also store subtypes. That's a separate enhancement.
-        TypeFilter::Subtype(_) => false,
-        // CR 608.2b: Disjunction for spell counting.
-        TypeFilter::AnyOf(ref filters) => {
-            filters.iter().any(|f| spell_types_match_filter(types, f))
-        }
     }
 }
 
@@ -503,10 +468,15 @@ mod tests {
     use super::*;
     use crate::game::game_object::CounterType;
     use crate::game::zones::create_object;
-    use crate::types::ability::{ControllerRef, Effect, TargetFilter, TypedFilter};
-    use crate::types::card_type::CoreType;
-    use crate::types::identifiers::CardId;
+    use crate::types::ability::{
+        ControllerRef, Effect, FilterProp, TargetFilter, TypeFilter, TypedFilter,
+    };
+    use crate::types::card_type::{CoreType, Supertype};
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaColor;
     use crate::types::zones::Zone;
+    use crate::types::SpellCastRecord;
 
     #[test]
     fn resolve_quantity_fixed_returns_value() {
@@ -671,6 +641,51 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 2);
+    }
+
+    #[test]
+    fn resolve_quantity_spells_cast_this_turn_with_qualified_filter() {
+        let mut state = GameState::new_two_player(42);
+        state.spells_cast_this_turn_by_player.insert(
+            PlayerId(0),
+            vec![
+                SpellCastRecord {
+                    core_types: vec![CoreType::Creature],
+                    supertypes: vec![Supertype::Legendary],
+                    subtypes: vec!["Bird".to_string()],
+                    keywords: vec![Keyword::Flying],
+                    colors: vec![ManaColor::Blue],
+                    mana_value: 3,
+                },
+                SpellCastRecord {
+                    core_types: vec![CoreType::Artifact],
+                    supertypes: vec![],
+                    subtypes: vec![],
+                    keywords: vec![],
+                    colors: vec![],
+                    mana_value: 1,
+                },
+            ],
+        );
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisTurn {
+                filter: Some(TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .with_type(TypeFilter::Subtype("Bird".to_string()))
+                        .properties(vec![
+                            FilterProp::WithKeyword {
+                                value: Keyword::Flying,
+                            },
+                            FilterProp::HasSupertype {
+                                value: crate::types::card_type::Supertype::Legendary,
+                            },
+                        ]),
+                )),
+            },
+        };
+
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 1);
     }
 
     #[test]

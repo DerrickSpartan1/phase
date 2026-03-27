@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use crate::game::combat;
-use crate::game::game_object::{parse_counter_type, GameObject};
+use crate::game::game_object::GameObject;
 use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{
     ControllerRef, FilterProp, QuantityExpr, SharedQuality, TargetFilter, TargetRef, TypeFilter,
@@ -382,10 +382,7 @@ fn matches_filter_prop(
         FilterProp::CountersGE {
             counter_type,
             count,
-        } => {
-            let ct = parse_counter_type(counter_type);
-            obj.counters.get(&ct).copied().unwrap_or(0) >= *count
-        }
+        } => obj.counters.get(counter_type).copied().unwrap_or(0) >= *count,
         FilterProp::CmcGE { value } => {
             let cmc = obj.mana_cost.mana_value() as i32;
             let controller = source.controller.unwrap_or(PlayerId(0));
@@ -495,7 +492,7 @@ fn matches_filter_prop(
         // CR 115.9b: Permissive at per-object level; validated by trigger matchers against
         // the stack entry's actual targets.
         FilterProp::Targets { .. } => true,
-        FilterProp::Other { .. } => true, // Permissive fallback for unrecognized properties
+        FilterProp::Other { .. } => false, // Fail-closed for unrecognized properties
     }
 }
 
@@ -792,7 +789,7 @@ mod tests {
 
         let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
             FilterProp::WithKeyword {
-                value: "flying".to_string(),
+                value: Keyword::Flying,
             },
         ]));
         assert!(matches_target_filter(&state, bird, &filter, bird));
@@ -813,13 +810,13 @@ mod tests {
                 .with_type(TypeFilter::Subtype("Bird".to_string()))
                 .properties(vec![
                     FilterProp::WithKeyword {
-                        value: "flying".to_string(),
+                        value: Keyword::Flying,
                     },
                     FilterProp::HasSupertype {
-                        value: "Legendary".to_string(),
+                        value: crate::types::card_type::Supertype::Legendary,
                     },
                     FilterProp::HasColor {
-                        color: "Blue".to_string(),
+                        color: ManaColor::Blue,
                     },
                 ]),
         );
@@ -1004,7 +1001,7 @@ mod tests {
         let filter =
             TargetFilter::Typed(
                 TypedFilter::land().properties(vec![FilterProp::HasSupertype {
-                    value: "Basic".to_string(),
+                    value: crate::types::card_type::Supertype::Basic,
                 }]),
             );
         assert!(matches_target_filter(&state, id, &filter, id));
@@ -1019,7 +1016,7 @@ mod tests {
         let filter =
             TargetFilter::Typed(
                 TypedFilter::land().properties(vec![FilterProp::HasSupertype {
-                    value: "Basic".to_string(),
+                    value: crate::types::card_type::Supertype::Basic,
                 }]),
             );
         assert!(!matches_target_filter(&state, id, &filter, id));
@@ -1173,7 +1170,7 @@ mod tests {
 
         let targets = vec![TargetRef::Object(a), TargetRef::Object(b)];
         assert!(
-            validate_shares_quality(&state, &targets, "creature type"),
+            validate_shares_quality(&state, &targets, &SharedQuality::CreatureType),
             "Two Elves should share the Elf creature type"
         );
     }
@@ -1201,7 +1198,7 @@ mod tests {
 
         let targets = vec![TargetRef::Object(a), TargetRef::Object(b)];
         assert!(
-            !validate_shares_quality(&state, &targets, "creature type"),
+            !validate_shares_quality(&state, &targets, &SharedQuality::CreatureType),
             "Elf and Goblin share no creature types"
         );
     }
@@ -1217,7 +1214,7 @@ mod tests {
 
         let targets = vec![TargetRef::Object(a), TargetRef::Object(b)];
         assert!(
-            validate_shares_quality(&state, &targets, "color"),
+            validate_shares_quality(&state, &targets, &SharedQuality::Color),
             "Both share Blue"
         );
     }
@@ -1233,7 +1230,7 @@ mod tests {
 
         let targets = vec![TargetRef::Object(a), TargetRef::Object(b)];
         assert!(
-            !validate_shares_quality(&state, &targets, "color"),
+            !validate_shares_quality(&state, &targets, &SharedQuality::Color),
             "Red and Blue share no colors"
         );
     }
