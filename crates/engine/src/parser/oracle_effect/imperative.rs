@@ -1171,6 +1171,24 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
     }
 
     let rest_lower = lower.strip_prefix("exile ")?;
+
+    // CR 400.12: "exile their graveyard" acts on all cards in that zone.
+    // Bare possessive zone references have same semantics as "exile all/each".
+    if starts_with_possessive(rest_lower, "", "graveyard")
+        || starts_with_possessive(rest_lower, "", "library")
+        || starts_with_possessive(rest_lower, "", "hand")
+    {
+        let (target, _rem) = parse_target(&text[6..]);
+        #[cfg(debug_assertions)]
+        super::types::assert_no_compound_remainder(_rem, text);
+        let origin = super::infer_origin_zone(rest_lower);
+        return Some(ZoneCounterImperativeAst::Exile {
+            origin,
+            target,
+            all: true,
+        });
+    }
+
     let (target, _rem) = parse_target(&text[6..]);
     #[cfg(debug_assertions)]
     super::types::assert_no_compound_remainder(_rem, text);

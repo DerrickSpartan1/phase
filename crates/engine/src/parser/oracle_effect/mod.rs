@@ -12,8 +12,8 @@ use std::str::FromStr;
 use super::oracle_quantity::{parse_cda_quantity, parse_for_each_clause};
 use super::oracle_target::{parse_event_context_ref, parse_mana_value_suffix, parse_target};
 use super::oracle_util::{
-    contains_possessive, has_unconsumed_conditional, parse_mana_symbols, parse_number, strip_after,
-    TextPair,
+    contains_possessive, has_unconsumed_conditional, parse_mana_symbols, parse_number,
+    starts_with_possessive, strip_after, TextPair,
 };
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::types::ability::{
@@ -1153,13 +1153,30 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
 
     // Parse the sub-effect
     let mut sub_clause = parse_imperative_effect(sub_text, ctx);
+    let sub_lower = sub_text.to_lowercase();
 
     // CR 608.2c: Verb carry-forward for bare "target X" clauses in compound actions.
     // When the sub-text starts with "target" and parsed as Unimplemented, prepend
     // the verb from the primary effect and re-parse. Handles "exile target creature
     // and target artifact" where "target artifact" lacks a verb.
+    if matches!(sub_clause.effect, Effect::Unimplemented { .. }) && sub_lower.starts_with("target ")
+    {
+        if let Some(verb) = extract_effect_verb(&primary_effect) {
+            let reparsed_text = format!("{verb} {sub_text}");
+            let reparsed = parse_imperative_effect(&reparsed_text, ctx);
+            if !matches!(reparsed.effect, Effect::Unimplemented { .. }) {
+                sub_clause = reparsed;
+            }
+        }
+    }
+
+    // CR 608.2c: Possessive zone carry-forward for compound actions.
+    // "exiles a creature they control and their graveyard" → sub-text "their graveyard"
+    // lacks a verb. Prepend the primary verb so it becomes "exile their graveyard".
     if matches!(sub_clause.effect, Effect::Unimplemented { .. })
-        && sub_text.to_lowercase().starts_with("target ")
+        && (starts_with_possessive(&sub_lower, "", "graveyard")
+            || starts_with_possessive(&sub_lower, "", "library")
+            || starts_with_possessive(&sub_lower, "", "hand"))
     {
         if let Some(verb) = extract_effect_verb(&primary_effect) {
             let reparsed_text = format!("{verb} {sub_text}");
@@ -1172,7 +1189,6 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
 
     // If the remainder contains anaphoric references ("it", "that creature", "them"),
     // replace the sub_effect's target with ParentTarget so it inherits the parent's targets.
-    let sub_lower = sub_text.to_lowercase();
     if has_anaphoric_reference(&sub_lower) {
         replace_target_with_parent(&mut sub_clause.effect);
     }
@@ -5227,6 +5243,64 @@ mod tests {
                 }
             ),
             "exile each graveyard should have origin=Graveyard, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_exile_your_graveyard_is_change_zone_all() {
+        let e = parse_effect("exile your graveyard");
+        assert!(
+            matches!(
+                e,
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "exile your graveyard should be ChangeZoneAll with origin=Graveyard, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_exile_possessive_graveyard_is_change_zone_all() {
+        let e = parse_effect("exile their graveyard");
+        assert!(
+            matches!(
+                e,
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "exile their graveyard should be ChangeZoneAll with origin=Graveyard, got {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_compound_exile_creature_and_possessive_graveyard() {
+        let clause = parse_effect_clause(
+            "exile a creature they control and their graveyard",
+            &Default::default(),
+        );
+        assert!(
+            matches!(clause.effect, Effect::ChangeZone { .. }),
+            "primary should be ChangeZone, got {:?}",
+            clause.effect
+        );
+        let sub = clause.sub_ability.expect("should have sub_ability");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Exile,
+                    ..
+                }
+            ),
+            "sub_ability should be ChangeZoneAll with origin=Graveyard, got {:?}",
+            *sub.effect
         );
     }
 

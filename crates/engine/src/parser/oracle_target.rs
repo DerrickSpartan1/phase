@@ -9,7 +9,8 @@ use crate::types::zones::Zone;
 
 use super::oracle_quantity::capitalize_first;
 use super::oracle_util::{
-    merge_or_filters, parse_subtype, starts_with_possessive, TextPair, SELF_REF_TYPE_PHRASES,
+    merge_or_filters, parse_subtype, starts_with_possessive, strip_possessive, TextPair,
+    SELF_REF_TYPE_PHRASES,
 };
 
 /// Parse an event-context possessive reference from Oracle text.
@@ -233,6 +234,32 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     // "you" — the controller (not a targeted player)
     if lower.starts_with("you") && (lower.len() == 3 || lower[3..].starts_with([',', '.', ' '])) {
         return (TargetFilter::Controller, &text[3..]);
+    }
+
+    // CR 400.12: Bare possessive zone references ("their graveyard", "your library").
+    // Effects targeting a zone act on all cards in that zone.
+    // Skip "its owner's" — ControllerRef has no Owner variant; handle when needed.
+    if let Some((poss, rest)) = strip_possessive(&lower) {
+        if poss != "its owner's" {
+            let zones: &[(&str, Zone)] = &[
+                ("graveyard", Zone::Graveyard),
+                ("library", Zone::Library),
+                ("hand", Zone::Hand),
+            ];
+            for &(zone_word, zone) in zones {
+                if rest.starts_with(zone_word) {
+                    let prefix_len = lower.len() - rest.len();
+                    return (
+                        TargetFilter::Typed(TypedFilter {
+                            controller: Some(ControllerRef::You),
+                            properties: vec![FilterProp::InZone { zone }],
+                            ..Default::default()
+                        }),
+                        &text[prefix_len + zone_word.len()..],
+                    );
+                }
+            }
+        }
     }
 
     // Bare type phrase fallback: try parse_type_phrase before giving up.
@@ -3489,5 +3516,37 @@ mod tests {
         } else {
             panic!("Expected Or filter, got {filter:?}");
         }
+    }
+
+    #[test]
+    fn parse_target_bare_possessive_graveyard() {
+        let (f, rest) = parse_target("their graveyard");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Graveyard
+                }],
+                ..Default::default()
+            })
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_bare_possessive_library() {
+        let (f, rest) = parse_target("your library");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter {
+                controller: Some(ControllerRef::You),
+                properties: vec![FilterProp::InZone {
+                    zone: Zone::Library
+                }],
+                ..Default::default()
+            })
+        );
+        assert_eq!(rest, "");
     }
 }

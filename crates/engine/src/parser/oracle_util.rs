@@ -483,9 +483,13 @@ fn match_phrase_variants(
     variants.iter().any(|word| {
         let mut needle = String::with_capacity(prefix.len() + word.len() + suffix.len() + 2);
         needle.push_str(prefix);
-        needle.push(' ');
+        if !prefix.is_empty() {
+            needle.push(' ');
+        }
         needle.push_str(word);
-        needle.push(' ');
+        if !suffix.is_empty() {
+            needle.push(' ');
+        }
         needle.push_str(suffix);
         strategy(text, &needle)
     })
@@ -499,6 +503,23 @@ pub fn contains_possessive(text: &str, prefix: &str, suffix: &str) -> bool {
     match_phrase_variants(text, prefix, suffix, POSSESSIVES, |hay, needle| {
         hay.contains(needle)
     })
+}
+
+/// Strip a possessive prefix ("your ", "their ", etc.) and return the matched word + remainder.
+///
+/// Returns `Some((possessive_word, remainder))` on match, `None` if no possessive found.
+/// The `possessive_word` can be mapped to `ControllerRef` by the caller:
+/// `"your"/"their"/"that player's"` → `You` (in subject-stripped context),
+/// `"its owner's"` needs special handling (no `Owner` variant exists).
+pub fn strip_possessive(text: &str) -> Option<(&'static str, &str)> {
+    for &poss in POSSESSIVES {
+        if let Some(rest) = text.strip_prefix(poss) {
+            if let Some(rest) = rest.strip_prefix(' ') {
+                return Some((poss, rest));
+            }
+        }
+    }
+    None
 }
 
 /// Like `contains_possessive`, but checks if `text` starts with the phrase.
@@ -1636,6 +1657,39 @@ mod tests {
             "search",
             "library"
         ));
+    }
+
+    #[test]
+    fn starts_with_possessive_empty_prefix() {
+        assert!(starts_with_possessive("their graveyard", "", "graveyard"));
+        assert!(starts_with_possessive(
+            "your library for a card",
+            "",
+            "library"
+        ));
+        assert!(starts_with_possessive(
+            "its owner's hand and then",
+            "",
+            "hand"
+        ));
+        assert!(!starts_with_possessive("a graveyard", "", "graveyard"));
+    }
+
+    #[test]
+    fn strip_possessive_returns_word_and_rest() {
+        assert_eq!(
+            strip_possessive("their graveyard"),
+            Some(("their", "graveyard"))
+        );
+        assert_eq!(
+            strip_possessive("your library for a card"),
+            Some(("your", "library for a card"))
+        );
+        assert_eq!(
+            strip_possessive("its owner's hand"),
+            Some(("its owner's", "hand"))
+        );
+        assert_eq!(strip_possessive("a graveyard"), None);
     }
 
     #[test]
