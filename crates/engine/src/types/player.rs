@@ -81,6 +81,10 @@ pub struct Player {
     pub life_gained_this_turn: u32,
     #[serde(default)]
     pub life_lost_this_turn: u32,
+    /// CR 603.4: Amount of life lost during the previous turn, snapshotted at turn start.
+    /// Used by "if an opponent lost life during their last turn" intervening-if conditions.
+    #[serde(default)]
+    pub life_lost_last_turn: u32,
     #[serde(default)]
     pub descended_this_turn: bool,
     #[serde(default)]
@@ -136,6 +140,7 @@ impl Default for Player {
             energy: 0,
             life_gained_this_turn: 0,
             life_lost_this_turn: 0,
+            life_lost_last_turn: 0,
             descended_this_turn: false,
             cards_drawn_this_turn: 0,
             crimes_committed_this_turn: 0,

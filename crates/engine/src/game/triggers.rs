@@ -894,6 +894,15 @@ fn check_trigger_constraint(
             .get(&obj_id)
             .and_then(|obj| obj.class_level)
             .is_some_and(|current| current == *level),
+        // CR 603.4: "This ability triggers only the first N times each turn."
+        TriggerConstraint::MaxTimesPerTurn { max } => {
+            let count = state
+                .trigger_fire_counts_this_turn
+                .get(&key)
+                .copied()
+                .unwrap_or(0);
+            count < *max
+        }
     }
 }
 
@@ -1063,6 +1072,38 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::CounterAddedThisTurn => state
             .players_who_added_counter_this_turn
             .contains(&controller),
+        // CR 603.4: "if an opponent lost life during their last turn" — check the opponent's
+        // snapshotted life_lost_last_turn. True if any opponent lost life during the previous turn.
+        TriggerCondition::LostLifeLastTurn => state
+            .players
+            .iter()
+            .any(|p| p.id != controller && p.life_lost_last_turn > 0),
+        // CR 509.1a + CR 603.4: "if defending player controls no [type]" — check if the
+        // defending player in combat controls no permanents matching the filter.
+        TriggerCondition::DefendingPlayerControlsNone { filter } => {
+            if let Some(combat) = &state.combat {
+                let defenders: std::collections::HashSet<PlayerId> = combat
+                    .attackers
+                    .iter()
+                    .map(|a| a.defending_player)
+                    .collect();
+                defenders.iter().all(|&def_pid| {
+                    !state.battlefield.iter().any(|id| {
+                        state.objects.get(id).is_some_and(|obj| {
+                            obj.controller == def_pid
+                                && crate::game::filter::matches_target_filter(
+                                    state,
+                                    *id,
+                                    filter,
+                                    source_id.unwrap_or(ObjectId(0)),
+                                )
+                        })
+                    })
+                })
+            } else {
+                false
+            }
+        }
         TriggerCondition::And { conditions } => conditions
             .iter()
             .all(|c| check_trigger_condition(state, c, controller, source_id)),
@@ -1142,6 +1183,10 @@ fn record_trigger_fired(
         | TriggerConstraint::NthDrawThisTurn { .. }
         | TriggerConstraint::AtClassLevel { .. } => {
             // No tracking needed — checked at fire time via game/object state
+        }
+        // CR 603.4: Increment fire count for MaxTimesPerTurn tracking.
+        TriggerConstraint::MaxTimesPerTurn { .. } => {
+            *state.trigger_fire_counts_this_turn.entry(key).or_insert(0) += 1;
         }
     }
 }

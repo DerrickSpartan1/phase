@@ -3240,6 +3240,14 @@ pub enum TriggerCondition {
     /// added any counter to any permanent this turn.
     CounterAddedThisTurn,
 
+    /// CR 603.4: "if an opponent lost life this turn" / "if that player lost life this turn"
+    /// — checks whether a specific player reference lost life (this turn or last turn).
+    LostLifeLastTurn,
+
+    /// CR 509.1a + CR 603.4: "if defending player controls no [type]" — true when the
+    /// defending player in the current combat controls no permanents matching the filter.
+    DefendingPlayerControlsNone { filter: TargetFilter },
+
     // -- Combinators --
     /// All conditions must be true ("if you gained and lost life this turn")
     And { conditions: Vec<TriggerCondition> },
@@ -3329,6 +3337,9 @@ pub enum TriggerConstraint {
     OnlyDuringOpponentsTurn,
     /// CR 716.5: "When this Class becomes level N" — fire only at the specified level.
     AtClassLevel { level: u8 },
+    /// CR 603.4: "This ability triggers only the first N times each turn." — generalizes
+    /// OncePerTurn to arbitrary limits. OncePerTurn remains for backward compatibility.
+    MaxTimesPerTurn { max: u32 },
 }
 
 /// Filter for counter-related trigger modes (CounterAdded, CounterRemoved).

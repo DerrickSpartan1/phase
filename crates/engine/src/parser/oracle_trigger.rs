@@ -106,6 +106,18 @@ fn parse_trigger_constraint(lower: &str) -> Option<TriggerConstraint> {
     if lower.contains("only during your turn") {
         return Some(TriggerConstraint::OnlyDuringYourTurn);
     }
+    // CR 603.4: "this ability triggers only the first N times each turn"
+    if let Some(rest) = lower
+        .find("triggers only the first ")
+        .map(|pos| &lower[pos + "triggers only the first ".len()..])
+    {
+        if let Some(times_pos) = rest.find(" time") {
+            let n_text = &rest[..times_pos];
+            if let Some((n, _)) = parse_number(n_text) {
+                return Some(TriggerConstraint::MaxTimesPerTurn { max: n });
+            }
+        }
+    }
     None
 }
 
@@ -127,6 +139,19 @@ fn strip_constraint_sentences(text: &str) -> String {
     let mut result = text.to_string();
     for pattern in &patterns {
         result = result.replace(pattern, "");
+    }
+    // Dynamic pattern: "this ability triggers only the first N time(s) each turn."
+    let lower = result.to_lowercase();
+    if let Some(start) = lower.find("this ability triggers only the first ") {
+        if let Some(end) = lower[start..].find("each turn") {
+            let end_pos = start + end + "each turn".len();
+            let end_pos = if lower[end_pos..].starts_with('.') {
+                end_pos + 1
+            } else {
+                end_pos
+            };
+            result = format!("{}{}", &result[..start], &result[end_pos..]);
+        }
     }
     let result = result.trim().to_string();
     if result.ends_with('.') {
@@ -512,6 +537,47 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                     Some(TriggerCondition::CastSpellThisTurn { filter: None }),
                 );
             }
+        }
+    }
+
+    // CR 603.4: "if an opponent lost life this turn" / "if that player lost life this turn"
+    // / "if an opponent lost life during their last turn"
+    for pattern in &[
+        "if an opponent lost life this turn",
+        "if that player lost life this turn",
+    ] {
+        if let Some(pos) = tp.find(pattern) {
+            return (
+                strip_condition_clause(text, pos, pattern.len()),
+                Some(TriggerCondition::LostLife),
+            );
+        }
+    }
+    if let Some(pos) = tp.find("if an opponent lost life during their last turn") {
+        return (
+            strip_condition_clause(
+                text,
+                pos,
+                "if an opponent lost life during their last turn".len(),
+            ),
+            Some(TriggerCondition::LostLifeLastTurn),
+        );
+    }
+
+    // CR 509.1a + CR 603.4: "if defending player controls no [type]"
+    if let Some(pos) = tp.find("if defending player controls no ") {
+        let after = &text[pos + "if defending player controls no ".len()..];
+        let (filter, rest) = crate::parser::oracle_target::parse_type_phrase(after);
+        if !matches!(filter, TargetFilter::Any) {
+            let consumed = after.len() - rest.len();
+            return (
+                strip_condition_clause(
+                    text,
+                    pos,
+                    "if defending player controls no ".len() + consumed,
+                ),
+                Some(TriggerCondition::DefendingPlayerControlsNone { filter }),
+            );
         }
     }
 
