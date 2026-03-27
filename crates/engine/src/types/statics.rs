@@ -203,6 +203,10 @@ pub enum StaticMode {
         keyword: Keyword,
     },
 
+    /// CR 104.3a: This player can't win the game (Platinum Angel effect).
+    CantWinTheGame,
+    /// CR 104.3b: This player can't lose the game (Platinum Angel effect).
+    CantLoseTheGame,
     /// Fallback for unrecognized static mode strings.
     Other(String),
 }
@@ -319,6 +323,8 @@ impl fmt::Display for StaticMode {
             StaticMode::CantHaveKeyword { keyword } => {
                 write!(f, "CantHaveKeyword({keyword:?})")
             }
+            StaticMode::CantWinTheGame => write!(f, "CantWinTheGame"),
+            StaticMode::CantLoseTheGame => write!(f, "CantLoseTheGame"),
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
         }
@@ -424,6 +430,8 @@ impl FromStr for StaticMode {
             "BlockRestriction" => StaticMode::BlockRestriction,
             "NoMaximumHandSize" => StaticMode::NoMaximumHandSize,
             "MayPlayAdditionalLand" => StaticMode::MayPlayAdditionalLand,
+            "CantWinTheGame" => StaticMode::CantWinTheGame,
+            "CantLoseTheGame" => StaticMode::CantLoseTheGame,
             // Parameterized
             other => {
                 if let Some(inner) = other

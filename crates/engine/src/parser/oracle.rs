@@ -919,6 +919,7 @@ pub(super) fn find_activated_colon(line: &str) -> Option<usize> {
         "exile",
         "tap",
         "untap",
+        "put",
     ];
     // Only lowercase when needed (skipped entirely if '{' was found above)
     let lower_prefix = trimmed.to_lowercase();
@@ -1304,6 +1305,9 @@ pub(super) fn is_static_pattern(lower: &str) -> bool {
         || lower.contains("must be blocked")
         // CR 119.7: Lifegain prevention
         || lower.contains("can't gain life")
+        // CR 104.3a/b: Win/lose the game restrictions
+        || lower.contains("can't win the game")
+        || lower.contains("can't lose the game")
         // CR 702.8d: Flash-granting statics (exclude self-cast options like "you may cast this spell as though it had flash")
         || (lower.contains("as though it had flash") && !lower.starts_with("you may cast"))
         || lower.contains("as though they had flash")
