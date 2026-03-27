@@ -104,6 +104,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // CR 500.1: Reset per-turn spell cast counters.
     state.spells_cast_this_turn = 0;
     state.triggers_fired_this_turn.clear();
+    state.trigger_fire_counts_this_turn.clear();
     state.activated_abilities_this_turn.clear();
     state.graveyard_cast_permissions_used.clear();
     state.spells_cast_this_turn_by_player.clear();
@@ -128,6 +129,8 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         player.has_drawn_this_turn = false;
         player.lands_played_this_turn = 0;
         player.life_gained_this_turn = 0;
+        // CR 603.4: Snapshot life lost before reset for "lost life during their last turn" conditions.
+        player.life_lost_last_turn = player.life_lost_this_turn;
         player.life_lost_this_turn = 0;
         player.descended_this_turn = false;
         player.cards_drawn_this_turn = 0;

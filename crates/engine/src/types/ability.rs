@@ -3164,6 +3164,14 @@ pub enum AbilityCondition {
     /// Checked at resolution time against the first resolved object target's keywords.
     /// Uses "Instead" override semantics: swaps the parent effect when condition is met.
     TargetHasKeywordInstead { keyword: Keyword },
+    /// CR 400.7 + CR 608.2c: "If that creature was a [type]" — gates the sub_ability on
+    /// whether the target (or its last-known information if `use_lki` is true) matches the filter.
+    /// Present-tense ("is a") checks current state; past-tense ("was a") checks LKI per CR 400.7.
+    TargetMatchesFilter {
+        filter: TargetFilter,
+        #[serde(default)]
+        use_lki: bool,
+    },
 }
 
 /// Casting-time facts that flow with a spell from casting through resolution.
@@ -3282,6 +3290,14 @@ pub enum TriggerCondition {
     /// added any counter to any permanent this turn.
     CounterAddedThisTurn,
 
+    /// CR 603.4: "if an opponent lost life this turn" / "if that player lost life this turn"
+    /// — checks whether a specific player reference lost life (this turn or last turn).
+    LostLifeLastTurn,
+
+    /// CR 509.1a + CR 603.4: "if defending player controls no [type]" — true when the
+    /// defending player in the current combat controls no permanents matching the filter.
+    DefendingPlayerControlsNone { filter: TargetFilter },
+
     // -- Combinators --
     /// All conditions must be true ("if you gained and lost life this turn")
     And { conditions: Vec<TriggerCondition> },
@@ -3371,6 +3387,9 @@ pub enum TriggerConstraint {
     OnlyDuringOpponentsTurn,
     /// CR 716.5: "When this Class becomes level N" — fire only at the specified level.
     AtClassLevel { level: u8 },
+    /// CR 603.4: "This ability triggers only the first N times each turn." — generalizes
+    /// OncePerTurn to arbitrary limits. OncePerTurn remains for backward compatibility.
+    MaxTimesPerTurn { max: u32 },
 }
 
 /// Filter for counter-related trigger modes (CounterAdded, CounterRemoved).
@@ -3718,6 +3737,11 @@ pub struct ReplacementDefinition {
     /// "under your control" → Some(You). None = any owner.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_owner_scope: Option<ControllerRef>,
+    /// CR 614.1a: Restricts which player this replacement applies to.
+    /// "an opponent would gain life" → Some(Opponent). None = applies to controller only.
+    /// Parallel to `token_owner_scope` pattern.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_player: Option<ControllerRef>,
     /// Marks this replacement as consumed (one-shot). Skipped by find_applicable_replacements.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_consumed: bool,
@@ -3747,6 +3771,7 @@ impl ReplacementDefinition {
             shield_kind: ShieldKind::None,
             quantity_modification: None,
             token_owner_scope: None,
+            valid_player: None,
             is_consumed: false,
             redirect_target: None,
         }

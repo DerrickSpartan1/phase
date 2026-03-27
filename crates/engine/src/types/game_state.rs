@@ -1060,6 +1060,14 @@ pub struct GameState {
     // Trigger constraint tracking: (object_id, trigger_index) pairs that have fired
     #[serde(default)]
     pub triggers_fired_this_turn: HashSet<(ObjectId, usize)>,
+    /// CR 603.4: Per-trigger fire counts for MaxTimesPerTurn constraint.
+    /// Tracks how many times each (object_id, trigger_index) has fired this turn.
+    #[serde(
+        default,
+        skip_serializing_if = "HashMap::is_empty",
+        with = "tuple_key_map"
+    )]
+    pub trigger_fire_counts_this_turn: HashMap<(ObjectId, usize), u32>,
     #[serde(default)]
     pub triggers_fired_this_game: HashSet<(ObjectId, usize)>,
     #[serde(
@@ -1320,6 +1328,7 @@ impl GameState {
             deck_pools: Vec::new(),
             sideboard_submitted: Vec::new(),
             triggers_fired_this_turn: HashSet::new(),
+            trigger_fire_counts_this_turn: HashMap::new(),
             triggers_fired_this_game: HashSet::new(),
             activated_abilities_this_turn: HashMap::new(),
             activated_abilities_this_game: HashMap::new(),
@@ -1457,6 +1466,7 @@ impl PartialEq for GameState {
             && self.deck_pools == other.deck_pools
             && self.sideboard_submitted == other.sideboard_submitted
             && self.triggers_fired_this_turn == other.triggers_fired_this_turn
+            && self.trigger_fire_counts_this_turn == other.trigger_fire_counts_this_turn
             && self.triggers_fired_this_game == other.triggers_fired_this_game
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
