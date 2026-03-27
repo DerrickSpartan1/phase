@@ -231,7 +231,7 @@ fn kaito_ninjutsu_activation() {
     {
         let state = runner.state_mut();
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker_id, P1)],
+            attackers: vec![AttackerInfo::attacking_player(attacker_id, P1)],
             ..Default::default()
         });
         state.waiting_for = WaitingFor::Priority { player: P0 };

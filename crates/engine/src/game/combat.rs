@@ -12,13 +12,21 @@ use crate::types::keywords::{Keyword, ProtectionTarget};
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
+use crate::types::zones::Zone;
 
-/// Represents who a creature is attacking: a player or a planeswalker.
+/// Represents who a creature is attacking: a player, planeswalker, or battle (CR 506.3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum AttackTarget {
     Player(PlayerId),
     Planeswalker(ObjectId),
+    Battle(ObjectId),
+}
+
+/// Serde default for `AttackerInfo.attack_target` — backward-compatible with states
+/// serialized before this field existed (all legacy attacks targeted a player).
+pub fn default_attack_target() -> AttackTarget {
+    AttackTarget::Player(PlayerId(0))
 }
 
 /// Tracks the state of the current combat phase.
@@ -54,6 +62,9 @@ impl Eq for CombatState {}
 pub struct AttackerInfo {
     pub object_id: ObjectId,
     pub defending_player: PlayerId,
+    /// The full attack target — preserves planeswalker/battle identity through combat.
+    #[serde(default = "default_attack_target")]
+    pub attack_target: AttackTarget,
     /// CR 509.1h: Once a creature is blocked, it remains blocked for the rest of combat
     /// even if all blockers are removed. Set to `true` during blocker declaration and
     /// never cleared — `unblocked_attackers` checks this flag, not the current blocker list.
@@ -62,11 +73,43 @@ pub struct AttackerInfo {
 }
 
 impl AttackerInfo {
-    pub fn new(object_id: ObjectId, defending_player: PlayerId) -> Self {
+    pub fn new(
+        object_id: ObjectId,
+        attack_target: AttackTarget,
+        defending_player: PlayerId,
+    ) -> Self {
         Self {
             object_id,
             defending_player,
+            attack_target,
             blocked: false,
+        }
+    }
+
+    /// Convenience for the common case of attacking a player directly.
+    pub fn attacking_player(object_id: ObjectId, player: PlayerId) -> Self {
+        Self::new(object_id, AttackTarget::Player(player), player)
+    }
+
+    /// Resolve the DamageTarget for this attacker's combat damage (CR 510.1b).
+    /// Returns `None` if attacking a planeswalker/battle that left the battlefield (CR 506.4c):
+    /// the creature is still attacking but assigns no combat damage.
+    pub fn resolve_damage_target(&self, state: &GameState) -> Option<DamageTarget> {
+        match &self.attack_target {
+            AttackTarget::Player(pid) => Some(DamageTarget::Player(*pid)),
+            // CR 506.4c: If the planeswalker/battle left the battlefield, creature assigns no damage.
+            // Check zone == Battlefield, not just contains_key — objects persist after zone changes.
+            AttackTarget::Planeswalker(pw_id) => match state.objects.get(pw_id) {
+                Some(obj) if obj.zone == Zone::Battlefield => Some(DamageTarget::Object(*pw_id)),
+                _ => None,
+            },
+            // CR 310.6: Damage to a battle removes defense counters — same Object routing.
+            AttackTarget::Battle(battle_id) => match state.objects.get(battle_id) {
+                Some(obj) if obj.zone == Zone::Battlefield => {
+                    Some(DamageTarget::Object(*battle_id))
+                }
+                _ => None,
+            },
         }
     }
 }
@@ -98,35 +141,39 @@ pub fn enter_attacking(
         obj.tapped = true;
     }
 
-    // Determine defending player before mutable combat borrow.
-    let defending_player = state
+    // Determine defending player and attack target before mutable combat borrow.
+    let (defending_player, attack_target) = state
         .combat
         .as_ref()
         .and_then(|c| {
             c.attackers
                 .iter()
                 .find(|a| a.object_id == source_id)
-                .map(|a| a.defending_player)
+                .map(|a| (a.defending_player, a.attack_target.clone()))
         })
         .or_else(|| {
             state
                 .current_trigger_event
                 .as_ref()
                 .and_then(|e| crate::game::targeting::extract_player_from_event(e, state))
+                .map(|pid| (pid, AttackTarget::Player(pid)))
         })
         .unwrap_or_else(|| {
             // CR 508.4: Fallback to first opponent in seat order (multiplayer-aware).
             // In 2-player, this returns the sole opponent — identical to the old arithmetic.
-            players::opponents(state, controller)
+            let pid = players::opponents(state, controller)
                 .first()
                 .copied()
-                .unwrap_or(controller)
+                .unwrap_or(controller);
+            (pid, AttackTarget::Player(pid))
         });
 
     if let Some(combat) = state.combat.as_mut() {
-        combat
-            .attackers
-            .push(AttackerInfo::new(object_id, defending_player));
+        combat.attackers.push(AttackerInfo::new(
+            object_id,
+            attack_target,
+            defending_player,
+        ));
     }
 }
 
@@ -629,6 +676,28 @@ pub fn declare_attackers(
                     return Err(format!("Cannot attack your own planeswalker {:?}", pw_id));
                 }
             }
+            AttackTarget::Battle(battle_id) => {
+                // CR 310.5: Battles can be attacked.
+                let battle = state
+                    .objects
+                    .get(battle_id)
+                    .ok_or_else(|| format!("Battle {:?} not found", battle_id))?;
+                if battle.zone != crate::types::zones::Zone::Battlefield
+                    || !battle
+                        .card_types
+                        .core_types
+                        .contains(&crate::types::card_type::CoreType::Battle)
+                {
+                    return Err(format!(
+                        "{:?} is not a battle on the battlefield",
+                        battle_id
+                    ));
+                }
+                // CR 310.8b: A battle's protector can never attack it.
+                if battle.controller == state.active_player {
+                    return Err(format!("Cannot attack your own battle {:?}", battle_id));
+                }
+            }
         }
     }
 
@@ -680,20 +749,20 @@ pub fn declare_attackers(
         }
     }
 
-    // Populate CombatState with per-creature defending players
+    // Populate CombatState with per-creature defending players and attack targets
     let combat = state.combat.get_or_insert_with(CombatState::default);
     combat.attackers = attacks
         .iter()
         .map(|(object_id, target)| {
             let defending_player = match target {
                 AttackTarget::Player(pid) => *pid,
-                AttackTarget::Planeswalker(pw_id) => state
+                AttackTarget::Planeswalker(pw_id) | AttackTarget::Battle(pw_id) => state
                     .objects
                     .get(pw_id)
                     .map(|pw| pw.controller)
                     .unwrap_or(PlayerId(0)),
             };
-            AttackerInfo::new(*object_id, defending_player)
+            AttackerInfo::new(*object_id, target.clone(), defending_player)
         })
         .collect();
     state.players_attacked_this_step = combat
@@ -713,6 +782,7 @@ pub fn declare_attackers(
     events.push(GameEvent::AttackersDeclared {
         attacker_ids: attacker_ids.clone(),
         defending_player,
+        attacks: attacks.to_vec(),
     });
 
     // Emit Firebend events for each attacking creature with firebending.
@@ -1284,7 +1354,7 @@ mod tests {
         let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
 
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker, PlayerId(1))],
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
             ..Default::default()
         });
 
@@ -1646,8 +1716,8 @@ mod tests {
 
         state.combat = Some(CombatState {
             attackers: vec![
-                AttackerInfo::new(attacker1, PlayerId(1)),
-                AttackerInfo::new(attacker2, PlayerId(1)),
+                AttackerInfo::attacking_player(attacker1, PlayerId(1)),
+                AttackerInfo::attacking_player(attacker2, PlayerId(1)),
             ],
             ..Default::default()
         });
@@ -1678,9 +1748,9 @@ mod tests {
 
         state.combat = Some(CombatState {
             attackers: vec![
-                AttackerInfo::new(attacker1, PlayerId(1)),
-                AttackerInfo::new(attacker2, PlayerId(1)),
-                AttackerInfo::new(attacker3, PlayerId(1)),
+                AttackerInfo::attacking_player(attacker1, PlayerId(1)),
+                AttackerInfo::attacking_player(attacker2, PlayerId(1)),
+                AttackerInfo::attacking_player(attacker3, PlayerId(1)),
             ],
             ..Default::default()
         });
@@ -1719,9 +1789,9 @@ mod tests {
 
         state.combat = Some(CombatState {
             attackers: vec![
-                AttackerInfo::new(attacker1, PlayerId(1)),
-                AttackerInfo::new(attacker2, PlayerId(1)),
-                AttackerInfo::new(attacker3, PlayerId(1)),
+                AttackerInfo::attacking_player(attacker1, PlayerId(1)),
+                AttackerInfo::attacking_player(attacker2, PlayerId(1)),
+                AttackerInfo::attacking_player(attacker3, PlayerId(1)),
             ],
             ..Default::default()
         });
@@ -1747,8 +1817,8 @@ mod tests {
 
         state.combat = Some(CombatState {
             attackers: vec![
-                AttackerInfo::new(attacker1, PlayerId(1)),
-                AttackerInfo::new(attacker2, PlayerId(1)),
+                AttackerInfo::attacking_player(attacker1, PlayerId(1)),
+                AttackerInfo::attacking_player(attacker2, PlayerId(1)),
             ],
             ..Default::default()
         });
@@ -1764,7 +1834,7 @@ mod tests {
         let blocker = create_creature(&mut state, PlayerId(1), "Wall", 0, 4);
 
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker, PlayerId(1))],
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
             ..Default::default()
         });
 
@@ -1836,7 +1906,7 @@ mod tests {
         let blocker = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
 
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker, PlayerId(1))],
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
             ..Default::default()
         });
 
@@ -1858,7 +1928,7 @@ mod tests {
         state.objects.get_mut(&blocker).unwrap().tapped = true;
 
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker, PlayerId(1))],
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
             ..Default::default()
         });
 
@@ -1884,7 +1954,7 @@ mod tests {
         let _ground = create_creature(&mut state, PlayerId(1), "Bear", 2, 2);
 
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker, PlayerId(1))],
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
             ..Default::default()
         });
 
@@ -1909,7 +1979,7 @@ mod tests {
         let blocker2 = create_creature(&mut state, PlayerId(1), "Bear2", 2, 2);
 
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker, PlayerId(1))],
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
             ..Default::default()
         });
 
@@ -1932,8 +2002,8 @@ mod tests {
 
         state.combat = Some(CombatState {
             attackers: vec![
-                AttackerInfo::new(attacker1, PlayerId(1)),
-                AttackerInfo::new(attacker2, PlayerId(1)),
+                AttackerInfo::attacking_player(attacker1, PlayerId(1)),
+                AttackerInfo::attacking_player(attacker2, PlayerId(1)),
             ],
             ..Default::default()
         });
@@ -1962,7 +2032,7 @@ mod tests {
             .push(StaticDefinition::new(StaticMode::MustBlock));
 
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker, PlayerId(1))],
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
             ..Default::default()
         });
 
@@ -1987,7 +2057,7 @@ mod tests {
         state.objects.get_mut(&blocker).unwrap().tapped = true;
 
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker, PlayerId(1))],
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
             ..Default::default()
         });
 
@@ -2016,7 +2086,7 @@ mod tests {
             .push(StaticDefinition::new(StaticMode::MustBlock));
 
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker, PlayerId(1))],
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
             ..Default::default()
         });
 

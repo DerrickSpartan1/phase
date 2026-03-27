@@ -6,7 +6,7 @@ use super::ability::{EffectKind, TargetRef};
 use super::identifiers::{CardId, ObjectId};
 use super::mana::ManaType;
 use super::phase::Phase;
-use super::player::PlayerId;
+use super::player::{PlayerCounterKind, PlayerId};
 use super::zones::Zone;
 
 /// Avatar crossover: The four elemental bending types, tracked per-turn on each player.
@@ -147,6 +147,9 @@ pub enum GameEvent {
     AttackersDeclared {
         attacker_ids: Vec<ObjectId>,
         defending_player: PlayerId,
+        /// Per-attacker targets — parallel to attacker_ids, same length and order.
+        #[serde(default)]
+        attacks: Vec<(ObjectId, crate::game::combat::AttackTarget)>,
     },
     BlockersDeclared {
         assignments: Vec<(ObjectId, ObjectId)>,
@@ -267,7 +270,7 @@ pub enum GameEvent {
     /// CR 122.1: A player counter (poison, experience, rad, ticket, etc.) changed.
     PlayerCounterChanged {
         player: PlayerId,
-        counter_kind: String,
+        counter_kind: PlayerCounterKind,
         delta: i32,
     },
     /// CR 700.14: Mana was spent on a spell cast, updating the cumulative total this turn.

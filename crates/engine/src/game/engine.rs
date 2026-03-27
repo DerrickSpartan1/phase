@@ -1,6 +1,7 @@
 use rand::Rng;
 use thiserror::Error;
 
+use crate::game::combat::{AttackTarget, DamageAssignment, DamageTarget};
 use crate::game::filter;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ChoiceType, ChoiceValue, ChosenAttribute, Effect,
@@ -2743,7 +2744,8 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 total_damage,
                 blockers,
                 has_trample,
-                defending_player,
+                defending_player: _,
+                attack_target,
             },
             GameAction::AssignCombatDamage {
                 assignments,
@@ -2753,7 +2755,6 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             let p = *player;
             let aid = *attacker_id;
             let total = *total_damage;
-            let dp = *defending_player;
             let trample = *has_trample;
 
             // CR 510.1c: Validate total equals attacker's power.
@@ -2803,7 +2804,6 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             }
 
             // Store assignments in pending_damage and advance the damage step index.
-            use crate::game::combat::{DamageAssignment, DamageTarget};
             if let Some(combat) = &mut state.combat {
                 for (blocker_id, amount) in &assignments {
                     if *amount > 0 {
@@ -2816,14 +2816,29 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                         ));
                     }
                 }
+                // CR 702.19f: Trample excess goes to the attack target, not always the player.
+                // CR 506.4c: If PW/battle left the battlefield, no trample excess.
                 if trample_damage > 0 {
-                    combat.pending_damage.push((
-                        aid,
-                        DamageAssignment {
-                            target: DamageTarget::Player(dp),
-                            amount: trample_damage,
-                        },
-                    ));
+                    let excess_target = match attack_target {
+                        AttackTarget::Player(pid) => Some(DamageTarget::Player(*pid)),
+                        AttackTarget::Planeswalker(pw_id) | AttackTarget::Battle(pw_id) => {
+                            match state.objects.get(pw_id) {
+                                Some(obj) if obj.zone == Zone::Battlefield => {
+                                    Some(DamageTarget::Object(*pw_id))
+                                }
+                                _ => None,
+                            }
+                        }
+                    };
+                    if let Some(target) = excess_target {
+                        combat.pending_damage.push((
+                            aid,
+                            DamageAssignment {
+                                target,
+                                amount: trample_damage,
+                            },
+                        ));
+                    }
                 }
                 // Advance past this attacker so resolve_combat_damage continues from next.
                 combat.damage_step_index = Some(combat.damage_step_index.unwrap_or(0) + 1);

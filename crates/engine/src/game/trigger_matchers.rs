@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
+#[cfg(test)]
+use crate::types::ability::FilterProp;
 use crate::types::ability::{
-    ControllerRef, DamageKindFilter, EffectKind, FilterProp, TargetFilter, TargetRef,
-    TriggerDefinition, TypedFilter,
+    ControllerRef, DamageKindFilter, EffectKind, TargetFilter, TargetRef, TriggerDefinition,
+    TypedFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, StackEntryKind};
@@ -316,153 +318,32 @@ pub(super) fn target_filter_matches_object(
     filter: &TargetFilter,
     source_id: ObjectId,
 ) -> bool {
-    let obj = match state.objects.get(&object_id) {
-        Some(o) => o,
-        None => return false,
-    };
-
     match filter {
         TargetFilter::None => false,
-        TargetFilter::Any => true,
-        TargetFilter::Player => false, // Players are not objects
+        TargetFilter::Player => false,
         TargetFilter::Controller => false,
-        TargetFilter::SelfRef => object_id == source_id,
-        TargetFilter::Typed(TypedFilter {
-            type_filters,
-            controller,
-            properties,
-        }) => {
-            // Check type filters (all must match — conjunction)
-            for tf in type_filters {
-                if !crate::game::filter::type_filter_matches(tf, obj) {
-                    return false;
-                }
-            }
-            // Check controller
-            if let Some(ctrl_ref) = controller {
-                let source_controller = state.objects.get(&source_id).map(|o| o.controller);
-                match ctrl_ref {
-                    ControllerRef::You => {
-                        if source_controller != Some(obj.controller) {
-                            return false;
-                        }
-                    }
-                    ControllerRef::Opponent => {
-                        if source_controller == Some(obj.controller) {
-                            return false;
-                        }
-                    }
-                }
-            }
-            // Check properties
-            for prop in properties {
-                match prop {
-                    FilterProp::Token => {
-                        // Token check not yet tracked on GameObject
-                    }
-                    FilterProp::Attacking => {
-                        // Would need combat state check
-                    }
-                    FilterProp::Tapped if !obj.tapped => {
-                        return false;
-                    }
-                    FilterProp::WithKeyword { value }
-                        if !obj.keywords.iter().any(|k| format!("{:?}", k) == *value) =>
-                    {
-                        return false;
-                    }
-                    FilterProp::Another if object_id == source_id => {
-                        return false;
-                    }
-                    FilterProp::HasColor { color } => {
-                        use crate::types::mana::ManaColor;
-                        let mana_color = match color.as_str() {
-                            "White" => Some(ManaColor::White),
-                            "Blue" => Some(ManaColor::Blue),
-                            "Black" => Some(ManaColor::Black),
-                            "Red" => Some(ManaColor::Red),
-                            "Green" => Some(ManaColor::Green),
-                            _ => None,
-                        };
-                        if let Some(mc) = mana_color {
-                            if !obj.color.contains(&mc) {
-                                return false;
-                            }
-                        }
-                    }
-                    FilterProp::PowerLE { value } if obj.power.unwrap_or(0) > *value => {
-                        return false;
-                    }
-                    FilterProp::PowerGE { value } if obj.power.unwrap_or(0) < *value => {
-                        return false;
-                    }
-                    FilterProp::Multicolored if obj.color.len() <= 1 => {
-                        return false;
-                    }
-                    FilterProp::IsChosenCreatureType => {
-                        let chosen = state
-                            .objects
-                            .get(&source_id)
-                            .and_then(|src| src.chosen_creature_type());
-                        match chosen {
-                            Some(ct) => {
-                                if !obj
-                                    .card_types
-                                    .subtypes
-                                    .iter()
-                                    .any(|s| s.eq_ignore_ascii_case(ct))
-                                {
-                                    return false;
-                                }
-                            }
-                            None => return false,
-                        }
-                    }
-                    _ => {
-                        // Other filter props: pass through for now
-                    }
-                }
-            }
-            true
-        }
-        TargetFilter::Not { filter: inner } => {
-            !target_filter_matches_object(state, object_id, inner, source_id)
-        }
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|f| target_filter_matches_object(state, object_id, f, source_id)),
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|f| target_filter_matches_object(state, object_id, f, source_id)),
-        // StackAbility/StackSpell targeting is handled directly at call sites, not via object matching
-        TargetFilter::StackAbility | TargetFilter::StackSpell => false,
-        TargetFilter::SpecificObject { id: target_id } => object_id == *target_id,
-        TargetFilter::AttachedTo => {
-            // The trigger source must have attached_to pointing at this object.
-            state
-                .objects
-                .get(&source_id)
-                .and_then(|src| src.attached_to)
-                .is_some_and(|attached| attached == object_id)
-        }
-        TargetFilter::LastCreated => state.last_created_token_ids.contains(&object_id),
-        // CR 603.7: Match objects in a tracked set from the originating effect.
-        TargetFilter::TrackedSet { id } => state
-            .tracked_object_sets
-            .get(id)
-            .is_some_and(|set| set.contains(&object_id)),
-        // CR 610.3: Delegate to shared filter logic for exile-until-leaves links.
-        TargetFilter::ExiledBySource => {
-            super::filter::matches_target_filter(state, object_id, filter, source_id)
-        }
-        // CR 603.7c / CR 506.3d: Event-context references resolve to players, not objects.
         TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
-        | TargetFilter::DefendingPlayer => false,
-        // ParentTarget/ParentTargetController resolve at resolution time, not during matching.
-        TargetFilter::ParentTarget | TargetFilter::ParentTargetController => false,
+        | TargetFilter::DefendingPlayer
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetController
+        | TargetFilter::StackAbility
+        | TargetFilter::StackSpell => false,
+        TargetFilter::Any
+        | TargetFilter::SelfRef
+        | TargetFilter::Typed(_)
+        | TargetFilter::Not { .. }
+        | TargetFilter::Or { .. }
+        | TargetFilter::And { .. }
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource => {
+            super::filter::matches_target_filter(state, object_id, filter, source_id)
+        }
     }
 }
 
@@ -1557,11 +1438,7 @@ pub(super) fn match_you_attack(
     source_id: ObjectId,
     state: &GameState,
 ) -> bool {
-    if let GameEvent::AttackersDeclared {
-        attacker_ids,
-        defending_player: _,
-    } = event
-    {
+    if let GameEvent::AttackersDeclared { attacker_ids, .. } = event {
         if attacker_ids.is_empty() {
             return false;
         }
@@ -2100,7 +1977,7 @@ mod tests {
 
         // Set up combat state with our attacker
         state.combat = Some(crate::game::combat::CombatState {
-            attackers: vec![crate::game::combat::AttackerInfo::new(
+            attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
                 attacker,
                 PlayerId(1),
             )],

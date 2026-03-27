@@ -10,11 +10,12 @@ use super::ability::{
     ContinuousModification, DelayedTriggerCondition, Duration, GameRestriction, ModalChoice,
     ResolvedAbility, StaticCondition, TargetFilter, TargetRef, TriggerCondition, UnlessCost,
 };
-use super::card_type::CoreType;
+use super::card_type::{CoreType, Supertype};
 use super::events::GameEvent;
 use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId, TrackedSetId};
-use super::mana::ManaCost;
+use super::keywords::Keyword;
+use super::mana::{ManaColor, ManaCost};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
 use super::player::{Player, PlayerId};
@@ -124,6 +125,17 @@ pub struct LKISnapshot {
     /// Used by `TriggerCondition::WasType` for "if it was a creature" patterns.
     #[serde(default)]
     pub card_types: Vec<CoreType>,
+}
+
+/// Snapshot of a spell's characteristics at cast time for per-turn history queries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct SpellCastRecord {
+    pub core_types: Vec<CoreType>,
+    pub supertypes: Vec<Supertype>,
+    pub subtypes: Vec<String>,
+    pub keywords: Vec<Keyword>,
+    pub colors: Vec<ManaColor>,
+    pub mana_value: u32,
 }
 
 /// CR 607.2a + CR 406.6: Tracks the link between an exiling source and the exiled card.
@@ -624,6 +636,8 @@ pub enum WaitingFor {
         blockers: Vec<DamageSlot>,
         has_trample: bool,
         defending_player: PlayerId,
+        #[serde(default = "crate::game::combat::default_attack_target")]
+        attack_target: crate::game::combat::AttackTarget,
     },
     /// CR 601.2d: Distribute N among targets at casting time ("divide N damage among").
     /// Infrastructure ready: handler in engine.rs, AI candidates, continuation match.
@@ -1033,11 +1047,11 @@ pub struct GameState {
     pub graveyard_cast_permissions_used: HashSet<ObjectId>,
     #[serde(default)]
     pub spells_cast_this_game: HashMap<PlayerId, u32>,
-    /// Per-player spell cast history this turn. Each entry records the CoreTypes
-    /// of the spell at cast time, enabling filtered counting at resolution.
-    /// CR 117.1: Replaces per-type counters with a general-purpose spell history.
+    /// Per-player spell cast history this turn.
+    /// Each entry records the spell's relevant characteristics at cast time,
+    /// enabling data-driven filtered counting at resolution.
     #[serde(default)]
-    pub spells_cast_this_turn_by_player: HashMap<PlayerId, Vec<Vec<CoreType>>>,
+    pub spells_cast_this_turn_by_player: HashMap<PlayerId, Vec<SpellCastRecord>>,
     #[serde(default)]
     pub players_who_searched_library_this_turn: HashSet<PlayerId>,
     #[serde(default)]

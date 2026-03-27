@@ -80,7 +80,7 @@ fn scenario_blocks_lethal_attack_when_a_block_exists() {
         state.phase = Phase::DeclareBlockers;
         state.active_player = P1;
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker, P0)],
+            attackers: vec![AttackerInfo::attacking_player(attacker, P0)],
             ..Default::default()
         });
         state.waiting_for = WaitingFor::DeclareBlockers {

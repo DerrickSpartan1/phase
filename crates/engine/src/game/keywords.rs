@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use crate::game::combat::AttackerInfo;
+use crate::game::combat::{AttackTarget, AttackerInfo};
 use crate::game::game_object::GameObject;
 use crate::game::players;
 use crate::game::zones;
@@ -202,7 +202,7 @@ pub fn activate_ninjutsu(
     let combat = state.combat.as_ref().ok_or("No active combat")?;
 
     // Validate the creature to return based on variant
-    let defending_player = match variant {
+    let (defending_player, attack_target) = match variant {
         NinjutsuVariant::Ninjutsu | NinjutsuVariant::CommanderNinjutsu | NinjutsuVariant::Sneak => {
             // Must be an unblocked attacker
             let attacker_info = combat
@@ -220,7 +220,7 @@ pub fn activate_ninjutsu(
                 return Err("Attacker is blocked".to_string());
             }
 
-            attacker_info.defending_player
+            (attacker_info.defending_player, attacker_info.attack_target)
         }
         NinjutsuVariant::WebSlinging => {
             // Must be a tapped creature controlled by player
@@ -243,20 +243,21 @@ pub fn activate_ninjutsu(
                 return Err("WebSlinging requires a creature".to_string());
             }
 
-            // If the tapped creature is an attacker, use its defending player;
+            // If the tapped creature is an attacker, inherit its attack target;
             // otherwise use the opponent of the active player
             combat
                 .attackers
                 .iter()
                 .find(|a| a.object_id == creature_to_return)
-                .map(|a| a.defending_player)
+                .map(|a| (a.defending_player, a.attack_target.clone()))
                 .unwrap_or_else(|| {
                     // CR 702.49c + CR 508.4: Ninjutsu enters attacking same defender;
                     // fallback to first opponent in seat order (multiplayer-aware).
-                    players::opponents(state, player)
+                    let pid = players::opponents(state, player)
                         .first()
                         .copied()
-                        .unwrap_or(player)
+                        .unwrap_or(player);
+                    (pid, AttackTarget::Player(pid))
                 })
         }
     };
@@ -311,9 +312,11 @@ pub fn activate_ninjutsu(
     // 4. CR 702.49c: Add to combat.attackers directly — do NOT use declare_attackers()
     //    This ensures no AttackersDeclared event fires, so no "whenever ~ attacks" triggers.
     if let Some(combat) = state.combat.as_mut() {
-        combat
-            .attackers
-            .push(AttackerInfo::new(ninjutsu_obj_id, defending_player));
+        combat.attackers.push(AttackerInfo::new(
+            ninjutsu_obj_id,
+            attack_target,
+            defending_player,
+        ));
     }
 
     state.layers_dirty = true;
@@ -589,7 +592,7 @@ mod tests {
 
         // Set up combat state with attacker unblocked
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker_id, PlayerId(1))],
+            attackers: vec![AttackerInfo::attacking_player(attacker_id, PlayerId(1))],
             ..Default::default()
         });
 

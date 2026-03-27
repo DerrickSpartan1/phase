@@ -109,18 +109,18 @@ export function groupAttackersByTarget(
   return groups;
 }
 
-/** Get attacker IDs targeting a specific defending player. */
+/** Get attacker IDs directly targeting a specific defending player (not their planeswalkers/battles). */
 export function getAttackersTargeting(
   combat: CombatState | null,
   defendingPlayer: PlayerId,
 ): ObjectId[] {
   if (!combat) return [];
   return combat.attackers
-    .filter((a) => a.defending_player === defendingPlayer)
+    .filter((a) => a.attack_target.type === "Player" && a.attack_target.data === defendingPlayer)
     .map((a) => a.object_id);
 }
 
-/** Check if an attacker is targeting the given defending player. */
+/** Check if an attacker is directly targeting the given defending player (not their planeswalkers/battles). */
 export function isAttackerTargetingPlayer(
   combat: CombatState | null,
   attackerId: ObjectId,
@@ -128,6 +128,8 @@ export function isAttackerTargetingPlayer(
 ): boolean {
   if (!combat) return false;
   return combat.attackers.some(
-    (a) => a.object_id === attackerId && a.defending_player === defendingPlayer,
+    (a) => a.object_id === attackerId
+      && a.attack_target.type === "Player"
+      && a.attack_target.data === defendingPlayer,
   );
 }

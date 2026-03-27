@@ -345,6 +345,7 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
         GameEvent::AttackersDeclared {
             attacker_ids,
             defending_player,
+            ..
         } => {
             let mut segs = vec![
                 player_seg(state, *defending_player),

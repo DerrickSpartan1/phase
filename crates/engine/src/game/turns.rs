@@ -1039,7 +1039,7 @@ mod tests {
         }
 
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker_id, PlayerId(1))],
+            attackers: vec![AttackerInfo::attacking_player(attacker_id, PlayerId(1))],
             ..Default::default()
         });
 

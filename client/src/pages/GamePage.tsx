@@ -15,6 +15,7 @@ import { useAudioContext } from "../audio/useAudioContext.ts";
 import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
+import { AttackTargetLines } from "../components/board/AttackTargetLines.tsx";
 import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
 import { CardImage } from "../components/card/CardImage.tsx";
@@ -821,9 +822,9 @@ function GamePageContent({
       <AnimationOverlay containerRef={containerRef} />
       <TurnBanner />
 
-      {/* Block assignment lines (animated SVG overlay for combat) */}
+      {/* Combat SVG overlays: blocker assignments + attack target arrows */}
       <BlockAssignmentLines />
-
+      <AttackTargetLines />
 
       {/* Card preview overlay */}
       <CardPreview cardName={inspectedCardName} backFaceName={inspectedOtherFaceName} />

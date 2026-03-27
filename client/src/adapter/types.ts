@@ -52,7 +52,8 @@ export interface DeckPoolEntry {
 
 export type AttackTarget =
   | { type: "Player"; data: PlayerId }
-  | { type: "Planeswalker"; data: ObjectId };
+  | { type: "Planeswalker"; data: ObjectId }
+  | { type: "Battle"; data: ObjectId };
 
 // ── Commander Damage ────────────────────────────────────────────────────
 
@@ -274,6 +275,7 @@ export type TargetRef =
 export interface AttackerInfo {
   object_id: ObjectId;
   defending_player: PlayerId;
+  attack_target: AttackTarget;
 }
 
 export type DamageTarget =
@@ -408,7 +410,7 @@ export type WaitingFor =
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId } }
   | { type: "CompanionReveal"; data: { player: PlayerId; eligible_companions: [string, number][] } }
   | { type: "ChooseLegend"; data: { player: PlayerId; legend_name: string; candidates: ObjectId[] } }
-  | { type: "AssignCombatDamage"; data: { player: PlayerId; attacker_id: ObjectId; total_damage: number; blockers: { blocker_id: ObjectId; lethal_minimum: number }[]; has_trample: boolean; defending_player: PlayerId } }
+  | { type: "AssignCombatDamage"; data: { player: PlayerId; attacker_id: ObjectId; total_damage: number; blockers: { blocker_id: ObjectId; lethal_minimum: number }[]; has_trample: boolean; defending_player: PlayerId; attack_target: AttackTarget } }
   | { type: "DistributeAmong"; data: { player: PlayerId; total: number; targets: TargetRef[]; unit: DistributionUnit } }
   | { type: "ChooseFromZoneChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; source_id: ObjectId } }
   | { type: "RetargetChoice"; data: { player: PlayerId; stack_entry_index: number; scope: RetargetScope; current_targets: TargetRef[]; legal_new_targets: TargetRef[] } }
@@ -538,7 +540,7 @@ export type GameEvent =
   | { type: "CreatureDestroyed"; data: { object_id: ObjectId } }
   | { type: "PermanentSacrificed"; data: { object_id: ObjectId; player_id: PlayerId } }
   | { type: "EffectResolved"; data: { kind: string; source_id: ObjectId } }
-  | { type: "AttackersDeclared"; data: { attacker_ids: ObjectId[]; defending_player: PlayerId } }
+  | { type: "AttackersDeclared"; data: { attacker_ids: ObjectId[]; defending_player: PlayerId; attacks?: [ObjectId, AttackTarget][] } }
   | { type: "BlockersDeclared"; data: { assignments: [ObjectId, ObjectId][] } }
   | { type: "BecomesTarget"; data: { object_id: ObjectId; source_id: ObjectId } }
   | { type: "ReplacementApplied"; data: { source_id: ObjectId; event_type: string } }

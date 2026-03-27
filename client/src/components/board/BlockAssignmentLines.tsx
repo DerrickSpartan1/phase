@@ -1,18 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { createPortal } from "react-dom";
 
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { useRafPositions } from "../../hooks/useRafPositions.ts";
 import type { ObjectId } from "../../adapter/types.ts";
 import { isAttackerTargetingPlayer } from "../../viewmodel/battlefieldProps.ts";
-
-interface LinePosition {
-  from: { x: number; y: number };
-  to: { x: number; y: number };
-  length: number;
-}
 
 export function BlockAssignmentLines() {
   const blockerAssignments = useUiStore((s) => s.blockerAssignments);
@@ -92,87 +87,6 @@ function useMergedPairs(
     }
     return merged;
   }, [uiAssignments, engineAssignments]);
-}
-
-/** RAF polling for element positions -- stabilizes after 10 unchanged frames. */
-function useRafPositions(pairs: Map<ObjectId, ObjectId>): Map<ObjectId, LinePosition> {
-  const [positions, setPositions] = useState<Map<ObjectId, LinePosition>>(new Map());
-  const prevRectsRef = useRef<Map<string, DOMRect>>(new Map());
-  const stableCountRef = useRef(0);
-
-  useEffect(() => {
-    if (pairs.size === 0) {
-      setPositions(new Map());
-      return;
-    }
-
-    stableCountRef.current = 0;
-    prevRectsRef.current = new Map();
-    let rafId: number;
-
-    function poll() {
-      const currentRects = new Map<string, DOMRect>();
-      let changed = false;
-
-      for (const [blockerId, attackerId] of pairs) {
-        for (const id of [blockerId, attackerId]) {
-          const key = String(id);
-          if (currentRects.has(key)) continue;
-          const el = document.querySelector(`[data-object-id="${id}"]`);
-          if (!el) continue;
-          const rect = el.getBoundingClientRect();
-          currentRects.set(key, rect);
-          const prev = prevRectsRef.current.get(key);
-          if (
-            !prev ||
-            Math.abs(prev.left - rect.left) > 0.5 ||
-            Math.abs(prev.top - rect.top) > 0.5 ||
-            Math.abs(prev.width - rect.width) > 0.5
-          ) {
-            changed = true;
-          }
-        }
-      }
-
-      if (changed) {
-        stableCountRef.current = 0;
-      } else {
-        stableCountRef.current++;
-      }
-
-      prevRectsRef.current = currentRects;
-
-      // Update positions on each frame until stable
-      const next = new Map<ObjectId, LinePosition>();
-      for (const [blockerId, attackerId] of pairs) {
-        const blockerRect = currentRects.get(String(blockerId));
-        const attackerRect = currentRects.get(String(attackerId));
-        if (!blockerRect || !attackerRect) continue;
-        const from = {
-          x: blockerRect.left + blockerRect.width / 2,
-          y: blockerRect.top + blockerRect.height / 2,
-        };
-        const to = {
-          x: attackerRect.left + attackerRect.width / 2,
-          y: attackerRect.top + attackerRect.height / 2,
-        };
-        const dx = to.x - from.x;
-        const dy = to.y - from.y;
-        next.set(blockerId, { from, to, length: Math.sqrt(dx * dx + dy * dy) });
-      }
-      setPositions(next);
-
-      // Stop polling after 10 stable frames
-      if (stableCountRef.current < 10) {
-        rafId = requestAnimationFrame(poll);
-      }
-    }
-
-    rafId = requestAnimationFrame(poll);
-    return () => cancelAnimationFrame(rafId);
-  }, [pairs]);
-
-  return positions;
 }
 
 /** Animated dot that pulses from blocker to attacker. */

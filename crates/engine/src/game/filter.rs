@@ -9,10 +9,11 @@ use crate::game::combat;
 use crate::game::game_object::{parse_counter_type, GameObject};
 use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{
-    ControllerRef, FilterProp, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    ControllerRef, FilterProp, QuantityExpr, SharedQuality, TargetFilter, TargetRef, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::CoreType;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, SpellCastRecord};
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
@@ -184,6 +185,165 @@ pub fn type_filter_matches(tf: &TypeFilter, obj: &GameObject) -> bool {
     }
 }
 
+/// Check whether a spell-cast history record matches a target filter.
+///
+/// Evaluates the subset of `TargetFilter` that is meaningful for spell snapshots.
+/// Variants that only make sense for on-battlefield objects (e.g. `AttachedTo`,
+/// `SpecificObject`) explicitly return `false` — no catch-all fall-through.
+#[allow(clippy::only_used_in_recursion)] // controller is checked in Typed branch for Opponent
+pub fn spell_record_matches_filter(
+    record: &SpellCastRecord,
+    filter: &TargetFilter,
+    controller: PlayerId,
+) -> bool {
+    match filter {
+        TargetFilter::Any => true,
+        TargetFilter::Typed(TypedFilter {
+            type_filters,
+            controller: filter_controller,
+            properties,
+        }) => {
+            // Spell history is already per-player, so ControllerRef::You is always
+            // satisfied when we're checking spells from that player's history.
+            if let Some(ctrl) = filter_controller {
+                match ctrl {
+                    ControllerRef::You => {}
+                    ControllerRef::Opponent => return false,
+                }
+            }
+
+            type_filters
+                .iter()
+                .all(|type_filter| spell_record_matches_type_filter(record, type_filter))
+                && properties
+                    .iter()
+                    .all(|prop| spell_record_matches_property(record, prop))
+        }
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|inner| spell_record_matches_filter(record, inner, controller)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|inner| spell_record_matches_filter(record, inner, controller)),
+        TargetFilter::Not { filter: inner } => {
+            !spell_record_matches_filter(record, inner, controller)
+        }
+        // All remaining variants are inapplicable to spell snapshots.
+        TargetFilter::None
+        | TargetFilter::Player
+        | TargetFilter::Controller
+        | TargetFilter::SelfRef
+        | TargetFilter::StackAbility
+        | TargetFilter::StackSpell
+        | TargetFilter::SpecificObject { .. }
+        | TargetFilter::AttachedTo
+        | TargetFilter::LastCreated
+        | TargetFilter::TrackedSet { .. }
+        | TargetFilter::ExiledBySource
+        | TargetFilter::TriggeringSpellController
+        | TargetFilter::TriggeringSpellOwner
+        | TargetFilter::TriggeringPlayer
+        | TargetFilter::TriggeringSource
+        | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetController
+        | TargetFilter::DefendingPlayer => false,
+    }
+}
+
+fn spell_record_matches_type_filter(record: &SpellCastRecord, filter: &TypeFilter) -> bool {
+    match filter {
+        TypeFilter::Creature => record.core_types.contains(&CoreType::Creature),
+        TypeFilter::Land => record.core_types.contains(&CoreType::Land),
+        TypeFilter::Artifact => record.core_types.contains(&CoreType::Artifact),
+        TypeFilter::Enchantment => record.core_types.contains(&CoreType::Enchantment),
+        TypeFilter::Instant => record.core_types.contains(&CoreType::Instant),
+        TypeFilter::Sorcery => record.core_types.contains(&CoreType::Sorcery),
+        TypeFilter::Planeswalker => record.core_types.contains(&CoreType::Planeswalker),
+        TypeFilter::Battle => record.core_types.contains(&CoreType::Battle),
+        TypeFilter::Permanent => {
+            record.core_types.contains(&CoreType::Creature)
+                || record.core_types.contains(&CoreType::Artifact)
+                || record.core_types.contains(&CoreType::Enchantment)
+                || record.core_types.contains(&CoreType::Land)
+                || record.core_types.contains(&CoreType::Planeswalker)
+                || record.core_types.contains(&CoreType::Battle)
+        }
+        TypeFilter::Card | TypeFilter::Any => true,
+        TypeFilter::Non(inner) => !spell_record_matches_type_filter(record, inner),
+        TypeFilter::Subtype(subtype) => record
+            .subtypes
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(subtype)),
+        TypeFilter::AnyOf(filters) => filters
+            .iter()
+            .any(|inner| spell_record_matches_type_filter(record, inner)),
+    }
+}
+
+fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::WithKeyword { value } => record.keywords.iter().any(|k| k == value),
+        FilterProp::HasColor { color } => record.colors.contains(color),
+        FilterProp::NotColor { color } => !record.colors.contains(color),
+        FilterProp::HasSupertype { value } => record.supertypes.contains(value),
+        FilterProp::NotSupertype { value } => !record.supertypes.contains(value),
+        FilterProp::Multicolored => record.colors.len() > 1,
+        FilterProp::CmcGE { value } => match value {
+            QuantityExpr::Fixed { value } => record.mana_value as i32 >= *value,
+            _ => {
+                debug_assert!(false, "dynamic QuantityExpr in spell record CmcGE filter — parser should only produce Fixed values here");
+                false
+            }
+        },
+        FilterProp::CmcLE { value } => match value {
+            QuantityExpr::Fixed { value } => (record.mana_value as i32) <= *value,
+            _ => {
+                debug_assert!(false, "dynamic QuantityExpr in spell record CmcLE filter — parser should only produce Fixed values here");
+                false
+            }
+        },
+        FilterProp::CmcEQ { value } => match value {
+            QuantityExpr::Fixed { value } => record.mana_value as i32 == *value,
+            _ => {
+                debug_assert!(false, "dynamic QuantityExpr in spell record CmcEQ filter — parser should only produce Fixed values here");
+                false
+            }
+        },
+        // All remaining props require on-battlefield or stack state unavailable from a snapshot.
+        FilterProp::Token
+        | FilterProp::Attacking
+        | FilterProp::Unblocked
+        | FilterProp::Tapped
+        | FilterProp::Untapped
+        | FilterProp::CountersGE { .. }
+        | FilterProp::InZone { .. }
+        | FilterProp::Owned { .. }
+        | FilterProp::EnchantedBy
+        | FilterProp::EquippedBy
+        | FilterProp::Another
+        | FilterProp::PowerLE { .. }
+        | FilterProp::PowerGE { .. }
+        | FilterProp::IsChosenCreatureType
+        | FilterProp::HasSingleTarget
+        | FilterProp::Suspected
+        | FilterProp::ToughnessGTPower
+        | FilterProp::DifferentNameFrom { .. }
+        | FilterProp::InAnyZone { .. }
+        | FilterProp::SharesQuality { .. }
+        | FilterProp::WasDealtDamageThisTurn
+        | FilterProp::EnteredThisTurn
+        | FilterProp::AttackedThisTurn
+        | FilterProp::BlockedThisTurn
+        | FilterProp::AttackedOrBlockedThisTurn
+        | FilterProp::FaceDown
+        | FilterProp::TargetsOnly { .. }
+        | FilterProp::Targets { .. }
+        | FilterProp::Named { .. }
+        | FilterProp::SameName
+        | FilterProp::Other { .. } => false,
+    }
+}
+
 /// Context about the source of an ability, used during filter property evaluation.
 struct SourceContext<'a> {
     id: ObjectId,
@@ -218,14 +378,7 @@ fn matches_filter_prop(
         FilterProp::Tapped => obj.tapped,
         // CR 302.6 / CR 110.5: Untapped status as targeting qualifier.
         FilterProp::Untapped => !obj.tapped,
-        FilterProp::WithKeyword { value } => {
-            // Check if object has the keyword
-            let kw: Result<crate::types::keywords::Keyword, _> = value.parse();
-            match kw {
-                Ok(k) => obj.has_keyword(&k),
-                Err(_) => true, // Unknown keyword -- permissive
-            }
-        }
+        FilterProp::WithKeyword { value } => obj.has_keyword(value),
         FilterProp::CountersGE {
             counter_type,
             count,
@@ -273,53 +426,15 @@ fn matches_filter_prop(
         FilterProp::EnchantedBy => source.attached_to == Some(object_id),
         FilterProp::EquippedBy => source.attached_to == Some(object_id),
         FilterProp::Another => object_id != source.id,
-        FilterProp::HasColor { color } => {
-            let mana_color = match color.as_str() {
-                "White" => Some(ManaColor::White),
-                "Blue" => Some(ManaColor::Blue),
-                "Black" => Some(ManaColor::Black),
-                "Red" => Some(ManaColor::Red),
-                "Green" => Some(ManaColor::Green),
-                _ => None,
-            };
-            match mana_color {
-                Some(mc) => obj.color.contains(&mc),
-                None => true, // Unknown color — permissive
-            }
-        }
+        FilterProp::HasColor { color } => obj.color.contains(color),
         FilterProp::PowerLE { value } => obj.power.unwrap_or(0) <= *value,
         FilterProp::PowerGE { value } => obj.power.unwrap_or(0) >= *value,
         FilterProp::Multicolored => obj.color.len() > 1,
-        FilterProp::HasSupertype { value } => {
-            let st: Result<crate::types::card_type::Supertype, _> = value.parse();
-            match st {
-                Ok(supertype) => obj.card_types.supertypes.contains(&supertype),
-                Err(_) => true, // Unknown supertype — permissive
-            }
-        }
+        FilterProp::HasSupertype { value } => obj.card_types.supertypes.contains(value),
         // CR 205.4b: Object does NOT have this color.
-        FilterProp::NotColor { color } => {
-            let mana_color = match color.as_str() {
-                "White" => Some(ManaColor::White),
-                "Blue" => Some(ManaColor::Blue),
-                "Black" => Some(ManaColor::Black),
-                "Red" => Some(ManaColor::Red),
-                "Green" => Some(ManaColor::Green),
-                _ => None,
-            };
-            match mana_color {
-                Some(mc) => !obj.color.contains(&mc),
-                None => true, // Unknown color — permissive
-            }
-        }
+        FilterProp::NotColor { color } => !obj.color.contains(color),
         // CR 205.4a: Object does NOT have this supertype.
-        FilterProp::NotSupertype { value } => {
-            let st: Result<crate::types::card_type::Supertype, _> = value.parse();
-            match st {
-                Ok(supertype) => !obj.card_types.supertypes.contains(&supertype),
-                Err(_) => true, // Unknown supertype — permissive
-            }
-        }
+        FilterProp::NotSupertype { value } => !obj.card_types.supertypes.contains(value),
         FilterProp::IsChosenCreatureType => match source.chosen_creature_type {
             Some(chosen) => obj
                 .card_types
@@ -392,7 +507,11 @@ fn matches_filter_prop(
 /// For "creature type": all objects must share at least one creature subtype.
 /// For "color": all objects must share at least one color.
 /// For "card type": all objects must share at least one card type.
-pub fn validate_shares_quality(state: &GameState, targets: &[TargetRef], quality: &str) -> bool {
+pub fn validate_shares_quality(
+    state: &GameState,
+    targets: &[TargetRef],
+    quality: &SharedQuality,
+) -> bool {
     let obj_ids: Vec<ObjectId> = targets
         .iter()
         .filter_map(|t| match t {
@@ -407,7 +526,7 @@ pub fn validate_shares_quality(state: &GameState, targets: &[TargetRef], quality
     }
 
     match quality {
-        "creature type" | "creature types" => {
+        SharedQuality::CreatureType => {
             // Collect subtypes for each object, then intersect.
             let mut subtype_sets: Vec<HashSet<&str>> = Vec::new();
             for &id in &obj_ids {
@@ -426,7 +545,7 @@ pub fn validate_shares_quality(state: &GameState, targets: &[TargetRef], quality
             }
             !shared.is_empty()
         }
-        "color" => {
+        SharedQuality::Color => {
             // All objects must share at least one color.
             let mut color_sets: Vec<HashSet<&ManaColor>> = Vec::new();
             for &id in &obj_ids {
@@ -443,7 +562,7 @@ pub fn validate_shares_quality(state: &GameState, targets: &[TargetRef], quality
             }
             !shared.is_empty()
         }
-        "card type" => {
+        SharedQuality::CardType => {
             // All objects must share at least one core card type.
             let mut type_sets: Vec<HashSet<&CoreType>> = Vec::new();
             for &id in &obj_ids {
@@ -460,8 +579,6 @@ pub fn validate_shares_quality(state: &GameState, targets: &[TargetRef], quality
             }
             !shared.is_empty()
         }
-        // Unknown quality — permissive fallback.
-        _ => true,
     }
 }
 
@@ -564,8 +681,10 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{ControllerRef, FilterProp, TargetFilter};
-    use crate::types::card_type::CoreType;
+    use crate::types::card_type::{CoreType, Supertype};
     use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaColor;
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -658,6 +777,53 @@ mod tests {
 
         assert!(matches_target_filter(&state, mine, &filter, mine));
         assert!(!matches_target_filter(&state, theirs, &filter, mine));
+    }
+
+    #[test]
+    fn with_keyword_matches_case_insensitively() {
+        let mut state = setup();
+        let bird = add_creature(&mut state, PlayerId(0), "Bird");
+        state
+            .objects
+            .get_mut(&bird)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+
+        let filter = TargetFilter::Typed(TypedFilter::creature().properties(vec![
+            FilterProp::WithKeyword {
+                value: "flying".to_string(),
+            },
+        ]));
+        assert!(matches_target_filter(&state, bird, &filter, bird));
+    }
+
+    #[test]
+    fn spell_record_matches_qualified_filter() {
+        let record = SpellCastRecord {
+            core_types: vec![CoreType::Creature],
+            supertypes: vec![Supertype::Legendary],
+            subtypes: vec!["Bird".to_string()],
+            keywords: vec![Keyword::Flying],
+            colors: vec![ManaColor::Blue],
+            mana_value: 3,
+        };
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature()
+                .with_type(TypeFilter::Subtype("Bird".to_string()))
+                .properties(vec![
+                    FilterProp::WithKeyword {
+                        value: "flying".to_string(),
+                    },
+                    FilterProp::HasSupertype {
+                        value: "Legendary".to_string(),
+                    },
+                    FilterProp::HasColor {
+                        color: "Blue".to_string(),
+                    },
+                ]),
+        );
+        assert!(spell_record_matches_filter(&record, &filter, PlayerId(0)));
     }
 
     #[test]
@@ -931,7 +1097,7 @@ mod tests {
         let attacker = add_creature(&mut state, PlayerId(0), "Attacker");
         let bystander = add_creature(&mut state, PlayerId(0), "Bystander");
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker, PlayerId(1))],
+            attackers: vec![AttackerInfo::attacking_player(attacker, PlayerId(1))],
             ..CombatState::default()
         });
 

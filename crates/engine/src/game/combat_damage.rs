@@ -220,6 +220,7 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
                 blockers,
                 has_trample,
                 defending_player: attacker_info.defending_player,
+                attack_target: attacker_info.attack_target.clone(),
             });
         }
 
@@ -348,7 +349,6 @@ fn assign_attacker_damage(
     has_trample: bool,
 ) -> Vec<DamageAssignment> {
     let attacker_id = attacker_info.object_id;
-    let defending_player = attacker_info.defending_player;
 
     let blockers = combat
         .blocker_assignments
@@ -362,11 +362,15 @@ fn assign_attacker_damage(
             if attacker_info.blocked {
                 return Vec::new();
             }
-            // CR 510.1b: Unblocked creature assigns all combat damage to the player/planeswalker it's attacking.
-            vec![DamageAssignment {
-                target: DamageTarget::Player(defending_player),
-                amount: power,
-            }]
+            // CR 510.1b: Unblocked creature assigns damage to the player/planeswalker/battle it's attacking.
+            // CR 506.4c: If the planeswalker/battle left the battlefield, assign no damage.
+            match attacker_info.resolve_damage_target(state) {
+                Some(target) => vec![DamageAssignment {
+                    target,
+                    amount: power,
+                }],
+                None => Vec::new(),
+            }
         }
         Some(blockers) => {
             if blockers.len() == 1 {
@@ -379,11 +383,16 @@ fn assign_attacker_damage(
                         target: DamageTarget::Object(blockers[0]),
                         amount: to_blocker,
                     }];
+                    // CR 702.19f: Without "trample over planeswalkers", excess goes to the
+                    // attack target (player/PW/battle), not the controlling player.
+                    // TODO: CR 702.19c — "trample over planeswalkers" allows excess to spill to PW controller.
                     if excess > 0 {
-                        result.push(DamageAssignment {
-                            target: DamageTarget::Player(defending_player),
-                            amount: excess,
-                        });
+                        if let Some(target) = attacker_info.resolve_damage_target(state) {
+                            result.push(DamageAssignment {
+                                target,
+                                amount: excess,
+                            });
+                        }
                     }
                     result
                 } else {
@@ -570,7 +579,7 @@ mod tests {
         let mut combat = CombatState {
             attackers: attackers
                 .iter()
-                .map(|&id| AttackerInfo::new(id, PlayerId(1)))
+                .map(|&id| AttackerInfo::attacking_player(id, PlayerId(1)))
                 .collect(),
             ..Default::default()
         };
@@ -1266,5 +1275,140 @@ mod tests {
 
         // Defending player took 2 from unblocked lifelinker.
         assert_eq!(state.players[1].life, 18);
+    }
+
+    fn create_planeswalker(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        loyalty: u32,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Planeswalker);
+        obj.loyalty = Some(loyalty);
+        id
+    }
+
+    // CR 510.1b: Unblocked creature attacking a planeswalker deals damage to the PW, not the player.
+    #[test]
+    fn unblocked_attacker_damages_planeswalker_not_player() {
+        use crate::game::combat::AttackTarget;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Grizzly Bears", 2, 2);
+        let pw = create_planeswalker(&mut state, PlayerId(1), "Test Planeswalker", 4);
+
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(pw),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // PW should have lost 2 loyalty (4 → 2), player life unchanged
+        let pw_obj = state.objects.get(&pw).unwrap();
+        assert_eq!(
+            pw_obj.loyalty,
+            Some(2),
+            "PW should have 2 loyalty after 2 damage"
+        );
+        assert_eq!(state.players[1].life, 20, "Player life should be unchanged");
+    }
+
+    // CR 702.19f: Regular trample excess goes to the PW, not the defending player.
+    #[test]
+    fn trample_excess_goes_to_planeswalker_not_player() {
+        use crate::game::combat::AttackTarget;
+        use crate::types::keywords::Keyword;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Big Trampler", 5, 5);
+        state
+            .objects
+            .get_mut(&attacker)
+            .unwrap()
+            .keywords
+            .push(Keyword::Trample);
+        let blocker = create_creature(&mut state, PlayerId(1), "Small Blocker", 1, 2);
+        let pw = create_planeswalker(&mut state, PlayerId(1), "Test Planeswalker", 6);
+
+        let mut combat = CombatState {
+            attackers: vec![AttackerInfo::new(
+                attacker,
+                AttackTarget::Planeswalker(pw),
+                PlayerId(1),
+            )],
+            ..Default::default()
+        };
+        // Assign blocker
+        combat.blocker_assignments.insert(attacker, vec![blocker]);
+        combat.blocker_to_attacker.insert(blocker, vec![attacker]);
+        if let Some(info) = combat
+            .attackers
+            .iter_mut()
+            .find(|a| a.object_id == attacker)
+        {
+            info.blocked = true;
+        }
+        state.combat = Some(combat);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // Blocker has 2 toughness: 2 damage lethal, 3 excess to PW (not player)
+        let pw_obj = state.objects.get(&pw).unwrap();
+        assert_eq!(
+            pw_obj.loyalty,
+            Some(3),
+            "PW should have 3 loyalty (6 - 3 trample excess)"
+        );
+        assert_eq!(
+            state.players[1].life, 20,
+            "Player life should be unchanged — CR 702.19f"
+        );
+    }
+
+    // CR 506.4c: If the PW leaves the battlefield before damage, attacker deals no damage.
+    #[test]
+    fn planeswalker_leaves_before_damage_no_damage_dealt() {
+        use crate::game::combat::AttackTarget;
+
+        let mut state = setup();
+        let attacker = create_creature(&mut state, PlayerId(0), "Grizzly Bears", 2, 2);
+        let pw = create_planeswalker(&mut state, PlayerId(1), "Doomed Planeswalker", 3);
+        let pw_attack_target = AttackTarget::Planeswalker(pw);
+
+        // Set up combat with attacker targeting the PW
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::new(attacker, pw_attack_target, PlayerId(1))],
+            ..Default::default()
+        });
+
+        // Remove the PW from battlefield before damage
+        if let Some(obj) = state.objects.get_mut(&pw) {
+            obj.zone = Zone::Graveyard;
+        }
+        state.battlefield.retain(|&id| id != pw);
+
+        let mut events = Vec::new();
+        resolve_combat_damage(&mut state, &mut events);
+
+        // CR 506.4c: No damage to player OR planeswalker
+        assert_eq!(
+            state.players[1].life, 20,
+            "Player should take no damage when PW left"
+        );
     }
 }

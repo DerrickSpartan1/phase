@@ -2755,7 +2755,7 @@ mod tests {
 
         // Set up combat with the creature as an attacker
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker_id, PlayerId(1))],
+            attackers: vec![AttackerInfo::attacking_player(attacker_id, PlayerId(1))],
             ..Default::default()
         });
 
@@ -2798,7 +2798,7 @@ mod tests {
         blocker_to_attacker.insert(blocker_id, vec![attacker_id]);
 
         state.combat = Some(CombatState {
-            attackers: vec![AttackerInfo::new(attacker_id, PlayerId(1))],
+            attackers: vec![AttackerInfo::attacking_player(attacker_id, PlayerId(1))],
             blocker_assignments,
             blocker_to_attacker,
             ..Default::default()

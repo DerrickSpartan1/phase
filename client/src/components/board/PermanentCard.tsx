@@ -168,7 +168,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
       "ring-2 ring-amber-400/60 shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]";
   } else if (isActivatable) {
     glowClass =
-      "ring-2 ring-cyan-400/60 shadow-[0_0_10px_2px_rgba(34,211,238,0.3)]";
+      "ring-2 ring-cyan-400 shadow-[0_0_14px_4px_rgba(34,211,238,0.55)]";
   } else if (isUndoableTap) {
     glowClass =
       "ring-1 ring-amber-400/40 shadow-[0_0_6px_1px_rgba(201,176,55,0.3)]";
@@ -251,6 +251,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
       layoutId={`permanent-${objectId}`}
       className="relative inline-flex w-fit cursor-pointer rounded-lg self-end select-none"
       style={{
+        zIndex: isAttacking ? 50 : undefined,
         filter: sicknessFilter,
         boxShadow: sicknessGlow,
         transformOrigin: "center center",
@@ -305,8 +306,8 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
         </div>
       ) : (
         <>
-          <div className="relative z-10 rounded-lg overflow-hidden">
-            <CardImage cardName={obj.name} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.card_id === 0} className={glowClass} />
+          <div className={`relative z-10 rounded-lg overflow-hidden ${glowClass}`}>
+            <CardImage cardName={obj.name} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.card_id === 0} />
             {/* Keyword strip overlay — inside the card image wrapper so absolute positioning works */}
             {showKeywordStrip && obj.keywords.length > 0 && !obj.face_down && (
               <KeywordStrip keywords={obj.keywords} baseKeywords={obj.base_keywords} />
