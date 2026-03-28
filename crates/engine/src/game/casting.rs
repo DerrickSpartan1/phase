@@ -2155,7 +2155,9 @@ mod tests {
             .cost(crate::types::ability::AbilityCost::Tap)
             .activation_restrictions(vec![
                 crate::types::ability::ActivationRestriction::RequiresCondition {
-                    text: "you control an Island or a Swamp".to_string(),
+                    condition: crate::parser::oracle_condition::parse_restriction_condition(
+                        "you control an Island or a Swamp",
+                    ),
                 },
             ]),
         );

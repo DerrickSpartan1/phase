@@ -15,6 +15,7 @@ use super::oracle_casting::{
     parse_additional_cost_line, parse_casting_restriction_line, parse_spell_casting_option_line,
 };
 use super::oracle_class::parse_class_oracle_text;
+use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context, ParseContext};
 pub use super::oracle_keyword::keyword_display_name;
@@ -1323,7 +1324,7 @@ fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
                 constraints
                     .restrictions
                     .push(ActivationRestriction::RequiresCondition {
-                        text: condition_text,
+                        condition: parse_restriction_condition(&condition_text),
                     });
                 break;
             }
@@ -1337,7 +1338,7 @@ fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
                 constraints
                     .restrictions
                     .push(ActivationRestriction::RequiresCondition {
-                        text: condition_text,
+                        condition: parse_restriction_condition(&condition_text),
                     });
                 continue;
             }
@@ -1351,10 +1352,11 @@ fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
                 remaining = remaining[..idx]
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
+                let full_text = format!("from {restriction_text}");
                 constraints
                     .restrictions
                     .push(ActivationRestriction::RequiresCondition {
-                        text: format!("from {restriction_text}"),
+                        condition: parse_restriction_condition(&full_text),
                     });
                 continue;
             }
@@ -1369,7 +1371,7 @@ fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
                 constraints
                     .restrictions
                     .push(ActivationRestriction::RequiresCondition {
-                        text: restriction_text,
+                        condition: parse_restriction_condition(&restriction_text),
                     });
                 continue;
             }
@@ -1383,10 +1385,11 @@ fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
                 remaining = remaining[..idx]
                     .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
                     .to_string();
+                let full_text = format!("no more than {restriction_text}");
                 constraints
                     .restrictions
                     .push(ActivationRestriction::RequiresCondition {
-                        text: format!("no more than {restriction_text}"),
+                        condition: parse_restriction_condition(&full_text),
                     });
                 continue;
             }
@@ -2368,7 +2371,7 @@ mod tests {
                     shards: vec![],
                 },
             })
-            .condition("an opponent searched their library this turn")
+            .condition(crate::types::ability::ParsedCondition::OpponentSearchedLibraryThisTurn)
         );
         assert_eq!(r.abilities.len(), 1);
         assert!(!matches!(
@@ -2427,7 +2430,7 @@ mod tests {
         assert_eq!(
             r.casting_options,
             vec![SpellCastingOption::free_cast()
-                .condition("this spell is the first spell you've cast this game")]
+                .condition(crate::types::ability::ParsedCondition::FirstSpellThisGame)]
         );
     }
 
@@ -2545,8 +2548,11 @@ mod tests {
         let second = &r.abilities[1];
         assert!(matches!(
             second.activation_restrictions.as_slice(),
-            [ActivationRestriction::RequiresCondition { text }]
-                if text == "you control an Island or a Swamp"
+            [ActivationRestriction::RequiresCondition {
+                condition: Some(
+                    crate::types::ability::ParsedCondition::YouControlLandSubtypeAny { .. }
+                )
+            }]
         ));
     }
 

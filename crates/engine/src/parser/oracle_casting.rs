@@ -1,3 +1,4 @@
+use crate::parser::oracle_condition::parse_restriction_condition;
 use crate::types::ability::{AbilityCost, AdditionalCost, CastingRestriction, SpellCastingOption};
 
 use super::oracle_cost::parse_oracle_cost;
@@ -78,8 +79,8 @@ pub(crate) fn parse_spell_casting_option_line(
         .or_else(|| parse_self_alternative_cost_option(primary_body, &body_lower, card_name))
         .map(|mut option| {
             if option.condition.is_none() {
-                if let Some(condition) = condition {
-                    option.condition = Some(condition.to_string());
+                if let Some(condition_text) = condition {
+                    option.condition = parse_restriction_condition(condition_text);
                 }
             }
             option
@@ -137,8 +138,10 @@ fn parse_self_flash_option(
         return Some(option);
     }
 
-    if let Some(condition) = rest.strip_prefix("if ") {
-        option = option.condition(condition.trim());
+    if let Some(condition_text) = rest.strip_prefix("if ") {
+        if let Some(parsed) = parse_restriction_condition(condition_text.trim()) {
+            option = option.condition(parsed);
+        }
         return Some(option);
     }
 
@@ -161,15 +164,17 @@ fn parse_self_alternative_cost_option(
         )));
     }
 
-    if let Some((cost_text, condition)) = extract_alternative_cost_with_trailing_condition(
+    if let Some((cost_text, condition_text)) = extract_alternative_cost_with_trailing_condition(
         body,
         body_lower,
         "you may pay ",
         " rather than pay this spell's mana cost if ",
     ) {
-        return Some(
-            SpellCastingOption::alternative_cost(parse_oracle_cost(cost_text)).condition(condition),
-        );
+        let mut option = SpellCastingOption::alternative_cost(parse_oracle_cost(cost_text));
+        if let Some(parsed) = parse_restriction_condition(condition_text) {
+            option = option.condition(parsed);
+        }
+        return Some(option);
     }
 
     if let Some(self_ref) = self_spell_phrase(body_lower, card_name) {
@@ -308,18 +313,21 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
     }
 
     if let Some(condition) = rest.strip_prefix("if ") {
+        let condition_text = strip_casting_condition_suffixes(condition);
         restrictions.push(CastingRestriction::RequiresCondition {
-            text: strip_casting_condition_suffixes(condition).to_string(),
+            condition: parse_restriction_condition(condition_text),
         });
     }
     if let Some(condition) = rest.strip_prefix("only if ") {
+        let condition_text = strip_casting_condition_suffixes(condition);
         restrictions.push(CastingRestriction::RequiresCondition {
-            text: strip_casting_condition_suffixes(condition).to_string(),
+            condition: parse_restriction_condition(condition_text),
         });
     }
     if let Some(condition) = rest.split(" and only if ").nth(1) {
+        let condition_text = strip_casting_condition_suffixes(condition);
         restrictions.push(CastingRestriction::RequiresCondition {
-            text: strip_casting_condition_suffixes(condition).to_string(),
+            condition: parse_restriction_condition(condition_text),
         });
     }
 
@@ -345,6 +353,7 @@ fn parse_blight_count(text: &str) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::ParsedCondition;
     use crate::types::mana::ManaCost;
 
     #[test]
@@ -358,7 +367,7 @@ mod tests {
             vec![
                 CastingRestriction::DeclareAttackersStep,
                 CastingRestriction::RequiresCondition {
-                    text: "you've been attacked this step".to_string(),
+                    condition: Some(ParsedCondition::BeenAttackedThisStep),
                 },
             ]
         );
@@ -400,7 +409,10 @@ mod tests {
         assert_eq!(
             restrictions,
             vec![CastingRestriction::RequiresCondition {
-                text: "you control two or more vampires".to_string(),
+                condition: Some(ParsedCondition::YouControlSubtypeCountAtLeast {
+                    subtype: "vampire".to_string(),
+                    count: 2,
+                }),
             }]
         );
     }
@@ -416,8 +428,7 @@ mod tests {
             vec![
                 CastingRestriction::AsSorcery,
                 CastingRestriction::RequiresCondition {
-                    text: "there are four or more card types among cards in your graveyard"
-                        .to_string(),
+                    condition: Some(ParsedCondition::GraveyardCardTypeCountAtLeast { count: 4 }),
                 },
             ]
         );
@@ -452,7 +463,7 @@ mod tests {
         assert_eq!(
             restrictions,
             vec![CastingRestriction::RequiresCondition {
-                text: "a creature died this turn".to_string(),
+                condition: Some(ParsedCondition::CreatureDiedThisTurn),
             }]
         );
     }

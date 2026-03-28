@@ -109,35 +109,7 @@ fn extract_shares_quality_props(filter: &TargetFilter) -> Vec<&SharedQuality> {
 
 /// CR 608.2b: Extract the target filter from an effect for SharesQuality validation.
 fn effect_target_filter(effect: &Effect) -> Option<&TargetFilter> {
-    match effect {
-        Effect::Pump { target, .. }
-        | Effect::Destroy { target, .. }
-        | Effect::Bounce { target, .. }
-        | Effect::Tap { target, .. }
-        | Effect::Untap { target, .. }
-        | Effect::DealDamage { target, .. }
-        | Effect::GainControl { target, .. }
-        | Effect::Counter { target, .. }
-        | Effect::Sacrifice { target, .. }
-        | Effect::AddCounter { target, .. }
-        | Effect::RemoveCounter { target, .. }
-        | Effect::PutCounter { target, .. }
-        | Effect::ChangeZone { target, .. }
-        | Effect::Fight { target, .. }
-        | Effect::Attach { target, .. }
-        | Effect::Transform { target, .. }
-        | Effect::Connive { target, .. }
-        | Effect::PhaseOut { target, .. }
-        | Effect::ForceBlock { target, .. }
-        | Effect::Regenerate { target, .. }
-        | Effect::Goad { target, .. }
-        | Effect::ExtraTurn { target, .. }
-        | Effect::Double { target, .. }
-        | Effect::BlightEffect { target, .. }
-        | Effect::Suspect { target, .. } => Some(target),
-        Effect::GenericEffect { target, .. } => target.as_ref(),
-        _ => None,
-    }
+    effect.target_filter()
 }
 
 /// Dispatch to the appropriate effect handler using typed pattern matching.
@@ -349,6 +321,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::ChangeTargets { target, .. }
         | Effect::ExtraTurn { target, .. }
         | Effect::Double { target, .. } => target,
+        Effect::Token { owner, .. } => owner,
         Effect::RevealTop { player, .. } => player,
         _ => return None,
     };
@@ -360,6 +333,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
             | TargetFilter::TriggeringPlayer
             | TargetFilter::TriggeringSource
             | TargetFilter::DefendingPlayer
+            | TargetFilter::ParentTargetController
     ) {
         Some(filter)
     } else {

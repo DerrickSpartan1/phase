@@ -14,8 +14,8 @@ use super::oracle_target::{
     parse_event_context_ref, parse_mana_value_suffix, parse_target, parse_type_phrase,
 };
 use super::oracle_util::{
-    contains_possessive, has_unconsumed_conditional, parse_mana_symbols, parse_number,
-    starts_with_possessive, strip_after, TextPair,
+    contains_possessive, has_unconsumed_conditional, parse_comparison_suffix, parse_mana_symbols,
+    parse_number, starts_with_possessive, strip_after, TextPair,
 };
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::types::ability::{
@@ -3480,8 +3480,6 @@ fn strip_target_keyword_instead(text: &str) -> (Option<AbilityCondition>, String
 /// - "four or more quest counters on it" → (GE, 4, "quest", len)
 /// - "no ice counters on it" → (EQ, 0, "ice", len)
 fn parse_counter_threshold(text: &str) -> Option<(Comparator, i32, String, usize)> {
-    use super::oracle_util::parse_number;
-
     let original_len = text.len();
 
     // "no [type] counters on it" → EQ(0)
@@ -3653,47 +3651,6 @@ fn strip_suffix_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     }
 
     (None, text.to_string())
-}
-
-/// Parse "N or greater", "N or less", "greater than N", "less than N" into (Comparator, i32).
-fn parse_comparison_suffix(text: &str) -> Option<(Comparator, i32)> {
-    use super::oracle_util::parse_number;
-
-    // "N or greater" / "N or more"
-    if let Some(rest) = text
-        .strip_suffix(" or greater")
-        .or(text.strip_suffix(" or more"))
-    {
-        let (n, remainder) = parse_number(rest)?;
-        if remainder.trim().is_empty() {
-            return Some((Comparator::GE, n as i32));
-        }
-    }
-    // "N or less" / "N or fewer"
-    if let Some(rest) = text
-        .strip_suffix(" or less")
-        .or(text.strip_suffix(" or fewer"))
-    {
-        let (n, remainder) = parse_number(rest)?;
-        if remainder.trim().is_empty() {
-            return Some((Comparator::LE, n as i32));
-        }
-    }
-    // "greater than N"
-    if let Some(rest) = text.strip_prefix("greater than ") {
-        let (n, remainder) = parse_number(rest)?;
-        if remainder.trim().is_empty() {
-            return Some((Comparator::GT, n as i32));
-        }
-    }
-    // "less than N"
-    if let Some(rest) = text.strip_prefix("less than ") {
-        let (n, remainder) = parse_number(rest)?;
-        if remainder.trim().is_empty() {
-            return Some((Comparator::LT, n as i32));
-        }
-    }
-    None
 }
 
 /// CR 608.2c: Parse comparator + RHS quantity from text after " is ".

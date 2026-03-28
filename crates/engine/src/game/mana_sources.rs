@@ -335,7 +335,9 @@ mod tests {
         obj.abilities.push(
             verge_ability(conditional_color).activation_restrictions(vec![
                 ActivationRestriction::RequiresCondition {
-                    text: condition_text.to_string(),
+                    condition: crate::parser::oracle_condition::parse_restriction_condition(
+                        condition_text,
+                    ),
                 },
             ]),
         );

@@ -1361,6 +1361,144 @@ pub enum StaticCondition {
 }
 
 // ---------------------------------------------------------------------------
+// ParsedCondition — typed restriction conditions parsed at build time
+// ---------------------------------------------------------------------------
+
+/// CR 601.3 / CR 602.5: A fully typed condition for casting/activation restrictions.
+/// Parsed at Oracle parse time to eliminate runtime reparsing.
+/// `Option<ParsedCondition>` is used at storage sites — `None` means the parser
+/// could not decompose the condition (permissive fallback: evaluates to `true`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type")]
+pub enum ParsedCondition {
+    SourceInZone {
+        zone: Zone,
+    },
+    /// CR 508.1a: The source creature is currently attacking.
+    SourceIsAttacking,
+    SourceIsAttackingOrBlocking,
+    /// CR 509.1h: The source creature is blocked.
+    SourceIsBlocked,
+    SourcePowerAtLeast {
+        minimum: i32,
+    },
+    SourceHasCounterAtLeast {
+        counter_type: CounterType,
+        count: u32,
+    },
+    SourceHasNoCounter {
+        counter_type: CounterType,
+    },
+    /// CR 302.6: Source entered the battlefield this turn.
+    SourceEnteredThisTurn,
+    SourceIsCreature,
+    SourceUntappedAttachedTo {
+        required_type: CoreType,
+    },
+    SourceLacksKeyword {
+        keyword: Keyword,
+    },
+    SourceIsColor {
+        color: ManaColor,
+    },
+    FirstSpellThisGame,
+    OpponentSearchedLibraryThisTurn,
+    BeenAttackedThisStep,
+    GraveyardCardCountAtLeast {
+        count: usize,
+    },
+    GraveyardCardTypeCountAtLeast {
+        count: usize,
+    },
+    GraveyardSubtypeCardCountAtLeast {
+        subtype: String,
+        count: usize,
+    },
+    OpponentPoisonAtLeast {
+        count: u32,
+    },
+    HandSizeExact {
+        count: usize,
+    },
+    HandSizeOneOf {
+        counts: Vec<usize>,
+    },
+    /// Compares a player-relative quantity against each opponent's quantity.
+    /// The comparison must hold for ALL opponents.
+    QuantityVsEachOpponent {
+        lhs: QuantityRef,
+        comparator: Comparator,
+        rhs: QuantityRef,
+    },
+    CreaturesYouControlTotalPowerAtLeast {
+        minimum: i32,
+    },
+    YouControlLandSubtypeAny {
+        subtypes: Vec<String>,
+    },
+    YouControlSubtypeCountAtLeast {
+        subtype: String,
+        count: usize,
+    },
+    YouControlCoreTypeCountAtLeast {
+        core_type: CoreType,
+        count: usize,
+    },
+    YouControlColorPermanentCountAtLeast {
+        color: ManaColor,
+        count: usize,
+    },
+    YouControlSubtypeOrGraveyardCardSubtype {
+        subtype: String,
+    },
+    YouControlLegendaryCreature,
+    YouControlNamedPlaneswalker {
+        name: String,
+    },
+    YouControlCreatureWithKeyword {
+        keyword: Keyword,
+    },
+    YouControlCreatureWithPowerAtLeast {
+        minimum: i32,
+    },
+    YouControlCreatureWithPt {
+        power: i32,
+        toughness: i32,
+    },
+    YouControlAnotherColorlessCreature,
+    YouControlSnowPermanentCountAtLeast {
+        count: usize,
+    },
+    YouControlDifferentPowerCreatureCountAtLeast {
+        count: usize,
+    },
+    YouControlLandsWithSameNameAtLeast {
+        count: usize,
+    },
+    YouControlNoCreatures,
+    YouAttackedThisTurn,
+    YouAttackedWithAtLeast {
+        count: u32,
+    },
+    YouCastNoncreatureSpellThisTurn,
+    YouCastSpellCountAtLeast {
+        count: u32,
+    },
+    YouGainedLifeThisTurn,
+    YouCreatedTokenThisTurn,
+    YouDiscardedCardThisTurn,
+    YouSacrificedArtifactThisTurn,
+    /// CR 700.4: A creature moved from battlefield to graveyard this turn.
+    CreatureDiedThisTurn,
+    YouHadCreatureEnterThisTurn,
+    YouHadAngelOrBerserkerEnterThisTurn,
+    YouHadArtifactEnterThisTurn,
+    CardsLeftYourGraveyardThisTurnAtLeast {
+        count: u32,
+    },
+}
+
+// ---------------------------------------------------------------------------
 // PaymentCost — cost paid during effect resolution (not activation)
 // ---------------------------------------------------------------------------
 
@@ -1514,7 +1652,7 @@ pub struct SpellCastingOption {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost: Option<AbilityCost>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub condition: Option<String>,
+    pub condition: Option<ParsedCondition>,
 }
 
 impl SpellCastingOption {
@@ -1547,8 +1685,8 @@ impl SpellCastingOption {
         self
     }
 
-    pub fn condition(mut self, condition: impl Into<String>) -> Self {
-        self.condition = Some(condition.into());
+    pub fn condition(mut self, condition: ParsedCondition) -> Self {
+        self.condition = Some(condition);
         self
     }
 }
@@ -1688,6 +1826,9 @@ pub enum Effect {
         tapped: bool,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// The player who creates/owns the token(s).
+        #[serde(default = "default_target_filter_controller")]
+        owner: TargetFilter,
         /// CR 303.7: When a Role token or Aura token is created "attached to" a
         /// target, this field captures that attachment target.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2422,6 +2563,149 @@ fn default_target_filter_self_ref() -> TargetFilter {
     TargetFilter::SelfRef
 }
 
+impl TargetFilter {
+    /// CR 115.1: Returns true for filters that are NOT player-chosen targets —
+    /// context references (triggering event participants per CR 603.7c),
+    /// parent target anaphora, and self-references resolve automatically
+    /// without target selection.
+    pub fn is_context_ref(&self) -> bool {
+        matches!(
+            self,
+            TargetFilter::None
+                | TargetFilter::SelfRef
+                | TargetFilter::Controller
+                | TargetFilter::TriggeringSpellController
+                | TargetFilter::TriggeringSpellOwner
+                | TargetFilter::TriggeringPlayer
+                | TargetFilter::TriggeringSource
+                | TargetFilter::DefendingPlayer
+                | TargetFilter::ParentTarget
+                | TargetFilter::ParentTargetController
+        )
+    }
+}
+
+impl Effect {
+    /// CR 115.1: Returns the target filter for effects that have a player-selectable
+    /// `target` field. Returns `None` for effects with no target field, or whose
+    /// targeting is handled through different mechanisms (filters, zones, etc.).
+    ///
+    /// Exhaustive match — no wildcards — so the compiler forces an update when new
+    /// Effect variants are added.
+    pub fn target_filter(&self) -> Option<&TargetFilter> {
+        match self {
+            // --- Effects with a `target: TargetFilter` field ---
+            Effect::DealDamage { target, .. }
+            | Effect::Pump { target, .. }
+            | Effect::Destroy { target, .. }
+            | Effect::Regenerate { target, .. }
+            | Effect::Counter { target, .. }
+            | Effect::Tap { target, .. }
+            | Effect::Untap { target, .. }
+            | Effect::AddCounter { target, .. }
+            | Effect::RemoveCounter { target, .. }
+            | Effect::Sacrifice { target, .. }
+            | Effect::DiscardCard { target, .. }
+            | Effect::Mill { target, .. }
+            | Effect::ChangeZone { target, .. }
+            | Effect::GainControl { target, .. }
+            | Effect::Attach { target, .. }
+            | Effect::Fight { target, .. }
+            | Effect::Bounce { target, .. }
+            | Effect::CopySpell { target, .. }
+            | Effect::CopyTokenOf { target, .. }
+            | Effect::BecomeCopy { target, .. }
+            | Effect::ChooseCard { target, .. }
+            | Effect::PutCounter { target, .. }
+            | Effect::MultiplyCounter { target, .. }
+            | Effect::DoublePT { target, .. }
+            | Effect::MoveCounters { target, .. }
+            | Effect::Animate { target, .. }
+            | Effect::Discard { target, .. }
+            | Effect::Shuffle { target, .. }
+            | Effect::Transform { target, .. }
+            | Effect::RevealHand { target, .. }
+            | Effect::TargetOnly { target, .. }
+            | Effect::Suspect { target, .. }
+            | Effect::Connive { target, .. }
+            | Effect::PhaseOut { target, .. }
+            | Effect::ForceBlock { target, .. }
+            | Effect::CastFromZone { target, .. }
+            | Effect::PreventDamage { target, .. }
+            | Effect::Exploit { target, .. }
+            | Effect::GivePlayerCounter { target, .. }
+            | Effect::PutAtLibraryPosition { target, .. }
+            | Effect::PutOnTopOrBottom { target, .. }
+            | Effect::Goad { target, .. }
+            | Effect::ExtraTurn { target, .. }
+            | Effect::AdditionalCombatPhase { target, .. }
+            | Effect::Double { target, .. }
+            | Effect::BlightEffect { target, .. }
+            | Effect::SetLifeTotal { target, .. }
+            | Effect::GiveControl { target, .. } => Some(target),
+
+            // GenericEffect has Option<TargetFilter>
+            Effect::GenericEffect { target, .. } => target.as_ref(),
+
+            // --- Effects with no player-selectable target field ---
+            // These use filters, zone-level operations, or have no targeting at all.
+            Effect::Draw { .. }
+            | Effect::Token { .. }
+            | Effect::GainLife { .. }
+            | Effect::LoseLife { .. }
+            | Effect::Scry { .. }
+            | Effect::PumpAll { .. }
+            | Effect::DamageAll { .. }
+            | Effect::DamageEachPlayer { .. }
+            | Effect::DestroyAll { .. }
+            | Effect::ChangeZoneAll { .. }
+            | Effect::Dig { .. }
+            | Effect::Surveil { .. }
+            | Effect::PutCounterAll { .. }
+            | Effect::DoublePTAll { .. }
+            | Effect::Explore
+            | Effect::Investigate
+            | Effect::BecomeMonarch
+            | Effect::Proliferate
+            | Effect::Cleanup { .. }
+            | Effect::Mana { .. }
+            | Effect::SearchLibrary { .. }
+            | Effect::RevealTop { .. }
+            | Effect::Choose { .. }
+            | Effect::SolveCase
+            | Effect::SetClassLevel { .. }
+            | Effect::CreateDelayedTrigger { .. }
+            | Effect::AddRestriction { .. }
+            | Effect::CreateEmblem { .. }
+            | Effect::PayCost { .. }
+            | Effect::GrantCastingPermission { .. }
+            | Effect::ChooseFromZone { .. }
+            | Effect::GainEnergy { .. }
+            | Effect::ExileFromTopUntil { .. }
+            | Effect::Discover { .. }
+            | Effect::GiftDelivery { .. }
+            | Effect::ExchangeControl
+            | Effect::ChangeTargets { .. }
+            | Effect::ManifestDread
+            | Effect::LoseTheGame
+            | Effect::WinTheGame
+            | Effect::RollDie { .. }
+            | Effect::FlipCoin { .. }
+            | Effect::FlipCoinUntilLose { .. }
+            | Effect::RingTemptsYou
+            | Effect::Amass { .. }
+            | Effect::Monstrosity { .. }
+            | Effect::Forage
+            | Effect::CollectEvidence { .. }
+            | Effect::Endure { .. }
+            | Effect::Seek { .. }
+            | Effect::SetDayNight { .. }
+            | Effect::RuntimeHandled { .. }
+            | Effect::Unimplemented { .. } => None,
+        }
+    }
+}
+
 /// Returns the human-readable variant name for an Effect.
 /// Production API for GameEvent::EffectResolved api_type strings and logging.
 pub fn effect_variant_name(effect: &Effect) -> &str {
@@ -2841,7 +3125,7 @@ pub enum ActivationRestriction {
         count: u8,
     },
     RequiresCondition {
-        text: String,
+        condition: Option<ParsedCondition>,
     },
     /// CR 719.4: This ability can only be activated while the source Case is solved.
     IsSolved,
@@ -2872,7 +3156,7 @@ pub enum CastingRestriction {
     BeforeBlockersDeclared,
     BeforeCombatDamage,
     AfterCombat,
-    RequiresCondition { text: String },
+    RequiresCondition { condition: Option<ParsedCondition> },
 }
 
 /// CR 601.2f: Self-referential cost reduction on an activated ability.
@@ -4635,6 +4919,7 @@ mod tests {
                     name: "the number of creatures you control".to_string(),
                 },
             },
+            owner: TargetFilter::Controller,
             attach_to: None,
             enters_attacking: false,
         };

@@ -88,33 +88,5 @@ pub fn resolve(
 /// Extract the target filter from an effect variant, if it has a standard `target` field.
 /// Used to compute legal alternative targets for retargeting (CR 115.7).
 fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
-    match effect {
-        Effect::DealDamage { target, .. }
-        | Effect::Pump { target, .. }
-        | Effect::Destroy { target, .. }
-        | Effect::Tap { target, .. }
-        | Effect::Untap { target, .. }
-        | Effect::Bounce { target, .. }
-        | Effect::GainControl { target, .. }
-        | Effect::Counter { target, .. }
-        | Effect::Sacrifice { target, .. }
-        | Effect::AddCounter { target, .. }
-        | Effect::RemoveCounter { target, .. }
-        | Effect::PutCounter { target, .. }
-        | Effect::DoublePT { target, .. }
-        | Effect::ChangeZone { target, .. }
-        | Effect::Fight { target, .. }
-        | Effect::Attach { target, .. }
-        | Effect::Transform { target, .. }
-        | Effect::Connive { target, .. }
-        | Effect::PhaseOut { target, .. }
-        | Effect::ForceBlock { target, .. }
-        | Effect::Regenerate { target, .. }
-        | Effect::PreventDamage { target, .. }
-        | Effect::CastFromZone { target, .. }
-        | Effect::Animate { target, .. }
-        | Effect::Suspect { target, .. }
-        | Effect::CopyTokenOf { target, .. } => Some(target),
-        _ => None,
-    }
+    effect.target_filter()
 }

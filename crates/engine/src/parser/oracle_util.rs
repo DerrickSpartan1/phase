@@ -1,4 +1,4 @@
-use crate::types::ability::{QuantityExpr, QuantityRef, RoundingMode, TargetFilter};
+use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, RoundingMode, TargetFilter};
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 
@@ -1284,6 +1284,68 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     result = result.replace("named ~", &format!("named {effective_name_str}"));
 
     result
+}
+
+/// Strip a comparator prefix from a comparison clause, returning (Comparator, remainder).
+/// Handles: "greater than or equal to X", "less than or equal to X", "greater than X",
+/// "less than X", "equal to X". Longer prefixes are tried first to avoid partial matches.
+pub(crate) fn parse_comparator_prefix(text: &str) -> Option<(Comparator, &str)> {
+    if let Some(rest) = text.strip_prefix("greater than or equal to ") {
+        return Some((Comparator::GE, rest));
+    }
+    if let Some(rest) = text.strip_prefix("less than or equal to ") {
+        return Some((Comparator::LE, rest));
+    }
+    if let Some(rest) = text.strip_prefix("greater than ") {
+        return Some((Comparator::GT, rest));
+    }
+    if let Some(rest) = text.strip_prefix("less than ") {
+        return Some((Comparator::LT, rest));
+    }
+    if let Some(rest) = text.strip_prefix("equal to ") {
+        return Some((Comparator::EQ, rest));
+    }
+    None
+}
+
+/// Parse "N or greater", "N or less", "greater than N", "less than N" into (Comparator, i32).
+/// Handles suffix patterns ("3 or greater") and prefix patterns ("greater than 3").
+pub(crate) fn parse_comparison_suffix(text: &str) -> Option<(Comparator, i32)> {
+    // "N or greater" / "N or more"
+    if let Some(rest) = text
+        .strip_suffix(" or greater")
+        .or(text.strip_suffix(" or more"))
+    {
+        let (n, remainder) = parse_number(rest)?;
+        if remainder.trim().is_empty() {
+            return Some((Comparator::GE, n as i32));
+        }
+    }
+    // "N or less" / "N or fewer"
+    if let Some(rest) = text
+        .strip_suffix(" or less")
+        .or(text.strip_suffix(" or fewer"))
+    {
+        let (n, remainder) = parse_number(rest)?;
+        if remainder.trim().is_empty() {
+            return Some((Comparator::LE, n as i32));
+        }
+    }
+    // "greater than N"
+    if let Some(rest) = text.strip_prefix("greater than ") {
+        let (n, remainder) = parse_number(rest)?;
+        if remainder.trim().is_empty() {
+            return Some((Comparator::GT, n as i32));
+        }
+    }
+    // "less than N"
+    if let Some(rest) = text.strip_prefix("less than ") {
+        let (n, remainder) = parse_number(rest)?;
+        if remainder.trim().is_empty() {
+            return Some((Comparator::LT, n as i32));
+        }
+    }
+    None
 }
 
 #[cfg(test)]

@@ -37,56 +37,16 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         return Some(def);
     }
 
-    // --- Fast lands: "enters tapped unless you control N or fewer other [type]" ---
-    // Must be checked BEFORE check lands (both match "unless you control").
-    if let Some(def) = parse_fast_land(&norm_lower, &text) {
-        return Some(def);
-    }
-
-    // --- Check lands: "enters tapped unless you control a [LandType] or a [LandType]" ---
-    // Must be checked BEFORE the generic "enters tapped" pattern.
-    if let Some(def) = parse_check_land(&norm_lower, &text) {
-        return Some(def);
-    }
-
-    // --- General "enters tapped unless you control a [type phrase]" ---
-    // CR 614.1d — Catches basic lands, legendary creatures, Mount/Vehicle, etc.
-    // Must be checked AFTER check lands (which produce the more specific UnlessControlsSubtype)
-    // but BEFORE the unconditional "enters tapped" catch-all.
-    if let Some(def) = parse_unless_controls_typed(&norm_lower, &text) {
+    // --- All conditional "enters tapped unless X" patterns (CR 614.1d) ---
+    // Dispatches to typed condition extractors in priority order, with generic fallback.
+    // Shock lands are handled above (structurally different: Optional mode with decline path).
+    if let Some(def) = parse_enters_tapped_unless(&norm_lower, &text) {
         return Some(def);
     }
 
     // --- "You may have ~ enter as a copy of [filter]" (clone replacement) ---
     // CR 707.9: "Enter as a copy" is a replacement effect modifying the ETB event.
     if let Some(def) = parse_clone_replacement(&norm_lower, &text) {
-        return Some(def);
-    }
-
-    // --- "enters tapped unless a player has N or less life" (bond lands) ---
-    // CR 614.1d — Must be checked BEFORE external and unconditional patterns.
-    if let Some(def) = parse_unless_player_life(&norm_lower, &text) {
-        return Some(def);
-    }
-
-    // --- "enters tapped unless you have two or more opponents" (battlebond lands) ---
-    if let Some(def) = parse_unless_multiple_opponents(&norm_lower, &text) {
-        return Some(def);
-    }
-
-    // --- "enters tapped unless it's your turn" (Horned Loch-Whale) ---
-    if let Some(def) = parse_unless_your_turn(&norm_lower, &text) {
-        return Some(def);
-    }
-
-    // --- "enters tapped unless it's your first, second, or third turn of the game" ---
-    if let Some(def) = parse_unless_turn_of_game(&norm_lower, &text) {
-        return Some(def);
-    }
-
-    // --- Catch-all: "enters tapped unless [unrecognized condition]" ---
-    // CR 614.1d — Recognize the replacement for coverage even when the condition is exotic.
-    if let Some(def) = parse_enters_tapped_unless_generic(&norm_lower, &text) {
         return Some(def);
     }
 
@@ -395,13 +355,47 @@ fn parse_clone_replacement(norm_lower: &str, original_text: &str) -> Option<Repl
 
 /// Parse check land pattern: "enters tapped unless you control a [LandType] or a [LandType]"
 /// Returns Mandatory ReplacementDefinition with an UnlessControlsSubtype condition.
-fn parse_check_land(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+/// Shared dispatcher for all conditional "enters tapped unless X" patterns (CR 614.1d).
+/// Tries typed condition extractors in priority order, falling back to generic Unrecognized.
+/// Shock lands are excluded — they use ReplacementMode::Optional with a decline path.
+fn parse_enters_tapped_unless(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
     if !norm_lower.contains("enters tapped")
         && !norm_lower.contains("enters the battlefield tapped")
     {
         return None;
     }
 
+    // Try typed condition extractors in priority order:
+    // Fast lands BEFORE check lands (both match "unless you control").
+    // Check lands BEFORE controls_typed (more specific subtype match).
+    let condition = parse_fast_condition(norm_lower)
+        .or_else(|| parse_check_condition(norm_lower))
+        .or_else(|| parse_controls_typed_condition(norm_lower))
+        .or_else(|| parse_player_life_condition(norm_lower))
+        .or_else(|| parse_multiple_opponents_condition(norm_lower))
+        .or_else(|| parse_your_turn_condition(norm_lower))
+        .or_else(|| parse_turn_of_game_condition(norm_lower))
+        .or_else(|| parse_generic_unless_condition(norm_lower, original_text))?;
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::SelfRef)
+            .description(original_text.to_string())
+            .condition(condition),
+    )
+}
+
+/// Extract check land condition: "unless you control a [LandType] or a [LandType]"
+fn parse_check_condition(norm_lower: &str) -> Option<ReplacementCondition> {
     let rest = strip_after(norm_lower, "unless you control ")?;
     let rest = rest.trim_end_matches('.');
 
@@ -421,30 +415,12 @@ fn parse_check_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         return None;
     }
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef,
-                },
-            ))
-            .valid_card(TargetFilter::SelfRef)
-            .description(original_text.to_string())
-            .condition(ReplacementCondition::UnlessControlsSubtype { subtypes }),
-    )
+    Some(ReplacementCondition::UnlessControlsSubtype { subtypes })
 }
 
-/// Parse fast land pattern: "enters tapped unless you control N or fewer other [type]"
-/// Returns Mandatory ReplacementDefinition with an UnlessControlsOtherLeq condition.
+/// Extract fast land condition: "unless you control N or fewer other [type]"
 /// CR 305.7 + CR 614.1c — fast lands (Spirebluff Canal, Blackcleave Cliffs, etc.).
-fn parse_fast_land(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
-    if !norm_lower.contains("enters tapped")
-        && !norm_lower.contains("enters the battlefield tapped")
-    {
-        return None;
-    }
-
+fn parse_fast_condition(norm_lower: &str) -> Option<ReplacementCondition> {
     let rest = strip_after(norm_lower, "unless you control ")?;
 
     // Parse "two or fewer other lands." → count=2, remainder="or fewer other lands."
@@ -464,21 +440,10 @@ fn parse_fast_land(norm_lower: &str, original_text: &str) -> Option<ReplacementD
         _ => return None,
     };
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef,
-                },
-            ))
-            .valid_card(TargetFilter::SelfRef)
-            .description(original_text.to_string())
-            .condition(ReplacementCondition::UnlessControlsOtherLeq {
-                count,
-                filter: typed_filter,
-            }),
-    )
+    Some(ReplacementCondition::UnlessControlsOtherLeq {
+        count,
+        filter: typed_filter,
+    })
 }
 
 /// Map lowercase land subtype name to canonical (title-cased) form.
@@ -493,20 +458,10 @@ fn canonical_land_subtype(raw: &str) -> Option<String> {
     }
 }
 
-/// Parse general "enters tapped unless you control a [type phrase]" pattern.
-/// CR 614.1d — Handles basic lands, legendary creatures, Mount/Vehicle, etc.
-/// Uses `parse_type_phrase` to parse the type expression after article stripping.
+/// Extract general "unless you control a [type phrase]" condition (CR 614.1d).
+/// Handles basic lands, legendary creatures, Mount/Vehicle, etc.
 /// Also handles "unless you control N or more [type]" quantity prefix patterns.
-fn parse_unless_controls_typed(
-    norm_lower: &str,
-    original_text: &str,
-) -> Option<ReplacementDefinition> {
-    if !norm_lower.contains("enters tapped")
-        && !norm_lower.contains("enters the battlefield tapped")
-    {
-        return None;
-    }
-
+fn parse_controls_typed_condition(norm_lower: &str) -> Option<ReplacementCondition> {
     let rest = strip_after(norm_lower, "unless you control ")?;
 
     // Try "N or more [type]" pattern first (e.g., "two or more other lands")
@@ -516,18 +471,7 @@ fn parse_unless_controls_typed(
             return None;
         }
         let filter = inject_controller_you(filter);
-        return Some(
-            ReplacementDefinition::new(ReplacementEvent::Moved)
-                .execute(AbilityDefinition::new(
-                    AbilityKind::Spell,
-                    Effect::Tap {
-                        target: TargetFilter::SelfRef,
-                    },
-                ))
-                .valid_card(TargetFilter::SelfRef)
-                .description(original_text.to_string())
-                .condition(ReplacementCondition::UnlessControlsCountMatching { minimum, filter }),
-        );
+        return Some(ReplacementCondition::UnlessControlsCountMatching { minimum, filter });
     }
 
     // Strip leading article — parse_type_phrase does NOT handle "a "/"an "
@@ -545,21 +489,10 @@ fn parse_unless_controls_typed(
     }
 
     // Inject ControllerRef::You — "you control" is implicit in the Oracle text
-    // CR 614.1d — consistent with parse_fast_land controller injection pattern
+    // CR 614.1d — consistent with fast land controller injection pattern
     let filter = inject_controller_you(filter);
 
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef,
-                },
-            ))
-            .valid_card(TargetFilter::SelfRef)
-            .description(original_text.to_string())
-            .condition(ReplacementCondition::UnlessControlsMatching { filter }),
-    )
+    Some(ReplacementCondition::UnlessControlsMatching { filter })
 }
 
 /// Try to parse "N or more " quantity prefix before a type phrase.
@@ -1196,15 +1129,9 @@ fn parse_mana_replacement(norm_lower: &str, original_text: &str) -> Option<Repla
 }
 
 /// CR 614.1d: Parse "enters tapped unless a player has N or less life" (bond lands).
-fn parse_unless_player_life(
-    norm_lower: &str,
-    original_text: &str,
-) -> Option<ReplacementDefinition> {
-    if !norm_lower.contains("enters tapped")
-        && !norm_lower.contains("enters the battlefield tapped")
-    {
-        return None;
-    }
+/// Extract "unless a player has N or less life" condition (bond lands).
+/// CR 614.1d
+fn parse_player_life_condition(norm_lower: &str) -> Option<ReplacementCondition> {
     let rest = strip_after(norm_lower, "unless a player has ")?;
     // "13 or less life" → extract amount
     let (amount, remainder) = parse_number(rest)?;
@@ -1213,83 +1140,32 @@ fn parse_unless_player_life(
     {
         return None;
     }
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef,
-                },
-            ))
-            .valid_card(TargetFilter::SelfRef)
-            .description(original_text.to_string())
-            .condition(ReplacementCondition::UnlessPlayerLifeAtMost { amount }),
-    )
+    Some(ReplacementCondition::UnlessPlayerLifeAtMost { amount })
 }
 
-/// CR 614.1d: Parse "enters tapped unless you have two or more opponents" (battlebond lands).
-fn parse_unless_multiple_opponents(
-    norm_lower: &str,
-    original_text: &str,
-) -> Option<ReplacementDefinition> {
-    if !norm_lower.contains("enters tapped")
-        && !norm_lower.contains("enters the battlefield tapped")
-    {
-        return None;
-    }
+/// Extract "unless you have two or more opponents" condition (battlebond lands).
+/// CR 614.1d
+fn parse_multiple_opponents_condition(norm_lower: &str) -> Option<ReplacementCondition> {
     if !norm_lower.contains("unless you have two or more opponents") {
         return None;
     }
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef,
-                },
-            ))
-            .valid_card(TargetFilter::SelfRef)
-            .description(original_text.to_string())
-            .condition(ReplacementCondition::UnlessMultipleOpponents),
-    )
+    Some(ReplacementCondition::UnlessMultipleOpponents)
 }
 
-/// CR 614.1d + CR 500: Parse "enters tapped unless it's your turn" (Horned Loch-Whale).
-fn parse_unless_your_turn(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
-    if !norm_lower.contains("enters tapped")
-        && !norm_lower.contains("enters the battlefield tapped")
-    {
-        return None;
-    }
+/// Extract "unless it's your turn" condition.
+/// CR 614.1d + CR 500
+fn parse_your_turn_condition(norm_lower: &str) -> Option<ReplacementCondition> {
     if !norm_lower.contains("unless it's your turn") {
         return None;
     }
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef,
-                },
-            ))
-            .valid_card(TargetFilter::SelfRef)
-            .description(original_text.to_string())
-            .condition(ReplacementCondition::UnlessYourTurn),
-    )
+    Some(ReplacementCondition::UnlessYourTurn)
 }
 
-/// CR 614.1d + CR 500: Parse "enters tapped unless it's your <ordinal-list> turn of the game".
+/// Extract "unless it's your <ordinal-list> turn of the game" condition.
+/// CR 614.1d + CR 500
 /// Handles variable-length ordinal lists ("first", "first or second", "first, second, or third").
 /// Takes the maximum ordinal as the threshold.
-fn parse_unless_turn_of_game(
-    norm_lower: &str,
-    original_text: &str,
-) -> Option<ReplacementDefinition> {
-    if !norm_lower.contains("enters tapped")
-        && !norm_lower.contains("enters the battlefield tapped")
-    {
-        return None;
-    }
+fn parse_turn_of_game_condition(norm_lower: &str) -> Option<ReplacementCondition> {
     let rest = strip_after(norm_lower, "unless it's your ")?;
     // Parse comma/or-separated ordinal list: "first, second, or third turn"
     let mut max_ordinal: u32 = 0;
@@ -1318,59 +1194,33 @@ fn parse_unless_turn_of_game(
     if !remaining.starts_with("turn") {
         return None;
     }
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef,
-                },
-            ))
-            .valid_card(TargetFilter::SelfRef)
-            .description(original_text.to_string())
-            .condition(ReplacementCondition::UnlessQuantity {
-                lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::TurnsTaken,
-                },
-                comparator: Comparator::LE,
-                rhs: QuantityExpr::Fixed {
-                    value: max_ordinal as i32,
-                },
-                active_player_req: Some(ControllerRef::You),
-            }),
-    )
+    Some(ReplacementCondition::UnlessQuantity {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::TurnsTaken,
+        },
+        comparator: Comparator::LE,
+        rhs: QuantityExpr::Fixed {
+            value: max_ordinal as i32,
+        },
+        active_player_req: Some(ControllerRef::You),
+    })
 }
 
-/// CR 614.1d: Catch-all "enters tapped unless [unrecognized condition]".
-/// Recognizes the replacement as a Moved event with an unrecognized condition.
-/// This ensures the card is counted as having a parsed replacement for coverage.
-fn parse_enters_tapped_unless_generic(
+/// Catch-all: extract the text after "unless" as an Unrecognized condition.
+/// CR 614.1d — Ensures the card is counted as having a parsed replacement for coverage.
+fn parse_generic_unless_condition(
     norm_lower: &str,
     original_text: &str,
-) -> Option<ReplacementDefinition> {
-    if !norm_lower.contains("enters tapped")
-        && !norm_lower.contains("enters the battlefield tapped")
-    {
-        return None;
-    }
+) -> Option<ReplacementCondition> {
+    // Only match if there's actually an "unless" clause
+    let _ = strip_after(norm_lower, " unless ")?;
     let original_lower = original_text.to_lowercase();
     let tp = TextPair::new(original_text, &original_lower);
     let unless_part = tp.strip_after(" unless ")?;
     let condition_text = unless_part.original;
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef,
-                },
-            ))
-            .valid_card(TargetFilter::SelfRef)
-            .description(original_text.to_string())
-            .condition(ReplacementCondition::Unrecognized {
-                text: condition_text.trim_end_matches('.').to_string(),
-            }),
-    )
+    Some(ReplacementCondition::Unrecognized {
+        text: condition_text.trim_end_matches('.').to_string(),
+    })
 }
 
 #[cfg(test)]
@@ -2531,7 +2381,7 @@ mod tests {
         // offset against original_text would point to the wrong position.
         let norm = "~ enters the battlefield tapped unless you pay {2}.";
         let original = "Some Very Long Card Name enters the battlefield tapped unless you pay {2}.";
-        let result = parse_enters_tapped_unless_generic(norm, original);
+        let result = parse_enters_tapped_unless(norm, original);
         assert!(result.is_some(), "Should parse enters-tapped-unless");
     }
 
@@ -2564,7 +2414,7 @@ mod tests {
     #[test]
     fn enters_tapped_unless_first_or_second_turn() {
         let text = "~ enters tapped unless it's your first or second turn of the game.";
-        let result = parse_unless_turn_of_game(text, text);
+        let result = parse_replacement_line(text, "Test Card");
         assert!(
             result.is_some(),
             "Should parse unless-turn-of-game with 2 ordinals"

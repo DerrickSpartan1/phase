@@ -6,8 +6,8 @@ use super::oracle_effect::parse_effect_chain;
 use super::oracle_quantity::{capitalize_first, parse_cda_quantity, parse_quantity_ref};
 use super::oracle_target::{parse_combat_status_prefix, parse_counter_suffix, parse_type_phrase};
 use super::oracle_util::{
-    has_unconsumed_conditional, infer_core_type_for_subtype, parse_mana_symbols, parse_number,
-    parse_subtype, strip_after, strip_reminder_text, TextPair,
+    has_unconsumed_conditional, infer_core_type_for_subtype, parse_comparator_prefix,
+    parse_mana_symbols, parse_number, parse_subtype, strip_after, strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator,
@@ -1577,27 +1577,6 @@ fn parse_quantity_comparison(lower: &str) -> Option<StaticCondition> {
         comparator,
         rhs: QuantityExpr::Ref { qty: rhs },
     })
-}
-
-/// Strip a comparator prefix from a comparison clause, returning (Comparator, remainder).
-fn parse_comparator_prefix(text: &str) -> Option<(Comparator, &str)> {
-    // Longer prefixes must be tried before shorter ones to avoid partial matches.
-    if let Some(rest) = text.strip_prefix("greater than or equal to ") {
-        return Some((Comparator::GE, rest));
-    }
-    if let Some(rest) = text.strip_prefix("less than or equal to ") {
-        return Some((Comparator::LE, rest));
-    }
-    if let Some(rest) = text.strip_prefix("greater than ") {
-        return Some((Comparator::GT, rest));
-    }
-    if let Some(rest) = text.strip_prefix("less than ") {
-        return Some((Comparator::LT, rest));
-    }
-    if let Some(rest) = text.strip_prefix("equal to ") {
-        return Some((Comparator::EQ, rest));
-    }
-    None
 }
 
 /// Parse "there are N or more [things] in your graveyard" conditions.
