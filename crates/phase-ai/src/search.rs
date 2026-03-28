@@ -13,6 +13,7 @@ use crate::planner::{
     apply_candidate, build_continuation_planner, rank_candidates, PlannerServices, SearchBudget,
 };
 use crate::policies::PolicyRegistry;
+use crate::tactical_gate::gate_candidates;
 
 /// Choose the best action for the AI player given the current game state.
 ///
@@ -53,9 +54,17 @@ pub fn score_candidates(
     let mut services =
         PlannerServices::new(ai_player, config, &policies, context, determinize_seed);
     let candidates = services.validate_candidates(state, ctx.candidates.clone());
-    let actions: Vec<GameAction> = candidates
+    let gated = gate_candidates(
+        state,
+        &ctx,
+        candidates,
+        ai_player,
+        config,
+        &services.context,
+    );
+    let actions: Vec<GameAction> = gated
         .iter()
-        .map(|candidate| candidate.action.clone())
+        .map(|candidate| candidate.candidate.action.clone())
         .collect();
 
     if actions.is_empty() {
@@ -93,9 +102,19 @@ pub fn score_candidates(
         );
         let tactical_weight = if is_target_selection { 1.0 } else { 0.1 };
 
+        let penalty_for = |candidate: &engine::ai_support::CandidateAction| {
+            gated
+                .iter()
+                .find(|gated_candidate| gated_candidate.candidate.action == candidate.action)
+                .map(|gated_candidate| gated_candidate.penalty)
+                .unwrap_or(0.0)
+        };
+
         rank_candidates(
-            candidates,
-            |candidate| services.tactical_score(state, &ctx, candidate, ai_player),
+            gated.iter().map(|candidate| candidate.candidate.clone()),
+            |candidate| {
+                services.tactical_score(state, &ctx, candidate, ai_player) + penalty_for(candidate)
+            },
             branching,
         )
         .into_iter()
@@ -112,11 +131,12 @@ pub fn score_candidates(
         .collect()
     } else {
         // Heuristic-only scoring
-        candidates
+        gated
             .into_iter()
             .map(|candidate| {
-                let score = services.tactical_score(state, &ctx, &candidate, ai_player);
-                (candidate.action, score)
+                let score = services.tactical_score(state, &ctx, &candidate.candidate, ai_player)
+                    + candidate.penalty;
+                (candidate.candidate.action, score)
             })
             .collect()
     }

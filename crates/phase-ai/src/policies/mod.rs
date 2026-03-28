@@ -5,6 +5,6 @@ pub(crate) mod effect_classify;
 mod effect_timing;
 mod mana_efficiency;
 mod registry;
-mod stack_awareness;
+pub(crate) mod stack_awareness;
 
 pub use registry::PolicyRegistry;

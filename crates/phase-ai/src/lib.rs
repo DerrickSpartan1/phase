@@ -11,6 +11,7 @@ pub mod planner;
 pub mod policies;
 pub mod search;
 pub mod synergy;
+pub mod tactical_gate;
 pub mod zone_eval;
 
 pub use card_hints::should_play_now;

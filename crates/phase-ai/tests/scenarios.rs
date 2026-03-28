@@ -4,8 +4,11 @@ use std::collections::HashSet;
 use engine::game::combat::{AttackTarget, AttackerInfo, CombatState};
 use engine::game::engine::apply;
 use engine::game::scenario::{GameScenario, P0, P1};
-use engine::types::ability::TargetRef;
-use engine::types::game_state::{TargetSelectionProgress, TargetSelectionSlot, WaitingFor};
+use engine::types::ability::{Effect, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef};
+use engine::types::game_state::{
+    StackEntry, StackEntryKind, TargetSelectionProgress, TargetSelectionSlot, WaitingFor,
+};
+use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::phase::Phase;
 use engine::types::player::PlayerId;
 use phase_ai::auto_play::run_ai_actions;
@@ -221,5 +224,147 @@ fn scenario_bounded_ai_sequence_progresses_without_panicking() {
     assert!(
         results.len() <= 200,
         "AI loop should stay within its hard safety cap"
+    );
+}
+
+#[test]
+fn scenario_very_hard_wasm_passes_instead_of_postcombat_giant_growth() {
+    let mut scenario = GameScenario::new();
+    scenario.add_creature(P0, "Bear", 2, 2);
+    scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Giant Growth",
+            true,
+            "Target creature gets +3/+3 until end of turn.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.phase = Phase::PostCombatMain;
+        state.active_player = P1;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+    }
+
+    let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+    let mut rng = SmallRng::seed_from_u64(17);
+    let action = choose_action(runner.state(), P0, &config, &mut rng);
+
+    assert_eq!(
+        action,
+        Some(engine::types::actions::GameAction::PassPriority)
+    );
+}
+
+#[test]
+fn scenario_very_hard_wasm_uses_giant_growth_to_win_combat() {
+    let mut scenario = GameScenario::new();
+    let attacker = scenario.add_creature(P0, "Attacker", 2, 2).id();
+    let blocker = scenario.add_creature(P1, "Blocker", 4, 4).id();
+    let growth = scenario
+        .add_spell_to_hand_from_oracle(
+            P0,
+            "Giant Growth",
+            true,
+            "Target creature gets +3/+3 until end of turn.",
+        )
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.phase = Phase::DeclareBlockers;
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        state.combat = Some(CombatState {
+            attackers: vec![AttackerInfo::attacking_player(attacker, P1)],
+            blocker_assignments: HashMap::from([(attacker, vec![blocker])]),
+            blocker_to_attacker: HashMap::from([(blocker, vec![attacker])]),
+            ..Default::default()
+        });
+    }
+
+    let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+    let mut rng = SmallRng::seed_from_u64(18);
+    let action = choose_action(runner.state(), P0, &config, &mut rng);
+
+    assert_eq!(
+        action,
+        Some(engine::types::actions::GameAction::CastSpell {
+            object_id: growth,
+            card_id: runner.state().objects[&growth].card_id,
+            targets: Vec::new(),
+        })
+    );
+}
+
+#[test]
+fn scenario_very_hard_wasm_passes_with_empty_stack_counterspell() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_spell_to_hand_from_oracle(P0, "Counterspell", true, "Counter target spell.")
+        .id();
+
+    let runner = scenario.build();
+    let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+    let mut rng = SmallRng::seed_from_u64(19);
+    let action = choose_action(runner.state(), P0, &config, &mut rng);
+
+    assert_eq!(
+        action,
+        Some(engine::types::actions::GameAction::PassPriority)
+    );
+}
+
+#[test]
+fn scenario_very_hard_wasm_passes_on_redundant_removal() {
+    let mut scenario = GameScenario::new();
+    let target = scenario.add_creature(P1, "Target", 2, 2).id();
+    let murder = scenario
+        .add_spell_to_hand_from_oracle(P0, "Murder", true, "Destroy target creature.")
+        .id();
+
+    let mut runner = scenario.build();
+    {
+        let state = runner.state_mut();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = P0;
+        state.priority_player = P0;
+        state.waiting_for = WaitingFor::Priority { player: P0 };
+        state.stack.push(StackEntry {
+            id: ObjectId(301),
+            source_id: ObjectId(300),
+            controller: P0,
+            kind: StackEntryKind::Spell {
+                ability: ResolvedAbility::new(
+                    Effect::DealDamage {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        target: TargetFilter::Any,
+                        damage_source: None,
+                    },
+                    vec![TargetRef::Object(target)],
+                    ObjectId(300),
+                    P0,
+                ),
+                card_id: CardId(300),
+                casting_variant: Default::default(),
+            },
+        });
+    }
+
+    let config = create_config(AiDifficulty::VeryHard, Platform::Wasm);
+    let mut rng = SmallRng::seed_from_u64(20);
+    let action = choose_action(runner.state(), P0, &config, &mut rng);
+
+    assert_eq!(
+        action,
+        Some(engine::types::actions::GameAction::PassPriority),
+        "Expected pass instead of redundant removal with Murder {:?}",
+        runner.state().objects[&murder].name
     );
 }

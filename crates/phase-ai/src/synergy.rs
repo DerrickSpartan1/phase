@@ -328,6 +328,7 @@ mod tests {
                         types: Vec::new(),
                         keywords: Vec::new(),
                         tapped: false,
+                        owner: TargetFilter::Controller,
                         attach_to: None,
                         enters_attacking: false,
                     },
