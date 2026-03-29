@@ -2440,6 +2440,18 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         } else {
             (None, text)
         };
+        // CR 608.2c: "If it's your turn" / "If it's not your turn" — game-state condition
+        let (turn_cond, text) = if condition.is_none()
+            && if_you_do.is_none()
+            && counter_cond.is_none()
+            && cast_from_zone.is_none()
+            && card_type_cond.is_none()
+            && property_cond.is_none()
+        {
+            strip_turn_conditional(&text)
+        } else {
+            (None, text)
+        };
         // CR 608.2e: "If that creature has [keyword], [effect] instead"
         let (keyword_instead_cond, text) = if condition.is_none()
             && if_you_do.is_none()
@@ -2447,6 +2459,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
+            && turn_cond.is_none()
         {
             strip_target_keyword_instead(&text)
         } else {
@@ -2461,6 +2474,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
+            && turn_cond.is_none()
             && keyword_instead_cond.is_none()
         {
             strip_suffix_conditional(&text)
@@ -2473,6 +2487,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             .or(cast_from_zone)
             .or(card_type_cond)
             .or(property_cond)
+            .or(turn_cond)
             .or(keyword_instead_cond)
             .or(suffix_cond);
         // CR 608.2c + CR 400.7: "unless ~ entered this turn" — strip suffix and
@@ -3417,27 +3432,38 @@ fn strip_cast_from_zone_conditional(text: &str) -> (Option<AbilityCondition>, St
 /// Covers 80+ cards with "reveal → if [type] → zone change" patterns.
 fn strip_card_type_conditional(text: &str) -> (Option<AbilityCondition>, String) {
     let lower = text.to_lowercase();
-    // Pattern: "if it's a [non][type] card, [effect]"
-    if let Some(rest) = lower.strip_prefix("if it's a ") {
-        let (negated, rest) = if let Some(r) = rest.strip_prefix("non") {
-            (true, r)
-        } else {
-            (false, rest)
-        };
-        // Extract type word before " card"
-        if let Some(type_end) = rest.find(" card") {
-            let type_str = &rest[..type_end];
-            let capitalized = format!("{}{}", &type_str[..1].to_uppercase(), &type_str[1..]);
-            if let Ok(card_type) = CoreType::from_str(&capitalized) {
-                let after_card = &rest[type_end + " card".len()..];
-                let remainder = after_card.strip_prefix(", ").unwrap_or(after_card);
-                let offset = text.len() - remainder.len();
-                return (
-                    Some(AbilityCondition::RevealedHasCardType { card_type, negated }),
-                    text[offset..].to_string(),
-                );
-            }
-        }
+    // Pattern: "if it's a/an [non][type] [card], [effect]"
+    let rest = lower
+        .strip_prefix("if it's a ")
+        .or_else(|| lower.strip_prefix("if it's an "));
+    let Some(rest) = rest else {
+        return (None, text.to_string());
+    };
+    let (negated, rest) = if let Some(r) = rest.strip_prefix("non") {
+        (true, r)
+    } else {
+        (false, rest)
+    };
+    // Try to find " card" to extract type word(s), but also handle bare "if it's a land,"
+    let (type_str, after_type) = if let Some(type_end) = rest.find(" card") {
+        (&rest[..type_end], &rest[type_end + " card".len()..])
+    } else if let Some(comma_pos) = rest.find(", ") {
+        // Bare type without " card" suffix: "if it's a land, [effect]"
+        (&rest[..comma_pos], &rest[comma_pos..])
+    } else {
+        return (None, text.to_string());
+    };
+    // Try to parse the last word as a CoreType (handles "artifact creature" → "creature",
+    // "land" → "land", etc.). Use the last word for the condition type.
+    let type_word = type_str.rsplit(' ').next().unwrap_or(type_str);
+    let capitalized = format!("{}{}", &type_word[..1].to_uppercase(), &type_word[1..]);
+    if let Ok(card_type) = CoreType::from_str(&capitalized) {
+        let remainder = after_type.strip_prefix(", ").unwrap_or(after_type);
+        let offset = text.len() - remainder.len();
+        return (
+            Some(AbilityCondition::RevealedHasCardType { card_type, negated }),
+            text[offset..].to_string(),
+        );
     }
     (None, text.to_string())
 }
@@ -3481,6 +3507,26 @@ fn try_parse_type_setting(text: &str) -> Option<AbilityDefinition> {
     let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);
     def = def.duration(Duration::Permanent);
     Some(def)
+}
+
+/// CR 608.2c: Strip "if it's your turn" / "if it's not your turn" prefix.
+/// Returns the condition and the remaining effect text.
+fn strip_turn_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+    let lower = text.to_lowercase();
+    for (prefix, negated) in &[
+        ("if it's your turn, ", false),
+        ("if it's not your turn, ", true),
+        ("if it isn't your turn, ", true),
+    ] {
+        if let Some(rest) = lower.strip_prefix(prefix) {
+            let offset = text.len() - rest.len();
+            return (
+                Some(AbilityCondition::IsYourTurn { negated: *negated }),
+                text[offset..].to_string(),
+            );
+        }
+    }
+    (None, text.to_string())
 }
 
 /// CR 608.2c: Strip a trailing "if its power/toughness is N or greater/less" suffix.

@@ -1029,6 +1029,10 @@ fn evaluate_condition(
                 false
             }
         }
+        // CR 608.2c: "If it's your turn" — check active player against controller.
+        AbilityCondition::IsYourTurn { negated } => {
+            (state.active_player == ability.controller) != *negated
+        }
     }
 }
 

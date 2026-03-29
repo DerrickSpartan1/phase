@@ -3165,6 +3165,9 @@ pub struct ModalChoice {
     /// CR 702.172b: Chosen mode costs are additional costs, not part of the base mana cost.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mode_costs: Vec<ManaCost>,
+    /// CR 702.42a: Entwine cost — when all modes are chosen, this additional cost is paid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entwine_cost: Option<ManaCost>,
 }
 
 /// Selection constraints attached to a modal choice header.
@@ -3560,6 +3563,12 @@ pub enum AbilityCondition {
         filter: TargetFilter,
         #[serde(default)]
         use_lki: bool,
+    },
+    /// CR 608.2c: "If it's your turn" / "If it's not your turn" — gates sub_ability on
+    /// whether the active player is the ability's controller.
+    IsYourTurn {
+        #[serde(default)]
+        negated: bool,
     },
 }
 

@@ -317,6 +317,7 @@ fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice
         allow_repeat_modes: header.allow_repeat_modes,
         constraints: header.constraints.clone(),
         mode_costs: modes.iter().filter_map(|m| m.mode_cost.clone()).collect(),
+        entwine_cost: None,
     }
 }
 

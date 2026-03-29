@@ -47,7 +47,7 @@ pub(crate) fn handle_select_modes(
     // CR 702.172b: Spree mode costs are additional costs — sum chosen modes and add to base cost.
     // TODO CR 702.172b: When "cast without paying mana cost" is implemented, Spree mode costs
     // must be paid separately (additional costs are not waived). Refactor to separate cost tracking.
-    let total_cost = if modal.mode_costs.is_empty() {
+    let mut total_cost = if modal.mode_costs.is_empty() {
         pending.cost.clone()
     } else {
         let spree_total = indices
@@ -57,6 +57,13 @@ pub(crate) fn handle_select_modes(
             });
         restrictions::add_mana_cost(&pending.cost, &spree_total)
     };
+
+    // CR 702.42a: Entwine — add entwine cost when all modes are chosen.
+    if indices.len() == modal.mode_count {
+        if let Some(ref entwine_cost) = modal.entwine_cost {
+            total_cost = restrictions::add_mana_cost(&total_cost, entwine_cost);
+        }
+    }
 
     // Get the card's abilities to build combined resolved ability from chosen modes
     let obj = state

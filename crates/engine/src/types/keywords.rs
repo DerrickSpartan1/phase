@@ -4,7 +4,7 @@ use std::str::FromStr;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::ability::{ControllerRef, QuantityExpr, TargetFilter, TypedFilter};
+use super::ability::{ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypedFilter};
 use super::mana::{ManaColor, ManaCost};
 
 /// CR 702.124: Partner variant keywords for co-commander deckbuilding.
@@ -262,7 +262,12 @@ pub enum Keyword {
     Surge(ManaCost),
     Encore(ManaCost),
     Buyback(ManaCost),
+    /// CR 702.153a: Casualty N — as an additional cost, you may sacrifice a creature
+    /// with power N or greater. When you do, copy this spell.
+    Casualty(u32),
     Echo(ManaCost),
+    /// CR 702.42a: Entwine — pay additional cost to choose all modes of a modal spell.
+    Entwine(ManaCost),
     Outlast(ManaCost),
     Scavenge(ManaCost),
     Fortify(ManaCost),
@@ -274,6 +279,9 @@ pub enum Keyword {
     /// CR 702.87a: Level up is an activated ability that puts a level counter
     /// on this permanent. Activate only as a sorcery.
     LevelUp(ManaCost),
+
+    /// CR 702.41a: Affinity for [type] — this spell costs {1} less for each [type] you control.
+    Affinity(TypedFilter),
 
     // Simple keywords (no params)
     Banding,
@@ -455,6 +463,38 @@ fn parse_keyword_mana_cost(s: &str) -> ManaCost {
     ManaCost::Cost { shards, generic }
 }
 
+/// CR 702.41a: Parse the type text from "Affinity for [type]" into a TypedFilter.
+/// Handles common affinity patterns: "artifacts", "Plains", "creatures", etc.
+fn parse_affinity_type(s: &str) -> Option<TypedFilter> {
+    use super::ability::TypeFilter;
+    // MTGJSON provides "Affinity for artifacts" — FromStr splits on first ':' giving
+    // param "for artifacts". Strip the "for " prefix if present.
+    let s = s.strip_prefix("for ").unwrap_or(s);
+    let lower = s.to_ascii_lowercase();
+    match lower.as_str() {
+        "artifacts" => Some(TypedFilter::new(TypeFilter::Artifact)),
+        "creatures" => Some(TypedFilter::creature()),
+        "lands" => Some(TypedFilter::land()),
+        "enchantments" => Some(TypedFilter::new(TypeFilter::Enchantment)),
+        "tokens" => Some(TypedFilter::creature().properties(vec![FilterProp::Token])),
+        "equipment" => {
+            Some(TypedFilter::new(TypeFilter::Artifact).subtype("Equipment".to_string()))
+        }
+        _ => {
+            // Try as a land subtype (Plains, Islands, etc.)
+            let capitalized = format!("{}{}", &s[..1].to_uppercase(), &s[1..]);
+            // Strip trailing 's' for plural land subtypes (e.g., "Plains" stays "Plains",
+            // but "Islands" → "Island", "Swamps" → "Swamp")
+            let subtype = if capitalized.ends_with('s') && capitalized != "Plains" {
+                capitalized[..capitalized.len() - 1].to_string()
+            } else {
+                capitalized
+            };
+            Some(TypedFilter::land().subtype(subtype))
+        }
+    }
+}
+
 /// Parse an enchant target string into a simple TargetFilter.
 fn parse_enchant_target(s: &str) -> TargetFilter {
     use super::ability::TypeFilter;
@@ -580,6 +620,14 @@ impl FromStr for Keyword {
                 "surge" => return Ok(Keyword::Surge(parse_keyword_mana_cost(p))),
                 "encore" => return Ok(Keyword::Encore(parse_keyword_mana_cost(p))),
                 "buyback" => return Ok(Keyword::Buyback(parse_keyword_mana_cost(p))),
+                "casualty" => return Ok(Keyword::Casualty(p.parse().unwrap_or(1))),
+                "entwine" => return Ok(Keyword::Entwine(parse_keyword_mana_cost(p))),
+                "affinity" => {
+                    if let Some(tf) = parse_affinity_type(p) {
+                        return Ok(Keyword::Affinity(tf));
+                    }
+                    // Fall through to Unknown for unrecognized affinity types
+                }
                 "echo" => return Ok(Keyword::Echo(parse_keyword_mana_cost(p))),
                 "outlast" => return Ok(Keyword::Outlast(parse_keyword_mana_cost(p))),
                 "scavenge" => return Ok(Keyword::Scavenge(parse_keyword_mana_cost(p))),
@@ -986,6 +1034,16 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Surge" => Ok(Keyword::Surge(mana(data)?)),
         "Encore" => Ok(Keyword::Encore(mana(data)?)),
         "Buyback" => Ok(Keyword::Buyback(mana(data)?)),
+        // CR 702.153a
+        "Casualty" => Ok(Keyword::Casualty(uint(data))),
+        // CR 702.42a
+        "Entwine" => Ok(Keyword::Entwine(mana(data)?)),
+        // CR 702.41a
+        "Affinity" => {
+            let tf: TypedFilter =
+                serde_json::from_value(data.clone()).map_err(|e| format!("Affinity: {e}"))?;
+            Ok(Keyword::Affinity(tf))
+        }
         "Echo" => Ok(Keyword::Echo(mana(data)?)),
         "Outlast" => Ok(Keyword::Outlast(mana(data)?)),
         "Scavenge" => Ok(Keyword::Scavenge(mana(data)?)),

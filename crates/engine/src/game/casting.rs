@@ -8,6 +8,7 @@ use crate::types::game_state::{
     StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaCost, SpellMeta};
 use crate::types::player::PlayerId;
 use crate::types::statics::{CastingProhibitionCondition, CastingProhibitionScope, StaticMode};
@@ -666,6 +667,9 @@ fn prepare_spell_cast(
     // This runs after self-cost reduction (CostReduction on the spell itself) and commander tax.
     apply_battlefield_cost_modifiers(state, player, object_id, &mut mana_cost);
 
+    // CR 702.41a: Affinity — reduce cost by {1} for each matching permanent controlled.
+    apply_affinity_reduction(state, player, object_id, &mut mana_cost);
+
     Ok(PreparedSpellCast {
         object_id,
         card_id: obj.card_id,
@@ -819,6 +823,40 @@ fn apply_cost_mod_to_mana(
             // Reducing NoCost is a no-op
         }
         ManaCost::SelfManaCost => {} // Should not occur here
+    }
+}
+
+/// CR 702.41a: Apply Affinity cost reduction from the spell's own keywords.
+///
+/// For each `Keyword::Affinity(type_filter)` on the spell, counts matching
+/// permanents on the battlefield controlled by the caster and reduces the
+/// spell's generic mana cost by that count (floor at 0).
+/// CR 702.41b: Multiple Affinity instances each apply separately.
+fn apply_affinity_reduction(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    mana_cost: &mut ManaCost,
+) {
+    let Some(spell_obj) = state.objects.get(&spell_id) else {
+        return;
+    };
+    for kw in &spell_obj.keywords {
+        if let Keyword::Affinity(ref type_filter) = kw {
+            let filter = TargetFilter::Typed(type_filter.clone());
+            let count = state
+                .battlefield
+                .iter()
+                .filter(|&&id| {
+                    let Some(obj) = state.objects.get(&id) else {
+                        return false;
+                    };
+                    obj.controller == caster
+                        && super::filter::matches_target_filter(state, id, &filter, spell_id)
+                })
+                .count() as u32;
+            apply_cost_mod_to_mana(mana_cost, &ManaCost::generic(1), count, false);
+        }
     }
 }
 

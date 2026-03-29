@@ -4,10 +4,10 @@ use crate::database::mtgjson::{parse_mtgjson_mana_cost, AtomicCard};
 use crate::game::printed_cards::derive_colors_from_mana_cost;
 use crate::parser::oracle::parse_oracle_text;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, ContinuousModification,
-    ControllerRef, Duration, Effect, FilterProp, ManaProduction, NinjutsuVariant, PtValue,
-    QuantityExpr, RuntimeHandler, StaticDefinition, TargetFilter, TriggerCondition,
-    TriggerDefinition, TypeFilter, TypedFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost,
+    ContinuousModification, ControllerRef, Duration, Effect, FilterProp, ManaProduction,
+    NinjutsuVariant, PtValue, QuantityExpr, RuntimeHandler, StaticDefinition, TargetFilter,
+    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -476,6 +476,74 @@ fn typecycling_subtype_to_filter(subtype: &str) -> TargetFilter {
     }
 }
 
+/// CR 702.153a: Synthesize Casualty N into an optional sacrifice cost + self-cast copy trigger.
+///
+/// Casualty N = two abilities:
+/// 1. Optional additional cost: sacrifice a creature with power N or greater
+/// 2. Triggered ability: "When you cast this spell, if a casualty cost was paid, copy it"
+pub fn synthesize_casualty(face: &mut CardFace) {
+    let threshold = match face.keywords.iter().find_map(|k| match k {
+        Keyword::Casualty(n) => Some(*n),
+        _ => None,
+    }) {
+        Some(n) => n,
+        None => return,
+    };
+
+    // CR 702.153a: "As an additional cost, you may sacrifice a creature with power N or greater"
+    if face.additional_cost.is_none() {
+        let sacrifice_filter =
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::PowerGE {
+                    value: threshold as i32,
+                }]),
+            );
+        face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Sacrifice {
+            target: sacrifice_filter,
+            count: 1,
+        }));
+    }
+
+    // CR 702.153a: "When you cast this spell, if a casualty cost was paid, copy it.
+    // If the spell has any targets, you may choose new targets for the copy."
+    let copy_effect = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopySpell {
+            target: TargetFilter::Any,
+        },
+    )
+    .condition(AbilityCondition::AdditionalCostPaid);
+
+    face.triggers.push(
+        TriggerDefinition::new(TriggerMode::SpellCast)
+            .valid_card(TargetFilter::SelfRef)
+            .trigger_zones(vec![Zone::Stack])
+            .execute(copy_effect)
+            .description("Casualty — copy this spell when cast with casualty paid".to_string()),
+    );
+}
+
+/// CR 702.42a: Synthesize Entwine cost onto modal spell's ModalChoice.
+///
+/// Sets `entwine_cost` on the face's modal abilities and raises `max_choices`
+/// to `mode_count` so all modes can be selected.
+pub fn synthesize_entwine(face: &mut CardFace) {
+    let cost = match face.keywords.iter().find_map(|k| match k {
+        Keyword::Entwine(cost) => Some(cost.clone()),
+        _ => None,
+    }) {
+        Some(c) => c,
+        None => return,
+    };
+
+    // Set entwine_cost on the face's modal choice + allow all-mode selection
+    if let Some(ref mut modal) = face.modal {
+        modal.entwine_cost = Some(cost);
+        // CR 702.42a: "You may choose all modes" — raise max_choices to allow it
+        modal.max_choices = modal.mode_count;
+    }
+}
+
 /// Run all synthesis functions in canonical order on a card face.
 /// Both `oracle_loader.rs` and `oracle_gen.rs` call this to ensure the same
 /// complete set of synthesizers is applied.
@@ -491,6 +559,8 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_mobilize(face);
     synthesize_level_up(face);
     synthesize_cycling(face);
+    synthesize_casualty(face);
+    synthesize_entwine(face);
 }
 
 /// Build a `CardFace` from MTGJSON data, running the Oracle text parser and all synthesis.

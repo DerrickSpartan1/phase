@@ -528,6 +528,9 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Impending(_) => "impending".to_string(),
         Keyword::LevelUp(_) => "level up".to_string(),
         Keyword::Hideaway(_) => "hideaway".to_string(),
+        Keyword::Casualty(n) => format!("casualty {n}"),
+        Keyword::Entwine(_) => "entwine".to_string(),
+        Keyword::Affinity(_) => "affinity".to_string(),
         Keyword::Unknown(s) => s.to_lowercase(),
     }
 }
