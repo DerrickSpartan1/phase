@@ -3376,10 +3376,31 @@ fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityCondition>, String)
     }
     if let Some(rest) = lower.strip_prefix("if you do, ") {
         let offset = text.len() - rest.len();
-        (Some(AbilityCondition::IfYouDo), text[offset..].to_string())
-    } else {
-        (None, text.to_string())
+        return (Some(AbilityCondition::IfYouDo), text[offset..].to_string());
     }
+    // CR 608.2c: "If a [noun] was [verb] this way, [effect]" — sub_ability executes only if
+    // the parent optional-targeting effect resolved on at least one target. Evaluated at runtime
+    // by checking optional_targeting && !targets.is_empty() (see evaluate_condition).
+    // Covers: "if a permanent was returned this way", "if a creature was destroyed this way", etc.
+    if let Some(after_article) = lower
+        .strip_prefix("if a ")
+        .or_else(|| lower.strip_prefix("if an "))
+    {
+        if let Some((_, after_was)) = after_article.split_once(" was ") {
+            // after_was: "[verb] this way, [body]" — verb is the first word
+            let mut words = after_was.splitn(3, ' ');
+            if let (Some(verb), Some("this"), Some(rest_with_way)) =
+                (words.next(), words.next(), words.next())
+            {
+                if let Some(body) = rest_with_way.strip_prefix("way, ") {
+                    let _ = verb; // consumed for pattern validation
+                    let offset = text.len() - body.len();
+                    return (Some(AbilityCondition::IfYouDo), text[offset..].to_string());
+                }
+            }
+        }
+    }
+    (None, text.to_string())
 }
 
 /// CR 608.2c + CR 400.7: Strip "unless ~ entered this turn" suffix from effect text.

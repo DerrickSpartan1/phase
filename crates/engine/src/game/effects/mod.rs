@@ -827,6 +827,7 @@ pub fn resolve_ability_chain(
                 | WaitingFor::ChooseFromZoneChoice { .. }
                 | WaitingFor::ManifestDreadChoice { .. }
                 | WaitingFor::DiscardChoice { .. }
+                | WaitingFor::LearnChoice { .. }
         ) {
             let mut sub_clone = sub.as_ref().clone();
             if sub_clone.targets.is_empty() && !ability.targets.is_empty() {
@@ -907,7 +908,16 @@ fn evaluate_condition(
     match condition {
         AbilityCondition::AdditionalCostPaid => ability.context.additional_cost_paid,
         AbilityCondition::AdditionalCostNotPaid => !ability.context.additional_cost_paid,
-        AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => {
+        AbilityCondition::IfYouDo => {
+            // CR 608.2c: Satisfied when the player performed the optional effect.
+            // For optional-targeting abilities ("up to one target"), resolved with ≥1 target
+            // is equivalent to "you chose to act on a target."
+            let optional_targeting_performed =
+                ability.optional_targeting && !ability.targets.is_empty();
+            (ability.context.optional_effect_performed || optional_targeting_performed)
+                && !state.cost_payment_failed_flag
+        }
+        AbilityCondition::IfAPlayerDoes => {
             ability.context.optional_effect_performed && !state.cost_payment_failed_flag
         }
         // CR 603.12: "When you do" — reflexive trigger that always fires.
