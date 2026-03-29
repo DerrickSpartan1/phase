@@ -230,20 +230,6 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
 
               {activeTab === "audio" && (<>
                 <SettingsSection title="Audio">
-                  <SettingGroup label="Global Volume">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-                      <input
-                        type="range"
-                        min={0}
-                        max={100}
-                        value={masterVolume}
-                        onChange={(e) => setMasterVolume(Number(e.target.value))}
-                        className="flex-1 accent-cyan-500"
-                      />
-                      <span className="text-xs text-slate-400 sm:w-10 sm:text-right">{masterVolume}%</span>
-                    </div>
-                  </SettingGroup>
-
                   <SettingGroup label="Mute All">
                     <label className="flex min-h-11 items-center gap-2">
                       <input
@@ -257,6 +243,20 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
                       />
                       <span className="text-sm text-slate-200">Mute all audio</span>
                     </label>
+                  </SettingGroup>
+
+                  <SettingGroup label="Global Volume">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+                      <input
+                        type="range"
+                        min={0}
+                        max={100}
+                        value={masterVolume}
+                        onChange={(e) => setMasterVolume(Number(e.target.value))}
+                        className="flex-1 accent-cyan-500"
+                      />
+                      <span className="text-xs text-slate-400 sm:w-10 sm:text-right">{masterVolume}%</span>
+                    </div>
                   </SettingGroup>
 
                   <SettingGroup label="SFX Volume">
