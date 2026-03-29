@@ -94,6 +94,30 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     let text = text.trim_start();
     let lower = text.to_lowercase();
 
+    // CR 608.2c: Bare anaphoric references inherit the parent target selected earlier
+    // in the same spell/ability instruction sequence.
+    if lower == "it"
+        || lower
+            .strip_prefix("it")
+            .is_some_and(|rest| rest.starts_with([' ', ',', '.']))
+    {
+        return (TargetFilter::ParentTarget, &text[2..]);
+    }
+    if lower == "them"
+        || lower
+            .strip_prefix("them")
+            .is_some_and(|rest| rest.starts_with([' ', ',', '.']))
+    {
+        return (TargetFilter::ParentTarget, &text[4..]);
+    }
+    if let Some(rest_subject) = lower.strip_prefix("that ") {
+        let original_rest = &text[text.len() - rest_subject.len()..];
+        let (filter, rem) = parse_type_phrase(original_rest);
+        if !matches!(filter, TargetFilter::Any) {
+            return (TargetFilter::ParentTarget, rem);
+        }
+    }
+
     // First-character dispatch for prefix matching
     match lower.as_bytes().first().copied() {
         // "~" — self-reference (normalized from card name)
@@ -2118,6 +2142,34 @@ mod tests {
         let (f, rest) = parse_target("each card exiled with ~ into its owner's graveyard");
         assert_eq!(f, TargetFilter::ExiledBySource);
         assert_eq!(rest, " into its owner's graveyard");
+    }
+
+    #[test]
+    fn parse_target_it_inherits_parent_target() {
+        let (filter, rest) = parse_target("it");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_them_inherits_parent_target() {
+        let (filter, rest) = parse_target("them");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_target_that_spell_inherits_parent_target() {
+        let (filter, rest) = parse_target("that spell is countered this way");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, " is countered this way");
+    }
+
+    #[test]
+    fn parse_target_that_creature_inherits_parent_target() {
+        let (filter, rest) = parse_target("that creature");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
     }
 
     #[test]

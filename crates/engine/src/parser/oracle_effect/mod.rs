@@ -8919,6 +8919,52 @@ mod tests {
     }
 
     #[test]
+    fn no_more_lies_exile_rider_uses_parent_target() {
+        let def = parse_effect_chain(
+            "Counter target spell unless its controller pays {3}. If that spell is countered this way, exile it instead of putting it into its owner's graveyard.",
+            AbilityKind::Spell,
+        );
+
+        match &*def.effect {
+            Effect::Counter {
+                target,
+                unless_payment,
+                ..
+            } => {
+                assert!(matches!(
+                    target,
+                    TargetFilter::Typed(tf)
+                        if tf.type_filters.contains(&TypeFilter::Card)
+                            && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
+                ));
+                assert!(
+                    unless_payment.is_some(),
+                    "counter rider should preserve unless-payment"
+                );
+            }
+            other => panic!("expected Counter effect, got {other:?}"),
+        }
+
+        let exile = def
+            .sub_ability
+            .as_ref()
+            .expect("No More Lies should parse exile rider");
+        match &*exile.effect {
+            Effect::ChangeZone {
+                destination,
+                origin,
+                target,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Exile);
+                assert_eq!(*origin, Some(Zone::Graveyard));
+                assert_eq!(*target, TargetFilter::ParentTarget);
+            }
+            other => panic!("expected exile ChangeZone rider, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn conjunction_multi_effect_discard_and_gain_life() {
         // "each opponent discards a card and you gain 3 life"
         // should produce Discard + GainLife chain
