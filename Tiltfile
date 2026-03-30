@@ -113,13 +113,14 @@ local_resource('check-frontend',
 
 local_resource('card-data',
     cmd = './scripts/gen-card-data.sh',
-#    trigger_mode = TRIGGER_MODE_MANUAL,
+    deps = ENGINE_SRC,
     auto_init = True,
     labels = ['data'],
 )
 
 local_resource('coverage',
     cmd = 'cargo coverage',
+    resource_deps = ['card-data'],
     trigger_mode = TRIGGER_MODE_MANUAL,
     auto_init = False,
     labels = ['data'],
