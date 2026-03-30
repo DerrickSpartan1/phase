@@ -927,6 +927,7 @@ fn add_controller(filter: TargetFilter, controller: ControllerRef) -> TargetFilt
 /// - "to a player"         → `Player`
 /// - "to an opponent"      → opponent-controlled TypedFilter
 /// - "to you"              → `Controller`
+///
 /// Other qualifiers (e.g. "to a player or planeswalker") are left as `None`
 /// so the trigger fires for any target, matching current behaviour.
 fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
