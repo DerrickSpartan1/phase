@@ -113,8 +113,8 @@ local_resource('check-frontend',
 
 local_resource('card-data',
     cmd = './scripts/gen-card-data.sh',
-    trigger_mode = TRIGGER_MODE_MANUAL,
-    auto_init = False,
+#    trigger_mode = TRIGGER_MODE_MANUAL,
+    auto_init = True,
     labels = ['data'],
 )
 

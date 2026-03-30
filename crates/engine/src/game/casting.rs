@@ -1385,7 +1385,8 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
         }
     }
 
-    let creature_face_ok = (prepared.modal.is_some() || spell_has_legal_targets(state, obj, player))
+    let creature_face_ok = (prepared.modal.is_some()
+        || spell_has_legal_targets(state, obj, player))
         && can_pay_cost_after_auto_tap(state, player, prepared.object_id, &prepared.mana_cost);
 
     if creature_face_ok {

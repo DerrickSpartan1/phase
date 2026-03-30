@@ -1156,7 +1156,8 @@ fn parse_multiple_opponents_condition(norm_lower: &str) -> Option<ReplacementCon
 /// Both phrasings are semantically identical: the permanent enters tapped on the opponent's turn.
 /// CR 614.1d + CR 500
 fn parse_your_turn_condition(norm_lower: &str) -> Option<ReplacementCondition> {
-    if norm_lower.contains("unless it's your turn") || norm_lower.contains("if it's not your turn") {
+    if norm_lower.contains("unless it's your turn") || norm_lower.contains("if it's not your turn")
+    {
         Some(ReplacementCondition::UnlessYourTurn)
     } else {
         None

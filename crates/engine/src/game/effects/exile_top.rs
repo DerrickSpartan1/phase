@@ -153,8 +153,12 @@ mod tests {
         let mut events = Vec::new();
         resolve(&mut state, &ability, &mut events).unwrap();
 
-        assert!(events
-            .iter()
-            .any(|e| matches!(e, GameEvent::EffectResolved { kind: EffectKind::ExileTop, .. })));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::ExileTop,
+                ..
+            }
+        )));
     }
 }
