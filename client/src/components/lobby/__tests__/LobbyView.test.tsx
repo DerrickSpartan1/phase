@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, render } from "@testing-library/react";
 
 import { LobbyView } from "../LobbyView";
+import { useMultiplayerStore } from "../../../stores/multiplayerStore";
 
 class MockWebSocket {
   static CONNECTING = 0;
@@ -33,6 +34,7 @@ describe("LobbyView", () => {
     cleanup();
     MockWebSocket.instances = [];
     vi.clearAllMocks();
+    useMultiplayerStore.setState({ serverAddress: "wss://us.phase-rs.dev/ws" });
   });
 
   it("calls onServerOffline when lobby websocket errors", () => {
@@ -80,5 +82,22 @@ describe("LobbyView", () => {
     );
 
     expect(MockWebSocket.instances).toHaveLength(0);
+  });
+
+  it("falls back to offline handling when the stored server address is invalid", () => {
+    useMultiplayerStore.setState({ serverAddress: "wss:" });
+    const onServerOffline = vi.fn();
+
+    render(
+      <LobbyView
+        onHostGame={vi.fn()}
+        onHostP2P={vi.fn()}
+        onJoinGame={vi.fn()}
+        onServerOffline={onServerOffline}
+      />,
+    );
+
+    expect(MockWebSocket.instances).toHaveLength(0);
+    expect(onServerOffline).toHaveBeenCalledTimes(1);
   });
 });

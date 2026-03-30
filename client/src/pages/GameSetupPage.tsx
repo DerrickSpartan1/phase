@@ -17,6 +17,7 @@ import { menuButtonClass } from "../components/menu/buttonStyles";
 import { getAiDifficultyLabel, type AIDifficulty } from "../constants/ai";
 import { ACTIVE_DECK_KEY, loadActiveDeck } from "../constants/storage";
 import { parseRoomCode } from "../network/connection";
+import { isValidWebSocketUrl } from "../services/serverDetection";
 import type { GamePreset } from "../services/presets";
 import { savePreset } from "../services/presets";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../stores/multiplayerStore";
@@ -103,6 +104,7 @@ export function GameSetupPage() {
   const hostWsRef = useRef<WebSocket | null>(null);
   const serverAddress = useMultiplayerStore((s) => s.serverAddress);
   const setFormatConfigStore = useMultiplayerStore((s) => s.setFormatConfig);
+  const showToast = useMultiplayerStore((s) => s.showToast);
 
   useEffect(() => {
     const savedDeck = localStorage.getItem(ACTIVE_DECK_KEY);
@@ -227,6 +229,11 @@ export function GameSetupPage() {
         }
       }
 
+      if (!isValidWebSocketUrl(serverAddress)) {
+        showToast("Invalid server address. Update it in Settings before hosting.");
+        return;
+      }
+
       const ws = new WebSocket(serverAddress);
       hostWsRef.current = ws;
 
@@ -280,7 +287,7 @@ export function GameSetupPage() {
         console.error("Failed to connect to server");
       };
     },
-    [activeDeckName, serverAddress, navigate],
+    [activeDeckName, serverAddress, navigate, showToast],
   );
 
   const handleHostP2P = useCallback((settings: HostSettings) => {

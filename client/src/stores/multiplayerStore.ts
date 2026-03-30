@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
 import type { FormatConfig, GameFormat, MatchType, PlayerId } from "../adapter/types";
+import { isValidWebSocketUrl } from "../services/serverDetection";
 import { saveActiveGame, useGameStore } from "./gameStore";
 
 type ConnectionStatus = "disconnected" | "connecting" | "connected";
@@ -345,6 +346,17 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             if (gameStartedFired) return;
 
             const session = JSON.parse(raw) as { gameCode: string; playerToken: string };
+            if (!isValidWebSocketUrl(get().serverAddress)) {
+              localStorage.removeItem("phase-ws-session");
+              set({
+                hostGameCode: null,
+                hostIsPublic: false,
+                hostingStatus: "idle",
+                playerSlots: [],
+                toastMessage: "Invalid server address. Update it in Settings.",
+              });
+              return;
+            }
             const rws = new WebSocket(get().serverAddress);
             hostWs = rws;
 
@@ -385,6 +397,16 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         };
 
         // Wire up the initial WebSocket handlers
+        if (!isValidWebSocketUrl(get().serverAddress)) {
+          set({
+            hostGameCode: null,
+            hostIsPublic: false,
+            hostingStatus: "idle",
+            playerSlots: [],
+            toastMessage: "Invalid server address. Update it in Settings.",
+          });
+          return;
+        }
         const ws = new WebSocket(get().serverAddress);
         hostWs = ws;
 

@@ -4,6 +4,7 @@ import { audioManager } from "../../audio/AudioManager.ts";
 import { cacheThemeManifest, clearThemeCache } from "../../audio/audioCache.ts";
 import { BUILT_IN_THEMES, findManifest, validateThemeManifest } from "../../audio/themeRegistry.ts";
 import { PLANESWALKER_THEME } from "../../audio/planeswalkerTheme.ts";
+import { isValidWebSocketUrl } from "../../services/serverDetection.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import type { AnimationSpeed, CombatPacing, VfxQuality } from "../../animation/types.ts";
@@ -374,6 +375,10 @@ export function PreferencesModal({ onClose }: PreferencesModalProps) {
                       />
                       <button
                         onClick={() => {
+                          if (!isValidWebSocketUrl(serverAddress)) {
+                            setConnTest("fail");
+                            return;
+                          }
                           setConnTest("testing");
                           const ws = new WebSocket(serverAddress);
                           const timeout = setTimeout(() => {

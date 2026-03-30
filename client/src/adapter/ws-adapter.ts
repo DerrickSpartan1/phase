@@ -8,6 +8,7 @@ import type {
   SubmitResult,
 } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
+import { isValidWebSocketUrl } from "../services/serverDetection";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 
 /** Deck data format matching server protocol. */
@@ -122,6 +123,13 @@ export class WebSocketAdapter implements EngineAdapter {
     return new Promise<void>((resolve, reject) => {
       this.initResolve = resolve;
       this.initReject = reject;
+
+      if (!isValidWebSocketUrl(this.serverUrl)) {
+        reject(new AdapterError("WS_ERROR", "Invalid WebSocket URL", false));
+        this.initResolve = null;
+        this.initReject = null;
+        return;
+      }
 
       this.ws = new WebSocket(this.serverUrl);
 
@@ -289,6 +297,11 @@ export class WebSocketAdapter implements EngineAdapter {
     }
     this._gameCode = session.gameCode;
     this.playerToken = session.playerToken;
+
+    if (!isValidWebSocketUrl(this.serverUrl)) {
+      this.emit({ type: "reconnectFailed" });
+      return false;
+    }
 
     this.ws = new WebSocket(this.serverUrl);
     this.ws.onopen = () => {

@@ -2,7 +2,23 @@ import { isTauri } from "./sidecar";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 
 const DEFAULT_PORT = 9374;
-const DEFAULT_SERVER = "wss://us.phase-rs.dev/ws";
+export const DEFAULT_SERVER = "wss://us.phase-rs.dev/ws";
+
+export function parseWebSocketUrl(value: string): URL | null {
+  try {
+    const url = new URL(value);
+    if ((url.protocol !== "ws:" && url.protocol !== "wss:") || !url.host) {
+      return null;
+    }
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+export function isValidWebSocketUrl(value: string): boolean {
+  return parseWebSocketUrl(value) !== null;
+}
 
 /**
  * Detect the best WebSocket server URL by trying in order:
@@ -21,7 +37,7 @@ export async function detectServerUrl(): Promise<string> {
 
   // Step 2: Try the stored server address
   const stored = useMultiplayerStore.getState().serverAddress;
-  if (stored) {
+  if (stored && isValidWebSocketUrl(stored)) {
     const httpUrl = wsUrlToHealthUrl(stored);
     if (httpUrl) {
       const reachable = await tryHealthCheck(httpUrl);
@@ -32,7 +48,7 @@ export async function detectServerUrl(): Promise<string> {
   }
 
   // Step 3: Fall back to stored address or default production server
-  return stored || DEFAULT_SERVER;
+  return isValidWebSocketUrl(stored) ? stored : DEFAULT_SERVER;
 }
 
 /**
@@ -84,15 +100,13 @@ export function parseJoinCode(input: string): { code: string; serverAddress?: st
 
 /** Convert ws:// URL to http:// health check URL. */
 function wsUrlToHealthUrl(wsUrl: string): string | null {
-  try {
-    const url = wsUrl
-      .replace(/^ws:\/\//, "http://")
-      .replace(/^wss:\/\//, "https://")
-      .replace(/\/ws\/?$/, "/health");
-    return url;
-  } catch {
+  if (!isValidWebSocketUrl(wsUrl)) {
     return null;
   }
+  return wsUrl
+    .replace(/^ws:\/\//, "http://")
+    .replace(/^wss:\/\//, "https://")
+    .replace(/\/ws\/?$/, "/health");
 }
 
 async function tryHealthCheck(url: string): Promise<boolean> {

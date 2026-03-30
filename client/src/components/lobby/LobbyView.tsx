@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { GameFormat } from "../../adapter/types";
-import { parseJoinCode } from "../../services/serverDetection";
+import { isValidWebSocketUrl, parseJoinCode } from "../../services/serverDetection";
 import { useMultiplayerStore } from "../../stores/multiplayerStore";
 import { MenuPanel } from "../menu/MenuShell";
 import { menuButtonClass } from "../menu/buttonStyles";
@@ -61,6 +61,11 @@ export function LobbyView({
       notifiedOffline = true;
       onServerOffline?.();
     };
+
+    if (!isValidWebSocketUrl(serverAddress)) {
+      notifyServerOffline();
+      return;
+    }
 
     // Connect to server lobby for game list subscription
     const ws = new WebSocket(serverAddress);
