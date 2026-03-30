@@ -2238,6 +2238,15 @@ pub enum Effect {
         #[serde(default = "default_one")]
         count: u32,
     },
+    /// Exile the top N card(s) of a player's library.
+    ExileTop {
+        /// The player whose library to exile from.
+        #[serde(default = "default_target_filter_any")]
+        player: TargetFilter,
+        /// Number of cards to exile.
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+    },
     /// No-op effect that only establishes targeting for sub-abilities in the chain.
     /// Produced by Oracle text like "Choose target creature" where the sentence exists
     /// solely to designate a target referenced by subsequent sentences via "that creature".
@@ -2707,6 +2716,8 @@ impl Effect {
             | Effect::SetLifeTotal { target, .. }
             | Effect::GiveControl { target, .. } => Some(target),
 
+            Effect::ExileTop { player, .. } => Some(player),
+
             // GenericEffect has Option<TargetFilter>
             Effect::GenericEffect { target, .. } => target.as_ref(),
 
@@ -2835,6 +2846,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::SearchLibrary { .. } => "SearchLibrary",
         Effect::RevealHand { .. } => "RevealHand",
         Effect::RevealTop { .. } => "RevealTop",
+        Effect::ExileTop { .. } => "ExileTop",
         Effect::TargetOnly { .. } => "TargetOnly",
         Effect::Choose { .. } => "Choose",
         Effect::Suspect { .. } => "Suspect",
@@ -2955,6 +2967,7 @@ pub enum EffectKind {
     Discard,
     Shuffle,
     SearchLibrary,
+    ExileTop,
     TargetOnly,
     Choose,
     Suspect,
@@ -3076,6 +3089,7 @@ impl From<&Effect> for EffectKind {
             Effect::SearchLibrary { .. } => EffectKind::SearchLibrary,
             Effect::RevealHand { .. } => EffectKind::Reveal,
             Effect::RevealTop { .. } => EffectKind::Reveal,
+            Effect::ExileTop { .. } => EffectKind::ExileTop,
             Effect::TargetOnly { .. } => EffectKind::TargetOnly,
             Effect::Choose { .. } => EffectKind::Choose,
             Effect::Suspect { .. } => EffectKind::Suspect,
@@ -4438,6 +4452,9 @@ pub struct ResolvedAbility {
     /// CR 608.2d: When set, an opponent chooses whether to perform this optional effect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub optional_for: Option<OpponentMayScope>,
+    /// Variable-count targeting preserved from the originating ability definition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub multi_target: Option<MultiTargetSpec>,
     /// Human-readable description of this ability (from Oracle text / trigger line).
     /// Used by `OptionalEffectChoice` to tell the player what they're choosing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4484,6 +4501,7 @@ impl ResolvedAbility {
             optional_targeting: false,
             optional: false,
             optional_for: None,
+            multi_target: None,
             description: None,
             repeat_for: None,
             forward_result: false,

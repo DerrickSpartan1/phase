@@ -95,6 +95,7 @@ mod tests {
             optional_targeting: false,
             optional: false,
             optional_for: None,
+            multi_target: None,
             description: None,
             player_scope: None,
             repeat_for: None,

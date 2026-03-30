@@ -1171,6 +1171,20 @@ pub(super) fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
 }
 
 pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImperativeAst> {
+    if let Some(rest) = lower.strip_prefix("exile the top ") {
+        let (count, remainder) = parse_number(rest).unwrap_or((1, rest));
+        // Only handles "your library" (TargetFilter::Controller). Opponent/any-player
+        // targeting ("target player's library") falls through to ChangeZone handling.
+        if remainder.starts_with("card of your library")
+            || remainder.starts_with("cards of your library")
+        {
+            return Some(ZoneCounterImperativeAst::ExileTop {
+                player: TargetFilter::Controller,
+                count,
+            });
+        }
+    }
+
     if lower.starts_with("exile all ") || lower.starts_with("exile each ") {
         let rest_lower = &lower[6..]; // after "exile "
         let (parsed_target, _rem) = parse_target(&text[6..]);
@@ -2056,6 +2070,12 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
                 }
             }
         }
+        ZoneCounterImperativeAst::ExileTop { player, count } => Effect::ExileTop {
+            player,
+            count: QuantityExpr::Fixed {
+                value: count as i32,
+            },
+        },
         ZoneCounterImperativeAst::Counter {
             target,
             source_static,

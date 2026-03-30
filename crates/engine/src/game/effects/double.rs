@@ -289,6 +289,7 @@ mod tests {
             optional_targeting: false,
             optional: false,
             optional_for: None,
+            multi_target: None,
             description: None,
             repeat_for: None,
             forward_result: false,

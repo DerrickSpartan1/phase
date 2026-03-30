@@ -442,6 +442,10 @@ pub(super) enum ZoneCounterImperativeAst {
         target: TargetFilter,
         all: bool,
     },
+    ExileTop {
+        player: TargetFilter,
+        count: u32,
+    },
     Counter {
         target: TargetFilter,
         source_static: Option<Box<StaticDefinition>>,

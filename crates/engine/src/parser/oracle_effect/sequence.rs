@@ -746,8 +746,8 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::CantRegenerate)
         }
         // CR 700.2: "Choose/You choose/An opponent chooses/Target opponent chooses one/two/N
-        // of them/those" after ChangeZone → ChooseFromZone building block
-        Effect::ChangeZone { .. }
+        // of them/those" after ChangeZone or ExileTop → ChooseFromZone building block
+        Effect::ChangeZone { .. } | Effect::ExileTop { .. }
             if (lower.contains("of them") || lower.contains("of those"))
                 && (lower.starts_with("choose ")
                     || lower.starts_with("you choose ")

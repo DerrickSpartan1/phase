@@ -46,6 +46,7 @@ pub mod effect;
 pub mod energy;
 pub mod exchange_control;
 pub mod exile_from_top_until;
+pub mod exile_top;
 pub mod exploit;
 pub mod explore;
 pub mod extra_turn;
@@ -183,6 +184,7 @@ pub fn resolve_effect(
         Effect::Seek { .. } => seek::resolve(state, ability, events),
         Effect::RevealHand { .. } => reveal_hand::resolve(state, ability, events),
         Effect::RevealTop { .. } => reveal_top::resolve(state, ability, events),
+        Effect::ExileTop { .. } => exile_top::resolve(state, ability, events),
         Effect::TargetOnly { .. } => Ok(()), // no-op: targeting is established at cast time
         Effect::Choose { .. } => choose::resolve(state, ability, events),
         Effect::Suspect { .. } => suspect::resolve(state, ability, events),
@@ -335,6 +337,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::TargetOnly { target } => target,
         Effect::Token { owner, .. } => owner,
         Effect::RevealTop { player, .. } => player,
+        Effect::ExileTop { player, .. } => player,
         _ => return None,
     };
 
@@ -680,6 +683,7 @@ pub fn resolve_ability_chain(
             Effect::ChangeZone { destination, .. } | Effect::ChangeZoneAll { destination, .. } => {
                 Some(*destination)
             }
+            Effect::ExileTop { .. } => Some(crate::types::zones::Zone::Exile),
             _ => None,
         };
         let moved_ids: Vec<ObjectId> = events[events_before..]

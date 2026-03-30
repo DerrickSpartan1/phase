@@ -3474,10 +3474,10 @@ mod tests {
             "exile the top card of your library, then cast it without paying its mana cost",
             crate::types::ability::AbilityKind::Spell,
         );
-        // First effect is ChangeZone (exile), sub is CastFromZone
+        // First effect is ExileTop (dedicated top-of-library exile), sub is CastFromZone
         assert!(
-            matches!(*def.effect, Effect::ChangeZone { .. }),
-            "first effect should be ChangeZone, got {:?}",
+            matches!(*def.effect, Effect::ExileTop { .. }),
+            "first effect should be ExileTop, got {:?}",
             def.effect,
         );
         let sub = def

@@ -6904,6 +6904,22 @@ mod tests {
     }
 
     #[test]
+    fn exile_top_of_your_library_parses_as_exile_top() {
+        let effect = parse_effect("Exile the top card of your library");
+        assert!(
+            matches!(
+                &effect,
+                Effect::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }
+            ),
+            "Expected ExileTop(controller, 1), got {:?}",
+            effect
+        );
+    }
+
+    #[test]
     fn put_counter_where_x_is_lowers_to_speed_quantity() {
         let def = parse_effect_chain_with_context(
             "put X +1/+1 counters on target creature you control, where X is your speed",
@@ -7613,8 +7629,14 @@ mod tests {
             AbilityKind::Spell,
         );
         assert!(
-            matches!(*def.effect, Effect::ChangeZone { .. }),
-            "Expected ChangeZone, got {:?}",
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 2 },
+                }
+            ),
+            "Expected ExileTop(controller, 2), got {:?}",
             def.effect
         );
         let sub = def.sub_ability.as_ref().expect("Expected sub_ability");
@@ -7640,10 +7662,16 @@ mod tests {
             "Exile the top two cards of your library. Choose one of them. Until end of turn, you may play that card.",
             AbilityKind::Spell,
         );
-        // First effect: ChangeZone to Exile
+        // First effect: ExileTop from controller's library
         assert!(
-            matches!(*def.effect, Effect::ChangeZone { .. }),
-            "Expected ChangeZone, got {:?}",
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Fixed { value: 2 },
+                }
+            ),
+            "Expected ExileTop(controller, 2), got {:?}",
             def.effect
         );
         // Second: ChooseFromZone

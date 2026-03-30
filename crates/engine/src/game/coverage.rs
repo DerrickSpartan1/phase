@@ -704,6 +704,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("count".into(), fmt_quantity(count)));
             }
         }
+        Effect::ExileTop { player, count } => {
+            d.push(("player".into(), fmt_target(player)));
+            d.push(("count".into(), fmt_quantity(count)));
+        }
         Effect::Pump {
             power,
             toughness,
