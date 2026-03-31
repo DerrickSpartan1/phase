@@ -234,6 +234,7 @@ export function MultiplayerPage() {
       <div className="menu-scene__haze" />
 
       <MenuShell eyebrow="Multiplayer" title={title} description={description} layout="stacked">
+        <div className="flex w-full flex-col items-center">
         {/* Active deck indicator — shown on lobby/host-setup when a deck is selected */}
         {(view === "lobby" || view === "host-setup") && activeDeckName && (
           <div className="mx-auto mb-4 flex w-full max-w-xl items-center justify-between gap-3 rounded-[16px] border border-white/8 bg-black/16 px-4 py-2.5">
@@ -309,6 +310,7 @@ export function MultiplayerPage() {
             isHost
           />
         )}
+        </div>
       </MenuShell>
       <ConnectionToast />
     </div>
