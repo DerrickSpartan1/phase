@@ -6,7 +6,7 @@ import { ManaSymbol } from "./ManaSymbol.tsx";
 function manaCostToShards(cost: ManaCost): string[] {
   if (cost.type !== "Cost") return [];
   const shards: string[] = [];
-  if (cost.generic > 0 || cost.shards.length === 0) shards.push(String(cost.generic));
+  if (cost.generic > 0) shards.push(String(cost.generic));
   for (const s of cost.shards) {
     shards.push(SHARD_ABBREVIATION[s] ?? s);
   }
@@ -31,6 +31,8 @@ interface ManaCostPipsProps {
 /** Mana cost pips with dark circular backgrounds, MTGA-style. */
 export function ManaCostPips({ cost, isReduced, size = "md", className = "" }: ManaCostPipsProps) {
   const shards = manaCostToShards(cost);
+  // Show {0} only when cost was reduced to zero (not for tokens/naturally free cards)
+  if (shards.length === 0 && isReduced) shards.push("0");
   if (shards.length === 0) return null;
 
   const s = PIP_SIZES[size];
