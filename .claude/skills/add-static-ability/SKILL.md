@@ -188,7 +188,7 @@ match modification {
 ### Phase 3 — Parser
 
 - [ ] **`crates/engine/src/parser/oracle.rs` — `is_static_pattern()`**
-  Add a pattern check so the Oracle parser routes your text to `parse_static_line()` instead of treating it as an effect. This is a simple string match — `lower.contains("your pattern")` or `lower.starts_with("your prefix")`.
+  Add a pattern check so the Oracle parser routes your text to `parse_static_line()` instead of treating it as an effect. This is a simple check — use `lower.contains("your pattern")` for classification routing, or nom `tag("prefix").parse(lower).is_ok()` for prefix-based dispatch.
 
 - [ ] **`crates/engine/src/parser/oracle_static.rs` — `parse_static_line()`**
   Add a parsing branch that:

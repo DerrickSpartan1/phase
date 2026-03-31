@@ -45,11 +45,12 @@ All parser branches delegate atomic parsing to shared nom 8.0 combinators in `pa
 - **`condition.rs`** — Condition phrase combinators
 - **`filter.rs`** — Filter property combinators
 - **`error.rs`** — `OracleResult` type, `parse_or_unimplemented` (converts nom `VerboseError` → `Effect::Unimplemented` with diagnostic trace), `format_verbose_error`
+- **`bridge.rs`** — `nom_on_lower` (run nom combinator on lowercase input, map remainder to original-case text), `nom_on_lower_required` (Result variant for error propagation), `nom_parse_lower` (parse lowercase, discard remainder)
 
-**Current state — hybrid architecture (migration in progress):**
-- **Nom handles**: atomic parsing, medium-level structural patterns (conditions, durations, quantities, target filters, controller suffixes), and dispatch-level routing via `dispatch_line_nom` (which calls `parse_effect_chain_with_context` for effect candidates).
-- **strip_prefix/TextPair still handles**: top-level sentence parsing within sub-parsers (subject-predicate decomposition, clause AST classification, verb family dispatch). Being migrated incrementally.
-- **For new parser code**: prefer nom combinators in `oracle_nom/` for new patterns. For extensions to existing sentence-level parsers, follow the existing style in that file.
+**Parser dispatch architecture:**
+- **Nom combinators** handle all parsing dispatch — atomic parsing, medium-level structural patterns, sentence-level verb dispatch (via `tag()`/`alt()`/`nom_on_lower` bridge), and top-level routing via `dispatch_line_nom`.
+- **`TextPair`** provides dual-string case-bridging (subject-predicate decomposition, clause AST classification). `TextPair::strip_prefix` is the correct tool for these operations.
+- **New parser code** MUST use nom combinators. `starts_with`/`strip_prefix` for parsing dispatch is not acceptable.
 
 ---
 
@@ -436,6 +437,21 @@ Parses keyword ability lines and keyword grants. Handles comma-separated keyword
 | `parse_counter_type(input)` | "+1/+1", "-1/-1", named types | Counter type identification |
 | `parse_pt_modifier(input)` | "+2/+3", "-1/-1" → `(i32, i32)` | P/T modification parsing |
 | `parse_roman_numeral(input)` | I-XX → `u32` | Saga chapters, class levels |
+
+### `oracle_nom/bridge.rs` — Nom/Original-Case Bridge
+
+| Function | What it does | Use when |
+|----------|-------------|----------|
+| `nom_on_lower(text, lower, parser)` | Runs nom combinator on lowercase, returns `(result, original_case_remainder)` | Parser operates on lowercase but caller needs original-case remainder |
+| `nom_on_lower_required(text, lower, parser)` | Same as `nom_on_lower` but returns `Result` for error propagation | When parse failure should propagate via `?` |
+| `nom_parse_lower(lower, parser)` | Runs nom combinator on lowercase, discards remainder | Boolean checks or value extraction where remainder is unused |
+
+### `oracle.rs` — Dispatch Helpers
+
+| Function | What it does | Use when |
+|----------|-------------|----------|
+| `has_trigger_prefix(lower)` | nom `alt((tag("when "), tag("whenever "), tag("at ")))` for trigger detection | Checking if a line is a trigger before routing |
+| `lower_starts_with(lower, prefix)` | nom `tag(prefix).parse(lower).is_ok()` for single-prefix boolean checks | Replacing `lower.starts_with(prefix)` in dispatch logic |
 
 ---
 

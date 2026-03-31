@@ -154,6 +154,14 @@ These helpers live in `oracle_effect/`, `oracle_util.rs`, and `oracle_nom/`. Kno
 | `parse_pt_modifier` | "+2/+3" → `(i32, i32)` | P/T modification |
 | `parse_counter_type` | "+1/+1", "loyalty", etc. | Counter identification |
 
+**Mixed-case bridging** (`oracle_nom/bridge.rs`) — Oracle text is mixed-case but nom `tag()` requires exact matching. Use these when you need to run nom combinators on lowercase input and preserve the original-case remainder:
+
+| Function | Signature | When to use |
+|----------|-----------|-------------|
+| `nom_on_lower` | `(text, lower, parser) -> Option<(T, &str)>` | Standard case — returns `Some((value, original_case_rest))` |
+| `nom_on_lower_required` | `(text, lower, parser) -> Result<(T, &str), String>` | When failure should propagate as a diagnostic error |
+| `nom_parse_lower` | `(lower, parser) -> Option<T>` | When you only need the value and discard the remainder |
+
 **Possessive helpers** — detect who "owns" something without requiring explicit targeting:
 
 | Helper | Matches | Example Oracle text |

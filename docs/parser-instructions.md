@@ -58,6 +58,7 @@ oracle_nom/
 ├── duration.rs     — Duration phrase combinators (until end of turn, etc.)
 ├── condition.rs    — Condition phrase combinators (if/unless/as long as)
 ├── filter.rs       — Filter property combinators (type phrases, controller)
+├── bridge.rs       — Case-bridging utilities: nom_on_lower (run nom on lowercase, map remainder to original case), nom_on_lower_required (Result variant), nom_parse_lower (discard remainder)
 ├── error.rs        — OracleResult type, parse_or_unimplemented error boundary, format_verbose_error
 ├── context.rs      — ParseContext for stateful parsing
 └── mod.rs          — Re-exports
@@ -83,23 +84,15 @@ At the dispatcher level (`oracle.rs`), `dispatch_line_nom` wraps nom combinators
 diagnostic traces. Partial parses (non-empty remainder) also become `Unimplemented`. This
 ensures unparsed fragments never silently pass.
 
-**Current state — hybrid architecture (migration in progress):**
+**Parser dispatch architecture:**
 
-- **Nom handles**: atomic parsing (numbers, mana, colors, P/T, roman numerals), medium-level
-  structural patterns (conditions, durations, quantities, target filters, controller suffixes,
-  combat status prefixes), and dispatch-level routing via `dispatch_line_nom` in `oracle.rs`.
-  The dispatcher calls `parse_effect_chain_with_context` for effect-sentence candidates and
-  provides structural classification with diagnostic traces for unmatched lines.
-- **`strip_prefix`/`TextPair` still handles**: top-level sentence parsing (subject-predicate
-  decomposition, clause AST classification, verb family dispatch) within the sub-parsers
-  themselves. These are being migrated incrementally to nom combinators.
-- **`oracle_util::parse_number`** is a thin wrapper that delegates to
-  `nom_primitives::parse_number` with word-boundary guard and X→0 fallback.
+- **Nom combinators** handle all parsing dispatch — atomic operations (numbers, mana, colors, P/T), medium-level structural patterns (conditions, durations, quantities, target filters), sentence-level verb dispatch (via `tag()`/`alt()`/`nom_on_lower` bridge), and top-level routing via `dispatch_line_nom`.
+- **`TextPair`** provides dual-string operations where both original-case and lowercase slices are needed simultaneously (subject-predicate decomposition, clause AST classification). `TextPair::strip_prefix` is the correct tool for these — it's a case-bridging utility, not parsing dispatch.
 
 **When writing new parser code:**
-- For new atomic/structural patterns, prefer writing nom combinators in `oracle_nom/`.
-- For extensions to existing sentence-level parsers, follow the existing style in that file
-  (which may be `strip_prefix` or nom depending on what's been migrated).
+- Use nom combinators in `oracle_nom/` or `tag()`/`alt()` with the `nom_on_lower` bridge for all parsing dispatch.
+- Use `nom_on_lower` from `oracle_nom/bridge.rs` when bridging mixed-case text to nom. Use `tag().parse()` directly for already-lowercase input.
+- `starts_with` is acceptable ONLY for: runtime array loops, char-level scanners, dynamic (non-literal) prefixes.
 - All parser branches import from `oracle_nom` — use the shared combinators rather than
   reimplementing number/color/mana/condition parsing locally.
 
@@ -460,7 +453,7 @@ in `process_triggers()` using `(ObjectId, trigger_index)` tracking sets on `Game
 
 | Pitfall | Correct approach |
 |---------|-----------------|
-| Manual index arithmetic `&text[n..]` | Use `strip_prefix()` / clippy will flag this |
+| Manual index arithmetic `&text[n..]` | Use nom `tag()`/`nom_on_lower` for parsing dispatch; `strip_prefix()` for TextPair/structural operations. Never use `&text[N..]` |
 | Reimplementing number/color/mana parsing | Delegate to `oracle_nom::primitives` combinators |
 | Using `nom::tag("a")` without word boundary | Use `parse_article_number` (prevents "another" → "a") |
 | Using `parse_number` for X-cost values | Use `parse_number_or_x` (X → 0 at parse time) |
@@ -474,3 +467,6 @@ in `process_triggers()` using `(ObjectId, trigger_index)` tracking sets on `Game
 | Raw `i32` for effect amounts on new effects | Use `QuantityExpr` — separates fixed constants from dynamic game-state lookups |
 | Splitting compound effects on " and " naively | Use `try_split_targeted_compound` which delegates to `parse_target` for boundary detection |
 | Putting `Fixed(i32)` inside `QuantityRef` | `QuantityRef` is only for dynamic references; constants go in `QuantityExpr::Fixed` |
+| `starts_with("verb ")` for dispatch | Use `tag("verb ").parse(lower)` or `nom_on_lower` bridge — keeps prefix and consumed length in sync |
+| `&text[N..]` hardcoded byte offset after prefix match | Use `nom_on_lower` which calculates remainder automatically from combinator output |
+| Inline `use nom::*` inside function bodies | All nom imports at file top — CLAUDE.md prohibits inline imports |
