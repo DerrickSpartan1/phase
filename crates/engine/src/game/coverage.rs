@@ -3578,16 +3578,14 @@ fn is_counter_reference(lower: &str) -> bool {
         if let Some(idx) = lower.find('+').or_else(|| lower.find('-')) {
             let rest = &lower[idx..];
             // Match +N/+M pattern then check what follows
-            let after_pattern = rest
-                .find('/')
-                .and_then(|slash| {
-                    // Skip past the /+N or /-N part
-                    let after_slash = &rest[slash + 1..];
-                    let digits_end = after_slash
-                        .find(|c: char| !c.is_ascii_digit() && c != '+' && c != '-')
-                        .unwrap_or(after_slash.len());
-                    Some(&after_slash[digits_end..])
-                });
+            let after_pattern = rest.find('/').map(|slash| {
+                // Skip past the /+N or /-N part
+                let after_slash = &rest[slash + 1..];
+                let digits_end = after_slash
+                    .find(|c: char| !c.is_ascii_digit() && c != '+' && c != '-')
+                    .unwrap_or(after_slash.len());
+                &after_slash[digits_end..]
+            });
             if let Some(after) = after_pattern {
                 let trimmed = after.trim_start();
                 if trimmed.starts_with("counter") {
@@ -3608,7 +3606,8 @@ fn is_counter_reference(lower: &str) -> bool {
 fn has_matching_counter_effect(face: &CardFace, counter_type: &str) -> bool {
     fn counter_in_chain(def: &AbilityDefinition, ct: &str) -> bool {
         match &*def.effect {
-            Effect::PutCounter { counter_type, .. } | Effect::PutCounterAll { counter_type, .. }
+            Effect::PutCounter { counter_type, .. }
+            | Effect::PutCounterAll { counter_type, .. }
                 if counter_type == ct =>
             {
                 return true;

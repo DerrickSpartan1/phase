@@ -83,7 +83,7 @@ fn parse_non_prefix(input: &str) -> OracleResult<'_, &str> {
 }
 
 /// Parse a supertype prefix ("legendary ", "basic ", "snow ") consuming trailing space.
-fn parse_supertype_prefix(input: &str) -> OracleResult<'_, Supertype> {
+pub fn parse_supertype_prefix(input: &str) -> OracleResult<'_, Supertype> {
     let (rest, st) = alt((
         value(Supertype::Legendary, tag("legendary")),
         value(Supertype::Basic, tag("basic")),

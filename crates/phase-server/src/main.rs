@@ -13,7 +13,9 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use clap::Parser;
-use engine::ai_support::{auto_pass_recommended as engine_auto_pass, legal_actions as engine_legal_actions};
+use engine::ai_support::{
+    auto_pass_recommended as engine_auto_pass, legal_actions as engine_legal_actions,
+};
 use engine::database::CardDatabase;
 use engine::game::{validate_deck_for_format, DeckCompatibilityRequest};
 use engine::types::game_state::GameState;
@@ -860,7 +862,12 @@ async fn handle_client_message(
                                             // AI will act next — don't send legal actions yet
                                             vec![]
                                         };
-                                    let p_auto_pass = if ai_results.is_empty() && actor == Some(*pid) { auto_pass_rec } else { false };
+                                    let p_auto_pass =
+                                        if ai_results.is_empty() && actor == Some(*pid) {
+                                            auto_pass_rec
+                                        } else {
+                                            false
+                                        };
                                     let _ = s.send(ServerMessage::StateUpdate {
                                         state: pstate.clone(),
                                         events: events.clone(),
@@ -877,7 +884,8 @@ async fn handle_client_message(
                     // Broadcast AI follow-up results with delays
                     for (i, result) in ai_results.iter().enumerate() {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                        let (ai_raw_state, ai_events, ai_legal, ai_log_entries, ai_auto_pass) = result;
+                        let (ai_raw_state, ai_events, ai_legal, ai_log_entries, ai_auto_pass) =
+                            result;
                         let is_last = i == ai_results.len() - 1;
 
                         // Filter AI state per-player outside the lock
@@ -897,7 +905,11 @@ async fn handle_client_message(
                                     } else {
                                         vec![]
                                     };
-                                    let p_auto_pass = if is_last && actor == Some(*pid) { *ai_auto_pass } else { false };
+                                    let p_auto_pass = if is_last && actor == Some(*pid) {
+                                        *ai_auto_pass
+                                    } else {
+                                        false
+                                    };
                                     let _ = s.send(ServerMessage::StateUpdate {
                                         state: pstate.clone(),
                                         events: ai_events.clone(),
@@ -994,11 +1006,7 @@ async fn handle_client_message(
                             let auto_pass = engine_auto_pass(&session.state, &legal_actions_all);
                             let actor = server_core::acting_player(&session.state.waiting_for);
                             let is_actor = actor == Some(player);
-                            let player_legals = if is_actor {
-                                legal_actions_all
-                            } else {
-                                vec![]
-                            };
+                            let player_legals = if is_actor { legal_actions_all } else { vec![] };
 
                             let game_started_msg = ServerMessage::GameStarted {
                                 state: filtered_state,
@@ -1092,11 +1100,7 @@ async fn handle_client_message(
                         };
                         let filtered = server_core::filter_state_for_player(&raw_state, player);
                         let is_actor = actor == Some(player);
-                        let player_legals = if is_actor {
-                            legal_actions
-                        } else {
-                            vec![]
-                        };
+                        let player_legals = if is_actor { legal_actions } else { vec![] };
                         let _ = tx.send(ServerMessage::StateUpdate {
                             state: filtered,
                             events,
@@ -1259,11 +1263,7 @@ async fn handle_client_message(
                     let player_names = session.display_names.clone();
 
                     let is_actor = actor == Some(PlayerId(0));
-                    let host_legals = if is_actor {
-                        legal_actions
-                    } else {
-                        vec![]
-                    };
+                    let host_legals = if is_actor { legal_actions } else { vec![] };
                     let host_state =
                         server_core::filter_state_for_player(&session.state, PlayerId(0));
 
@@ -1320,11 +1320,7 @@ async fn handle_client_message(
                     let filtered = server_core::filter_state_for_player(&raw_state, PlayerId(0));
                     {
                         let is_actor = actor == Some(PlayerId(0));
-                        let player_legals = if is_actor {
-                            legal_actions
-                        } else {
-                            vec![]
-                        };
+                        let player_legals = if is_actor { legal_actions } else { vec![] };
                         let _ = tx.send(ServerMessage::StateUpdate {
                             state: filtered,
                             events,
