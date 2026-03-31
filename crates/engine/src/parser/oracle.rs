@@ -979,11 +979,9 @@ pub fn parse_oracle_text(
 /// Try to parse "Equip {cost}" or "Equip — {cost}" lines.
 /// Caller must verify the line starts with "equip" (case-insensitive) before calling.
 fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
-    // Strip "Equip" prefix (caller already verified starts_with("equip"))
-    let rest = line
-        .strip_prefix("Equip")
-        .or_else(|| line.strip_prefix("equip"))?
-        .trim();
+    // Caller already verified lower.starts_with("equip") — strip 5-char prefix.
+    // "equip" is always ASCII so byte length == char length.
+    let rest = line.get("equip".len()..)?.trim();
     // Strip leading "—" or "- "
     let cost_text = rest
         .strip_prefix('—')
