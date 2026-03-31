@@ -3609,7 +3609,8 @@ fn is_counter_reference(lower: &str) -> bool {
 fn has_matching_counter_effect(face: &CardFace, counter_type: &str) -> bool {
     fn counter_in_chain(def: &AbilityDefinition, ct: &str) -> bool {
         match &*def.effect {
-            Effect::PutCounter { counter_type, .. } | Effect::PutCounterAll { counter_type, .. }
+            Effect::PutCounter { counter_type, .. }
+            | Effect::PutCounterAll { counter_type, .. }
                 if counter_type == ct =>
             {
                 return true;

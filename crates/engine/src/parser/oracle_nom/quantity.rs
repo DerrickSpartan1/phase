@@ -13,8 +13,7 @@ use super::error::OracleResult;
 use super::primitives::parse_number;
 use super::target::parse_type_filter_word;
 use crate::types::ability::{
-    ControllerRef, CountScope, QuantityExpr, QuantityRef, TargetFilter, TypedFilter,
-    ZoneRef,
+    ControllerRef, CountScope, QuantityExpr, QuantityRef, TargetFilter, TypedFilter, ZoneRef,
 };
 
 /// Parse a quantity expression: either a fixed number or a dynamic reference.

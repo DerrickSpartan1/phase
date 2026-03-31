@@ -1,5 +1,9 @@
 use std::str::FromStr;
 
+use nom::bytes::complete::tag;
+use nom::combinator::value;
+use nom::Parser;
+
 use crate::types::ability::{
     ControllerRef, FilterProp, QuantityExpr, QuantityRef, SharedQuality, TargetFilter, TypeFilter,
     TypedFilter,
@@ -19,6 +23,39 @@ use super::oracle_util::{
     SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
 
+/// Run a nom combinator on lowercased text, returning the result and
+/// remainder from the original (mixed-case) text.
+///
+/// This bridges the nom combinator world (which expects lowercase input)
+/// with the oracle_target API (which preserves original casing in remainders).
+fn nom_on_lower<'a, T, F>(text: &'a str, lower: &str, mut parser: F) -> Option<(T, &'a str)>
+where
+    F: FnMut(&str) -> super::oracle_nom::error::OracleResult<'_, T>,
+{
+    let (rest, result) = parser(lower).ok()?;
+    let consumed = lower.len() - rest.len();
+    Some((result, &text[consumed..]))
+}
+
+/// Parse a word with a word boundary check: the next char after the word must be
+/// non-alphanumeric (whitespace, comma, period, etc.) or end-of-input.
+/// Prevents "it" from matching "item", "you" from matching "your", etc.
+fn parse_word_bounded<'a>(
+    input: &'a str,
+    word: &str,
+) -> super::oracle_nom::error::OracleResult<'a, ()> {
+    let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>(word).parse(input)?;
+    match rest.chars().next() {
+        None | Some(' ' | ',' | '.' | ';' | ':' | ')' | '\'' | '"' | '/' | '-') => Ok((rest, ())),
+        _ => Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Context("word boundary required"),
+            )],
+        })),
+    }
+}
+
 /// Parse an event-context possessive reference from Oracle text.
 /// These resolve from the triggering event, not from player targeting.
 /// Must be checked BEFORE standard `parse_target` for trigger-based effects.
@@ -29,63 +66,38 @@ pub fn parse_event_context_ref(text: &str) -> Option<(TargetFilter, &str)> {
     let text = text.trim();
     let lower = text.to_lowercase();
 
-    // Longest-match-first ordering within shared prefixes.
-    if let Some(rest) = lower.strip_prefix("that spell's controller") {
-        return Some((
-            TargetFilter::TriggeringSpellController,
-            &text[text.len() - rest.len()..],
-        ));
-    }
-    // CR 608.2c: "its controller" / "their controller" — controller of the parent target object.
-    if let Some(rest) = lower
-        .strip_prefix("its controller")
-        .or_else(|| lower.strip_prefix("their controller"))
-    {
-        return Some((
-            TargetFilter::ParentTargetController,
-            &text[text.len() - rest.len()..],
-        ));
-    }
-    if let Some(rest) = lower.strip_prefix("that spell's owner") {
-        return Some((
-            TargetFilter::TriggeringSpellOwner,
-            &text[text.len() - rest.len()..],
-        ));
-    }
-    if let Some(rest) = lower.strip_prefix("that player") {
-        return Some((
-            TargetFilter::TriggeringPlayer,
-            &text[text.len() - rest.len()..],
-        ));
-    }
-    if let Some(rest) = lower.strip_prefix("that source") {
-        return Some((
-            TargetFilter::TriggeringSource,
-            &text[text.len() - rest.len()..],
-        ));
-    }
-    // "that permanent or player" before "that permanent" — longest match first.
-    if let Some(rest) = lower.strip_prefix("that permanent or player") {
-        return Some((
-            TargetFilter::TriggeringSource,
-            &text[text.len() - rest.len()..],
-        ));
-    }
-    if let Some(rest) = lower.strip_prefix("that permanent") {
-        return Some((
-            TargetFilter::TriggeringSource,
-            &text[text.len() - rest.len()..],
-        ));
-    }
-    // CR 506.3d: "defending player" — the player being attacked by the source creature.
-    if let Some(rest) = lower.strip_prefix("defending player") {
-        return Some((
-            TargetFilter::DefendingPlayer,
-            &text[text.len() - rest.len()..],
-        ));
-    }
-
-    None
+    // CR 608.2k: Event-context references resolve from the triggering event.
+    // All patterns in one nom alt() for clean longest-match-first dispatch.
+    nom_on_lower(text, &lower, |input| {
+        nom::branch::alt((
+            // Longest-match-first within shared prefixes.
+            value(
+                TargetFilter::TriggeringSpellController,
+                tag::<_, _, nom_language::error::VerboseError<&str>>("that spell's controller"),
+            ),
+            value(
+                TargetFilter::TriggeringSpellOwner,
+                tag("that spell's owner"),
+            ),
+            // CR 608.2c: "its controller" / "their controller" — controller of the parent target.
+            value(TargetFilter::ParentTargetController, tag("its controller")),
+            value(
+                TargetFilter::ParentTargetController,
+                tag("their controller"),
+            ),
+            value(TargetFilter::TriggeringPlayer, tag("that player")),
+            value(TargetFilter::TriggeringSource, tag("that source")),
+            // "that permanent or player" before "that permanent" — longest match first.
+            value(
+                TargetFilter::TriggeringSource,
+                tag("that permanent or player"),
+            ),
+            value(TargetFilter::TriggeringSource, tag("that permanent")),
+            // CR 506.3d: "defending player" — the player being attacked.
+            value(TargetFilter::DefendingPlayer, tag("defending player")),
+        ))
+        .parse(input)
+    })
 }
 
 /// Parse a target description from Oracle text, returning (filter, remaining_text).
@@ -99,174 +111,219 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
 
     // CR 608.2c: Bare anaphoric references inherit the parent target selected earlier
     // in the same spell/ability instruction sequence.
-    if lower == "it"
-        || lower
-            .strip_prefix("it")
-            .is_some_and(|rest| rest.starts_with([' ', ',', '.']))
-    {
-        return (TargetFilter::ParentTarget, &text[2..]);
+    // "it" with word boundary — prevents matching "item", "iterate", etc.
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "it")) {
+        return (TargetFilter::ParentTarget, rest);
     }
-    if lower == "them"
-        || lower
-            .strip_prefix("them")
-            .is_some_and(|rest| rest.starts_with([' ', ',', '.']))
-    {
-        return (TargetFilter::ParentTarget, &text[4..]);
+    // "them" with word boundary
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "them")) {
+        return (TargetFilter::ParentTarget, rest);
     }
-    if let Some(rest_subject) = lower.strip_prefix("that ") {
-        let original_rest = &text[text.len() - rest_subject.len()..];
+    // "that [type phrase]" → anaphoric reference to a typed subject
+    if let Ok((rest_subject, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("that ").parse(lower.as_str())
+    {
+        let original_rest = &text[lower.len() - rest_subject.len()..];
         let (filter, rem) = parse_type_phrase(original_rest);
         if !matches!(filter, TargetFilter::Any) {
             return (TargetFilter::ParentTarget, rem);
         }
     }
 
-    // First-character dispatch for prefix matching
-    match lower.as_bytes().first().copied() {
-        // "~" — self-reference (normalized from card name)
-        Some(b'~') => {
-            return (TargetFilter::SelfRef, text[1..].trim_start());
-        }
-
-        // "a" — "any target", "all " + type phrase
-        Some(b'a') => {
-            if lower.starts_with("any target") {
-                return (TargetFilter::Any, &text[10..]);
-            }
-            if lower.starts_with("all ") {
-                let (filter, rest) = parse_type_phrase(&text[4..]);
-                return (filter, rest);
-            }
-        }
-
-        // "t" — "this creature" (self-ref), "target ...", "those ...", "the exiled ..."
-        Some(b't') => {
-            // CR 201.5: "this creature", "this spell", etc. — self-reference
-            for phrase in SELF_REF_TYPE_PHRASES
-                .iter()
-                .chain(SELF_REF_PARSE_ONLY_PHRASES)
-            {
-                if let Some(rest) = lower.strip_prefix(phrase) {
-                    return (TargetFilter::SelfRef, &text[text.len() - rest.len()..]);
-                }
-            }
-            if lower.starts_with("target ") {
-                // Longest-match-first within "target" group
-                if lower.starts_with("target player or planeswalker") {
-                    return (
-                        TargetFilter::Or {
-                            filters: vec![
-                                TargetFilter::Player,
-                                typed(TypeFilter::Planeswalker, None, vec![], vec![]),
-                            ],
-                        },
-                        &text[29..],
-                    );
-                }
-                if lower.starts_with("target opponent") {
-                    return (
-                        TargetFilter::Typed(
-                            TypedFilter::default().controller(ControllerRef::Opponent),
-                        ),
-                        &text[15..],
-                    );
-                }
-                if lower.starts_with("target player") {
-                    return (TargetFilter::Player, &text[13..]);
-                }
-                // "target" + type phrase (generic)
-                let (filter, rest) = parse_type_phrase(&text[7..]);
-                return (filter, rest);
-            }
-            // CR 603.7: Anaphoric tracked-set pronouns
-            for prefix in [
-                "those cards",
-                "those permanents",
-                "those creatures",
-                "the exiled cards",
-                "the exiled card",
-                "the exiled permanents",
-                "the exiled permanent",
-                "the exiled creature",
-            ] {
-                if lower.starts_with(prefix) {
-                    return (
-                        TargetFilter::TrackedSet {
-                            id: TrackedSetId(0),
-                        },
-                        &text[prefix.len()..],
-                    );
-                }
-            }
-        }
-
-        // "e" — "each ...", "enchanted creature", "equipped creature"
-        Some(b'e') => {
-            if lower.starts_with("each opponent") {
-                return (
-                    TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
-                    &text[13..],
-                );
-            }
-            // CR 610.3: "each card exiled with ~" / "each card exiled with this <type>"
-            if let Some(rest) = lower.strip_prefix("each card exiled with ~") {
-                return (
-                    TargetFilter::ExiledBySource,
-                    &text[text.len() - rest.len()..],
-                );
-            }
-            if let Some(rest) = lower.strip_prefix("each card exiled with this ") {
-                let after_type = rest.find(' ').map_or("", |i| &rest[i..]);
-                return (
-                    TargetFilter::ExiledBySource,
-                    &text[text.len() - after_type.len()..],
-                );
-            }
-            if lower.starts_with("each ") {
-                let (filter, rest) = parse_type_phrase(&text[5..]);
-                return (filter, rest);
-            }
-            if lower.starts_with("enchanted creature") {
-                return (
-                    TargetFilter::Typed(
-                        TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
-                    ),
-                    &text[18..],
-                );
-            }
-            if lower.starts_with("equipped creature") {
-                return (
-                    TargetFilter::Typed(
-                        TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
-                    ),
-                    &text[17..],
-                );
-            }
-        }
-
-        // "c" — "cards exiled with ~" / "cards exiled with this <type>"
-        Some(b'c') => {
-            if let Some(rest) = lower.strip_prefix("cards exiled with ~") {
-                return (
-                    TargetFilter::ExiledBySource,
-                    &text[text.len() - rest.len()..],
-                );
-            }
-            if let Some(rest) = lower.strip_prefix("cards exiled with this ") {
-                let after_type = rest.find(' ').map_or("", |i| &rest[i..]);
-                return (
-                    TargetFilter::ExiledBySource,
-                    &text[text.len() - after_type.len()..],
-                );
-            }
-        }
-
-        _ => {}
+    // "~" — self-reference (normalized from card name)
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("~").parse(lower.as_str())
+    {
+        return (
+            TargetFilter::SelfRef,
+            text[lower.len() - rest.len()..].trim_start(),
+        );
     }
 
-    // "you" — the controller (not a targeted player)
-    if lower.starts_with("you") && (lower.len() == 3 || lower[3..].starts_with([',', '.', ' '])) {
-        return (TargetFilter::Controller, &text[3..]);
+    // "any target" — matches any legal target
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
+        value(
+            TargetFilter::Any,
+            tag::<_, _, nom_language::error::VerboseError<&str>>("any target"),
+        )
+        .parse(input)
+    }) {
+        return (TargetFilter::Any, rest);
+    }
+
+    // "all " + type phrase
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("all ").parse(lower.as_str())
+    {
+        let (filter, rest) = parse_type_phrase(&text[lower.len() - rest.len()..]);
+        return (filter, rest);
+    }
+
+    // CR 201.5: "this creature", "this spell", etc. — self-reference
+    for phrase in SELF_REF_TYPE_PHRASES
+        .iter()
+        .chain(SELF_REF_PARSE_ONLY_PHRASES)
+    {
+        if let Ok((rest, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>(*phrase).parse(lower.as_str())
+        {
+            return (TargetFilter::SelfRef, &text[lower.len() - rest.len()..]);
+        }
+    }
+
+    // "target" group — longest-match-first within
+    if let Ok((after_target, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("target ").parse(lower.as_str())
+    {
+        let target_offset = lower.len() - after_target.len();
+        // "target player or planeswalker"
+        if let Ok((rest, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>("player or planeswalker")
+                .parse(after_target)
+        {
+            return (
+                TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Player,
+                        typed(TypeFilter::Planeswalker, None, vec![], vec![]),
+                    ],
+                },
+                &text[lower.len() - rest.len()..],
+            );
+        }
+        // "target opponent"
+        if let Ok((rest, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>("opponent").parse(after_target)
+        {
+            return (
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+                &text[lower.len() - rest.len()..],
+            );
+        }
+        // "target player"
+        if let Ok((rest, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>("player").parse(after_target)
+        {
+            return (TargetFilter::Player, &text[lower.len() - rest.len()..]);
+        }
+        // "target" + type phrase (generic)
+        let (filter, rest) = parse_type_phrase(&text[target_offset..]);
+        return (filter, rest);
+    }
+
+    // CR 603.7: Anaphoric tracked-set pronouns
+    static TRACKED_SET_PHRASES: &[&str] = &[
+        "those cards",
+        "those permanents",
+        "those creatures",
+        "the exiled cards",
+        "the exiled card",
+        "the exiled permanents",
+        "the exiled permanent",
+        "the exiled creature",
+    ];
+    for phrase in TRACKED_SET_PHRASES {
+        if let Ok((rest, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>(*phrase).parse(lower.as_str())
+        {
+            return (
+                TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                &text[lower.len() - rest.len()..],
+            );
+        }
+    }
+
+    // "each opponent"
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
+        value(
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            tag::<_, _, nom_language::error::VerboseError<&str>>("each opponent"),
+        )
+        .parse(input)
+    }) {
+        return (
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            rest,
+        );
+    }
+
+    // CR 610.3: "each card exiled with ~" / "each card exiled with this <type>"
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("each card exiled with ~")
+            .parse(lower.as_str())
+    {
+        return (
+            TargetFilter::ExiledBySource,
+            &text[lower.len() - rest.len()..],
+        );
+    }
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("each card exiled with this ")
+            .parse(lower.as_str())
+    {
+        // Skip the type word after "this " to consume "each card exiled with this artifact"
+        let after_type = rest.find(' ').map_or("", |i| &rest[i..]);
+        return (
+            TargetFilter::ExiledBySource,
+            &text[text.len() - after_type.len()..],
+        );
+    }
+
+    // "each " + type phrase
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("each ").parse(lower.as_str())
+    {
+        let (filter, rest) = parse_type_phrase(&text[lower.len() - rest.len()..]);
+        return (filter, rest);
+    }
+
+    // "enchanted creature" / "equipped creature"
+    if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
+        nom::branch::alt((
+            value(
+                TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                ),
+                tag::<_, _, nom_language::error::VerboseError<&str>>("enchanted creature"),
+            ),
+            value(
+                TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
+                ),
+                tag("equipped creature"),
+            ),
+        ))
+        .parse(input)
+    }) {
+        return (filter, rest);
+    }
+
+    // "cards exiled with ~" / "cards exiled with this <type>"
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("cards exiled with ~")
+            .parse(lower.as_str())
+    {
+        return (
+            TargetFilter::ExiledBySource,
+            &text[lower.len() - rest.len()..],
+        );
+    }
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("cards exiled with this ")
+            .parse(lower.as_str())
+    {
+        let after_type = rest.find(' ').map_or("", |i| &rest[i..]);
+        return (
+            TargetFilter::ExiledBySource,
+            &text[text.len() - after_type.len()..],
+        );
+    }
+
+    // "you" — the controller (not a targeted player), with word boundary
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| parse_word_bounded(input, "you")) {
+        return (TargetFilter::Controller, rest);
     }
 
     // CR 400.12: Bare possessive zone references ("their graveyard", "your library").
@@ -274,21 +331,23 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     // Skip "its owner's" — ControllerRef has no Owner variant; handle when needed.
     if let Some((poss, rest)) = strip_possessive(&lower) {
         if poss != "its owner's" {
-            let zones: &[(&str, Zone)] = &[
+            static ZONE_WORDS: &[(&str, Zone)] = &[
                 ("graveyard", Zone::Graveyard),
                 ("library", Zone::Library),
                 ("hand", Zone::Hand),
             ];
-            for &(zone_word, zone) in zones {
-                if rest.starts_with(zone_word) {
-                    let prefix_len = lower.len() - rest.len();
+            for &(zone_word, zone) in ZONE_WORDS {
+                if let Ok((zone_rest, _)) =
+                    tag::<_, _, nom_language::error::VerboseError<&str>>(zone_word).parse(rest)
+                {
+                    let consumed = lower.len() - zone_rest.len();
                     return (
                         TargetFilter::Typed(TypedFilter {
                             controller: Some(ControllerRef::You),
                             properties: vec![FilterProp::InZone { zone }],
                             ..Default::default()
                         }),
-                        &text[prefix_len + zone_word.len()..],
+                        &text[consumed..],
                     );
                 }
             }
@@ -318,11 +377,15 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 
     // Strip leading article ("a "/"an ") when followed by a recognized type word.
     // Guard: "an opponent" → "opponent" fails type word check → no stripping.
-    if let Some(rest) = lower[pos..].strip_prefix("a ") {
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("a ").parse(&lower[pos..])
+    {
         if starts_with_type_word(rest) {
             pos += "a ".len();
         }
-    } else if let Some(rest) = lower[pos..].strip_prefix("an ") {
+    } else if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("an ").parse(&lower[pos..])
+    {
         if starts_with_type_word(rest) {
             pos += "an ".len();
         }
@@ -330,16 +393,26 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
 
     // Handle "other"/"another" prefix: "other creatures", "another creature",
     // "other nonland permanents", "another target creature"
-    if lower_trimmed.starts_with("other ") {
+    if tag::<_, _, nom_language::error::VerboseError<&str>>("other ")
+        .parse(lower_trimmed)
+        .is_ok()
+    {
         properties.push(FilterProp::Another);
-        pos += offset + "other ".len();
-    } else if lower_trimmed.starts_with("another ") {
+        pos = offset + "other ".len();
+    } else if tag::<_, _, nom_language::error::VerboseError<&str>>("another ")
+        .parse(lower_trimmed)
+        .is_ok()
+    {
         properties.push(FilterProp::Another);
-        pos += offset + "another ".len();
+        pos = offset + "another ".len();
     }
     // "another target [type]" — strip "target " after "another " so the type is reachable.
-    if properties.contains(&FilterProp::Another) && lower[pos..].starts_with("target ") {
-        pos += "target ".len();
+    if properties.contains(&FilterProp::Another) {
+        if let Ok((_, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>("target ").parse(&lower[pos..])
+        {
+            pos += "target ".len();
+        }
     }
 
     // CR 509.1h: Consume combat status prefixes (unblocked, attacking)
@@ -351,16 +424,9 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     // CR 205.4a: Parse supertype prefix: "legendary", "basic", "snow"
     // Must come BEFORE color prefix so "legendary white creature" works:
     // supertype consumed first, then color at the new position.
-    for (prefix, supertype) in [
-        ("legendary ", Supertype::Legendary),
-        ("basic ", Supertype::Basic),
-        ("snow ", Supertype::Snow),
-    ] {
-        if lower[pos..].starts_with(prefix) {
-            properties.push(FilterProp::HasSupertype { value: supertype });
-            pos += prefix.len();
-            break;
-        }
+    if let Ok((rest, supertype)) = nom_target::parse_supertype_prefix(&lower[pos..]) {
+        properties.push(FilterProp::HasSupertype { value: supertype });
+        pos += lower[pos..].len() - rest.len();
     }
 
     // Handle color prefix: "white creature", "red spell", etc.
@@ -380,10 +446,17 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     let mut neg_type_filters: Vec<TypeFilter> = Vec::new();
     loop {
         let remaining = &lower[pos..];
-        let Some(after_non) = remaining.strip_prefix("non") else {
+        let Ok((after_non, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>("non").parse(remaining)
+        else {
             break;
         };
-        let after_non = after_non.strip_prefix('-').unwrap_or(after_non);
+        // Optional hyphen: "non-" or "non"
+        let after_non =
+            match tag::<_, _, nom_language::error::VerboseError<&str>>("-").parse(after_non) {
+                Ok((r, _)) => r,
+                Err(_) => after_non,
+            };
         let prefix_len = remaining.len() - after_non.len(); // "non" or "non-"
 
         // Find the negated word: ends at comma or whitespace
@@ -401,8 +474,13 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         pos += prefix_len + end;
 
         // Check for ", non" continuation (stacked negation)
-        if let Some(rest) = lower[pos..].strip_prefix(", ") {
-            if rest.starts_with("non") {
+        if let Ok((rest, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>(", ").parse(&lower[pos..])
+        {
+            if tag::<_, _, nom_language::error::VerboseError<&str>>("non")
+                .parse(rest)
+                .is_ok()
+            {
                 pos += ", ".len();
                 continue;
             }
@@ -439,10 +517,13 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         let rest_trimmed = lower[pos..].trim_start();
         let ws_len = lower[pos..].len() - rest_trimmed.len();
         // CR 108.1: "spell" and "card" are informational suffixes after a typed qualifier.
-        let redundant_suffixes = ["spells ", "spell ", "cards ", "card "];
+        // Longest-match-first ordering (plurals before singular).
+        static REDUNDANT_SUFFIXES: &[&str] = &["spells ", "spell ", "cards ", "card "];
         let mut consumed_suffix = false;
-        for suffix in &redundant_suffixes {
-            if let Some(after) = rest_trimmed.strip_prefix(suffix) {
+        for suffix in REDUNDANT_SUFFIXES {
+            if let Ok((after, _)) =
+                tag::<_, _, nom_language::error::VerboseError<&str>>(*suffix).parse(rest_trimmed)
+            {
                 let suffix_len = rest_trimmed.len() - after.len();
                 pos += ws_len + suffix_len;
                 consumed_suffix = true;
@@ -451,7 +532,7 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         }
         if !consumed_suffix {
             // Check end-of-input variants (no trailing space)
-            for suffix in &["spell", "spells", "card", "cards"] {
+            for suffix in &["spells", "spell", "cards", "card"] {
                 if rest_trimmed == *suffix {
                     pos += ws_len + suffix.len();
                     break;
@@ -470,139 +551,36 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     let rest_lower = lower[pos..].trim_start();
     let rest_offset = lower[pos..].len() - rest_lower.len();
 
-    // Check ", and/or " before ", and " — longest-match-first ordering to prevent
-    // ", and " from consuming the prefix and leaving "/or [type]" as remainder.
-    if let Some(after_comma_andor) = rest_lower.strip_prefix(", and/or ") {
-        let after_trimmed = after_comma_andor.trim_start();
-        if starts_with_type_word(after_trimmed) {
-            let comma_andor_text = &text[pos + rest_offset + ", and/or ".len()..];
-            let (other_filter, final_rest) = parse_type_phrase(comma_andor_text);
-            let left = typed(
-                card_type.unwrap_or(TypeFilter::Any),
-                subtype,
-                properties.clone(),
-                neg_type_filters.clone(),
-            );
-            let combined = merge_or_filters(left, other_filter);
-            let combined = distribute_shared_properties(combined, &properties);
-            let combined = distribute_controller_to_or(combined);
-            return (distribute_properties_to_or(combined), final_rest);
-        }
-    }
-
-    // Check ", and " (Oxford comma before final element) since it starts with ", "
-    if let Some(after_comma_and) = rest_lower.strip_prefix(", and ") {
-        let after_trimmed = after_comma_and.trim_start();
-        if starts_with_type_word(after_trimmed) {
-            let comma_and_text = &text[pos + rest_offset + ", and ".len()..];
-            let (other_filter, final_rest) = parse_type_phrase(comma_and_text);
-            let left = typed(
-                card_type.unwrap_or(TypeFilter::Any),
-                subtype,
-                properties.clone(),
-                neg_type_filters.clone(),
-            );
-            let combined = merge_or_filters(left, other_filter);
-            let combined = distribute_shared_properties(combined, &properties);
-            let combined = distribute_controller_to_or(combined);
-            return (distribute_properties_to_or(combined), final_rest);
-        }
-    }
-
-    // CR 205.3a: Oxford comma before "or" in type lists ("artifact, creature, or enchantment")
-    if let Some(after_comma_or) = rest_lower.strip_prefix(", or ") {
-        let after_trimmed = after_comma_or.trim_start();
-        if starts_with_type_word(after_trimmed) {
-            let comma_or_text = &text[pos + rest_offset + ", or ".len()..];
-            let (other_filter, final_rest) = parse_type_phrase(comma_or_text);
-            let left = typed(
-                card_type.unwrap_or(TypeFilter::Any),
-                subtype,
-                properties.clone(),
-                neg_type_filters.clone(),
-            );
-            let combined = merge_or_filters(left, other_filter);
-            let combined = distribute_shared_properties(combined, &properties);
-            let combined = distribute_controller_to_or(combined);
-            return (distribute_properties_to_or(combined), final_rest);
-        }
-    }
-
-    // CR 205.3a: Comma between non-final elements ("artifacts, creatures, ...")
-    if let Some(after_comma) = rest_lower.strip_prefix(", ") {
-        let after_trimmed = after_comma.trim_start();
-        if starts_with_type_word(after_trimmed) {
-            let comma_text = &text[pos + rest_offset + ", ".len()..];
-            let (other_filter, final_rest) = parse_type_phrase(comma_text);
-            let left = typed(
-                card_type.unwrap_or(TypeFilter::Any),
-                subtype,
-                properties.clone(),
-                neg_type_filters.clone(),
-            );
-            let combined = merge_or_filters(left, other_filter);
-            let combined = distribute_shared_properties(combined, &properties);
-            let combined = distribute_controller_to_or(combined);
-            return (distribute_properties_to_or(combined), final_rest);
-        }
-    }
-
-    // Check for "or" combinator: "artifact or enchantment", "creature or artifact you control"
-    if rest_lower.starts_with("or ") {
-        let or_text = &text[pos + rest_offset + 3..];
-        let (other_filter, final_rest) = parse_type_phrase(or_text);
-        let left = typed(
-            card_type.unwrap_or(TypeFilter::Any),
-            subtype,
-            properties.clone(),
-            neg_type_filters.clone(),
-        );
-        let combined = merge_or_filters(left, other_filter);
-        let combined = distribute_shared_properties(combined, &properties);
-        let combined = distribute_controller_to_or(combined);
-        return (distribute_properties_to_or(combined), final_rest);
-    }
-
-    // CR 601.2d: "and/or" between types — for filter purposes, equivalent to Or.
-    // Must be checked BEFORE "and " to prevent "and " from consuming "and/or ".
-    if let Some(after_and_or) = rest_lower.strip_prefix("and/or ") {
-        let after_trimmed = after_and_or.trim_start();
-        if starts_with_type_word(after_trimmed) {
-            let and_or_text = &text[pos + rest_offset + "and/or ".len()..];
-            let (other_filter, final_rest) = parse_type_phrase(and_or_text);
-            let left = typed(
-                card_type.unwrap_or(TypeFilter::Any),
-                subtype,
-                properties.clone(),
-                neg_type_filters.clone(),
-            );
-            let combined = merge_or_filters(left, other_filter);
-            let combined = distribute_shared_properties(combined, &properties);
-            let combined = distribute_controller_to_or(combined);
-            return (distribute_properties_to_or(combined), final_rest);
-        }
-    }
-
-    // CR 205.3a: Oracle "and" between type words is set-union ("artifacts and creatures"
-    // = any object that is an artifact OR a creature), not set-intersection.
-    // TargetFilter::Or is correct here.
-    // Only recurse when the word after "and" is a recognized card type — prevents
-    // false matches on effect text like "destroy target creature and draw a card".
-    if let Some(after_and_kw) = rest_lower.strip_prefix("and ") {
-        let after_and = after_and_kw.trim_start();
-        if starts_with_type_word(after_and) {
-            let and_text = &text[pos + rest_offset + 4..];
-            let (other_filter, final_rest) = parse_type_phrase(and_text);
-            let left = typed(
-                card_type.unwrap_or(TypeFilter::Any),
-                subtype,
-                properties.clone(),
-                neg_type_filters.clone(),
-            );
-            let combined = merge_or_filters(left, other_filter);
-            let combined = distribute_shared_properties(combined, &properties);
-            let combined = distribute_controller_to_or(combined);
-            return (distribute_properties_to_or(combined), final_rest);
+    // Try each type combinator separator in longest-match-first order.
+    // Each separator produces an Or combination when followed by a recognized type word.
+    static TYPE_SEPARATORS: &[&str] = &[
+        ", and/or ",
+        ", and ",
+        ", or ",
+        ", ",
+        "or ",
+        "and/or ",
+        "and ",
+    ];
+    for separator in TYPE_SEPARATORS {
+        if let Ok((after_sep, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>(*separator).parse(rest_lower)
+        {
+            let after_trimmed = after_sep.trim_start();
+            if starts_with_type_word(after_trimmed) {
+                let sep_text = &text[pos + rest_offset + separator.len()..];
+                let (other_filter, final_rest) = parse_type_phrase(sep_text);
+                let left = typed(
+                    card_type.unwrap_or(TypeFilter::Any),
+                    subtype,
+                    properties.clone(),
+                    neg_type_filters.clone(),
+                );
+                let combined = merge_or_filters(left, other_filter);
+                let combined = distribute_shared_properties(combined, &properties);
+                let combined = distribute_controller_to_or(combined);
+                return (distribute_properties_to_or(combined), final_rest);
+            }
         }
     }
 
@@ -610,13 +588,22 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     let mut controller = None;
     let own_ctrl = lower[pos..].trim_start();
     let own_ctrl_offset = lower[pos..].len() - own_ctrl.len();
-    if own_ctrl.starts_with("you own and control") {
+    if tag::<_, _, nom_language::error::VerboseError<&str>>("you own and control")
+        .parse(own_ctrl)
+        .is_ok()
+    {
         controller = Some(ControllerRef::You);
         properties.push(FilterProp::Owned {
             controller: ControllerRef::You,
         });
         pos += own_ctrl_offset + "you own and control".len();
-    } else if own_ctrl.starts_with("you own") && !own_ctrl.starts_with("you own and") {
+    } else if tag::<_, _, nom_language::error::VerboseError<&str>>("you own")
+        .parse(own_ctrl)
+        .is_ok()
+        && tag::<_, _, nom_language::error::VerboseError<&str>>("you own and")
+            .parse(own_ctrl)
+            .is_err()
+    {
         properties.push(FilterProp::Owned {
             controller: ControllerRef::You,
         });
@@ -670,7 +657,10 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     // Check "of the chosen type" suffix (Cavern of Souls, Metallic Mimic, etc.)
     let remaining = lower[pos..].trim_start();
     let remaining_offset = lower[pos..].len() - remaining.len();
-    if remaining.starts_with("of the chosen type") {
+    if tag::<_, _, nom_language::error::VerboseError<&str>>("of the chosen type")
+        .parse(remaining)
+        .is_ok()
+    {
         properties.push(FilterProp::IsChosenCreatureType);
         pos += remaining_offset + "of the chosen type".len();
     }
@@ -680,7 +670,10 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     let remaining_choice = lower[pos..].trim_start();
     let choice_offset = lower[pos..].len() - remaining_choice.len();
     for suffix in &["of their choice", "of his or her choice"] {
-        if remaining_choice.starts_with(suffix) {
+        if tag::<_, _, nom_language::error::VerboseError<&str>>(*suffix)
+            .parse(remaining_choice)
+            .is_ok()
+        {
             pos += choice_offset + suffix.len();
             break;
         }
@@ -690,7 +683,9 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     // Handles "creature named X", "cards named X", "named X" patterns.
     let remaining_named = lower[pos..].trim_start();
     let named_offset = lower[pos..].len() - remaining_named.len();
-    if let Some(name_text) = remaining_named.strip_prefix("named ") {
+    if let Ok((name_text, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("named ").parse(remaining_named)
+    {
         // Name extends to end-of-clause markers: comma, period, "you control", "that", or end.
         let name_end = name_text.find([',', '.']).unwrap_or(name_text.len());
         let raw_name = name_text[..name_end].trim();
@@ -788,8 +783,15 @@ fn starts_with_type_word(text: &str) -> bool {
         return true;
     }
     // CR 205.4b: Negated type prefix: "noncreature spell", "nonland permanent"
-    if let Some(after_non) = text.strip_prefix("non") {
-        let after_non = after_non.strip_prefix('-').unwrap_or(after_non);
+    if let Ok((after_non, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("non").parse(text)
+    {
+        // Optional hyphen
+        let after_non =
+            match tag::<_, _, nom_language::error::VerboseError<&str>>("-").parse(after_non) {
+                Ok((r, _)) => r,
+                Err(_) => after_non,
+            };
         if let Some(ws_pos) = after_non.find(|c: char| c.is_whitespace()) {
             let after_negated = after_non[ws_pos..].trim_start();
             return parse_core_type(after_negated).0.is_some();
@@ -916,39 +918,11 @@ fn distribute_controller_to_or(filter: TargetFilter) -> TargetFilter {
 }
 
 fn parse_core_type(text: &str) -> (Option<TypeFilter>, Option<String>, usize) {
-    // Longest-match-first: plural forms before singular to avoid "creatures" matching
-    // only "creature" and leaving "s". The nom combinator `nom_target::parse_type_filter_word`
-    // handles singular forms; here we need the full plural/alias table for correct consumption.
-    let types: &[(&str, TypeFilter)] = &[
-        ("creatures", TypeFilter::Creature),
-        ("creature", TypeFilter::Creature),
-        ("permanents", TypeFilter::Permanent),
-        ("permanent", TypeFilter::Permanent),
-        ("artifacts", TypeFilter::Artifact),
-        ("artifact", TypeFilter::Artifact),
-        ("enchantments", TypeFilter::Enchantment),
-        ("enchantment", TypeFilter::Enchantment),
-        ("instants", TypeFilter::Instant),
-        ("instant", TypeFilter::Instant),
-        ("sorceries", TypeFilter::Sorcery),
-        ("sorcery", TypeFilter::Sorcery),
-        ("planeswalkers", TypeFilter::Planeswalker),
-        ("planeswalker", TypeFilter::Planeswalker),
-        // CR 310: Battle type recognition.
-        ("battles", TypeFilter::Battle),
-        ("battle", TypeFilter::Battle),
-        ("lands", TypeFilter::Land),
-        ("land", TypeFilter::Land),
-        ("spells", TypeFilter::Card),
-        ("spell", TypeFilter::Card),
-        ("cards", TypeFilter::Card),
-        ("card", TypeFilter::Card),
-    ];
-
-    for (word, tf) in types {
-        if text.starts_with(word) {
-            return (Some(tf.clone()), None, word.len());
-        }
+    // Delegate to the shared nom combinator table which handles both singular
+    // and plural forms in longest-match-first order.
+    if let Ok((rest, tf)) = nom_target::parse_type_filter_word(text) {
+        let consumed = text.len() - rest.len();
+        return (Some(tf), None, consumed);
     }
 
     (None, None, 0)
@@ -964,42 +938,42 @@ fn parse_controller_suffix(text: &str) -> Option<(ControllerRef, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
 
-    // Try the shared nom combinator first — handles the three most common patterns.
-    if let Ok((rest, ctrl)) = nom_target::parse_controller_suffix(trimmed) {
+    // Delegate to nom_filter::parse_zone_controller which handles common patterns,
+    // then fall through to additional nom-based patterns.
+    if let Ok((rest, ctrl)) = nom_filter::parse_zone_controller(trimmed) {
         return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
     }
 
-    // Additional patterns not in the shared nom combinator.
-    if trimmed.starts_with("you don't control") {
-        Some((
-            ControllerRef::Opponent,
-            leading_ws + "you don't control".len(),
-        ))
-    } else if trimmed.starts_with("that player controls") {
+    // Additional patterns via nom tag().
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("that player controls").parse(trimmed)
+    {
         // "that player controls" → ControllerRef::You, resolved against scope_player
         // at runtime by resolve_quantity_scoped() for per-player iteration contexts.
-        Some((
-            ControllerRef::You,
-            leading_ws + "that player controls".len(),
-        ))
-    } else if trimmed.starts_with("they control") {
+        return Some((ControllerRef::You, leading_ws + trimmed.len() - rest.len()));
+    }
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("they control").parse(trimmed)
+    {
         // CR 608.2d: "they control" → ControllerRef::You, resolved against
         // accepting_player during "any opponent may" resolution.
-        Some((ControllerRef::You, leading_ws + "they control".len()))
-    } else {
-        None
+        return Some((ControllerRef::You, leading_ws + trimmed.len() - rest.len()));
     }
+
+    None
 }
 
 fn parse_token_suffix(text: &str) -> Option<usize> {
     let trimmed = text.trim_start();
 
-    for prefix in ["tokens", "token"] {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            if rest.is_empty()
-                || rest.starts_with(|c: char| c.is_whitespace() || c == ',' || c == '.')
-            {
-                return Some(text.len() - rest.len());
+    // Try "tokens" before "token" (longest match first), with word boundary.
+    for word in &["tokens", "token"] {
+        if let Ok((rest, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>(*word).parse(trimmed)
+        {
+            match rest.chars().next() {
+                None | Some(' ' | ',' | '.') => return Some(text.len() - rest.len()),
+                _ => {}
             }
         }
     }
@@ -1015,7 +989,9 @@ fn parse_token_suffix(text: &str) -> Option<usize> {
 fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
     let (rest, color) = nom_primitives::parse_color(text).ok()?;
     // Must be followed by a space (color adjective prefix, not standalone color word).
-    let rest = rest.strip_prefix(' ')?;
+    let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>(" ")
+        .parse(rest)
+        .ok()?;
     let consumed = text.len() - rest.len();
     Some((FilterProp::HasColor { color }, consumed))
 }
@@ -1037,15 +1013,21 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
                 | FilterProp::Tapped
                 | FilterProp::Untapped
                 | FilterProp::FaceDown
-        ) && rest.starts_with(' ')
-        {
-            return Some((prop, text.len() - rest.len() + 1));
+        ) {
+            // Must be followed by space (prefix, not standalone)
+            if let Ok((after_space, _)) =
+                tag::<_, _, nom_language::error::VerboseError<&str>>(" ").parse(rest)
+            {
+                return Some((prop, text.len() - after_space.len()));
+            }
         }
     }
 
     // Handle "face-down " (hyphenated variant not in the nom combinator).
-    if text.starts_with("face-down ") {
-        return Some((FilterProp::FaceDown, "face-down ".len()));
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("face-down ").parse(text)
+    {
+        return Some((FilterProp::FaceDown, text.len() - rest.len()));
     }
 
     None
@@ -1055,20 +1037,29 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
 /// Returns (FilterProp, bytes consumed from the original text).
 fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
-    let rest = trimmed.strip_prefix("with power ")?;
-    let num_end = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    if num_end == 0 {
-        return None;
-    }
-    let value: i32 = rest[..num_end].parse().ok()?;
-    let after_num = rest[num_end..].trim_start();
-
-    let (prop, after) = if let Some(a) = after_num.strip_prefix("or less") {
-        (FilterProp::PowerLE { value }, a)
-    } else if let Some(a) = after_num.strip_prefix("or greater") {
-        (FilterProp::PowerGE { value }, a)
+    let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("with power ")
+        .parse(trimmed)
+        .ok()?;
+    let (rest, value) = nom_primitives::parse_number(rest).ok()?;
+    let after_num = rest.trim_start();
+    let (prop, after) = if let Ok((a, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("or less").parse(after_num)
+    {
+        (
+            FilterProp::PowerLE {
+                value: value as i32,
+            },
+            a,
+        )
+    } else if let Ok((a, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("or greater").parse(after_num)
+    {
+        (
+            FilterProp::PowerGE {
+                value: value as i32,
+            },
+            a,
+        )
     } else {
         return None;
     };
@@ -1080,18 +1071,24 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
 /// Returns (FilterProp, bytes consumed from the original text).
 pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
-    let rest = trimmed.strip_prefix("with mana value ")?;
+    let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("with mana value ")
+        .parse(trimmed)
+        .ok()?;
 
     // CR 202.3: Dynamic comparisons referencing the triggering event source's mana value.
     // Staged checks: first detect "less than" / "greater than", then check for "or equal to".
-    if let Some(a) = rest.strip_prefix("less than") {
+    if let Ok((a, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("less than").parse(rest)
+    {
         let a = a.trim_start();
-        let (is_equal, a) = if let Some(a2) = a.strip_prefix("or equal to") {
+        let (is_equal, a) = if let Ok((a2, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>("or equal to").parse(a)
+        {
             (true, a2.trim_start())
         } else {
             (false, a)
         };
-        if let Some(a) = a.strip_prefix("that ") {
+        if let Ok((a, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>("that ").parse(a) {
             let after = a.find([',', '.', ' ']).map_or(a, |i| &a[i..]);
             return Some((
                 if is_equal {
@@ -1101,7 +1098,6 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
                         },
                     }
                 } else {
-                    // Strict "less than" → CmcLE with offset -1
                     FilterProp::CmcLE {
                         value: QuantityExpr::Offset {
                             inner: Box::new(QuantityExpr::Ref {
@@ -1115,14 +1111,18 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
             ));
         }
     }
-    if let Some(a) = rest.strip_prefix("greater than") {
+    if let Ok((a, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("greater than").parse(rest)
+    {
         let a = a.trim_start();
-        let (is_equal, a) = if let Some(a2) = a.strip_prefix("or equal to") {
+        let (is_equal, a) = if let Ok((a2, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>("or equal to").parse(a)
+        {
             (true, a2.trim_start())
         } else {
             (false, a)
         };
-        if let Some(a) = a.strip_prefix("that ") {
+        if let Ok((a, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>("that ").parse(a) {
             let after = a.find([',', '.', ' ']).map_or(a, |i| &a[i..]);
             return Some((
                 if is_equal {
@@ -1132,7 +1132,6 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
                         },
                     }
                 } else {
-                    // Strict "greater than" → CmcGE with offset +1
                     FilterProp::CmcGE {
                         value: QuantityExpr::Offset {
                             inner: Box::new(QuantityExpr::Ref {
@@ -1148,16 +1147,12 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
     }
 
     // Static "N or less" / "N or greater"
-    let num_end = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    if num_end == 0 {
-        return None;
-    }
-    let value: u32 = rest[..num_end].parse().ok()?;
-    let after_num = rest[num_end..].trim_start();
+    let (after_num_raw, value) = nom_primitives::parse_number(rest).ok()?;
+    let after_num = after_num_raw.trim_start();
 
-    let (prop, after) = if let Some(a) = after_num.strip_prefix("or greater") {
+    let (prop, after) = if let Ok((a, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("or greater").parse(after_num)
+    {
         (
             FilterProp::CmcGE {
                 value: QuantityExpr::Fixed {
@@ -1166,7 +1161,9 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
             },
             a,
         )
-    } else if let Some(a) = after_num.strip_prefix("or less") {
+    } else if let Ok((a, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("or less").parse(after_num)
+    {
         (
             FilterProp::CmcLE {
                 value: QuantityExpr::Fixed {
@@ -1193,7 +1190,9 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
 /// Returns (FilterProp, bytes consumed from the original text).
 pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
-    let rest = trimmed.strip_prefix("with ")?;
+    let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("with ")
+        .parse(trimmed)
+        .ok()?;
 
     for suffix in [
         " counters on them",
@@ -1205,11 +1204,19 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
             continue;
         };
         let mut counter_type = rest[..counter_end].trim();
-        counter_type = counter_type
-            .strip_prefix("an ")
-            .or_else(|| counter_type.strip_prefix("a "))
-            .unwrap_or(counter_type)
-            .trim();
+        // Strip leading article "an " or "a " via nom tag.
+        counter_type = if let Ok((r, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>("an ").parse(counter_type)
+        {
+            r
+        } else if let Ok((r, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>("a ").parse(counter_type)
+        {
+            r
+        } else {
+            counter_type
+        }
+        .trim();
 
         if counter_type.is_empty() {
             continue;
@@ -1231,7 +1238,10 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
 fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
-    let mut remaining = trimmed.strip_prefix("with ")?;
+    let (after_with, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("with ")
+        .parse(trimmed)
+        .ok()?;
+    let mut remaining = after_with;
     let mut consumed = leading_ws + "with ".len();
     let mut properties = Vec::new();
 
@@ -1242,23 +1252,21 @@ fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
         consumed += keyword_len;
         remaining = &remaining[keyword_len..];
 
-        if let Some(rest) = remaining.strip_prefix(", and ") {
-            consumed += ", and ".len();
-            remaining = rest;
-            continue;
+        // Try keyword list separators in longest-match-first order.
+        let mut found_sep = false;
+        for sep in &[", and ", " and ", ", "] {
+            if let Ok((rest, _)) =
+                tag::<_, _, nom_language::error::VerboseError<&str>>(*sep).parse(remaining)
+            {
+                consumed += sep.len();
+                remaining = rest;
+                found_sep = true;
+                break;
+            }
         }
-        if let Some(rest) = remaining.strip_prefix(" and ") {
-            consumed += " and ".len();
-            remaining = rest;
-            continue;
+        if !found_sep {
+            break;
         }
-        if let Some(rest) = remaining.strip_prefix(", ") {
-            consumed += ", ".len();
-            remaining = rest;
-            continue;
-        }
-
-        break;
     }
 
     if properties.is_empty() {
@@ -1316,28 +1324,37 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
 
-    let after_that = trimmed.strip_prefix("that ")?;
+    let (after_that, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("that ")
+        .parse(trimmed)
+        .ok()?;
     let that_len = leading_ws + "that ".len();
 
     // --- "that share(s) [no] [a] [quality]" ---
-    if let Some(rest) = after_that
-        .strip_prefix("share ")
-        .or_else(|| after_that.strip_prefix("shares "))
-    {
-        let share_verb_len = after_that.len() - rest.len();
+    let share_result = nom::branch::alt((
+        tag::<_, _, nom_language::error::VerboseError<&str>>("share "),
+        tag("shares "),
+    ))
+    .parse(after_that);
+    if let Ok((rest, matched_verb)) = share_result {
+        let share_verb_len = matched_verb.len();
 
         // Optional negation: "that share no creature types"
-        let (rest, negated) = rest
-            .strip_prefix("no ")
-            .map(|r| (r, true))
-            .unwrap_or((rest, false));
-        let neg_len = if negated { "no ".len() } else { 0 };
+        let (rest, _negated, neg_len) = if let Ok((r, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>("no ").parse(rest)
+        {
+            (r, true, "no ".len())
+        } else {
+            (rest, false, 0)
+        };
 
         // Optional article: "a creature type" vs "creature types"
-        let (rest, a_len) = rest
-            .strip_prefix("a ")
-            .map(|r| (r, "a ".len()))
-            .unwrap_or((rest, 0));
+        let (rest, a_len) = if let Ok((r, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>("a ").parse(rest)
+        {
+            (r, "a ".len())
+        } else {
+            (rest, 0)
+        };
 
         // CR 700.5: Map quality phrase to typed SharedQuality enum.
         let quality_end = rest.find([',', '.']).unwrap_or(rest.len());
@@ -1355,7 +1372,9 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     }
 
     // --- CR 115.9c: "that targets only [filter]" ---
-    if let Some(rest) = after_that.strip_prefix("targets only ") {
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("targets only ").parse(after_that)
+    {
         let targets_verb_len = "targets only ".len();
         if let Some((props, consumed)) =
             parse_targets_only_constraint(rest, that_len + targets_verb_len)
@@ -1366,7 +1385,9 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
 
     // --- CR 115.9b: "that targets [filter]" (.any() semantics) ---
     // Must come AFTER "targets only" check above (longest match first).
-    if let Some(rest) = after_that.strip_prefix("targets ") {
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("targets ").parse(after_that)
+    {
         let targets_verb_len = "targets ".len();
         if let Some((props, consumed)) = parse_targets_constraint(rest, that_len + targets_verb_len)
         {
@@ -1396,7 +1417,9 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     ];
 
     for (phrase, prop) in VERB_PHRASES {
-        if let Some(_rest) = after_that.strip_prefix(phrase) {
+        if let Ok((_, _)) =
+            tag::<_, _, nom_language::error::VerboseError<&str>>(*phrase).parse(after_that)
+        {
             let total = that_len + phrase.len();
             return Some((vec![prop.clone()], total));
         }
@@ -1417,22 +1440,23 @@ fn parse_targets_only_constraint(
     text: &str,
     prefix_len: usize,
 ) -> Option<(Vec<FilterProp>, usize)> {
-    // Self-reference: "~" or "it"
-    if text.starts_with('~') {
+    // Self-reference: "~"
+    if let Ok((_, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>("~").parse(text) {
         let props = vec![FilterProp::TargetsOnly {
             filter: Box::new(TargetFilter::SelfRef),
         }];
         return Some((props, prefix_len + 1));
     }
-    if text.starts_with("it") && (text.len() == 2 || text[2..].starts_with([',', '.', ' '])) {
+    // "it" with word boundary
+    if parse_word_bounded(text, "it").is_ok() {
         let props = vec![FilterProp::TargetsOnly {
             filter: Box::new(TargetFilter::SelfRef),
         }];
         return Some((props, prefix_len + 2));
     }
 
-    // "you" — targets only the controller (a player)
-    if text.starts_with("you") && (text.len() == 3 || text[3..].starts_with([',', '.', ' '])) {
+    // "you" with word boundary — targets only the controller (a player)
+    if parse_word_bounded(text, "you").is_ok() {
         let props = vec![FilterProp::TargetsOnly {
             filter: Box::new(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::You),
@@ -1442,7 +1466,9 @@ fn parse_targets_only_constraint(
     }
 
     // "a single [type phrase or player]" — TargetsOnly + HasSingleTarget
-    if let Some(rest) = text.strip_prefix("a single ") {
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("a single ").parse(text)
+    {
         let single_len = "a single ".len();
         let (inner_filter, consumed) = parse_targets_only_type_or_player(rest);
         let props = vec![
@@ -1455,8 +1481,13 @@ fn parse_targets_only_constraint(
     }
 
     // "a/an [type phrase or player]" — TargetsOnly without single constraint
-    if let Some(rest) = text.strip_prefix("a ").or_else(|| text.strip_prefix("an ")) {
-        let article_len = text.len() - rest.len();
+    let article_result = nom::branch::alt((
+        tag::<_, _, nom_language::error::VerboseError<&str>>("a "),
+        tag("an "),
+    ))
+    .parse(text);
+    if let Ok((rest, matched)) = article_result {
+        let article_len = matched.len();
         let (inner_filter, consumed) = parse_targets_only_type_or_player(rest);
         let props = vec![FilterProp::TargetsOnly {
             filter: Box::new(inner_filter),
@@ -1478,32 +1509,33 @@ fn parse_targets_only_constraint(
 /// - "a/an [type phrase]" → `Targets { filter }`
 fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<FilterProp>, usize)> {
     // Strip "one or more " — redundant with .any() semantics
-    let (text, extra_len) = if let Some(rest) = text.strip_prefix("one or more ") {
+    let (text, extra_len) = if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("one or more ").parse(text)
+    {
         (rest, "one or more ".len())
     } else {
         (text, 0)
     };
     let prefix_len = prefix_len + extra_len;
 
-    // Self-reference: "~" or "it"
-    if text.starts_with('~') {
+    // Self-reference: "~"
+    if let Ok((_, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>("~").parse(text) {
         let props = vec![FilterProp::Targets {
             filter: Box::new(TargetFilter::SelfRef),
         }];
         return Some((props, prefix_len + 1));
     }
-    if text.starts_with("it") && (text.len() == 2 || text[2..].starts_with([',', '.', ' '])) {
+    // "it" with word boundary
+    if parse_word_bounded(text, "it").is_ok() {
         let props = vec![FilterProp::Targets {
             filter: Box::new(TargetFilter::SelfRef),
         }];
         return Some((props, prefix_len + 2));
     }
 
-    // Self-reference: "this creature" / "this permanent"
+    // Self-reference: "this creature" / "this permanent" with word boundary
     for phrase in ["this creature", "this permanent"] {
-        if text.starts_with(phrase)
-            && (text.len() == phrase.len() || text[phrase.len()..].starts_with([',', '.', ' ']))
-        {
+        if parse_word_bounded(text, phrase).is_ok() {
             let props = vec![FilterProp::Targets {
                 filter: Box::new(TargetFilter::SelfRef),
             }];
@@ -1511,15 +1543,16 @@ fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<Filter
         }
     }
 
-    // "you or a [type]" — compound controller + typed filter
+    // "you or a [type]" / "you or an [type]" — compound controller + typed filter
     let lower = text.to_lowercase();
-    if lower.starts_with("you or a ") || lower.starts_with("you or an ") {
-        let after_you_or = if lower.starts_with("you or an ") {
-            &text["you or an ".len()..]
-        } else {
-            &text["you or a ".len()..]
-        };
-        let you_or_len = text.len() - after_you_or.len();
+    let you_or_result = nom::branch::alt((
+        tag::<_, _, nom_language::error::VerboseError<&str>>("you or an "),
+        tag("you or a "),
+    ))
+    .parse(lower.as_str());
+    if let Ok((_, matched)) = you_or_result {
+        let you_or_len = matched.len();
+        let after_you_or = &text[you_or_len..];
         let (type_filter, remainder) = parse_type_phrase(after_you_or);
         let consumed = after_you_or.len() - remainder.len();
         let combined = TargetFilter::Or {
@@ -1531,8 +1564,8 @@ fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<Filter
         return Some((props, prefix_len + you_or_len + consumed));
     }
 
-    // "you" — targets the controller (a player)
-    if lower.starts_with("you") && (text.len() == 3 || text[3..].starts_with([',', '.', ' '])) {
+    // "you" — targets the controller (a player), with word boundary
+    if parse_word_bounded(lower.as_str(), "you").is_ok() {
         let props = vec![FilterProp::Targets {
             filter: Box::new(TargetFilter::Controller),
         }];
@@ -1540,8 +1573,13 @@ fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<Filter
     }
 
     // "a/an [type phrase or player]" — parse type, using the same helper as TargetsOnly
-    if let Some(rest) = text.strip_prefix("a ").or_else(|| text.strip_prefix("an ")) {
-        let article_len = text.len() - rest.len();
+    let article_result = nom::branch::alt((
+        tag::<_, _, nom_language::error::VerboseError<&str>>("a "),
+        tag("an "),
+    ))
+    .parse(text);
+    if let Ok((rest, matched)) = article_result {
+        let article_len = matched.len();
         let (inner_filter, consumed) = parse_targets_only_type_or_player(rest);
         let props = vec![FilterProp::Targets {
             filter: Box::new(inner_filter),
@@ -1566,8 +1604,8 @@ fn parse_targets_constraint(text: &str, prefix_len: usize) -> Option<(Vec<Filter
 /// Handles "player" as `TargetFilter::Player` and "[type] or player" as
 /// `Or(Typed(type), Player)`, since `parse_type_phrase` doesn't recognize "player".
 fn parse_targets_only_type_or_player(text: &str) -> (TargetFilter, usize) {
-    // Check for bare "player" at start
-    if text.starts_with("player") && (text.len() == 6 || text[6..].starts_with([',', '.', ' '])) {
+    // Check for bare "player" at start with word boundary
+    if parse_word_bounded(text, "player").is_ok() {
         return (TargetFilter::Player, 6);
     }
 
@@ -1580,13 +1618,17 @@ fn parse_targets_only_type_or_player(text: &str) -> (TargetFilter, usize) {
     if let Some(or_pos) = tp.find(" or player") {
         let end = or_pos + " or player".len();
         // Only match if "or player" is followed by a delimiter or end of string
-        if end == text.len() || text[end..].starts_with([',', '.', ' ']) {
-            let type_part = tp.split_at(or_pos).0.original;
-            let (type_filter, _) = parse_type_phrase(type_part);
-            let combined = TargetFilter::Or {
-                filters: vec![type_filter, TargetFilter::Player],
-            };
-            return (combined, end);
+        let after = &text[end..];
+        match after.chars().next() {
+            None | Some(',' | '.' | ' ') => {
+                let type_part = tp.split_at(or_pos).0.original;
+                let (type_filter, _) = parse_type_phrase(type_part);
+                let combined = TargetFilter::Or {
+                    filters: vec![type_filter, TargetFilter::Player],
+                };
+                return (combined, end);
+            }
+            _ => {}
         }
     }
 
@@ -1627,14 +1669,19 @@ fn parse_zone_suffix(text: &str) -> Option<(FilterProp, Option<ControllerRef>, u
     let leading_ws = text.len() - trimmed.len();
 
     // Skip optional "card"/"cards" before zone preposition
-    let (after_card, card_skip) = if let Some(rest) = trimmed.strip_prefix("cards ") {
+    let (after_card, card_skip) = if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("cards ").parse(trimmed)
+    {
         (rest, "cards ".len())
-    } else if let Some(rest) = trimmed.strip_prefix("card ") {
+    } else if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("card ").parse(trimmed)
+    {
         (rest, "card ".len())
     } else {
         (trimmed, 0)
     };
 
+    let after_card_lower = after_card.to_lowercase();
     let zones: &[(&str, &str, Zone)] = &[
         ("graveyard", "graveyards", Zone::Graveyard),
         ("exile", "exiles", Zone::Exile),
@@ -1645,19 +1692,19 @@ fn parse_zone_suffix(text: &str) -> Option<(FilterProp, Option<ControllerRef>, u
     for prep in &["from", "in"] {
         for &(zone_word, zone_plural, ref zone) in zones {
             // Possessive: "from your graveyard", "from their graveyard"
-            // Use starts_with to avoid false matches where "in" is part of "into"
-            // (e.g., "is put into your graveyard from your library" should NOT match
-            // as a zone suffix — it's a trigger event, not a type qualifier).
+            // Use starts_with_possessive to avoid false matches where "in" is part of "into".
             if starts_with_possessive(after_card, prep, zone_word) {
                 let pattern = format!("{prep} your {zone_word}");
-                let ctrl = if after_card.to_lowercase().starts_with(&pattern) {
+                let ctrl = if tag::<_, _, nom_language::error::VerboseError<&str>>(pattern.as_str())
+                    .parse(after_card_lower.as_str())
+                    .is_ok()
+                {
                     Some(ControllerRef::You)
                 } else {
                     None
                 };
                 // Find end of the zone word in after_card
-                let zone_end = after_card
-                    .to_lowercase()
+                let zone_end = after_card_lower
                     .find(zone_word)
                     .map(|i| i + zone_word.len())
                     .unwrap_or(after_card.len());
@@ -1670,7 +1717,10 @@ fn parse_zone_suffix(text: &str) -> Option<(FilterProp, Option<ControllerRef>, u
 
             // Indefinite: "from a graveyard", "in a graveyard"
             let indef = format!("{prep} a {zone_word}");
-            if after_card.to_lowercase().starts_with(&indef) {
+            if tag::<_, _, nom_language::error::VerboseError<&str>>(indef.as_str())
+                .parse(after_card_lower.as_str())
+                .is_ok()
+            {
                 return Some((
                     FilterProp::InZone { zone: *zone },
                     None,
@@ -1683,17 +1733,20 @@ fn parse_zone_suffix(text: &str) -> Option<(FilterProp, Option<ControllerRef>, u
                 format!("{prep} {zone_word}"),
                 format!("{prep} {zone_plural}"),
             ] {
-                if after_card.to_lowercase().starts_with(&direct) {
-                    // Make sure it's not a possessive that we missed
-                    let after = &after_card[direct.len()..];
-                    if after.is_empty()
-                        || after.starts_with(|c: char| c.is_whitespace() || c == ',' || c == '.')
-                    {
-                        return Some((
-                            FilterProp::InZone { zone: *zone },
-                            None,
-                            leading_ws + card_skip + direct.len(),
-                        ));
+                if let Ok((rest, _)) =
+                    tag::<_, _, nom_language::error::VerboseError<&str>>(direct.as_str())
+                        .parse(after_card_lower.as_str())
+                {
+                    // Make sure it's not a possessive that we missed — check word boundary
+                    match rest.chars().next() {
+                        None | Some(' ' | ',' | '.') => {
+                            return Some((
+                                FilterProp::InZone { zone: *zone },
+                                None,
+                                leading_ws + card_skip + direct.len(),
+                            ));
+                        }
+                        _ => {}
                     }
                 }
             }

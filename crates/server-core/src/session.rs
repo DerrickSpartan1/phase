@@ -132,7 +132,13 @@ impl GameSession {
             .map(|r| {
                 let legal = engine_legal_actions(&self.state);
                 let auto_pass = auto_pass_recommended(&self.state, &legal);
-                (self.state.clone(), r.events, legal, r.log_entries, auto_pass)
+                (
+                    self.state.clone(),
+                    r.events,
+                    legal,
+                    r.log_entries,
+                    auto_pass,
+                )
             })
             .collect()
     }
@@ -482,7 +488,13 @@ impl SessionManager {
             session.state.auto_pass.remove(&player);
             let new_legal_actions = engine_legal_actions(&session.state);
             let auto_pass = auto_pass_recommended(&session.state, &new_legal_actions);
-            return Ok((session.state.clone(), vec![], new_legal_actions, vec![], auto_pass));
+            return Ok((
+                session.state.clone(),
+                vec![],
+                new_legal_actions,
+                vec![],
+                auto_pass,
+            ));
         }
 
         // Validate it's this player's turn to act

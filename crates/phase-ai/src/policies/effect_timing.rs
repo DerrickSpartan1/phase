@@ -125,8 +125,8 @@ fn counterspell_score(ctx: &PolicyContext<'_>) -> f64 {
     };
 
     // Boost incentive to cast a counter when opponent is countering one of our spells
-    let protect_bonus =
-        threatened_own_spell_value(ctx.state, ctx.ai_player) * ctx.penalties().protect_spell_bonus_mult;
+    let protect_bonus = threatened_own_spell_value(ctx.state, ctx.ai_player)
+        * ctx.penalties().protect_spell_bonus_mult;
 
     if matches!(ctx.decision.waiting_for, WaitingFor::Priority { .. }) {
         if !is_own_turn && stack_pressure > 0.0 {
