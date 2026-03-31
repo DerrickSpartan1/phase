@@ -66,7 +66,8 @@ When creating or participating in an agent team (whether triggered by `/batch-me
 | `parser/oracle_static.rs` | Static ability line parsing, continuous modification extraction (`"gets +N/+M and has flying"` → typed modifications), `strip_casting_prohibition_subject` (shared subject→`CastingProhibitionScope` extractor for all casting prohibition patterns) |
 | `game/filter.rs` | Runtime `TargetFilter` evaluation against game objects and players |
 | `game/zones.rs` | Zone manipulation primitives — creating, moving, adding, removing objects |
-| `game/quantity.rs` | Dynamic quantity resolution (`QuantityExpr` → concrete `i32` from game state) |
+| `game/targeting.rs` | Target legality, zone queries (`zone_object_ids` for all objects in a zone), and target validation |
+| `game/quantity.rs` | Dynamic quantity resolution (`QuantityExpr` → concrete `i32` from game state). `ObjectCount` uses `TargetFilter::extract_in_zone()` to count objects in the correct zone (not just battlefield) |
 | `game/ability_utils.rs` | Ability construction, target slot wiring, chained ability building, target selection/validation |
 | `game/keywords.rs` | Keyword presence queries, protection checks, keyword string parsing |
 

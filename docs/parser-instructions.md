@@ -299,6 +299,11 @@ pub enum QuantityRef {
 **Legacy amount types** (`DamageAmount`, `LifeAmount`) still exist for backward compatibility but
 new effects should use `QuantityExpr`.
 
+**Zone-aware counting:** `ObjectCount` uses `TargetFilter::extract_in_zone()` to determine which
+zone to iterate. If the filter contains an `InZone` property (e.g., `InZone: Graveyard`), objects
+from that zone are counted instead of battlefield. Without `InZone`, defaults to battlefield.
+The reusable helper `targeting::zone_object_ids(state, zone)` returns all object IDs in a zone.
+
 ---
 
 ## Replacement Effect Parser — `oracle_replacement.rs`
@@ -446,6 +451,22 @@ parse_trigger_line(text, card_name)
 
 Parsed from the full trigger text in `parse_trigger_constraint()`. The runtime enforces constraints
 in `process_triggers()` using `(ObjectId, trigger_index)` tracking sets on `GameState`.
+
+---
+
+## Static Ability Parser — Turn-Condition Handling
+
+`oracle_static.rs` handles turn conditions in both **prefix** and **suffix** forms:
+
+| Oracle text form | Handler |
+|-----------------|---------|
+| "During your turn, ~ has first strike." | Prefix: `nom_tag_tp("during your turn, ")` at line ~342 |
+| "~ has first strike during your turn." | Suffix: `strip_suffix_turn_condition()` in both self-ref and `parse_subject_continuous_static` paths |
+| "During turns other than yours, ~ has hexproof." | Prefix: `nom_tag_tp("during turns other than yours, ")` |
+| "~ has hexproof during turns other than yours." | Suffix: same `strip_suffix_turn_condition()` |
+
+The `strip_suffix_turn_condition(text)` helper returns `(stripped_text, Option<StaticCondition>)`.
+Both forms produce identical output: `StaticCondition::DuringYourTurn` (or `Not { DuringYourTurn }`).
 
 ---
 

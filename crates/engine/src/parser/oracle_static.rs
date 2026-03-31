@@ -453,11 +453,24 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
             && nom_tag_lower(subject, subject, "other ").is_none()
         {
             let after = &tp.original[pos + verb_len..];
-            return parse_continuous_gets_has(
-                &format!("{}{}", verb_prefix, after),
+            let predicate = format!("{}{}", verb_prefix, after);
+            let predicate_lower = predicate.to_lowercase();
+
+            // CR 604.1: Strip suffix turn conditions —
+            // "has first strike during your turn" → condition + "has first strike"
+            let (effective_predicate, suffix_condition) =
+                strip_suffix_turn_condition(&predicate_lower);
+
+            if let Some(mut def) = parse_continuous_gets_has(
+                &effective_predicate,
                 TargetFilter::SelfRef,
                 tp.original,
-            );
+            ) {
+                if let Some(cond) = suffix_condition {
+                    def.condition = Some(cond);
+                }
+                return Some(def);
+            }
         }
     }
 
@@ -1127,14 +1140,20 @@ fn parse_subject_continuous_static(text: &str) -> Option<StaticDefinition> {
         return parse_continuous_gets_has(predicate, affected, text);
     }
 
-    let modifications = parse_continuous_modifications(predicate);
+    // CR 604.1: Strip suffix turn conditions from predicate —
+    // "has first strike during your turn" → "has first strike" + DuringYourTurn
+    let (effective_predicate, suffix_condition) = strip_suffix_turn_condition(&pred_lower);
+
+    let modifications = parse_continuous_modifications(&effective_predicate);
     if !modifications.is_empty() {
-        return Some(
-            StaticDefinition::continuous()
-                .affected(affected)
-                .modifications(modifications)
-                .description(text.to_string()),
-        );
+        let mut def = StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(modifications)
+            .description(text.to_string());
+        if let Some(cond) = suffix_condition {
+            def.condition = Some(cond);
+        }
+        return Some(def);
     }
 
     None
@@ -3466,6 +3485,27 @@ fn parse_land_type_change_subject(subject: &str) -> Option<TargetFilter> {
     }
 }
 
+/// CR 604.1: Strip turn-condition suffixes from predicate text.
+///
+/// Handles "during your turn" and "during turns other than yours" suffixes
+/// on keyword/modification predicates. Returns the stripped predicate and
+/// the corresponding `StaticCondition`, or the original text with `None`.
+fn strip_suffix_turn_condition(text: &str) -> (String, Option<StaticCondition>) {
+    let trimmed = text.trim_end_matches('.');
+    if let Some(rest) = trimmed.strip_suffix(" during your turn") {
+        (format!("{rest}."), Some(StaticCondition::DuringYourTurn))
+    } else if let Some(rest) = trimmed.strip_suffix(" during turns other than yours") {
+        (
+            format!("{rest}."),
+            Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn),
+            }),
+        )
+    } else {
+        (text.to_string(), None)
+    }
+}
+
 /// Strip "in addition to {its/their} other {land }types" suffix,
 /// returning the type name before it.
 fn strip_in_addition_suffix(text: &str) -> Option<&str> {
@@ -4296,6 +4336,40 @@ mod tests {
             .modifications
             .contains(&ContinuousModification::AddKeyword {
                 keyword: Keyword::Lifelink,
+            }));
+    }
+
+    #[test]
+    fn suffix_during_your_turn_has_first_strike() {
+        // Razorkin Needlehead: "This creature has first strike during your turn."
+        let def =
+            parse_static_line("This creature has first strike during your turn.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::FirstStrike,
+            }));
+    }
+
+    #[test]
+    fn suffix_during_turns_other_than_yours() {
+        let def =
+            parse_static_line("This creature has hexproof during turns other than yours.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.condition,
+            Some(StaticCondition::Not {
+                condition: Box::new(StaticCondition::DuringYourTurn),
+            })
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Hexproof,
             }));
     }
 

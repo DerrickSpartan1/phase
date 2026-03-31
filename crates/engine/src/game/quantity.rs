@@ -131,13 +131,19 @@ fn resolve_ref(
         // CR 118.4: Total life lost this turn by the controller.
         QuantityRef::LifeLostThisTurn => player.map_or(0, |p| p.life_lost_this_turn as i32),
         QuantityRef::Speed => i32::from(effective_speed(state, controller)),
-        QuantityRef::ObjectCount { filter } => state
-            .battlefield
-            .iter()
-            .filter(|&&id| {
-                matches_target_filter_controlled(state, id, filter, source_id, controller)
-            })
-            .count() as i32,
+        QuantityRef::ObjectCount { filter } => {
+            // CR 400.1: If the filter constrains to a specific zone via InZone,
+            // count objects in that zone. Otherwise default to battlefield.
+            let zone = filter
+                .extract_in_zone()
+                .unwrap_or(crate::types::zones::Zone::Battlefield);
+            crate::game::targeting::zone_object_ids(state, zone)
+                .iter()
+                .filter(|&&id| {
+                    matches_target_filter_controlled(state, id, filter, source_id, controller)
+                })
+                .count() as i32
+        }
         QuantityRef::PlayerCount { filter } => resolve_player_count(state, filter, controller),
         QuantityRef::CountersOnSelf { counter_type } => state
             .objects
@@ -588,6 +594,113 @@ mod tests {
             "Source".to_string(),
             Zone::Battlefield,
         );
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 3);
+    }
+
+    #[test]
+    fn object_count_with_in_zone_graveyard() {
+        // Eddymurk Crab pattern: count instants and sorceries in your graveyard.
+        use crate::types::ability::FilterProp;
+        use crate::types::card_type::CoreType;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Add 2 instants and 1 sorcery to player 0's graveyard
+        for (i, name) in ["Instant A", "Instant B", "Sorcery C"].iter().enumerate() {
+            let id = create_object(
+                &mut state,
+                CardId(i as u64),
+                PlayerId(0),
+                name.to_string(),
+                Zone::Graveyard,
+            );
+            let core_type = if name.starts_with("Instant") {
+                CoreType::Instant
+            } else {
+                CoreType::Sorcery
+            };
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(core_type);
+        }
+
+        // Add a creature to graveyard (should NOT count)
+        let creature = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Add an instant on battlefield (should NOT count — wrong zone)
+        let bf_instant = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(0),
+            "BF Instant".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&bf_instant)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        let source = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Filter: Or(Instant+InZone:Graveyard, Sorcery+InZone:Graveyard)
+        let instant_filter = TypedFilter {
+            type_filters: vec![TypeFilter::Instant],
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }],
+        };
+        let sorcery_filter = TypedFilter {
+            type_filters: vec![TypeFilter::Sorcery],
+            controller: Some(ControllerRef::You),
+            properties: vec![FilterProp::InZone {
+                zone: Zone::Graveyard,
+            }],
+        };
+        let filter = TargetFilter::Or {
+            filters: vec![
+                TargetFilter::Typed(instant_filter),
+                TargetFilter::Typed(sorcery_filter),
+            ],
+        };
+        // Verify extract_in_zone returns Graveyard
+        assert_eq!(filter.extract_in_zone(), Some(Zone::Graveyard));
+
+        // Verify zone_object_ids finds graveyard objects
+        let gy_ids = crate::game::targeting::zone_object_ids(&state, Zone::Graveyard);
+        assert_eq!(gy_ids.len(), 4, "expected 4 objects in graveyard (3 spells + 1 creature)");
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        };
+
+        // Should count 3 (2 instants + 1 sorcery in graveyard)
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 3);
     }
 

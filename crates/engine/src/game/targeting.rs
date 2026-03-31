@@ -511,8 +511,11 @@ fn can_target(
     true
 }
 
-/// Returns all object IDs in the given zone.
-fn zone_object_ids(state: &GameState, zone: Zone) -> Vec<ObjectId> {
+/// CR 400.1: Returns all object IDs in the given zone.
+///
+/// Per-player zones (Hand, Library, Graveyard) are aggregated across all players.
+/// Shared zones (Battlefield, Exile, Stack, Command) return the global list.
+pub(crate) fn zone_object_ids(state: &GameState, zone: Zone) -> Vec<ObjectId> {
     match zone {
         Zone::Battlefield => state.battlefield.clone(),
         Zone::Stack => state.stack.iter().map(|e| e.id).collect(),

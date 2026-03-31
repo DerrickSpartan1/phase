@@ -2662,6 +2662,25 @@ impl TargetFilter {
                 | TargetFilter::ParentTargetController
         )
     }
+
+    /// Extract the `InZone` zone from this filter's properties, if any.
+    ///
+    /// Recursively checks `Typed`, `Or`, `And`, and `Not` variants.
+    /// Returns the first `InZone` zone found, or `None` if the filter
+    /// has no zone constraint (defaulting to battlefield for counting).
+    pub fn extract_in_zone(&self) -> Option<crate::types::zones::Zone> {
+        match self {
+            TargetFilter::Typed(tf) => tf.properties.iter().find_map(|p| match p {
+                FilterProp::InZone { zone } => Some(*zone),
+                _ => None,
+            }),
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                filters.iter().find_map(|f| f.extract_in_zone())
+            }
+            TargetFilter::Not { filter } => filter.extract_in_zone(),
+            _ => None,
+        }
+    }
 }
 
 impl Effect {

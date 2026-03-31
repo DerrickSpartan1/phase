@@ -229,7 +229,8 @@ If your static uses a mode other than `Continuous`, it's evaluated outside the l
 | Lord effect | "Other Elf creatures you control get +1/+1" | Other-subtype-you-control block |
 | Global effect | "All creatures get -1/-1" | All-creatures block |
 | Conditional | "~ has indestructible as long as..." | As-long-as block |
-| Turn-scoped | "During your turn, ~ has first strike" | During-your-turn block |
+| Turn-scoped (prefix) | "During your turn, ~ has first strike" | During-your-turn prefix block |
+| Turn-scoped (suffix) | "~ has first strike during your turn" | `strip_suffix_turn_condition()` in self-ref and subject-continuous paths |
 | CDA | Changeling → all creature types | `synthesize_changeling_cda()` in `synthesis.rs` |
 | Type changing | "This land is the chosen type" | **Not yet implemented** — see `add-replacement-effect` skill |
 | Cost reduction | "Spells you cast cost {1} less" | Cost reduction block |
