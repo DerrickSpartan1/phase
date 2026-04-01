@@ -2529,6 +2529,7 @@ fn is_modal_header_line(lower: &str) -> bool {
         "choose up to two",
         "choose up to three",
         "choose any number",
+        "choose x.",
     ];
     CHOOSE_PHRASES.iter().any(|p| lower.contains(p))
 }
@@ -3939,6 +3940,14 @@ fn normalize_for_matching(lower: &str, card_name_lower: &str) -> String {
             let short = short.trim();
             if short.len() > 2 {
                 result = result.replace(short, "~");
+                // Also try with Alchemy prefix stripped: "a-alrund" → "alrund"
+                if !result.contains('~') {
+                    if let Some(stripped) = short.strip_prefix("a-") {
+                        if stripped.len() > 2 {
+                            result = result.replace(stripped, "~");
+                        }
+                    }
+                }
             }
         }
         // "of"-based: "rosie cotton of south lane" → "rosie cotton"
@@ -4329,6 +4338,31 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     effective_lower.contains("tap") && !effective_lower.contains("untap")
                 }
                 Effect::UntapAll { .. } => effective_lower.contains("untap"),
+                Effect::PreventDamage { .. } => {
+                    // "If a source would deal damage to you, prevent N of that damage"
+                    // Parsed as PreventDamage without a description string.
+                    effective_lower.contains("prevent") && effective_lower.contains("damage")
+                }
+                Effect::CopySpell { .. } => {
+                    // "You may have this creature enter as a copy of ..." lines
+                    // (including "enter tapped as a copy of")
+                    // Parsed as CopySpell without a description string.
+                    effective_lower.contains("as a copy of")
+                }
+                Effect::Untap { .. } => {
+                    // "Untap this creature during each other player's untap step" and similar
+                    // Parsed as Untap without a description string.
+                    effective_lower.contains("untap")
+                        && (effective_lower.contains("untap step")
+                            || effective_lower.contains("during each"))
+                }
+                Effect::Pump { .. } | Effect::PumpAll { .. } => {
+                    // "All Saprolings get +1/+1" or "This creature gets +X/+X" lines
+                    // Parsed as Pump/PumpAll without a description string.
+                    (effective_lower.contains("get ") || effective_lower.contains("gets "))
+                        && (effective_lower.contains('+') || effective_lower.contains('-'))
+                        && effective_lower.contains('/')
+                }
                 _ => false,
             };
             ability_tree_any(a, &pred)
@@ -5261,6 +5295,8 @@ fn is_keyword_line(lower: &str) -> bool {
         "evoke\u{2014}",
         "ninjutsu ",
         "ninjutsu\u{2014}",
+        "commander ninjutsu ",
+        "commander ninjutsu\u{2014}",
         "craft with ",
         "craft\u{2014}",
         "disturb ",
@@ -5407,6 +5443,10 @@ fn is_keyword_line(lower: &str) -> bool {
         "saddle ",
         "harmonize ",
         "harmonize\u{2014}",
+        "reinforce ",
+        "reinforce\u{2014}",
+        "recover\u{2014}",
+        "recover—",
         "warp\u{2014}",
         "warp ",
     ];
@@ -5467,6 +5507,7 @@ fn is_keyword_line(lower: &str) -> bool {
         "imprint",
         "grasp of fate",
         "eminence",
+        "mono eminence",
         "bloodthirst",
         "landfall",
         "heroic",
