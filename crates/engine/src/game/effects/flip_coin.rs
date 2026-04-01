@@ -138,6 +138,7 @@ mod tests {
             AbilityKind::Spell,
             Effect::LoseLife {
                 amount: QuantityExpr::Fixed { value: 3 },
+                target: None,
             },
         ));
 

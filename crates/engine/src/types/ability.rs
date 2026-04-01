@@ -1988,7 +1988,7 @@ pub enum Effect {
     LoseLife {
         #[serde(default = "default_quantity_one")]
         amount: QuantityExpr,
-        /// CR 119.3 + CR 115.1: Optional player target for directed life loss.
+        /// CR 119.3 + CR 115.1d: Optional player target for directed life loss.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<TargetFilter>,
     },

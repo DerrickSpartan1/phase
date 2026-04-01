@@ -232,6 +232,7 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         AbilityKind::Spell,
         Effect::LoseLife {
             amount: QuantityExpr::Fixed { value: amount },
+            target: None,
         },
     );
 
@@ -1564,7 +1565,8 @@ mod tests {
         assert!(matches!(
             *execute.effect,
             Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 2 }
+                amount: QuantityExpr::Fixed { value: 2 },
+                ..
             }
         ));
         // Decline branch: Tap { target: SelfRef }
@@ -1592,7 +1594,8 @@ mod tests {
         assert!(matches!(
             *execute.effect,
             Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 3 }
+                amount: QuantityExpr::Fixed { value: 3 },
+                ..
             }
         ));
     }
@@ -1617,7 +1620,8 @@ mod tests {
         assert!(matches!(
             *execute.sub_ability.as_ref().unwrap().effect,
             Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 2 }
+                amount: QuantityExpr::Fixed { value: 2 },
+                ..
             }
         ));
 
