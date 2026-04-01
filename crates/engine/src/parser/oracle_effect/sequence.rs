@@ -643,18 +643,20 @@ pub(super) fn parse_intrinsic_continuation_ast(
             // ChangeZone(→Hand) — the card stays in the library and a separate
             // PutAtLibraryPosition effect in the chain handles placement.
             // Also suppress for "Nth from the top" (Long-Term Plans, etc.)
-            let has_positional_put = full_lower.contains("put that card on top")
-                || full_lower.contains("put it on top")
-                || full_lower.contains("put the card on top")
-                || full_lower.contains("put them on top")
-                || (full_lower.contains("put that card") && full_lower.contains("from the top"));
+            let has_positional_put =
+                nom_primitives::scan_contains(&full_lower, "put that card on top")
+                    || nom_primitives::scan_contains(&full_lower, "put it on top")
+                    || nom_primitives::scan_contains(&full_lower, "put the card on top")
+                    || nom_primitives::scan_contains(&full_lower, "put them on top")
+                    || (nom_primitives::scan_contains(&full_lower, "put that card")
+                        && nom_primitives::scan_contains(&full_lower, "from the top"));
             if has_positional_put {
                 return None;
             }
             let lower = text.to_lowercase();
-            let attach_to_source = lower.contains("attached to");
+            let attach_to_source = nom_primitives::scan_contains(&lower, "attached to");
             // CR 701.23a: "onto the battlefield tapped" — the searched card enters tapped.
-            let enter_tapped = lower.contains("battlefield tapped");
+            let enter_tapped = nom_primitives::scan_contains(&lower, "battlefield tapped");
             // Safety net: verify the clause splitter correctly separated all boundaries.
             // If this fires, a verb is missing from starts_clause_text() or the splitter's
             // search_start guard is incorrectly suppressing a split.
@@ -698,7 +700,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
 /// - "put two of them into your hand and the rest on the bottom of your library in any order"
 fn parse_dig_from_among(lower: &str, _original: &str) -> Option<ContinuationAst> {
     // Determine kept-cards destination
-    let destination = if lower.contains("onto the battlefield") {
+    let destination = if nom_primitives::scan_contains(lower, "onto the battlefield") {
         Zone::Battlefield
     } else {
         Zone::Hand
@@ -822,10 +824,10 @@ pub(super) fn parse_followup_continuation_ast(
 
     match previous_effect {
         Effect::RevealHand { .. }
-            if lower.contains("card from it")
-                || lower.contains("card from among")
-                || lower.contains("one of them")
-                || lower.contains("one of those") =>
+            if nom_primitives::scan_contains(&lower, "card from it")
+                || nom_primitives::scan_contains(&lower, "card from among")
+                || nom_primitives::scan_contains(&lower, "one of them")
+                || nom_primitives::scan_contains(&lower, "one of those") =>
         {
             let card_filter = if alt((
                 tag::<_, _, VerboseError<&str>>("you choose "),
@@ -843,7 +845,8 @@ pub(super) fn parse_followup_continuation_ast(
         Effect::Mana { .. } => super::mana::parse_mana_spend_restriction(&lower)
             .map(|restriction| ContinuationAst::ManaRestriction { restriction }),
         Effect::Counter { .. }
-            if lower.contains("countered this way") && lower.contains("loses all abilities") =>
+            if nom_primitives::scan_contains(&lower, "countered this way")
+                && nom_primitives::scan_contains(&lower, "loses all abilities") =>
         {
             Some(ContinuationAst::CounterSourceStatic {
                 source_static: Box::new(StaticDefinition::continuous().modifications(vec![
@@ -854,15 +857,17 @@ pub(super) fn parse_followup_continuation_ast(
         // "put the rest on the bottom" / "put them back" / "put those cards into your graveyard"
         // after Dig/RevealTop — sets rest_destination on the preceding Dig effect.
         Effect::Dig { .. } | Effect::RevealTop { .. }
-            if lower.contains("put them back")
-                || lower.contains("put the rest")
-                || lower.contains("put those cards") =>
+            if nom_primitives::scan_contains(&lower, "put them back")
+                || nom_primitives::scan_contains(&lower, "put the rest")
+                || nom_primitives::scan_contains(&lower, "put those cards") =>
         {
-            let destination = if lower.contains("into your graveyard")
-                || lower.contains("into their graveyard")
+            let destination = if nom_primitives::scan_contains(&lower, "into your graveyard")
+                || nom_primitives::scan_contains(&lower, "into their graveyard")
             {
                 Zone::Graveyard
-            } else if lower.contains("into your hand") || lower.contains("into their hand") {
+            } else if nom_primitives::scan_contains(&lower, "into your hand")
+                || nom_primitives::scan_contains(&lower, "into their hand")
+            {
                 Zone::Hand
             } else {
                 // Default: bottom of library (covers "on the bottom", "back in any order", etc.)
@@ -881,15 +886,16 @@ pub(super) fn parse_followup_continuation_ast(
         // CR 701.19c + CR 608.2c: "It can't be regenerated" prevents regeneration shields;
         // later text modifies the preceding Destroy instruction per CR 608.2c.
         Effect::Destroy { .. } | Effect::DestroyAll { .. }
-            if lower.contains("can't be regenerated")
-                || lower.contains("cannot be regenerated") =>
+            if nom_primitives::scan_contains(&lower, "can't be regenerated")
+                || nom_primitives::scan_contains(&lower, "cannot be regenerated") =>
         {
             Some(ContinuationAst::CantRegenerate)
         }
         // CR 700.2: "Choose/You choose/An opponent chooses/Target opponent chooses one/two/N
         // of them/those" after ChangeZone or ExileTop → ChooseFromZone building block
         Effect::ChangeZone { .. } | Effect::ExileTop { .. }
-            if (lower.contains("of them") || lower.contains("of those"))
+            if (nom_primitives::scan_contains(&lower, "of them")
+                || nom_primitives::scan_contains(&lower, "of those"))
                 && alt((
                     tag::<_, _, VerboseError<&str>>("choose "),
                     tag("you choose "),
@@ -917,19 +923,19 @@ pub(super) fn parse_followup_continuation_ast(
         // and "put N of them into your hand [and the rest on the bottom]"
         // after Dig — patches keep_count, filter, destination on the preceding Dig effect.
         Effect::Dig { .. }
-            if (lower.contains("from among them")
-                || lower.contains("from among those cards")
-                || lower.contains(" of them"))
-                && (lower.contains("onto the battlefield")
-                    || lower.contains("into your hand")
-                    || lower.contains("into their hand")) =>
+            if (nom_primitives::scan_contains(&lower, "from among them")
+                || nom_primitives::scan_contains(&lower, "from among those cards")
+                || nom_primitives::scan_contains(&lower, "of them"))
+                && (nom_primitives::scan_contains(&lower, "onto the battlefield")
+                    || nom_primitives::scan_contains(&lower, "into your hand")
+                    || nom_primitives::scan_contains(&lower, "into their hand")) =>
         {
             parse_dig_from_among(&lower, text)
         }
         // CR 508.4 / CR 614.1: "It/The token/He/She/Name enters tapped and attacking"
         // after CopyTokenOf, Token, or ChangeZone effects.
         Effect::CopyTokenOf { .. } | Effect::Token { .. } | Effect::ChangeZone { .. }
-            if lower.contains("enters tapped and attacking") =>
+            if nom_primitives::scan_contains(&lower, "enters tapped and attacking") =>
         {
             Some(ContinuationAst::EntersTappedAttacking)
         }

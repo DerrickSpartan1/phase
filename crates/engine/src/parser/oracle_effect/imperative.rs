@@ -84,7 +84,8 @@ pub(super) fn parse_numeric_imperative_ast(
         return Some(NumericImperativeAst::Draw { count });
     }
 
-    if lower.contains("gain") && lower.contains("life") {
+    if nom_primitives::scan_contains(lower, "gain") && nom_primitives::scan_contains(lower, "life")
+    {
         // CR 119.1: Handle "life equal to {quantity}" — dynamic amount from game state.
         if let Some(qty_text) =
             strip_after(lower, "life equal to ").map(|s| s.trim_end_matches('.'))
@@ -108,7 +109,8 @@ pub(super) fn parse_numeric_imperative_ast(
         }
     }
 
-    if lower.contains("lose") && lower.contains("life") {
+    if nom_primitives::scan_contains(lower, "lose") && nom_primitives::scan_contains(lower, "life")
+    {
         if let Some(expr) = try_parse_half_life_amount(lower) {
             return Some(NumericImperativeAst::LoseLife { amount: expr });
         }
@@ -135,10 +137,10 @@ pub(super) fn parse_numeric_imperative_ast(
         return Some(NumericImperativeAst::LoseLife { amount });
     }
 
-    if lower.contains("gets +")
-        || lower.contains("gets -")
-        || lower.contains("get +")
-        || lower.contains("get -")
+    if nom_primitives::scan_contains(lower, "gets +")
+        || nom_primitives::scan_contains(lower, "gets -")
+        || nom_primitives::scan_contains(lower, "get +")
+        || nom_primitives::scan_contains(lower, "get -")
     {
         // Accept any pump — discard the target. Callers that need subject threading
         // (e.g., try_parse_for_each_effect) extract the subject separately via
@@ -207,9 +209,9 @@ fn try_parse_half_life_amount(lower: &str) -> Option<QuantityExpr> {
     };
 
     // Parse rounding direction
-    let rounding = if lower.contains("rounded up") {
+    let rounding = if nom_primitives::scan_contains(lower, "rounded up") {
         RoundingMode::Up
-    } else if lower.contains("rounded down") {
+    } else if nom_primitives::scan_contains(lower, "rounded down") {
         RoundingMode::Down
     } else {
         // Default to up per most MTG cards using "half life"
@@ -640,11 +642,11 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
 
 pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevealImperativeAst> {
     if nom_on_lower(text, lower, |input| value((), tag("look at ")).parse(input)).is_some()
-        && lower.contains("hand")
+        && nom_primitives::scan_contains(lower, "hand")
     {
         if contains_possessive(lower, "look at", "hand") {
             // CR 603.7c: "that player's hand" resolves to the player from the triggering event.
-            let target = if lower.contains("that player's hand") {
+            let target = if nom_primitives::scan_contains(lower, "that player's hand") {
                 TargetFilter::TriggeringPlayer
             } else {
                 TargetFilter::Any
@@ -663,7 +665,9 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
     })?;
 
     // CR 701.20a: "reveals a number of cards from their hand equal to X"
-    if lower.contains("hand") && lower.contains("equal to ") {
+    if nom_primitives::scan_contains(lower, "hand")
+        && nom_primitives::scan_contains(lower, "equal to ")
+    {
         if let Some((_, qty_text)) = lower.split_once("equal to ") {
             let qty_text = qty_text.trim_end_matches('.');
             if let Some(qty) = super::super::oracle_quantity::parse_quantity_ref(qty_text) {
@@ -677,7 +681,9 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
     // Check for "the top [N] card(s) of [their/your] library" BEFORE the catch-all
     // "hand" check — text like "reveals the top card...then puts it into their hand"
     // contains "hand" as a destination, not as the reveal source.
-    if lower.contains("the top ") && lower.contains("librar") {
+    if nom_primitives::scan_contains(lower, "the top ")
+        && nom_primitives::scan_contains(lower, "librar")
+    {
         // Delegate to nom combinator (input already lowercase from lower).
         let count = if let Some(pos) = lower.find("the top ") {
             let after_top = &lower[pos + 8..];
@@ -691,7 +697,7 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
         return Some(HandRevealImperativeAst::RevealTop { count });
     }
 
-    if lower.contains("hand") {
+    if nom_primitives::scan_contains(lower, "hand") {
         return Some(HandRevealImperativeAst::RevealHand);
     }
 
@@ -878,7 +884,7 @@ fn parse_prevent_effect(text: &str) -> Effect {
         .unwrap_or(&lower);
 
     // Determine scope: combat damage only vs all damage
-    let scope = if rest.contains("combat damage") {
+    let scope = if nom_primitives::scan_contains(rest, "combat damage") {
         PreventionScope::CombatDamage
     } else {
         PreventionScope::AllDamage
@@ -903,9 +909,11 @@ fn parse_prevent_effect(text: &str) -> Effect {
     };
 
     // Determine target
-    let target = if rest.contains("any target") {
+    let target = if nom_primitives::scan_contains(rest, "any target") {
         TargetFilter::Any
-    } else if rest.contains("target creature") || rest.contains("target permanent") {
+    } else if nom_primitives::scan_contains(rest, "target creature")
+        || nom_primitives::scan_contains(rest, "target permanent")
+    {
         // Extract the target from the text
         let tp = TextPair::new(text, &lower);
         if let Some(from_target) = tp.find("target ").map(|pos| tp.split_at(pos).1) {
@@ -914,7 +922,9 @@ fn parse_prevent_effect(text: &str) -> Effect {
         } else {
             TargetFilter::Any
         }
-    } else if rest.contains("to you") || rest.contains("to its controller") {
+    } else if nom_primitives::scan_contains(rest, "to you")
+        || nom_primitives::scan_contains(rest, "to its controller")
+    {
         TargetFilter::Controller
     } else {
         // Default: "that would be dealt" with no specific target → Any
@@ -991,8 +1001,10 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
     // Must check before try_parse_put_zone_change which would emit ChangeZone (auto-shuffles).
     // Only matches forms WITHOUT an explicit origin zone ("from your hand") — those
     // specify a real zone transfer and should go through try_parse_put_zone_change.
-    if lower.contains("on top of") && lower.contains("library") {
-        let has_origin = lower.contains(" from ");
+    if nom_primitives::scan_contains(lower, "on top of")
+        && nom_primitives::scan_contains(lower, "library")
+    {
+        let has_origin = nom_primitives::scan_contains(lower, " from ");
         if !has_origin {
             return Some(PutImperativeAst::TopOfLibrary);
         }
@@ -1007,8 +1019,10 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
     // CR 701.24g: "put X on the bottom of Y's library" — specific position without
     // explicit origin zone. Forms with "from" (e.g. "from your hand") go through
     // try_parse_put_zone_change for proper ChangeZone handling.
-    if lower.contains("on the bottom of") && lower.contains("library") {
-        let has_origin = lower.contains(" from ");
+    if nom_primitives::scan_contains(lower, "on the bottom of")
+        && nom_primitives::scan_contains(lower, "library")
+    {
+        let has_origin = nom_primitives::scan_contains(lower, " from ");
         if !has_origin {
             return Some(PutImperativeAst::BottomOfLibrary);
         }
@@ -1022,7 +1036,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
 
     // CR 701.24g: "put X into Y's library Nth from the top" —
     // specific positional placement (God-Eternals, Approach, Bury in Books).
-    if lower.contains("from the top") {
+    if nom_primitives::scan_contains(lower, "from the top") {
         if let Some(pos) = lower.find("from the top") {
             // Look backwards from "from the top" to find the ordinal
             let before = lower[..pos].trim_end();
@@ -1570,8 +1584,9 @@ pub(super) fn parse_imperative_family_ast(
     // CR 500.8: "additional combat phase" can appear in various sentence structures
     // ("there is an additional combat phase", "after this phase, there is an additional...").
     // Intercept early regardless of first_word.
-    if lower.contains("additional combat phase") {
-        let with_main = lower.contains("followed by an additional main phase");
+    if nom_primitives::scan_contains(lower, "additional combat phase") {
+        let with_main =
+            nom_primitives::scan_contains(lower, "followed by an additional main phase");
         return Some(ImperativeFamilyAst::GainKeyword(
             Effect::AdditionalCombatPhase {
                 target: TargetFilter::Controller,
@@ -1599,7 +1614,7 @@ pub(super) fn parse_imperative_family_ast(
         "counter" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
 
         // Numeric verbs (CR 121)
-        "draw" if lower.contains("that many") => {
+        "draw" if nom_primitives::scan_contains(lower, "that many") => {
             // "draw that many cards" → EventContextAmount, bypass numeric AST
             // which can only represent fixed u32 counts.
             Some(ImperativeFamilyAst::GainKeyword(Effect::Draw {
@@ -1764,7 +1779,7 @@ pub(super) fn parse_imperative_family_ast(
         }
         // CR 500.7: "take an extra turn after this one"
         "take" | "takes" => {
-            if lower.contains("extra turn") {
+            if nom_primitives::scan_contains(lower, "extra turn") {
                 Some(ImperativeFamilyAst::GainKeyword(Effect::ExtraTurn {
                     target: TargetFilter::Controller,
                 }))
@@ -1838,7 +1853,10 @@ pub(super) fn parse_imperative_family_ast(
         // Produces a PutCounter with the counter type and target, using EventContextAmount
         // for the count. The engine resolver reads the count from the resolved ability's
         // event_context_amount field.
-        "put" if lower.contains("that many") && lower.contains("counter") => {
+        "put"
+            if nom_primitives::scan_contains(lower, "that many")
+                && nom_primitives::scan_contains(lower, "counter") =>
+        {
             try_parse_that_many_counters(lower, ctx)
                 .map(ImperativeFamilyAst::GainKeyword)
                 .or_else(|| {
@@ -1863,10 +1881,10 @@ pub(super) fn parse_imperative_family_ast(
         // `contains("gain") && contains("life")`, so "gain control of" never matches numeric.
         // This reordering makes the disambiguation explicit.
         "gain" | "gains" => {
-            if lower.contains("control of") {
+            if nom_primitives::scan_contains(lower, "control of") {
                 parse_targeted_action_ast(text, lower)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Targeted(ast)))
-            } else if lower.contains("life") {
+            } else if nom_primitives::scan_contains(lower, "life") {
                 parse_numeric_imperative_ast(text, lower)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
             } else {
@@ -1877,12 +1895,12 @@ pub(super) fn parse_imperative_family_ast(
 
         // "lose" → "lose the game" (step 6) → "lose life" (step 3) → keyword (step 7)
         "lose" | "loses" => {
-            if lower.contains("the game") {
+            if nom_primitives::scan_contains(lower, "the game") {
                 Some(ImperativeFamilyAst::LoseTheGame)
-            } else if lower.contains("life") {
+            } else if nom_primitives::scan_contains(lower, "life") {
                 parse_numeric_imperative_ast(text, lower)
                     .map(|ast| ImperativeFamilyAst::Structured(ImperativeAst::Numeric(ast)))
-            } else if !lower.contains("mana") {
+            } else if !nom_primitives::scan_contains(lower, "mana") {
                 try_parse_gain_keyword(text).map(ImperativeFamilyAst::LoseKeyword)
             } else {
                 None
@@ -1891,7 +1909,7 @@ pub(super) fn parse_imperative_family_ast(
 
         // CR 104.3a: "win the game"
         "win" | "wins" => {
-            if lower.contains("the game") {
+            if nom_primitives::scan_contains(lower, "the game") {
                 Some(ImperativeFamilyAst::WinTheGame)
             } else {
                 None

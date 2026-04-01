@@ -388,9 +388,8 @@ pub(super) fn strip_ability_word_with_name(line: &str) -> Option<(String, String
 /// Scan for modal count override phrases at word boundaries using nom combinators.
 /// Returns (min_choices, max_choices) for matching phrases.
 fn scan_modal_count_override(text: &str) -> Option<(usize, usize)> {
-    let mut remaining = text;
-    while !remaining.is_empty() {
-        if let Ok((_, count)) = alt((
+    super::oracle_nom::primitives::scan_at_word_boundaries(text, |input| {
+        alt((
             value(
                 (1, usize::MAX),
                 tag::<_, _, VerboseError<&str>>("choose any number instead"),
@@ -404,15 +403,8 @@ fn scan_modal_count_override(text: &str) -> Option<(usize, usize)> {
                 alt((tag("one or more"), tag("any number"))),
             ),
         ))
-        .parse(remaining)
-        {
-            return Some(count);
-        }
-        remaining = remaining
-            .find(' ')
-            .map_or("", |i| remaining[i + 1..].trim_start());
-    }
-    None
+        .parse(input)
+    })
 }
 
 #[cfg(test)]

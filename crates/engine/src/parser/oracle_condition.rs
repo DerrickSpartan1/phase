@@ -580,40 +580,21 @@ fn parse_etb_this_turn_condition(
     .parse(text)
 }
 
-/// Check if `text` contains `phrase` at any word boundary using nom tag matching.
-/// More precise than `str::contains()` — matches at word starts, not arbitrary positions.
+/// Delegates to the shared word-boundary scanning primitive in `oracle_nom::primitives`.
 fn scan_contains_tag(text: &str, phrase: &str) -> bool {
-    let mut remaining = text;
-    while !remaining.is_empty() {
-        if tag::<_, _, VerboseError<&str>>(phrase)
-            .parse(remaining)
-            .is_ok()
-        {
-            return true;
-        }
-        remaining = remaining
-            .find(' ')
-            .map_or("", |i| remaining[i + 1..].trim_start());
-    }
-    false
+    super::oracle_nom::primitives::scan_contains(text, phrase)
 }
 
 /// Scan source condition text for state keywords at word boundaries using nom.
 /// Matches "[subject] is attacking", "[subject] is blocked", "[subject] suspended", etc.
 fn scan_source_state(text: &str) -> nom::IResult<&str, ParsedCondition, VerboseError<&str>> {
-    // Try the combinator at each word boundary in the text
-    let mut remaining = text;
-    while !remaining.is_empty() {
-        if let Ok(result) = parse_source_state_keyword(remaining) {
-            return Ok(result);
-        }
-        remaining = remaining
-            .find(' ')
-            .map_or("", |i| remaining[i + 1..].trim_start());
+    // scan_at_word_boundaries returns Option<ParsedCondition> — wrap into IResult
+    match super::oracle_nom::primitives::scan_at_word_boundaries(text, parse_source_state_keyword) {
+        Some(condition) => Ok(("", condition)),
+        None => Err(nom::Err::Error(VerboseError {
+            errors: vec![(text, VerboseErrorKind::Context("no source state"))],
+        })),
     }
-    Err(nom::Err::Error(VerboseError {
-        errors: vec![(text, VerboseErrorKind::Context("no source state"))],
-    }))
 }
 
 /// Nom combinator: match source state keywords at the current position.

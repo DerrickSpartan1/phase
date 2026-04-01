@@ -445,9 +445,8 @@ pub(super) fn parse_mana_color_symbol_set(symbol: &str) -> Option<Vec<ManaColor>
 /// Scan for mana production type at word boundaries using nom combinators.
 fn scan_mana_production_type(text: &str, count: QuantityExpr) -> Option<ManaProduction> {
     use nom_language::error::VerboseError;
-    let mut remaining = text;
-    while !remaining.is_empty() {
-        if let Ok((_, production)) = alt((
+    crate::parser::oracle_nom::primitives::scan_at_word_boundaries(text, |input| {
+        alt((
             value(
                 ManaProduction::AnyOneColor {
                     count: count.clone(),
@@ -472,15 +471,8 @@ fn scan_mana_production_type(text: &str, count: QuantityExpr) -> Option<ManaProd
                 alt((tag("mana of the chosen color"), tag("mana of that color"))),
             ),
         ))
-        .parse(remaining)
-        {
-            return Some(production);
-        }
-        remaining = remaining
-            .find(' ')
-            .map_or("", |i| remaining[i + 1..].trim_start());
-    }
-    None
+        .parse(input)
+    })
 }
 
 pub(super) fn all_mana_colors() -> Vec<ManaColor> {
