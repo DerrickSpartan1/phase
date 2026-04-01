@@ -3622,6 +3622,35 @@ fn is_non_effect_counter_context(lower: &str) -> bool {
         return true;
     }
 
+    // Trigger conditions referencing counters (not placement effects):
+    // "counter is put on" / "put one or more +1/+1 counters on" as trigger conditions
+    if lower.contains("counter is put") || lower.contains("counter on it,") {
+        return true;
+    }
+    // "had a +1/+1 counter" / "without a +1/+1 counter" — state checks, not placement
+    if lower.contains("had a +")
+        || lower.contains("had a -")
+        || lower.contains("without a +")
+        || lower.contains("without a -")
+    {
+        return true;
+    }
+    // "prevent that damage and put ... counters" — prevention replacement with counter placement
+    if lower.contains("prevent") && lower.contains("counter") {
+        return true;
+    }
+    // "additional +1/+1 counter" — enters-with-additional replacement, not direct PutCounter
+    if lower.contains("additional +") || lower.contains("additional -") {
+        return true;
+    }
+    // "remove a ... counter" with phrasing variants
+    if lower.contains("remove a pupa counter")
+        || lower.contains("remove a time counter")
+        || lower.contains("remove a counter")
+    {
+        return true;
+    }
+
     // Quoted sub-ability: counter mention inside granted ability text
     if let Some(quote_pos) = lower.find('"') {
         if let Some(counter_pos) = lower.find("counter") {
@@ -4116,11 +4145,16 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
 
         // Keyword/cost definition lines are structural — skip property checks
         // since they don't represent in-game effects with durations or P/T values.
+        // Saga chapter lines, attraction lines, and quoted sub-abilities are also
+        // structural matches that can't be checked against individual parsed elements.
         if matched.is_empty()
             && (covered_by_keyword
                 || covered_by_enchant
                 || covered_by_casting
-                || covered_by_additional_cost)
+                || covered_by_additional_cost
+                || covered_by_saga
+                || covered_by_attraction
+                || covered_by_quoted)
         {
             continue;
         }
@@ -4152,7 +4186,14 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         // 2. Duration check: does Oracle text contain duration language?
         if let Some(dur_label) = line_has_duration_text(&lower) {
             let any_has_duration = matched.iter().any(|e| e.has_duration())
-                || modal_any(&|d: &AbilityDefinition| d.duration.is_some());
+                || modal_any(&|d: &AbilityDefinition| d.duration.is_some())
+                // Fallback: for saga chapter lines, the matched element may be a static
+                // but the duration lives on the trigger's execute ability. Check all triggers.
+                || face.triggers.iter().any(|t| {
+                    t.execute
+                        .as_ref()
+                        .is_some_and(|e| ability_tree_any(e, &|d| d.duration.is_some()))
+                });
             if !any_has_duration {
                 findings.push(SemanticFinding::DroppedDuration {
                     oracle_line: line.to_string(),
@@ -4165,8 +4206,16 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         let stripped_for_pt = strip_parenthesized_reminder(line);
         let lower_for_pt = stripped_for_pt.to_lowercase();
         if let Some((power, toughness)) = extract_pt_modifier(&lower_for_pt) {
+            // Skip if the +N/+M pattern is inside a quoted sub-ability
+            let pt_in_quotes = lower_for_pt
+                .find('"')
+                .zip(lower_for_pt.find(&format!("{}{}/", if power >= 0 { "+" } else { "" }, power)))
+                .is_some_and(|(quote_pos, pt_pos)| pt_pos > quote_pos);
+
             if power == 0 && toughness == 0 {
                 // +0/+0 is meaningless, skip
+            } else if pt_in_quotes {
+                // +N/+M is inside a quoted sub-ability — not a property of this line's element
             } else if is_counter_reference(&lower_for_pt) {
                 // Skip false positives: counter mentioned in filter, condition, cost,
                 // quantity reference, replacement, or quoted sub-ability context
@@ -4266,7 +4315,12 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
     ];
 
     for &(phrase, label) in condition_phrases {
-        if !lower.contains(phrase) {
+        // Word-boundary check: ensure the phrase occurs at the start of the string or
+        // after a non-alphabetic character (prevents "Phelddagrif gains" matching "if ").
+        let has_phrase = lower
+            .find(phrase)
+            .is_some_and(|pos| pos == 0 || !lower.as_bytes()[pos - 1].is_ascii_alphabetic());
+        if !has_phrase {
             continue;
         }
 
@@ -4294,10 +4348,9 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || lower.contains("if it is a ")
             || lower.contains("if it isn't a ")
             || lower.contains("if it's not a ")
-            // "if that creature/card/player" — resolve-time state checks on a referenced object
-            || lower.contains("if that creature")
-            || lower.contains("if that card")
-            || lower.contains("if that player")
+            // "if that <noun>" — resolve-time state checks on a referenced object
+            // (spell, land, permanent, creature, card, player, mana, equipment, etc.)
+            || lower.contains("if that ")
             // "if they do" / "if they don't" — opponent/player action results
             || lower.contains("if they do")
             || lower.contains("if they don't")
@@ -4315,11 +4368,18 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             // --- Mana/casting condition patterns (casting-time, not board-state conditions) ---
             // "if {U} was spent to cast" — mana-spent conditions
             || (lower.contains("was spent") && lower.contains("if "))
-            // "if you cast" / "if it was cast" / "if he was cast" — casting conditions
+            // "if you cast" / "if it was [state]" / "if he was cast" — casting/state conditions
             || lower.contains("if you cast")
-            || lower.contains("if it was cast")
+            || lower.contains("if it was ")
             || lower.contains("if he was cast")
             || lower.contains("if she was cast")
+            // "if this spell was cast/foretold/etc." — casting-condition checks on self
+            || lower.contains("if this spell")
+            // --- Casting cost conditionals (part of casting system, not ability conditions) ---
+            // "this spell costs {2} less to cast if..." — cost reduction conditions
+            || lower.contains("this spell costs")
+            || lower.contains("spells cost")
+            || lower.contains("starting player")
             // --- Duration patterns (audited by DroppedDuration, not DroppedCondition) ---
             // "for as long as" is a duration, not a condition
             || lower.contains("for as long as")
@@ -4342,6 +4402,27 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             // --- Reminder text in parentheses (not part of the ability's condition) ---
             || lower.contains("(if ")
             || lower.contains("(unless ")
+            // --- Cost-result conditionals (resolve-time checks on what was paid/sacrificed) ---
+            // "if the sacrificed creature was a Human" / "if the discarded card was..."
+            || lower.contains("if the sacrificed")
+            || lower.contains("if the discarded")
+            || lower.contains("if the exiled")
+            // --- Enchanted/equipped state checks (resolve-time, not ability conditions) ---
+            || lower.contains("if enchanted")
+            || lower.contains("if equipped")
+            // --- Leyline / opening-hand structural patterns ---
+            || lower.contains("in your opening hand")
+            // --- Resolution-count conditions (not board-state gating) ---
+            // "if this is the second time" / "if it's the third time" — ability resolution count
+            || lower.contains("if this is the ")
+            || lower.contains("if it's the second")
+            || lower.contains("if it's the third")
+            // --- Activation/resolution count conditions ---
+            || lower.contains("this ability has been activated")
+            // --- Zone-referential conditions (structural, not board-state) ---
+            // "if this card is suspended" / "if this card is in your graveyard"
+            || lower.contains("is suspended")
+            || lower.contains("if this card is in your")
             // --- Quoted sub-abilities: condition is inside a granted ability, not on the granter ---
             || condition_inside_quotes(lower, phrase)
         {
@@ -4534,6 +4615,7 @@ fn is_keyword_line(lower: &str) -> bool {
 }
 
 /// Check if an Oracle line contains duration language, returning the label if so.
+/// Excludes duration phrases that appear only inside quoted sub-abilities.
 fn line_has_duration_text(lower: &str) -> Option<&'static str> {
     let duration_phrases: &[(&str, &str)] = &[
         ("until end of turn", "until end of turn"),
@@ -4542,7 +4624,13 @@ fn line_has_duration_text(lower: &str) -> Option<&'static str> {
         ("until end of combat", "until end of combat"),
     ];
     for &(phrase, label) in duration_phrases {
-        if lower.contains(phrase) {
+        if let Some(phrase_pos) = lower.find(phrase) {
+            // Skip if the duration phrase is inside a quoted sub-ability
+            if let Some(quote_pos) = lower.find('"') {
+                if phrase_pos > quote_pos {
+                    continue;
+                }
+            }
             return Some(label);
         }
     }
