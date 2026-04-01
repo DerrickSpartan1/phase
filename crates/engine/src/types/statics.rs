@@ -161,6 +161,13 @@ pub enum StaticMode {
         max: u32,
         spell_filter: Option<TargetFilter>,
     },
+    /// CR 101.2: Per-turn draw limit — restricts how many cards a player may draw.
+    /// E.g., Spirit of the Labyrinth: "Each player can't draw more than one card each turn."
+    /// E.g., Narset, Parter of Veils: "Each opponent can't draw more than one card each turn."
+    PerTurnDrawLimit {
+        who: CastingProhibitionScope,
+        max: u32,
+    },
 
     // -- Tier 1: Keyword/evasion statics with dedicated handlers --
     /// CR 509.1b: This creature can't be blocked.
@@ -280,7 +287,8 @@ impl Hash for StaticMode {
             StaticMode::ReduceCost { .. }
             | StaticMode::RaiseCost { .. }
             | StaticMode::DefilerCostReduction { .. }
-            | StaticMode::PerTurnCastLimit { .. } => {}
+            | StaticMode::PerTurnCastLimit { .. }
+            | StaticMode::PerTurnDrawLimit { .. } => {}
             // All other variants are unit variants — discriminant suffices.
             _ => {}
         }
@@ -322,6 +330,9 @@ impl fmt::Display for StaticMode {
             }
             StaticMode::PerTurnCastLimit { who, max, .. } => {
                 write!(f, "PerTurnCastLimit({who},{max})")
+            }
+            StaticMode::PerTurnDrawLimit { who, max } => {
+                write!(f, "PerTurnDrawLimit({who},{max})")
             }
             StaticMode::ExtraBlockers { count } => match count {
                 None => write!(f, "ExtraBlockers(any)"),
@@ -514,6 +525,19 @@ impl FromStr for StaticMode {
                                 max,
                                 spell_filter: None,
                             });
+                        }
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
+                    .strip_prefix("PerTurnDrawLimit(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    if let Some((who_str, max_str)) = inner.split_once(',') {
+                        if let (Ok(who), Ok(max)) = (
+                            CastingProhibitionScope::from_str(who_str),
+                            max_str.parse::<u32>(),
+                        ) {
+                            return Ok(StaticMode::PerTurnDrawLimit { who, max });
                         }
                     }
                     return Ok(StaticMode::Other(other.to_string()));

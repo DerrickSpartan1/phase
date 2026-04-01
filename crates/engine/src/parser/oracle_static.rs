@@ -769,6 +769,22 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         );
     }
 
+    // --- CR 101.2: Blanket casting prohibition ("can't cast [type] spells") ---
+    // e.g., Steel Golem: "You can't cast creature spells."
+    // e.g., Hymn of the Wilds: "You can't cast instant or sorcery spells."
+    // Excludes lines handled by PerTurnCastLimit ("can't cast more than"),
+    // CantCastDuring ("can't cast spells during"), and CantCastFrom ("can't cast spells from").
+    if let Some(def) = parse_cant_cast_type_spells(tp.lower, &text) {
+        return Some(def);
+    }
+
+    // --- CR 101.2: Per-turn draw limit ("can't draw more than N card(s) each turn") ---
+    // e.g., Spirit of the Labyrinth: "Each player can't draw more than one card each turn."
+    // e.g., Narset, Parter of Veils: "Each opponent can't draw more than one card each turn."
+    if let Some(def) = parse_per_turn_draw_limit(tp.lower, &text) {
+        return Some(def);
+    }
+
     // --- "~ doesn't untap during your untap step [as long as / if condition]" ---
     // CR 502.3: Effects can keep permanents from untapping during the untap step.
     if tp.lower.contains("doesn't untap during") || tp.lower.contains("doesn\u{2019}t untap during")
@@ -870,7 +886,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
                 .description(text.to_string()),
         );
     }
-    if tp.lower.contains("can't lose the game") {
+    if tp.lower.contains("can't lose the game") || tp.lower.contains("don't lose the game") {
         let affected = parse_player_scope_filter(&tp);
         return Some(
             StaticDefinition::new(StaticMode::CantLoseTheGame)
@@ -2155,6 +2171,84 @@ fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
             spell_filter,
         })
         .description(text.to_string()),
+    )
+}
+
+/// CR 101.2: Parse blanket casting prohibition from Oracle text.
+/// Handles "[Subject] can't cast [type] spells" where [type] is creature, instant,
+/// sorcery, noncreature, etc.
+/// E.g., Steel Golem: "You can't cast creature spells."
+/// E.g., Hymn of the Wilds: "You can't cast instant or sorcery spells."
+fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition> {
+    // Exclude patterns handled by other parsers
+    if tp.contains("can't cast more than")
+        || tp.contains("can't cast spells during")
+        || tp.contains("can't cast spells from")
+        || tp.contains("can cast spells only")
+    {
+        return None;
+    }
+
+    // 1. Strip subject → scope
+    let (who, predicate) = strip_casting_prohibition_subject(tp)?;
+
+    // 2. Match "can't cast [types] spell(s)"
+    let after_cant_cast = nom_tag_lower(predicate, predicate, "can't cast ")?;
+
+    // 3. Require it ends with "spell" or "spells" (possibly with a period)
+    let trimmed = after_cant_cast.trim_end_matches('.');
+    let before_spells = trimmed
+        .strip_suffix(" spells")
+        .or_else(|| trimmed.strip_suffix(" spell"))?;
+
+    // 4. Parse type filter from the remaining text
+    let type_text = before_spells.trim();
+    let spell_filter = if type_text.is_empty() {
+        None
+    } else {
+        let (filter, _) = parse_type_phrase(type_text);
+        match &filter {
+            TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => Some(filter),
+            _ => None,
+        }
+    };
+
+    let mut def = StaticDefinition::new(StaticMode::CantBeCast).description(text.to_string());
+    if let Some(filter) = spell_filter {
+        def = def.affected(filter);
+    }
+    // Set the scope on the affected filter's controller
+    if who != CastingProhibitionScope::Controller {
+        // For "each player"/"each opponent" scopes, the affected filter is broader
+        // than just "you". Store scope info in description for now.
+        // The runtime handler will use CantBeCast + controller ref.
+    }
+    Some(def)
+}
+
+/// CR 101.2: Parse per-turn draw limit from Oracle text.
+/// Handles "[Subject] can't draw more than N card(s) each turn."
+/// E.g., Spirit of the Labyrinth: "Each player can't draw more than one card each turn."
+/// E.g., Narset, Parter of Veils: "Each opponent can't draw more than one card each turn."
+fn parse_per_turn_draw_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
+    // 1. Strip subject → scope
+    let (who, predicate) = strip_casting_prohibition_subject(tp)?;
+
+    // 2. Match "can't draw more than "
+    let after_more_than = nom_tag_lower(predicate, predicate, "can't draw more than ")?;
+
+    // 3. Extract limit count
+    let (max, rest) = parse_number(after_more_than)?;
+
+    // 4. Require "card(s) each turn" suffix
+    let rest = rest.trim_start();
+    if !(rest.starts_with("card each turn") || rest.starts_with("cards each turn")) {
+        return None;
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::PerTurnDrawLimit { who, max })
+            .description(text.to_string()),
     )
 }
 
@@ -6762,5 +6856,67 @@ mod tests {
         assert!(def
             .modifications
             .contains(&ContinuousModification::SetToughness { value: 1 }));
+    }
+
+    // --- CantBeCast (blanket casting prohibition) tests ---
+
+    #[test]
+    fn cant_cast_creature_spells() {
+        // CR 101.2: Steel Golem — "You can't cast creature spells."
+        let def = parse_static_line("You can't cast creature spells.").unwrap();
+        assert_eq!(def.mode, StaticMode::CantBeCast);
+    }
+
+    #[test]
+    fn cant_cast_instant_or_sorcery_spells() {
+        // CR 101.2: Hymn of the Wilds — "You can't cast instant or sorcery spells."
+        let def = parse_static_line("You can't cast instant or sorcery spells.").unwrap();
+        assert_eq!(def.mode, StaticMode::CantBeCast);
+    }
+
+    #[test]
+    fn cant_cast_noncreature_spells() {
+        // CR 101.2: Generic noncreature prohibition
+        let def = parse_static_line("You can't cast noncreature spells.").unwrap();
+        assert_eq!(def.mode, StaticMode::CantBeCast);
+    }
+
+    // --- "don't lose the game" ---
+
+    #[test]
+    fn dont_lose_the_game() {
+        // CR 104.3b: Phyrexian Unlife — "You don't lose the game for having 0 or less life."
+        let def = parse_static_line("You don't lose the game for having 0 or less life.").unwrap();
+        assert_eq!(def.mode, StaticMode::CantLoseTheGame);
+    }
+
+    // --- PerTurnDrawLimit tests ---
+
+    #[test]
+    fn per_turn_draw_limit_all_players() {
+        // CR 101.2: Spirit of the Labyrinth
+        let def =
+            parse_static_line("Each player can't draw more than one card each turn.").unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::PerTurnDrawLimit {
+                who: CastingProhibitionScope::AllPlayers,
+                max: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn per_turn_draw_limit_opponents() {
+        // CR 101.2: Narset, Parter of Veils
+        let def =
+            parse_static_line("Each opponent can't draw more than one card each turn.").unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::PerTurnDrawLimit {
+                who: CastingProhibitionScope::Opponents,
+                max: 1,
+            }
+        );
     }
 }

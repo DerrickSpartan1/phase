@@ -1597,6 +1597,7 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     // CR 104.3a/b: Win/lose the game restrictions
     "can't win the game",
     "can't lose the game",
+    "don't lose the game",
     // Blocking rules
     "can block an additional",
     "can block any number",
@@ -1610,6 +1611,16 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "can't cast spells from",
     // CR 101.2: Turn/phase-scoped casting prohibitions
     "can't cast spells during",
+    // CR 101.2: Per-turn casting limits ("can't cast more than")
+    "can't cast more than",
+    "can cast no more than",
+    // CR 101.2: Blanket casting prohibition ("can't cast creature/instant/sorcery spells")
+    "can't cast creature",
+    "can't cast instant",
+    "can't cast sorcery",
+    "can't cast noncreature",
+    // CR 101.2: Per-turn draw limits ("can't draw more than")
+    "can't draw more than",
     // CR 117.1a + CR 604.1: Casting only during turn
     "can cast spells only during",
     // CR 614.1b + CR 614.10: Skip step replacement effects (draw/untap/upkeep)
@@ -3349,7 +3360,8 @@ mod tests {
         assert!(matches!(
             *execute.mode_abilities[3].effect,
             Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 15 }
+                amount: QuantityExpr::Fixed { value: 15 },
+                ..
             }
         ));
     }
