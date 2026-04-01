@@ -3921,6 +3921,12 @@ fn normalize_for_matching(lower: &str, card_name_lower: &str) -> String {
     if !card_name_lower.is_empty() {
         // Try full name first
         result = result.replace(card_name_lower, "~");
+        // Alchemy rebalance prefix: "a-armory veteran" → try "armory veteran"
+        if !result.contains('~') {
+            if let Some(stripped) = card_name_lower.strip_prefix("a-") {
+                result = result.replace(stripped, "~");
+            }
+        }
         // Comma-truncated: "akiri, line-slinger" → "akiri"
         if let Some(short) = card_name_lower.split(',').next() {
             let short = short.trim();
@@ -3937,15 +3943,24 @@ fn normalize_for_matching(lower: &str, card_name_lower: &str) -> String {
                 }
             }
         }
-        // First-word prefix fallback: "bontu the glorified" → try "bontu the", "bontu"
+        // First-word prefix: "bontu the glorified" → try "bontu the", "bontu"
         // Mirrors the parser's normalize_card_name_refs short-name strategy.
-        // Only replaces at word boundaries and skips common MTG game terms
-        // (e.g., "quest" in "quest counters" for the card "Quest for Renewal").
-        if !result.contains('~') {
+        // Always runs (even if `~` is already present from the parser) to ensure
+        // consistent normalization between oracle lines and parsed descriptions.
+        // Skips common MTG game terms that would cause false matches.
+        {
+            const GAME_TERM_BLOCKLIST: &[&str] = &[
+                "quest", "spirit", "heart", "edge", "wall", "lake", "dream", "herald", "champion",
+                "guardian", "master", "prophet", "bringer",
+            ];
             let name_words: Vec<&str> = card_name_lower.split_whitespace().collect();
             for len in (1..name_words.len()).rev() {
                 let candidate: String = name_words[..len].join(" ");
                 if candidate.len() >= 3 {
+                    // Skip single-word candidates that are common MTG game terms
+                    if len == 1 && GAME_TERM_BLOCKLIST.contains(&candidate.as_str()) {
+                        continue;
+                    }
                     let replaced = result.replace(candidate.as_str(), "~");
                     if replaced != result {
                         result = replaced;
@@ -4278,11 +4293,20 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     matches!(
                         restriction,
                         GameRestriction::DamagePreventionDisabled { .. }
-                    ) && effective_lower.contains("damage can't be prevented")
+                    ) && effective_lower.contains("can't be prevented")
+                        && effective_lower.contains("damage")
                 }
                 Effect::CastFromZone { .. } => {
                     effective_lower.contains("you may cast")
                         || effective_lower.contains("you may play")
+                }
+                Effect::GiftDelivery { .. } => {
+                    effective_lower.contains("gift was promised")
+                        || effective_lower.contains("gift wasn't promised")
+                }
+                Effect::GenericEffect { .. } => {
+                    // "don't lose unspent mana" parsed as GenericEffect
+                    effective_lower.contains("don't lose unspent")
                 }
                 _ => false,
             };
@@ -4923,8 +4947,19 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             // "if [event] causes a triggered ability ... to trigger" — this is a static
             // ability condition (Panharmonicon), not an ability-gating condition.
             || lower.contains("causes a triggered ability")
+            // "if an ability of a [type] triggers" — Panharmonicon variant
+            || (lower.contains("if an ability of") && lower.contains("triggers"))
             // --- "if [it] isn't legendary" — copy exception clause, not ability condition ---
             || lower.contains("isn't legendary")
+            // --- Meld conditions ("if you both own and control") — structural meld trigger ---
+            || lower.contains("if you both own and control")
+            // --- Target-referential conditions ("if it targets a") — resolve-time check ---
+            || lower.contains("if it targets")
+            // --- Exact-count conditions ("if you have exactly N") — win condition / resolve-time ---
+            || lower.contains("if you have exactly")
+            || lower.contains("if target player has exactly")
+            // --- Total power conditions ("if creatures you control have total power") ---
+            || lower.contains("total power")
             // --- Class/type transformation conditions (resolve-time state checks) ---
             // "if [name] is a Scout/Citizen/Detective" — leveler/class evolution checks
             || lower.contains(" is a scout")
@@ -5006,6 +5041,8 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || lower.contains("doesn't have a +")
             // "if you cycled" — turn-event action check
             || lower.contains("if you cycled")
+            // "if evidence was collected" — keyword mechanic resolve-time check
+            || lower.contains("evidence was collected")
             // "if three or more cards were put into your graveyard" — turn-event zone check
             || lower.contains("cards were put into your graveyard")
             // "if an aura you controlled was attached" — turn-event attachment check
@@ -5092,6 +5129,35 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || lower.contains("tapped for mana")
             // --- Quoted sub-abilities: condition is inside a granted ability, not on the granter ---
             || condition_inside_quotes(lower, phrase)
+            // --- Turn-ownership conditions (not board-state gating) ---
+            // "if it's not their turn" / "if it isn't that player's turn"
+            || lower.contains("not their turn")
+            || lower.contains("isn't that player's turn")
+            || lower.contains("not that player's turn")
+            // --- Source-state resolve-time checks ("if it's [modified/enchanted/etc.]") ---
+            || lower.contains("if it's modified")
+            || lower.contains("if it's enchanted")
+            || lower.contains("if it's equipped")
+            || lower.contains("if it's renowned")
+            || lower.contains("if it's not suspected")
+            || lower.contains("if it's tapped")
+            || lower.contains("if it's outside")
+            // "if it devoured a creature" — devour resolve-time check
+            || lower.contains("devoured a creature")
+            // --- "can't attack/block unless" — restriction qualifier, not ability condition ---
+            || (lower.contains("can't attack") && lower.contains("unless"))
+            || (lower.contains("can't block") && lower.contains("unless"))
+            // --- Un-set flavor conditions ---
+            || lower.contains("unless you insult")
+            || lower.contains("unless they challenge")
+            // --- Enchanted creature "unless" clauses (restriction qualifier) ---
+            // "enchanted creature can't ... unless" — part of the restriction definition
+            || (lower.starts_with("enchanted creature can't") && lower.contains("unless"))
+            // --- "if [you] cast [it] from" — casting-origin condition ---
+            || lower.contains("if you cast it from")
+            || lower.contains("was cast from exile")
+            // --- Triggered-ability intervening-if with "other than" (resolve-time filter) ---
+            || lower.contains("other than your hand")
         {
             continue;
         }

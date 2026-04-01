@@ -331,6 +331,7 @@ mod tests {
                         owner: TargetFilter::Controller,
                         attach_to: None,
                         enters_attacking: false,
+                        supertypes: vec![],
                     },
                 )],
                 ..Default::default()
