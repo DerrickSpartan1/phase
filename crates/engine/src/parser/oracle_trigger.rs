@@ -196,24 +196,40 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
 
     let after_unless = &lower[unless_pos + 8..];
 
-    // "unless you [verb]" without "pays" — strip the clause even if we can't
-    // fully parse the cost. This ensures the main effect text is clean.
-    // Exception: "unless you discard" is an effect-level modifier (discard count
-    // reduction), not a trigger-level payment — preserve it for the effect parser.
-    let Some(pays_pos) = after_unless.find("pays ") else {
-        if tag::<_, _, VerboseError<&str>>("you discard ")
-            .parse(after_unless)
-            .is_ok()
-        {
-            // CR 608.2c: "unless you discard a [type]" is handled by the Discard
-            // effect parser — don't strip it here.
-            return (text.to_string(), None);
+    // CR 608.2c: "unless you discard a [type]" is handled by the Discard
+    // effect parser — don't strip it here.
+    if tag::<_, _, VerboseError<&str>>("you discard ")
+        .parse(after_unless)
+        .is_ok()
+    {
+        return (text.to_string(), None);
+    }
+
+    // Parse payer + payment verb as a single combinator: "(payer) pay(s) " → (TargetFilter, &str).
+    let payer_result: Result<(&str, TargetFilter), _> = alt((
+        value(TargetFilter::Controller, tag::<_, _, VerboseError<&str>>("you pay ")),
+        value(
+            TargetFilter::TriggeringPlayer,
+            nom::sequence::pair(
+                alt((tag("that player "), tag("that opponent "))),
+                tag("pays "),
+            ),
+        ),
+        value(
+            TargetFilter::TriggeringSpellController,
+            nom::sequence::pair(tag("its controller "), tag("pays ")),
+        ),
+    ))
+    .parse(after_unless);
+
+    let (cost_str, payer) = match payer_result {
+        Ok((rest, p)) => (rest, p),
+        Err(_) => {
+            // No recognized payment pattern — strip the unless clause so the effect parses.
+            let cleaned = text[..unless_pos].trim().to_string();
+            return (cleaned, None);
         }
-        // Still strip the unless clause so the main effect parses correctly.
-        let cleaned = text[..unless_pos].trim().to_string();
-        return (cleaned, None);
     };
-    let cost_str = &after_unless[pays_pos + 5..];
 
     // Extract cost symbols
     let cost_end = cost_str
@@ -244,15 +260,7 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
         UnlessCost::Fixed { cost: mana_cost }
     };
 
-    // Determine payer from text between "unless" and "pays"
-    let payer_text = after_unless[..pays_pos].trim();
-    let payer = if payer_text.contains("that player") || payer_text.contains("that opponent") {
-        TargetFilter::TriggeringPlayer
-    } else if payer_text.contains("controller") {
-        TargetFilter::TriggeringSpellController
-    } else {
-        TargetFilter::TriggeringPlayer
-    };
+    // Payer was already determined by the combinator above.
 
     // Strip the unless clause from the effect text
     let cleaned = text[..unless_pos].trim().to_string();
@@ -4258,6 +4266,29 @@ mod tests {
             }
         );
         assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+    }
+
+    #[test]
+    fn trigger_unless_you_pay_mana() {
+        // "sacrifice this creature unless you pay {G}{G}" — "you pay" payer variant
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice this creature unless you pay {G}{G}.",
+            "Test Card",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        assert!(
+            matches!(unless_pay.cost, UnlessCost::Fixed { .. }),
+            "cost should be Fixed mana, got {:?}",
+            unless_pay.cost
+        );
+        // The effect text should be stripped of the unless clause
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(
+            matches!(*execute.effect, Effect::Sacrifice { .. }),
+            "execute should be Sacrifice, got {:?}",
+            execute.effect
+        );
     }
 
     #[test]

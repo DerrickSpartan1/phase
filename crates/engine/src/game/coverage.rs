@@ -3373,25 +3373,8 @@ fn pump_matches_oracle(
         Effect::GenericEffect {
             static_abilities, ..
         } => {
-            for stat in static_abilities {
-                let mut power_match = expected_power == 0;
-                let mut tough_match = expected_toughness == 0;
-                for modif in &stat.modifications {
-                    match modif {
-                        ContinuousModification::AddPower { value } if *value == expected_power => {
-                            power_match = true;
-                        }
-                        ContinuousModification::AddToughness { value }
-                            if *value == expected_toughness =>
-                        {
-                            tough_match = true;
-                        }
-                        _ => {}
-                    }
-                }
-                if power_match && tough_match {
-                    return true;
-                }
+            if static_has_pump_modification(static_abilities, expected_power, expected_toughness) {
+                return true;
             }
         }
         _ => {}
@@ -3414,6 +3397,14 @@ fn static_has_pump_modification(
                     power_match = true;
                 }
                 ContinuousModification::AddToughness { value } if *value == expected_toughness => {
+                    tough_match = true;
+                }
+                // Dynamic P/T (e.g., "for each" pumps) satisfies any expected magnitude —
+                // the actual value is resolved at runtime from game state.
+                ContinuousModification::AddDynamicPower { .. } => {
+                    power_match = true;
+                }
+                ContinuousModification::AddDynamicToughness { .. } => {
                     tough_match = true;
                 }
                 _ => {}

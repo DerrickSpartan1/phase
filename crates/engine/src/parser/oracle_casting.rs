@@ -5,8 +5,7 @@ use nom::Parser;
 use nom_language::error::VerboseError;
 
 use super::oracle_cost::parse_oracle_cost;
-use super::oracle_nom::primitives as nom_primitives;
-use super::oracle_util::{parse_mana_symbols, strip_after, TextPair};
+use super::oracle_util::{parse_mana_symbols, TextPair};
 use crate::parser::oracle_condition::parse_restriction_condition;
 use crate::types::ability::{AbilityCost, AdditionalCost, CastingRestriction, SpellCastingOption};
 
@@ -16,48 +15,46 @@ use crate::types::ability::{AbilityCost, AdditionalCost, CastingRestriction, Spe
 /// - "you may blight N" → `Optional(Blight { count: N })`
 /// - "blight N or pay {M}" → `Choice(Blight { count: N }, Mana { cost: M })`
 /// - General "X or Y" → `Choice(X, Y)` using `parse_single_cost` for each fragment
-pub fn parse_additional_cost_line(lower: &str, _raw: &str) -> Option<AdditionalCost> {
-    // Pattern: "you may blight N" → Optional
-    if let Some(after) = strip_after(lower, "you may blight ") {
-        let count = parse_blight_count(after);
-        return Some(AdditionalCost::Optional(AbilityCost::Blight { count }));
+pub fn parse_additional_cost_line(lower: &str, raw: &str) -> Option<AdditionalCost> {
+    // Strip the standard additional-cost prefix.
+    let after_prefix = tag::<_, _, VerboseError<&str>>("as an additional cost to cast this spell, ")
+        .parse(lower)
+        .map_or(lower, |(rest, _)| rest);
+    // Use TextPair for case-preserving parallel slicing, then strip trailing period.
+    let tp = TextPair::new(
+        &raw[raw.len() - after_prefix.len()..],
+        after_prefix,
+    );
+    let tp = tp.trim_end_matches('.');
+    let body_lower = tp.lower;
+    let body_raw = tp.original;
+
+    // "you may [cost]" → Optional wrapping
+    if let Ok((opt_lower, _)) = tag::<_, _, VerboseError<&str>>("you may ").parse(body_lower) {
+        let opt_raw = &body_raw[body_raw.len() - opt_lower.len()..];
+        let cost = super::oracle_cost::parse_single_cost(opt_raw);
+        if !matches!(cost, AbilityCost::Unimplemented { .. }) {
+            return Some(AdditionalCost::Optional(cost));
+        }
     }
 
-    // Pattern: "blight N or pay {M}" → Choice (specific pattern with case-sensitive mana)
-    let tp = TextPair::new(_raw, lower);
-    if let Some(pos) = tp.find("blight ") {
-        let after_tp = tp.split_at(pos + "blight ".len()).1;
-        let count = parse_blight_count(after_tp.lower);
-
-        if let Some(or_pos) = after_tp.find(" or pay ") {
-            let mana_part = after_tp.split_at(or_pos + " or pay ".len()).1.original;
-            if let Some((mana_cost, _)) = parse_mana_symbols(mana_part.trim_end_matches('.')) {
+    // "X or pay {M}" → Choice between cost X and mana payment.
+    // Uses the raw text for mana symbols (case-sensitive).
+    if let Some((left_lower, right_lower)) = body_lower.split_once(" or pay ") {
+        let right_raw = &body_raw[body_raw.len() - right_lower.len()..];
+        if let Some((mana_cost, _)) = parse_mana_symbols(right_raw.trim()) {
+            let cost_a = super::oracle_cost::parse_single_cost(left_lower.trim());
+            if !matches!(cost_a, AbilityCost::Unimplemented { .. }) {
                 return Some(AdditionalCost::Choice(
-                    AbilityCost::Blight { count },
+                    cost_a,
                     AbilityCost::Mana { cost: mana_cost },
                 ));
             }
         }
     }
 
-    // Strip the standard additional-cost prefix and trailing period.
-    let body = tag::<_, _, VerboseError<&str>>("as an additional cost to cast this spell, ")
-        .parse(lower)
-        .map_or(lower, |(rest, _)| rest)
-        .trim_end_matches('.');
-
-    // "waterbend {N}" as mandatory additional cost
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("waterbend ").parse(body) {
-        if let Some((mana_cost, _)) = parse_mana_symbols(rest.trim()) {
-            return Some(AdditionalCost::Required(AbilityCost::Waterbend {
-                cost: mana_cost,
-            }));
-        }
-    }
-
     // General "X or Y" choice pattern using parse_single_cost for each fragment.
-
-    if let Some((left, right)) = body.split_once(" or ") {
+    if let Some((left, right)) = body_lower.split_once(" or ") {
         let cost_a = super::oracle_cost::parse_single_cost(left.trim());
         let cost_b = super::oracle_cost::parse_single_cost(right.trim());
         // Both fragments must parse to known costs — Unimplemented means the split was wrong
@@ -67,6 +64,13 @@ pub fn parse_additional_cost_line(lower: &str, _raw: &str) -> Option<AdditionalC
         {
             return Some(AdditionalCost::Choice(cost_a, cost_b));
         }
+    }
+
+    // Mandatory single cost: "sacrifice a creature", "discard a card", "pay 3 life", etc.
+    // Delegates to parse_single_cost which handles all standard cost patterns.
+    let cost = super::oracle_cost::parse_single_cost(body_raw);
+    if !matches!(cost, AbilityCost::Unimplemented { .. }) {
+        return Some(AdditionalCost::Required(cost));
     }
 
     None
@@ -269,66 +273,9 @@ pub(crate) fn parse_casting_restriction_line(text: &str) -> Option<Vec<CastingRe
             Ok((r, _)) => r,
             Err(_) => return None,
         };
-    let mut restrictions = Vec::new();
+    let mut restrictions = scan_timing_restrictions(rest);
 
-    if rest.contains("as a sorcery") {
-        restrictions.push(CastingRestriction::AsSorcery);
-    }
-    if rest.contains("during combat") {
-        restrictions.push(CastingRestriction::DuringCombat);
-    }
-    if rest.contains("during an opponent's turn")
-        || rest.contains("during an opponents turn")
-        || rest.contains("on an opponent's turn")
-        || rest.contains("on an opponents turn")
-    {
-        restrictions.push(CastingRestriction::DuringOpponentsTurn);
-    }
-    if rest.contains("during your turn") || rest.contains("on your turn") {
-        restrictions.push(CastingRestriction::DuringYourTurn);
-    }
-    if rest.contains("during your upkeep") {
-        restrictions.push(CastingRestriction::DuringYourUpkeep);
-    }
-    if rest.contains("during any upkeep step") || rest.contains("during any upkeep") {
-        restrictions.push(CastingRestriction::DuringAnyUpkeep);
-    }
-    if rest.contains("during an opponent's upkeep") || rest.contains("during an opponents upkeep") {
-        restrictions.push(CastingRestriction::DuringOpponentsUpkeep);
-    }
-    if rest.contains("during your end step") {
-        restrictions.push(CastingRestriction::DuringYourEndStep);
-    }
-    if rest.contains("during an opponent's end step")
-        || rest.contains("during an opponents end step")
-    {
-        restrictions.push(CastingRestriction::DuringOpponentsEndStep);
-    }
-    if rest.contains("during the declare attackers step")
-        || rest.contains("during your declare attackers step")
-        || rest.contains("during declare attackers step")
-    {
-        restrictions.push(CastingRestriction::DeclareAttackersStep);
-    }
-    if rest.contains("during the declare blockers step")
-        || rest.contains("during your declare blockers step")
-        || rest.contains("during declare blockers step")
-    {
-        restrictions.push(CastingRestriction::DeclareBlockersStep);
-    }
-    if rest.contains("before attackers are declared") {
-        restrictions.push(CastingRestriction::BeforeAttackersDeclared);
-    }
-    if rest.contains("before blockers are declared") {
-        restrictions.push(CastingRestriction::BeforeBlockersDeclared);
-    }
-    if rest.contains("before the combat damage step") || rest.contains("before combat damage") {
-        restrictions.push(CastingRestriction::BeforeCombatDamage);
-    }
-    if rest.contains("after combat") {
-        restrictions.push(CastingRestriction::AfterCombat);
-    }
-
+    // Extract condition clauses: "if ...", "only if ...", or "... and only if ..."
     if let Ok((condition, _)) =
         alt((tag::<_, _, VerboseError<&str>>("only if "), tag("if "))).parse(rest)
     {
@@ -355,19 +302,11 @@ fn strip_casting_condition_suffixes(text: &str) -> &str {
         .trim()
 }
 
-/// Extract the blight count (N) from text starting after "blight ".
-/// Parse a blight count using nom digit combinator.
-fn parse_blight_count(text: &str) -> u32 {
-    nom_primitives::parse_number
-        .parse(text)
-        .map(|(_, n)| n)
-        .unwrap_or(1)
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::ParsedCondition;
+    use crate::types::ability::{ParsedCondition, TargetFilter};
     use crate::types::mana::ManaCost;
 
     #[test]
@@ -554,13 +493,14 @@ mod tests {
     }
 
     #[test]
-    fn parse_additional_cost_mandatory_blight_skipped() {
-        // Mandatory blight (no "you may", no "or") — not yet modeled
+    fn parse_additional_cost_mandatory_blight() {
         let lower = "as an additional cost to cast this spell, blight 2.";
         let raw = "As an additional cost to cast this spell, blight 2.";
         let result = parse_additional_cost_line(lower, raw);
-        // Mandatory without "or" currently falls through (no choice to present)
-        assert!(result.is_none());
+        assert_eq!(
+            result,
+            Some(AdditionalCost::Required(AbilityCost::Blight { count: 2 }))
+        );
     }
 
     #[test]
@@ -597,11 +537,107 @@ mod tests {
 
     #[test]
     fn parse_additional_cost_sacrifice_compound_type_not_choice() {
-        // "sacrifice an artifact or creature" is a single sacrifice cost, not a choice
+        // "sacrifice an artifact or creature" is a single sacrifice cost, not a choice.
+        // The " or " split fails because "creature" alone is Unimplemented, correctly
+        // falling through to the mandatory single-cost path which parses the full filter.
         let lower = "as an additional cost to cast this spell, sacrifice an artifact or creature.";
         let raw = "As an additional cost to cast this spell, sacrifice an artifact or creature.";
         let result = parse_additional_cost_line(lower, raw);
-        // Should return None — "creature" alone is Unimplemented, rejecting the split
-        assert!(result.is_none());
+        match result {
+            Some(AdditionalCost::Required(AbilityCost::Sacrifice { target, count: 1 })) => {
+                assert!(
+                    matches!(target, TargetFilter::Or { .. }),
+                    "Expected Or filter, got {target:?}"
+                );
+            }
+            other => panic!("Expected Required(Sacrifice {{ Or, 1 }}), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_additional_cost_sacrifice_creature() {
+        let lower = "as an additional cost to cast this spell, sacrifice a creature.";
+        let raw = "As an additional cost to cast this spell, sacrifice a creature.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Required(AbilityCost::Sacrifice { count: 1, .. })) => {}
+            other => panic!("Expected Required(Sacrifice), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_additional_cost_discard_card() {
+        let lower = "as an additional cost to cast this spell, discard a card.";
+        let raw = "As an additional cost to cast this spell, discard a card.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Required(AbilityCost::Discard { count: 1, .. })) => {}
+            other => panic!("Expected Required(Discard), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_additional_cost_pay_life() {
+        let lower = "as an additional cost to cast this spell, pay 3 life.";
+        let raw = "As an additional cost to cast this spell, pay 3 life.";
+        let result = parse_additional_cost_line(lower, raw);
+        assert_eq!(
+            result,
+            Some(AdditionalCost::Required(AbilityCost::PayLife { amount: 3 }))
+        );
+    }
+
+    #[test]
+    fn parse_additional_cost_optional_sacrifice() {
+        let lower = "as an additional cost to cast this spell, you may sacrifice an artifact.";
+        let raw = "As an additional cost to cast this spell, you may sacrifice an artifact.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Optional(AbilityCost::Sacrifice { count: 1, .. })) => {}
+            other => panic!("Expected Optional(Sacrifice), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_additional_cost_reveal_type_or_pay() {
+        let lower =
+            "as an additional cost to cast this spell, reveal a dragon card from your hand or pay {1}.";
+        let raw =
+            "As an additional cost to cast this spell, reveal a Dragon card from your hand or pay {1}.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Choice(
+                AbilityCost::Reveal { count: 1, filter: Some(_) },
+                AbilityCost::Mana { .. },
+            )) => {}
+            other => panic!("Expected Choice(Reveal, Mana), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_additional_cost_reveal_type_mandatory() {
+        let lower =
+            "as an additional cost to cast this spell, reveal a creature card from your hand.";
+        let raw =
+            "As an additional cost to cast this spell, reveal a creature card from your hand.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Required(AbilityCost::Reveal {
+                count: 1,
+                filter: Some(_),
+            })) => {}
+            other => panic!("Expected Required(Reveal with filter), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_additional_cost_sacrifice_land() {
+        let lower = "as an additional cost to cast this spell, sacrifice a land.";
+        let raw = "As an additional cost to cast this spell, sacrifice a land.";
+        let result = parse_additional_cost_line(lower, raw);
+        match result {
+            Some(AdditionalCost::Required(AbilityCost::Sacrifice { count: 1, .. })) => {}
+            other => panic!("Expected Required(Sacrifice), got {:?}", other),
+        }
     }
 }

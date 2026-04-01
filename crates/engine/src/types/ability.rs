@@ -1689,6 +1689,10 @@ pub enum AbilityCost {
     },
     Reveal {
         count: u32,
+        /// Filter on what must be revealed (e.g., "a Dragon card from your hand").
+        /// None means reveal any card (self-reveal).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
     },
     Composite {
         costs: Vec<AbilityCost>,

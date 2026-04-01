@@ -357,7 +357,29 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     })
     .is_some()
     {
-        return AbilityCost::Reveal { count: 1 };
+        return AbilityCost::Reveal {
+            count: 1,
+            filter: None,
+        };
+    }
+
+    // "Reveal a [Type] card from your hand" — reveal from hand with type filter.
+    if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("reveal ")).parse(i)) {
+        let rest_lower = rest.to_lowercase();
+        if let Some(idx) = rest_lower.find("from your hand") {
+            let filter_raw = rest_lower[..idx].trim();
+            let filter_raw = strip_article(filter_raw, filter_raw);
+            let filter_raw = filter_raw
+                .strip_suffix(" card")
+                .or_else(|| filter_raw.strip_suffix(" cards"))
+                .unwrap_or(filter_raw)
+                .trim();
+            let (filter, _) = parse_target(&format!("target {filter_raw}"));
+            return AbilityCost::Reveal {
+                count: 1,
+                filter: Some(filter),
+            };
+        }
     }
 
     // "Exert this creature" / "Exert ~" — exert cost (CR 701.43)
@@ -1011,7 +1033,10 @@ mod tests {
     fn cost_reveal_self_from_hand() {
         assert_eq!(
             parse_oracle_cost("Reveal this card from your hand"),
-            AbilityCost::Reveal { count: 1 }
+            AbilityCost::Reveal {
+                count: 1,
+                filter: None
+            }
         );
     }
 
