@@ -1,7 +1,7 @@
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityDefinition, CastingPermission, Duration, Effect, ManaProduction, ManaSpendRestriction,
-    PaymentCost, QuantityExpr, StaticDefinition, TargetFilter, UnlessCost,
+    PaymentCost, PtValue, QuantityExpr, StaticDefinition, TargetFilter, UnlessCost,
 };
 use crate::types::game_state::DistributionUnit;
 use crate::types::keywords::Keyword;
@@ -248,6 +248,75 @@ pub(super) enum NumericImperativeAst {
     Mill {
         count: QuantityExpr,
     },
+}
+
+/// Replace a fixed quantity with a for-each quantity, preserving multipliers.
+/// Fixed(0) is preserved as-is (zero effect regardless of for-each count).
+/// Fixed(1) is replaced directly with the for-each quantity.
+/// Fixed(N>1) wraps in Multiply { factor: N, inner: for_each }.
+pub(super) fn replace_fixed_quantity(fixed: QuantityExpr, for_each: QuantityExpr) -> QuantityExpr {
+    match fixed {
+        QuantityExpr::Fixed { value: 0 } => QuantityExpr::Fixed { value: 0 },
+        QuantityExpr::Fixed { value } if value > 1 => QuantityExpr::Multiply {
+            factor: value,
+            inner: Box::new(for_each),
+        },
+        _ => for_each,
+    }
+}
+
+impl NumericImperativeAst {
+    /// Replace fixed counts/amounts with a dynamic for-each quantity expression.
+    /// For draw/life/scry/surveil/mill: a fixed multiplier > 1 wraps the quantity in Multiply.
+    /// For pump: each P/T component is converted from Fixed(N) to Quantity(N * for_each).
+    pub(super) fn with_for_each_quantity(self, quantity: QuantityExpr) -> Self {
+        /// Convert a P/T value from Fixed(N) to Quantity(N * for_each).
+        fn pt_to_quantity(pt: PtValue, quantity: &QuantityExpr) -> PtValue {
+            match pt {
+                PtValue::Fixed(0) => PtValue::Fixed(0),
+                PtValue::Fixed(n) if n == 1 || n == -1 => {
+                    let q = if n < 0 {
+                        QuantityExpr::Multiply {
+                            factor: -1,
+                            inner: Box::new(quantity.clone()),
+                        }
+                    } else {
+                        quantity.clone()
+                    };
+                    PtValue::Quantity(q)
+                }
+                PtValue::Fixed(n) => PtValue::Quantity(QuantityExpr::Multiply {
+                    factor: n,
+                    inner: Box::new(quantity.clone()),
+                }),
+                other => other,
+            }
+        }
+        match self {
+            Self::Draw { count } => Self::Draw {
+                count: replace_fixed_quantity(count, quantity),
+            },
+            Self::GainLife { amount } => Self::GainLife {
+                amount: replace_fixed_quantity(amount, quantity),
+            },
+            Self::LoseLife { amount } => Self::LoseLife {
+                amount: replace_fixed_quantity(amount, quantity),
+            },
+            Self::Scry { count } => Self::Scry {
+                count: replace_fixed_quantity(count, quantity),
+            },
+            Self::Surveil { count } => Self::Surveil {
+                count: replace_fixed_quantity(count, quantity),
+            },
+            Self::Mill { count } => Self::Mill {
+                count: replace_fixed_quantity(count, quantity),
+            },
+            Self::Pump { power, toughness } => Self::Pump {
+                power: pt_to_quantity(power, &quantity),
+                toughness: pt_to_quantity(toughness, &quantity),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

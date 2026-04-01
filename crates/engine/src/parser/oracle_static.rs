@@ -1737,7 +1737,6 @@ fn parse_graveyard_threshold_condition(lower: &str) -> Option<StaticCondition> {
     None
 }
 
-
 /// Parse "N or more [type] entered the battlefield under your control this turn".
 fn parse_entered_this_turn_condition(lower: &str) -> Option<StaticCondition> {
     // "[two/three/N] or more [nonland permanents/creatures/etc.] entered the battlefield under your control this turn"

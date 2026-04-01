@@ -88,8 +88,8 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you have ").parse(input)?;
 
     // "you have no cards in hand" → HandSize EQ 0
-    if let Ok((rest, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>("no cards in hand")
-        .parse(rest)
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("no cards in hand").parse(rest)
     {
         return Ok((
             rest,
@@ -107,33 +107,21 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, n) = parse_number(rest)?;
 
     // Try each quantity suffix
-    if let Ok((rest, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>(
-        " or more cards in hand",
-    )
-    .parse(rest)
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>(" or more cards in hand").parse(rest)
     {
-        return Ok((
-            rest,
-            make_quantity_ge(QuantityRef::HandSize, n),
-        ));
+        return Ok((rest, make_quantity_ge(QuantityRef::HandSize, n)));
     }
-    if let Ok((rest, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>(
-        " or more cards in your graveyard",
-    )
-    .parse(rest)
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>(" or more cards in your graveyard")
+            .parse(rest)
     {
-        return Ok((
-            rest,
-            make_quantity_ge(QuantityRef::GraveyardSize, n),
-        ));
+        return Ok((rest, make_quantity_ge(QuantityRef::GraveyardSize, n)));
     }
     if let Ok((rest, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>(" or more life").parse(rest)
     {
-        return Ok((
-            rest,
-            make_quantity_ge(QuantityRef::LifeTotal, n),
-        ));
+        return Ok((rest, make_quantity_ge(QuantityRef::LifeTotal, n)));
     }
 
     Err(nom::Err::Error(nom_language::error::VerboseError {
@@ -229,8 +217,8 @@ fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
 
 /// Parse "you don't control a/an [type]" → Not(IsPresent).
 fn parse_you_dont_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("you don't control a "), tag("you don't control an ")))
-        .parse(input)?;
+    let (rest, _) =
+        alt((tag("you don't control a "), tag("you don't control an "))).parse(input)?;
     let (filter, remainder) = parse_type_phrase(rest);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom_language::error::VerboseError {
@@ -259,7 +247,6 @@ fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
         other => other,
     }
 }
-
 
 /// Parse "your life total is N or less/greater" conditions.
 ///
@@ -482,8 +469,7 @@ mod tests {
 
     #[test]
     fn test_control_count_ge() {
-        let (rest, c) =
-            parse_inner_condition("you control three or more creatures").unwrap();
+        let (rest, c) = parse_inner_condition("you control three or more creatures").unwrap();
         assert_eq!(rest, "");
         match c {
             StaticCondition::QuantityComparison {
@@ -497,8 +483,7 @@ mod tests {
 
     #[test]
     fn test_control_count_ge_artifacts() {
-        let (rest, c) =
-            parse_inner_condition("you control two or more artifacts").unwrap();
+        let (rest, c) = parse_inner_condition("you control two or more artifacts").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(
             c,

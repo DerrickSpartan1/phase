@@ -204,6 +204,21 @@ fn resolve_ref(
                 AggregateFunction::Sum => values.sum(),
             }
         }
+        QuantityRef::CountersOnTarget { counter_type } => {
+            // Find the first object target and count counters of the given type.
+            let ct = parse_counter_type(counter_type);
+            targets
+                .iter()
+                .find_map(|t| {
+                    if let TargetRef::Object(id) = t {
+                        state.objects.get(id)
+                    } else {
+                        None
+                    }
+                })
+                .map(|obj| obj.counters.get(&ct).copied().unwrap_or(0) as i32)
+                .unwrap_or(0)
+        }
         QuantityRef::TargetPower => {
             // Find the first object target and return its power.
             targets

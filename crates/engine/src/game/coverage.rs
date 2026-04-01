@@ -439,6 +439,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CountersOnSelf { counter_type } => {
             format!("{counter_type} counters on self")
         }
+        QuantityRef::CountersOnTarget { counter_type } => {
+            format!("{counter_type} counters on target")
+        }
         QuantityRef::Variable { name } => name.clone(),
         QuantityRef::SelfPower => "self power".into(),
         QuantityRef::SelfToughness => "self toughness".into(),
@@ -1108,7 +1111,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::PreventDamage {
-            amount, target, scope, ..
+            amount,
+            target,
+            scope,
+            ..
         } => {
             d.push(("amount".into(), format!("{amount:?}")));
             d.push(("target".into(), fmt_target(target)));
@@ -1169,7 +1175,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("+ main phase".into(), "yes".into()));
             }
         }
-        Effect::Double { target_kind, target } => {
+        Effect::Double {
+            target_kind,
+            target,
+        } => {
             d.push(("doubles".into(), format!("{target_kind:?}")));
             d.push(("target".into(), fmt_target(target)));
         }
@@ -3034,6 +3043,7 @@ fn quantity_ref_variant_name(qref: &QuantityRef) -> &'static str {
         QuantityRef::ObjectCount { .. } => "ObjectCount",
         QuantityRef::PlayerCount { .. } => "PlayerCount",
         QuantityRef::CountersOnSelf { .. } => "CountersOnSelf",
+        QuantityRef::CountersOnTarget { .. } => "CountersOnTarget",
         QuantityRef::Variable { .. } => "Variable",
         QuantityRef::SelfPower => "SelfPower",
         QuantityRef::SelfToughness => "SelfToughness",

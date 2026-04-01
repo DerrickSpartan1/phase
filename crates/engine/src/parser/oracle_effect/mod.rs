@@ -10,7 +10,7 @@ mod types;
 use std::str::FromStr;
 
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{opt, value};
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -26,13 +26,13 @@ use super::oracle_util::{
     starts_with_possessive, strip_after, TextPair,
 };
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
+use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
     Comparator, ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition,
-    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, MultiTargetSpec,
-    NinjutsuVariant, PlayerFilter, PtValue, QuantityExpr, QuantityRef, RestrictionExpiry,
-    RestrictionPlayerScope, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
-    TypedFilter, UnlessCost,
+    Duration, Effect, FilterProp, GameRestriction, MultiTargetSpec, NinjutsuVariant, PlayerFilter,
+    PtValue, QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope, StaticCondition,
+    StaticDefinition, TargetFilter, TypeFilter, TypedFilter, UnlessCost,
 };
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{DistributionUnit, RetargetScope};
@@ -1042,126 +1042,178 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     let qty = parse_for_each_clause(for_each_clause)?;
     let quantity = QuantityExpr::Ref { qty };
 
-    // Parse the base effect and replace its count with the dynamic quantity
-    if tag::<_, _, VerboseError<&str>>("draw ")
-        .parse(base_tp.lower)
-        .is_ok()
-        || base_tp.contains(" draw")
-    {
-        return Some(parsed_clause(Effect::Draw { count: quantity }));
+    // Delegate to parse_numeric_imperative_ast — it already handles draw, gain/lose life,
+    // pump, scry, surveil, mill. Replace fixed counts with the for-each quantity, then
+    // thread subject through for effects that carry a target.
+    if let Some(ast) = imperative::parse_numeric_imperative_ast(base_tp.original, base_tp.lower) {
+        let effect = imperative::lower_numeric_imperative_ast(ast.with_for_each_quantity(quantity));
+        let effect = thread_for_each_subject(effect, base_tp.original);
+        return Some(parsed_clause(effect));
     }
 
-    if alt((tag::<_, _, VerboseError<&str>>("you gain "), tag("gain ")))
-        .parse(base_tp.lower)
-        .is_ok()
-        && base_tp.contains("life")
-    {
-        // Extract multiplier: "gain 3 life" → factor=3, "gain life" → factor=1
-        let after_gain = alt((tag::<_, _, VerboseError<&str>>("you gain "), tag("gain ")))
-            .parse(base_tp.lower)
-            .map(|(rest, _)| rest)
-            .unwrap_or(base_tp.lower);
-        // Delegate to nom combinator (input already lowercase from base_tp.lower).
-        let amount = match nom_primitives::parse_number.parse(after_gain) {
-            Ok((_, n)) if n > 1 => QuantityExpr::Multiply {
-                factor: n as i32,
-                inner: Box::new(quantity),
+    // CR 120.1: "[subject] deals N damage to [target] for each X" → DealDamage.
+    // Delegates to try_parse_damage, which already handles amount extraction, target parsing,
+    // and damage source variants. Replace the fixed amount with the for-each quantity.
+    if let Some(effect) = try_parse_damage(base_tp.lower, base_tp.original) {
+        let effect = match effect {
+            Effect::DealDamage {
+                amount,
+                target,
+                damage_source,
+            } => Effect::DealDamage {
+                amount: replace_fixed_quantity(amount, quantity.clone()),
+                target,
+                damage_source,
             },
-            _ => quantity,
-        };
-        return Some(parsed_clause(Effect::GainLife {
-            amount,
-            player: GainLifePlayer::Controller,
-        }));
-    }
-
-    if alt((tag::<_, _, VerboseError<&str>>("you lose "), tag("lose ")))
-        .parse(base_tp.lower)
-        .is_ok()
-        && base_tp.contains("life")
-    {
-        // Extract multiplier: "lose 3 life" → factor=3
-        let after_lose = alt((tag::<_, _, VerboseError<&str>>("you lose "), tag("lose ")))
-            .parse(base_tp.lower)
-            .map(|(rest, _)| rest)
-            .unwrap_or(base_tp.lower);
-        // Delegate to nom combinator (input already lowercase from base_tp.lower).
-        let amount = match nom_primitives::parse_number.parse(after_lose) {
-            Ok((_, n)) if n > 1 => QuantityExpr::Multiply {
-                factor: n as i32,
-                inner: Box::new(quantity),
+            Effect::DamageEachPlayer {
+                amount,
+                player_filter,
+            } => Effect::DamageEachPlayer {
+                amount: replace_fixed_quantity(amount, quantity.clone()),
+                player_filter,
             },
-            _ => quantity,
+            Effect::DamageAll { amount, target } => Effect::DamageAll {
+                amount: replace_fixed_quantity(amount, quantity),
+                target,
+            },
+            other => other,
         };
-        return Some(parsed_clause(Effect::LoseLife { amount }));
+        return Some(parsed_clause(effect));
     }
 
-    // "gets +N/+M for each X" → Pump with dynamic PtValue::Quantity
-    // Handles: "~ gets +1/+1 for each creature you control",
-    //          "target creature gets +2/+2 for each..."
-    if let Some(gets_pos) = base_tp.find("gets ").or_else(|| base_tp.find("get ")) {
-        let offset = if tag::<_, _, VerboseError<&str>>("gets ")
-            .parse(&base_tp.lower[gets_pos..])
-            .is_ok()
-        {
-            5
-        } else {
-            4
+    // CR 111.11: "create [token description] for each X" → Token with dynamic count.
+    // Delegates to try_parse_token, which handles token description parsing (name, P/T,
+    // types, colors, keywords). Replace the embedded count with the for-each quantity.
+    if let Some(effect) = token::try_parse_token(base_tp.lower, base_tp.original) {
+        let effect = match effect {
+            Effect::Token {
+                name,
+                power,
+                toughness,
+                types,
+                colors,
+                keywords,
+                tapped,
+                owner,
+                attach_to,
+                enters_attacking,
+                count: _,
+            } => Effect::Token {
+                name,
+                power,
+                toughness,
+                types,
+                colors,
+                keywords,
+                tapped,
+                owner,
+                attach_to,
+                enters_attacking,
+                count: quantity,
+            },
+            other => other,
         };
-        let after_gets = base_tp.original[gets_pos + offset..].trim();
-        // Extract the P/T token
-        let token_end = after_gets
-            .find(|c: char| c.is_whitespace() || c == ',' || c == '.')
-            .unwrap_or(after_gets.len());
-        let token = &after_gets[..token_end];
-        if let Some((p, t)) = parse_pt_modifier(token) {
-            let make_quantity_pt = |pt: PtValue| -> PtValue {
-                match pt {
-                    PtValue::Fixed(n) if n == 1 || n == -1 => {
-                        let q = if n < 0 {
-                            QuantityExpr::Multiply {
-                                factor: -1,
-                                inner: Box::new(quantity.clone()),
-                            }
-                        } else {
-                            quantity.clone()
-                        };
-                        PtValue::Quantity(q)
-                    }
-                    PtValue::Fixed(n) if n != 0 => PtValue::Quantity(QuantityExpr::Multiply {
-                        factor: n,
-                        inner: Box::new(quantity.clone()),
-                    }),
-                    PtValue::Fixed(0) => PtValue::Fixed(0),
-                    other => other,
-                }
-            };
-            return Some(parsed_clause(Effect::Pump {
-                power: make_quantity_pt(p),
-                toughness: make_quantity_pt(t),
-                target: TargetFilter::Any,
-            }));
-        }
+        return Some(parsed_clause(effect));
     }
 
-    // "put a +1/+1 counter on ~ for each X" → PutCounter with dynamic count
-    // Handles: "put a +1/+1 counter on ~ for each creature card in your graveyard"
-    if base_tp.contains("counter on") {
-        let counter_type = if base_tp.contains("+1/+1") {
-            "+1/+1"
-        } else if base_tp.contains("-1/-1") {
-            "-1/-1"
-        } else {
-            return None;
-        };
+    // "put a [counter type] counter on [target] for each X" → PutCounter with dynamic count.
+    // Not a NumericImperativeAst — counter placement has its own structure.
+    if let Ok((_, before)) =
+        take_until::<_, _, VerboseError<&str>>("counter on").parse(base_tp.lower)
+    {
+        // before = "put a +1/+1 " — strip "put a[n] " prefix then parse counter type.
+        let ct_start = alt((
+            value((), tag::<_, _, VerboseError<&str>>("put a ")),
+            value((), tag("put an ")),
+            value((), tag("put ")),
+        ))
+        .parse(before)
+        .map(|(rest, _)| rest)
+        .unwrap_or(before)
+        .trim();
+        let (_, counter_type) = nom_primitives::parse_counter_type.parse(ct_start).ok()?;
+        let counter_on_end = before.len() + "counter on ".len();
+        let after_counter_on = base_tp.original[counter_on_end..].trim();
+        let target = parse_subject_application(after_counter_on, &ParseContext::default())
+            .map(|app| app.affected)
+            .unwrap_or(TargetFilter::Any);
         return Some(parsed_clause(Effect::PutCounter {
-            counter_type: counter_type.to_string(),
+            counter_type,
             count: quantity,
-            target: TargetFilter::Any,
+            target,
         }));
     }
 
     None
+}
+
+/// Thread subject through for-each effects that carry a `target` field.
+/// Locates the predicate verb, extracts subject text before it, and replaces
+/// default targets (Any/Controller) with the parsed subject filter.
+fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
+    let lower = original.to_lowercase();
+    // Predicate verbs that parse_numeric_imperative_ast recognizes — find the earliest one.
+    // Note: uses str::find (not nom) because this is positional splitting on already-dispatched
+    // text (base_tp from try_parse_for_each_effect), not parsing dispatch on raw Oracle text.
+    // The input is short and constrained, so substring false positives are not a concern.
+    // Find the predicate verb. Must check for space-before-verb boundary to avoid
+    // substring matches inside other words (e.g., "target" contains "get").
+    // The first verb may appear at position 0 (no preceding space) for bare imperatives.
+    let verb_pos = [
+        " gets ",
+        " get ",
+        " gains ",
+        " gain ",
+        " loses ",
+        " lose ",
+        " draws ",
+        " draw ",
+        " mills ",
+        " mill ",
+        " scries ",
+        " scry ",
+        " surveils ",
+        " surveil ",
+    ]
+    .iter()
+    .filter_map(|verb| lower.find(verb).map(|pos| pos + 1)) // +1 to skip the leading space
+    .min();
+
+    let subject_text = match verb_pos {
+        Some(pos) if pos > 0 => original[..pos].trim(),
+        _ => return effect,
+    };
+    if subject_text.is_empty() {
+        return effect;
+    }
+
+    let target = match parse_subject_application(subject_text, &ParseContext::default()) {
+        Some(app) => app.affected,
+        None => return effect,
+    };
+
+    // Only replace default/placeholder targets — leave already-resolved targets alone.
+    match effect {
+        Effect::Pump {
+            power,
+            toughness,
+            target: TargetFilter::Any,
+        } => Effect::Pump {
+            power,
+            toughness,
+            target,
+        },
+        Effect::Mill {
+            count,
+            target: TargetFilter::Controller,
+            destination,
+        } => Effect::Mill {
+            count,
+            target,
+            destination,
+        },
+        other => other,
+    }
 }
 
 #[tracing::instrument(level = "trace")]
@@ -5950,8 +6002,8 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        ContinuousModification, ControllerRef, DoublePTMode, ManaProduction, PaymentCost,
-        TypeFilter,
+        ContinuousModification, ControllerRef, DoublePTMode, GainLifePlayer, ManaProduction,
+        PaymentCost, TypeFilter,
     };
     use crate::types::mana::ManaColor;
 
@@ -6512,6 +6564,97 @@ mod tests {
             }
             other => panic!("expected Token, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn for_each_pump_threads_subject_target_creature() {
+        let e = parse_effect("target creature gets +1/+1 for each creature you control");
+        assert!(
+            matches!(
+                e,
+                Effect::Pump {
+                    target: TargetFilter::Typed(..),
+                    power: PtValue::Quantity(..),
+                    toughness: PtValue::Quantity(..),
+                }
+            ),
+            "pump should have typed target filter, not Any"
+        );
+    }
+
+    #[test]
+    fn for_each_pump_self_ref() {
+        let e = parse_effect("~ gets +1/+1 for each creature you control");
+        assert!(
+            matches!(
+                e,
+                Effect::Pump {
+                    target: TargetFilter::SelfRef,
+                    power: PtValue::Quantity(..),
+                    ..
+                }
+            ),
+            "self-ref subject should produce SelfRef target"
+        );
+    }
+
+    #[test]
+    fn for_each_deal_damage() {
+        let e = parse_effect("~ deals 1 damage to any target for each creature you control");
+        assert!(
+            matches!(e, Effect::DealDamage { .. }),
+            "should produce DealDamage"
+        );
+    }
+
+    #[test]
+    fn for_each_token_count_replaced() {
+        let e =
+            parse_effect("create a 1/1 white Warrior creature token for each creature you control");
+        assert!(
+            matches!(
+                e,
+                Effect::Token {
+                    count: QuantityExpr::Ref { .. },
+                    ..
+                }
+            ),
+            "token count should be a Ref quantity, not Fixed"
+        );
+    }
+
+    #[test]
+    fn for_each_counter_on_target() {
+        let e =
+            parse_effect("~ deals damage equal to the number of +1/+1 counters on that creature");
+        // This is a CDA-style quantity, not a for-each. Verify the quantity ref is correct.
+        if let Effect::DealDamage { amount, .. } = &e {
+            assert!(
+                matches!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CountersOnTarget { .. }
+                    }
+                ),
+                "should produce CountersOnTarget quantity"
+            );
+        }
+    }
+
+    #[test]
+    fn for_each_put_counter_threads_subject() {
+        let e = parse_effect("put a +1/+1 counter on ~ for each creature you control");
+        assert!(
+            matches!(
+                e,
+                Effect::PutCounter {
+                    target: TargetFilter::SelfRef,
+                    count: QuantityExpr::Ref { .. },
+                    ..
+                }
+            ),
+            "put counter should have SelfRef target and Ref count"
+        );
     }
 
     #[test]

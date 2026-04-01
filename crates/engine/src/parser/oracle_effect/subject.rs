@@ -199,7 +199,10 @@ fn try_parse_subject_restriction_clause(
     build_restriction_clause(application, predicate)
 }
 
-fn parse_subject_application(subject: &str, ctx: &ParseContext) -> Option<SubjectApplication> {
+pub(super) fn parse_subject_application(
+    subject: &str,
+    ctx: &ParseContext,
+) -> Option<SubjectApplication> {
     if subject.trim().is_empty() {
         return None;
     }

@@ -42,10 +42,13 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
 
     // Complex patterns requiring type phrase parsing or counter normalization.
 
-    // "[counter type] counters on ~" / "[counter type] counters on it"
+    // "[counter type] counter(s) on ~" / "[counter type] counter(s) on it"
+    // Handles both plural ("counters on ~") and singular ("counter on ~") forms.
     if let Some(rest) = trimmed
         .strip_suffix(" counters on ~")
         .or_else(|| trimmed.strip_suffix(" counters on it"))
+        .or_else(|| trimmed.strip_suffix(" counter on ~"))
+        .or_else(|| trimmed.strip_suffix(" counter on it"))
     {
         let raw_type = tag::<_, _, VerboseError<&str>>("the number of ")
             .parse(rest)
@@ -54,6 +57,24 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
         let counter_type = normalize_counter_type(raw_type);
         if !counter_type.is_empty() {
             return Some(QuantityRef::CountersOnSelf { counter_type });
+        }
+    }
+
+    // "[counter type] counter(s) on that creature/permanent" — anaphoric reference
+    // to a previously targeted object, not self. Distinct from CountersOnSelf.
+    if let Some(rest) = trimmed
+        .strip_suffix(" counters on that creature")
+        .or_else(|| trimmed.strip_suffix(" counters on that permanent"))
+        .or_else(|| trimmed.strip_suffix(" counter on that creature"))
+        .or_else(|| trimmed.strip_suffix(" counter on that permanent"))
+    {
+        let raw_type = tag::<_, _, VerboseError<&str>>("the number of ")
+            .parse(rest)
+            .map_or(rest, |(r, _)| r)
+            .trim();
+        let counter_type = normalize_counter_type(raw_type);
+        if !counter_type.is_empty() {
+            return Some(QuantityRef::CountersOnTarget { counter_type });
         }
     }
 
@@ -442,6 +463,12 @@ fn is_event_context_referent(prefix: &str) -> bool {
 pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     let clause = clause.trim().trim_end_matches('.');
 
+    // "card put into a graveyard this way" / "creature card exiled this way" / etc.
+    // "this way" references objects from the preceding effect's tracked set.
+    if clause.contains("this way") {
+        return Some(QuantityRef::TrackedSetSize);
+    }
+
     // "opponent who lost life this turn"
     if clause.contains("opponent") && clause.contains("lost life") {
         return Some(QuantityRef::PlayerCount {
@@ -461,6 +488,14 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
         return Some(QuantityRef::PlayerCount {
             filter: PlayerFilter::Opponent,
         });
+    }
+
+    // "[counter type] counter(s) on that creature/permanent" — anaphoric, must check
+    // before the wildcard "counter on" guard below which would misroute to CountersOnSelf.
+    if clause.contains("counter on that") {
+        if let Some(qty) = parse_quantity_ref(clause) {
+            return Some(qty);
+        }
     }
 
     // "[counter type] counter on ~" / "[counter type] counter on it"
@@ -540,6 +575,49 @@ mod tests {
             QuantityRef::CountersOnSelf { counter_type } => assert_eq!(counter_type, "P1P1"),
             other => panic!("Expected CountersOnSelf, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn for_each_singular_counter_on_self() {
+        // Singular "counter on ~" (not "counters on ~")
+        let qty = parse_for_each_clause("blight counter on it").unwrap();
+        assert!(
+            matches!(qty, QuantityRef::CountersOnSelf { ref counter_type } if counter_type == "blight"),
+            "singular counter form should produce CountersOnSelf"
+        );
+    }
+
+    #[test]
+    fn for_each_counter_on_that_creature() {
+        let qty = parse_for_each_clause("+1/+1 counter on that creature").unwrap();
+        assert!(
+            matches!(qty, QuantityRef::CountersOnTarget { ref counter_type } if counter_type == "P1P1"),
+            "counter on that creature should produce CountersOnTarget, not CountersOnSelf"
+        );
+    }
+
+    #[test]
+    fn for_each_this_way_produces_tracked_set_size() {
+        let qty = parse_for_each_clause("card put into a graveyard this way").unwrap();
+        assert_eq!(qty, QuantityRef::TrackedSetSize);
+    }
+
+    #[test]
+    fn quantity_ref_counters_on_target() {
+        let qty = parse_quantity_ref("+1/+1 counters on that creature").unwrap();
+        assert!(
+            matches!(qty, QuantityRef::CountersOnTarget { ref counter_type } if counter_type == "P1P1"),
+            "counters on that creature should produce CountersOnTarget"
+        );
+    }
+
+    #[test]
+    fn quantity_ref_singular_counter_on_target() {
+        let qty = parse_quantity_ref("charge counter on that permanent").unwrap();
+        assert!(
+            matches!(qty, QuantityRef::CountersOnTarget { ref counter_type } if counter_type == "charge"),
+            "singular counter on that permanent should produce CountersOnTarget"
+        );
     }
 
     #[test]

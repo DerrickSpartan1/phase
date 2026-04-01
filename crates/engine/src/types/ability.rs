@@ -1106,6 +1106,10 @@ pub enum QuantityRef {
     /// Count of counters of a given type on the source object.
     /// Used for "for each [counter type] counter on ~" patterns.
     CountersOnSelf { counter_type: String },
+    /// Count of counters of a given type on the previously targeted object.
+    /// Used for "for each [counter type] counter on that creature" anaphoric patterns.
+    /// Semantically distinct from CountersOnSelf: counts counters on a *targeted* object.
+    CountersOnTarget { counter_type: String },
     /// A variable reference (e.g. "X") resolved from spell payment or "that much" from prior effect.
     Variable { name: String },
     /// CR 208.3: The current power of the source object (post-layer).

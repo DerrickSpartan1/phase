@@ -866,7 +866,10 @@ fn parse_control_count_condition(lower: &str) -> Option<(TriggerCondition, usize
     // Extract minimum and filter from the canonical QuantityComparison result.
     let (minimum, filter) = match sc {
         StaticCondition::QuantityComparison {
-            lhs: QuantityExpr::Ref { qty: QuantityRef::ObjectCount { filter } },
+            lhs:
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { filter },
+                },
             rhs: QuantityExpr::Fixed { value },
             ..
         } => (value as u32, filter),
@@ -6168,13 +6171,15 @@ mod tests {
         let (cleaned, cond) = extract_if_condition("if you control a creature, draw a card");
         assert_eq!(cleaned, "draw a card");
         assert!(cond.is_some());
-        assert!(matches!(cond.unwrap(), TriggerCondition::ControlsType { .. }));
+        assert!(matches!(
+            cond.unwrap(),
+            TriggerCondition::ControlsType { .. }
+        ));
     }
 
     #[test]
     fn fallback_if_hand_empty() {
-        let (cleaned, cond) =
-            extract_if_condition("if you have no cards in hand, draw a card");
+        let (cleaned, cond) = extract_if_condition("if you have no cards in hand, draw a card");
         assert_eq!(cleaned, "draw a card");
         match cond.unwrap() {
             TriggerCondition::QuantityComparison {
@@ -6191,9 +6196,11 @@ mod tests {
         // "if you gained life this turn" has a specific handler that produces
         // GainedLife, NOT a generic QuantityComparison. Verify the specific
         // variant is preserved even though the nom parser could also handle it.
-        let (_, cond) =
-            extract_if_condition("if you gained life this turn, draw a card");
-        assert!(matches!(cond.unwrap(), TriggerCondition::GainedLife { minimum: 1 }));
+        let (_, cond) = extract_if_condition("if you gained life this turn, draw a card");
+        assert!(matches!(
+            cond.unwrap(),
+            TriggerCondition::GainedLife { minimum: 1 }
+        ));
     }
 
     #[test]
@@ -6205,8 +6212,7 @@ mod tests {
     #[test]
     fn fallback_does_not_shadow_specific_controls_count() {
         // "if you control 3 or more creatures" has a specific handler producing ControlCount
-        let (_, cond) =
-            extract_if_condition("if you control three or more creatures, draw a card");
+        let (_, cond) = extract_if_condition("if you control three or more creatures, draw a card");
         assert!(matches!(
             cond.unwrap(),
             TriggerCondition::ControlCount { minimum: 3, .. }

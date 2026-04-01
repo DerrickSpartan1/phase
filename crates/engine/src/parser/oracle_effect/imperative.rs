@@ -140,10 +140,11 @@ pub(super) fn parse_numeric_imperative_ast(
         || lower.contains("get +")
         || lower.contains("get -")
     {
+        // Accept any pump — discard the target. Callers that need subject threading
+        // (e.g., try_parse_for_each_effect) extract the subject separately via
+        // thread_for_each_subject after lowering the AST.
         if let Some(Effect::Pump {
-            power,
-            toughness,
-            target: TargetFilter::Any,
+            power, toughness, ..
         }) = super::try_parse_pump(lower, text)
         {
             return Some(NumericImperativeAst::Pump { power, toughness });
