@@ -24,7 +24,7 @@ export type P2PAdapterEvent =
   | { type: "opponentDisconnected"; reason: string }
   | { type: "gameOver"; winner: PlayerId | null; reason: string }
   | { type: "error"; message: string }
-  | { type: "stateChanged"; state: GameState; events: GameEvent[]; legalActions: GameAction[]; autoPassRecommended: boolean };
+  | { type: "stateChanged"; state: GameState; events: GameEvent[]; legalResult: LegalActionsResult };
 
 type P2PAdapterEventListener = (event: P2PAdapterEvent) => void;
 
@@ -248,7 +248,7 @@ export class P2PHostAdapter implements EngineAdapter {
           });
 
           // Emit state update locally so host UI updates for opponent actions
-          this.emit({ type: "stateChanged", state, events: result.events, legalActions: legalResult.actions, autoPassRecommended: legalResult.autoPassRecommended });
+          this.emit({ type: "stateChanged", state, events: result.events, legalResult });
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
           this.session.send({ type: "action_rejected", reason });
@@ -390,7 +390,7 @@ export class P2PGuestAdapter implements EngineAdapter {
           this.pendingReject = null;
         } else {
           // Unsolicited update (opponent's action result)
-          this.emit({ type: "stateChanged", state: msg.state, events: msg.events, legalActions: msg.legalActions, autoPassRecommended: msg.autoPassRecommended ?? false });
+          this.emit({ type: "stateChanged", state: msg.state, events: msg.events, legalResult: { actions: msg.legalActions, autoPassRecommended: msg.autoPassRecommended ?? false } });
         }
         break;
       }

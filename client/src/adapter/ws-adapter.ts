@@ -37,7 +37,7 @@ export type WsAdapterEvent =
   | { type: "reconnecting"; attempt: number; maxAttempts: number }
   | { type: "reconnected" }
   | { type: "reconnectFailed" }
-  | { type: "stateChanged"; state: GameState; events: GameEvent[]; legalActions: GameAction[]; autoPassRecommended: boolean }
+  | { type: "stateChanged"; state: GameState; events: GameEvent[]; legalResult: LegalActionsResult }
   | { type: "emoteReceived"; fromPlayer: PlayerId; emote: string }
   | { type: "conceded"; player: PlayerId }
   | { type: "timerUpdate"; player: PlayerId; remainingSeconds: number };
@@ -407,7 +407,7 @@ export class WebSocketAdapter implements EngineAdapter {
         } else {
           // Reconnect path — no initResolve pending, so emit state change
           // so GameProvider's event listener populates the store.
-          this.emit({ type: "stateChanged", state: data.state, events: [], legalActions: this._legalActions.actions, autoPassRecommended: this._legalActions.autoPassRecommended });
+          this.emit({ type: "stateChanged", state: data.state, events: [], legalResult: this._legalActions });
         }
         break;
       }
@@ -426,7 +426,7 @@ export class WebSocketAdapter implements EngineAdapter {
           this.pendingResolve = null;
           this.pendingReject = null;
         } else {
-          this.emit({ type: "stateChanged", state: data.state, events: data.events, legalActions: this._legalActions.actions, autoPassRecommended: this._legalActions.autoPassRecommended });
+          this.emit({ type: "stateChanged", state: data.state, events: data.events, legalResult: this._legalActions });
         }
         break;
       }

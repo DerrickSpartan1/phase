@@ -1,4 +1,4 @@
-import type { GameAction, GameEvent, GameState } from "../adapter/types";
+import type { GameAction, GameEvent, GameState, LegalActionsResult } from "../adapter/types";
 import { normalizeEvents } from "../animation/eventNormalizer";
 import { getPlayerId } from "../hooks/usePlayerId";
 import type { AnimationStep } from "../animation/types";
@@ -7,7 +7,7 @@ import { audioManager } from "../audio/AudioManager";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { debugLog } from "./debugLog";
 import { useAnimationStore } from "../stores/animationStore";
-import { useGameStore, saveGame, saveCheckpoints } from "../stores/gameStore";
+import { useGameStore, legalResultState, saveGame, saveCheckpoints } from "../stores/gameStore";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
@@ -52,8 +52,7 @@ interface PendingRemoteUpdate {
   kind: "remote";
   state: GameState;
   events: GameEvent[];
-  legalActions: GameAction[];
-  autoPassRecommended: boolean;
+  legalResult: LegalActionsResult;
   resolve: () => void;
   reject: (err: unknown) => void;
 }
@@ -166,8 +165,7 @@ async function processAction(action: GameAction): Promise<void> {
       logHistory: [...prev.logHistory, ...newLogEntries].slice(-2000),
       nextLogSeq: seq,
       waitingFor: newState.waiting_for,
-      legalActions: legalResult.actions,
-      autoPassRecommended: legalResult.autoPassRecommended,
+      ...legalResultState(legalResult),
       stateHistory: newHistory,
     };
   });
@@ -193,7 +191,7 @@ async function processQueue(): Promise<void> {
       if (next.kind === "local") {
         await processAction(next.action);
       } else {
-        await processRemoteUpdateInner(next.state, next.events, next.legalActions, next.autoPassRecommended);
+        await processRemoteUpdateInner(next.state, next.events, next.legalResult);
       }
       next.resolve();
     } catch (err) {
@@ -245,8 +243,7 @@ export async function dispatchAction(action: GameAction): Promise<void> {
 async function processRemoteUpdateInner(
   state: GameState,
   events: GameEvent[],
-  legalActions: GameAction[],
-  autoPassRecommended: boolean,
+  legalResult: LegalActionsResult,
 ): Promise<void> {
   // 1. Capture snapshot before updating state (for position lookups during animation)
   const snapshot = useAnimationStore.getState().captureSnapshot();
@@ -300,8 +297,7 @@ async function processRemoteUpdateInner(
     events,
     eventHistory: [...prev.eventHistory, ...events].slice(-1000),
     waitingFor: state.waiting_for,
-    legalActions,
-    autoPassRecommended,
+    ...legalResultState(legalResult),
   }));
 
   // 6. Play victory/defeat stinger on GameOver
@@ -325,18 +321,17 @@ async function processRemoteUpdateInner(
 export async function processRemoteUpdate(
   state: GameState,
   events: GameEvent[],
-  legalActions: GameAction[],
-  autoPassRecommended = false,
+  legalResult: LegalActionsResult,
 ): Promise<void> {
   if (isAnimating) {
     return new Promise<void>((resolve, reject) => {
-      pendingQueue.push({ kind: "remote", state, events, legalActions, autoPassRecommended, resolve, reject });
+      pendingQueue.push({ kind: "remote", state, events, legalResult, resolve, reject });
     });
   }
 
   isAnimating = true;
   try {
-    await processRemoteUpdateInner(state, events, legalActions, autoPassRecommended);
+    await processRemoteUpdateInner(state, events, legalResult);
   } finally {
     if (pendingQueue.length > 0) {
       processQueue().catch(() => { isAnimating = false; });
@@ -364,8 +359,7 @@ export async function restoreGameState(state: GameState): Promise<string | null>
   useGameStore.setState({
     gameState: state,
     waitingFor: state.waiting_for,
-    legalActions: legalResult.actions,
-    autoPassRecommended: legalResult.autoPassRecommended,
+    ...legalResultState(legalResult),
     events: [],
   });
 

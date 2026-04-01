@@ -7,12 +7,22 @@ import type {
   GameEvent,
   GameLogEntry,
   GameState,
+  LegalActionsResult,
   ManaCost,
   MatchConfig,
   WaitingFor,
 } from "../adapter/types";
 import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { loadCheckpoints, saveGame } from "../services/gamePersistence";
+
+/** Map a LegalActionsResult to the store fields it owns — single source of truth. */
+export function legalResultState(result: LegalActionsResult): Pick<GameStoreState, "legalActions" | "autoPassRecommended" | "spellCosts"> {
+  return {
+    legalActions: result.actions,
+    autoPassRecommended: result.autoPassRecommended,
+    spellCosts: result.spellCosts ?? {},
+  };
+}
 
 // Re-export persistence API so existing imports keep working
 export type { ActiveGameMeta } from "../services/gamePersistence";
@@ -99,9 +109,7 @@ export const useGameStore = create<GameStore>()(
         adapter,
         gameState: state,
         waitingFor: state.waiting_for,
-        legalActions: legalResult.actions,
-        autoPassRecommended: legalResult.autoPassRecommended,
-        spellCosts: legalResult.spellCosts ?? {},
+        ...legalResultState(legalResult),
         events: [],
         eventHistory: [],
         logHistory: initLogEntries,
@@ -123,9 +131,7 @@ export const useGameStore = create<GameStore>()(
         adapter,
         gameState: state,
         waitingFor: state.waiting_for,
-        legalActions: legalResult.actions,
-        autoPassRecommended: legalResult.autoPassRecommended,
-        spellCosts: legalResult.spellCosts ?? {},
+        ...legalResultState(legalResult),
         events: [],
         eventHistory: [],
         logHistory: [],
@@ -167,9 +173,7 @@ export const useGameStore = create<GameStore>()(
           logHistory: [...prev.logHistory, ...newLogEntries].slice(-2000),
           nextLogSeq: seq,
           waitingFor: newState.waiting_for,
-          legalActions: legalResult.actions,
-          autoPassRecommended: legalResult.autoPassRecommended,
-          spellCosts: legalResult.spellCosts ?? {},
+          ...legalResultState(legalResult),
           stateHistory: newHistory,
         };
       });
@@ -192,9 +196,7 @@ export const useGameStore = create<GameStore>()(
       set({
         gameState: previous,
         waitingFor: previous.waiting_for,
-        legalActions: legalResult.actions,
-        autoPassRecommended: legalResult.autoPassRecommended,
-        spellCosts: legalResult.spellCosts ?? {},
+        ...legalResultState(legalResult),
         events: [],
         stateHistory: stateHistory.slice(0, -1),
       });
