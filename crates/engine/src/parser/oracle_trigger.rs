@@ -372,7 +372,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
             })
         }
 
-        // Variants with no TriggerCondition equivalent.
+        // Variants with no TriggerCondition equivalent (combat-only / source-state).
         StaticCondition::SourceEnteredThisTurn
         | StaticCondition::SourceIsTapped
         | StaticCondition::SourceInZone { .. }
@@ -383,6 +383,8 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::HasCounters { .. }
         | StaticCondition::SourceMatchesFilter { .. }
+        | StaticCondition::DefendingPlayerControls { .. }
+        | StaticCondition::SourceAttackingAlone
         | StaticCondition::Unrecognized { .. }
         | StaticCondition::None => None,
     }
@@ -401,8 +403,9 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     let tp = TextPair::new(text, &lower);
 
     // --- Source-referential patterns (cannot be StaticConditions) ---
+    // These require trigger-source context that StaticCondition can't express.
 
-    // "if you cast it" — zoneless cast check (CR 701.57a: Discover ETBs).
+    // CR 701.57a: "if you cast it" — zoneless cast check (Discover ETBs).
     // Guard: must not be followed by " from" (zone-specific variant).
     if let Some(pos) = tp.find("if you cast it") {
         let after = &lower[pos + "if you cast it".len()..];
@@ -414,14 +417,22 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         }
     }
 
-    // CR 508.1 / CR 603.4: "if it's attacking" / "if it is attacking"
-    for pattern in &["if it's attacking", "if it is attacking"] {
-        if let Some(pos) = tp.find(pattern) {
-            return (
-                strip_condition_clause(text, pos, pattern.len()),
-                Some(TriggerCondition::SourceIsAttacking),
-            );
-        }
+    // Simple pattern→condition extractions (no dynamic parsing or guards needed).
+    if let Some(result) = try_extract_simple_condition(
+        &tp,
+        text,
+        &[
+            // CR 508.1 / CR 603.4: attacking state.
+            ("if it's attacking", TriggerCondition::SourceIsAttacking),
+            ("if it is attacking", TriggerCondition::SourceIsAttacking),
+            // CR 603.4: past-turn life loss.
+            (
+                "if an opponent lost life during their last turn",
+                TriggerCondition::LostLifeLastTurn,
+            ),
+        ],
+    ) {
+        return result;
     }
 
     // CR 702.49 + CR 603.4: "if [possessive] sneak/ninjutsu cost was paid [this turn]"
@@ -431,6 +442,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     }
 
     // CR 400.7 + CR 603.10: "if it was a [type]" / "if it was an [type]"
+    // Dynamic: parses type word after the prefix.
     for prefix in &["if it was a ", "if it was an "] {
         if let Some(pos) = tp.find(prefix) {
             let after = &lower[pos + prefix.len()..];
@@ -448,6 +460,7 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     }
 
     // CR 509.1a + CR 603.4: "if defending player controls no [type]"
+    // Dynamic: parses type phrase after the prefix.
     if let Some(pos) = tp.find("if defending player controls no ") {
         let after = &text[pos + "if defending player controls no ".len()..];
         let (filter, rest) = crate::parser::oracle_target::parse_type_phrase(after);
@@ -462,18 +475,6 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 Some(TriggerCondition::DefendingPlayerControlsNone { filter }),
             );
         }
-    }
-
-    // CR 603.4: "if an opponent lost life during their last turn" — past-turn variant.
-    if let Some(pos) = tp.find("if an opponent lost life during their last turn") {
-        return (
-            strip_condition_clause(
-                text,
-                pos,
-                "if an opponent lost life during their last turn".len(),
-            ),
-            Some(TriggerCondition::LostLifeLastTurn),
-        );
     }
 
     // --- Shared combinator path: parse_inner_condition + bridge ---
@@ -529,6 +530,26 @@ fn try_extract_ninjutsu_condition(
                 Some(TriggerCondition::NinjutsuVariantPaid {
                     variant: variant.clone(),
                 }),
+            ));
+        }
+    }
+    None
+}
+
+/// Try extracting a simple pattern→condition from text via search-and-strip.
+///
+/// For source-referential conditions that cannot be `StaticCondition`s and don't need
+/// dynamic parsing — just a fixed pattern mapping to a fixed `TriggerCondition`.
+fn try_extract_simple_condition(
+    tp: &TextPair<'_>,
+    text: &str,
+    patterns: &[(&str, TriggerCondition)],
+) -> Option<(String, Option<TriggerCondition>)> {
+    for (pattern, condition) in patterns {
+        if let Some(pos) = tp.find(pattern) {
+            return Some((
+                strip_condition_clause(text, pos, pattern.len()),
+                Some(condition.clone()),
             ));
         }
     }
@@ -600,6 +621,11 @@ fn continues_player_action_list(after_comma: &str) -> bool {
     // E.g. "a creature, planeswalker, or battle enters" — after ", " we see
     // "planeswalker" (a bare type word) or "or battle enters" ("or" + type word).
     // Strip optional "or "/"and " conjunction, then check if the next word is a type.
+    //
+    // Guard: a type word followed by a predicate verb indicates a new subject-predicate
+    // sentence (the effect body), not a type list continuation.
+    // E.g. "creatures you control get +1/+1" starts with "creatures" (type word) but
+    // has "get" (predicate verb) — this is the effect, not a continuation.
     let after_conjunction = alt((
         value((), tag::<_, _, VerboseError<&str>>("or ")),
         value((), tag("and ")),
@@ -607,7 +633,37 @@ fn continues_player_action_list(after_comma: &str) -> bool {
     .parse(trimmed)
     .map(|(rest, _)| rest)
     .unwrap_or(trimmed);
-    starts_with_type_word(after_conjunction)
+    if !starts_with_type_word(after_conjunction) {
+        return false;
+    }
+    // Type word found — distinguish continuation from new sentence.
+    // A continuation has no predicate verb before the trigger event verb;
+    // a new sentence has a subject + predicate verb ("creatures you control get").
+    !is_new_sentence_not_type_continuation(after_conjunction)
+}
+
+/// Check if the text starting at a type word is a new subject-predicate sentence
+/// rather than a type-list continuation.
+///
+/// A type-list continuation: "planeswalker, or battle enters" — just a type word
+/// optionally followed by more type words and a trigger event verb.
+/// A new effect sentence: "creatures you control get +1/+1" — a type word followed
+/// by a controller clause and a predicate verb before the next comma.
+///
+/// The heuristic: check only the words before the next ", " boundary. If a
+/// predicate verb appears there, it's a new sentence.
+fn is_new_sentence_not_type_continuation(text: &str) -> bool {
+    use crate::parser::oracle_effect::normalize_verb_token;
+    use crate::parser::oracle_effect::subject::PREDICATE_VERBS;
+    // Only examine up to the next ", " (or end of text) to avoid looking through
+    // subsequent clauses that legitimately contain predicate verbs.
+    let clause = text.split(", ").next().unwrap_or(text);
+    let lower = clause.to_lowercase();
+    // Skip the first word (the type word itself) and check remaining words.
+    lower.split_whitespace().skip(1).any(|w| {
+        let normalized = normalize_verb_token(w);
+        PREDICATE_VERBS.contains(&normalized.as_str())
+    })
 }
 
 fn make_base() -> TriggerDefinition {
@@ -3398,16 +3454,41 @@ mod tests {
 
     #[test]
     fn trigger_if_gained_and_lost_life_compound() {
-        // NOTE: "you gained and lost life this turn" is an intra-phrase compound
-        // not yet handled by the nom condition combinator. The combinator parses
-        // "you gained life this turn" but doesn't split on mid-phrase "and".
-        // This is a known gap — the condition falls through to None.
+        // CR 119: "you gained and lost life this turn" is a compound-verb condition
+        // with shared object — two event verbs joined by "and" sharing "life this turn".
         let def = parse_trigger_line(
             "At the beginning of your end step, if you gained and lost life this turn, create a 1/1 black Bat creature token with flying.",
             "Some Card",
         );
-        assert_eq!(def.condition, None);
+        assert!(
+            matches!(
+                &def.condition,
+                Some(TriggerCondition::And { conditions }) if conditions.len() == 2
+            ),
+            "Expected And with 2 conditions, got {:?}",
+            def.condition
+        );
         assert!(def.execute.is_some());
+    }
+
+    #[test]
+    fn trigger_execute_pump_all_creatures() {
+        // Regression: trigger bodies with "creatures you control get +1/+1 until end of turn"
+        // must produce a PumpAll execute effect, not null.
+        let def = parse_trigger_line(
+            "Whenever another creature you control enters, creatures you control get +1/+1 until end of turn.",
+            "Goldnight Commander",
+        );
+        assert!(
+            def.execute.is_some(),
+            "execute should be Some (PumpAll), got None"
+        );
+        let exec = def.execute.as_ref().unwrap();
+        assert!(
+            matches!(*exec.effect, Effect::PumpAll { .. }),
+            "execute effect should be PumpAll, got {:?}",
+            exec.effect
+        );
     }
 
     #[test]
