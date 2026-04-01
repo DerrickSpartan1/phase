@@ -6,10 +6,10 @@ use nom_language::error::VerboseError;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, AdditionalCost,
-    CastingRestriction, Comparator, DieResultBranch, Effect, ModalChoice, ReplacementDefinition,
-    SolveCondition, SpellCastingOption, StaticDefinition, TargetFilter, TriggerDefinition,
-    TypedFilter,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
+    AdditionalCost, CastingRestriction, Comparator, DieResultBranch, Effect, ModalChoice,
+    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticDefinition, TargetFilter,
+    TriggerDefinition, TypedFilter,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -24,7 +24,9 @@ use super::oracle_casting::{
 use super::oracle_class::parse_class_oracle_text;
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::parse_oracle_cost;
-use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context, ParseContext};
+use super::oracle_effect::{
+    parse_effect_chain, parse_effect_chain_with_context, split_leading_conditional, ParseContext,
+};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     extract_keyword_line, is_keyword_cost_line, parse_keyword_from_oracle,
@@ -799,6 +801,27 @@ pub fn parse_oracle_text(
             if has_roll_die_pattern(&lower) {
                 i = attach_die_result_branches_to_chain(&mut def, &lines, i);
             }
+            // CR 608.2c: Cross-line "instead" replacement — when a conditional line
+            // replaces the entire preceding ability, compose them so the engine resolves
+            // the binary choice correctly. The "instead" sub has the condition; the base
+            // ability becomes the fallback when the condition is not met.
+            if is_instead_replacement_line(&effect_line) {
+                if let Some(condition) = def.condition.take() {
+                    if let Some(mut base) = result.abilities.pop() {
+                        // Save the base ability's continuation chain in else_ability
+                        // so the engine can run it when the condition is NOT met.
+                        def.condition = Some(AbilityCondition::ConditionInstead {
+                            inner: Box::new(condition),
+                        });
+                        def.else_ability = base.sub_ability.take();
+                        base.sub_ability = Some(Box::new(def));
+                        result.abilities.push(base);
+                        continue;
+                    }
+                    // No previous ability to compose with — restore condition and push standalone.
+                    def.condition = Some(condition);
+                }
+            }
             result.abilities.push(def);
             continue;
         }
@@ -1458,6 +1481,17 @@ fn is_cant_win_lose_compound(lower: &str) -> bool {
 /// Check if lowercased text contains "roll a d" (die roll table indicator).
 fn has_roll_die_pattern(lower: &str) -> bool {
     lower.contains("roll a d")
+}
+
+/// CR 608.2c: Detect "if [condition], instead [effect]" replacement pattern.
+/// Returns true when the line has a conditional prefix whose body starts with
+/// "instead ". Delegates to `split_leading_conditional` for paren/quote-aware
+/// comma scanning to correctly handle nested condition phrases.
+fn is_instead_replacement_line(text: &str) -> bool {
+    split_leading_conditional(text).is_some_and(|(_, body)| {
+        let body_lower = body.to_lowercase();
+        body_lower.starts_with("instead ")
+    })
 }
 
 /// Check if lowercased text starts with a trigger prefix ("when ", "whenever ", "at ").

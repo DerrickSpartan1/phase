@@ -3687,6 +3687,14 @@ pub enum AbilityCondition {
     /// Handles both optional-targeting parents (empty targets → empty IDs → false)
     /// and mandatory parents (type filter check on moved objects).
     ZoneChangedThisWay { filter: TargetFilter },
+    /// CR 608.2c: General "instead" replacement — wraps any `AbilityCondition` with
+    /// replacement semantics. When the inner condition is met at resolution, the sub's
+    /// effect chain replaces the parent's entire effect chain. When not met, the base
+    /// continuation chain (stored in `else_ability`) runs after the parent's own effect.
+    ///
+    /// Used for cross-line patterns like Delirium ("If [condition], instead [effect]")
+    /// where the conditional replacement and the base effect are on separate Oracle lines.
+    ConditionInstead { inner: Box<AbilityCondition> },
 }
 
 /// Casting-time facts that flow with a spell from casting through resolution.

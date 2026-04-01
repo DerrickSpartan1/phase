@@ -2843,6 +2843,14 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         } else {
             condition
         };
+        // CR 608.2e: Strip leading "instead " when a condition was extracted.
+        // The condition already encodes the replacement gate; "instead" is a
+        // textual marker that the effect parser doesn't need.
+        let text = if condition.is_some() {
+            strip_leading_instead(&text)
+        } else {
+            text
+        };
         let (is_optional, opponent_may_scope, text) = strip_optional_effect_prefix(&text);
         let (repeat_for, text) = strip_for_each_prefix(&text);
         // CR 609.3: "twice" / "N times" suffix — same mechanism as "for each" prefix.
@@ -3556,6 +3564,19 @@ fn parse_search_destination(lower: &str) -> Zone {
     }
 }
 
+/// CR 608.2e: Strip a leading "instead " prefix from effect text using `nom_on_lower`.
+/// Returns the text with "instead " removed if present, or the original text unchanged.
+/// Used after condition extraction to remove the textual replacement marker so the
+/// existing effect parsers can process the body.
+fn strip_leading_instead(text: &str) -> String {
+    let lower = text.to_lowercase();
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |i| value((), tag("instead ")).parse(i)) {
+        rest.to_string()
+    } else {
+        text.to_string()
+    }
+}
+
 /// Capitalize the first letter of a string (for subtype names).
 pub(crate) fn capitalize(s: &str) -> String {
     let mut c = s.chars();
@@ -3567,7 +3588,7 @@ pub(crate) fn capitalize(s: &str) -> String {
 
 // --- Helper parsers ---
 
-fn split_leading_conditional(text: &str) -> Option<(String, String)> {
+pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> {
     let lower = text.to_lowercase();
     if tag::<_, _, VerboseError<&str>>("if ")
         .parse(lower.as_str())
@@ -3729,18 +3750,26 @@ fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCondition>, S
 
     match body {
         Some(body) => {
-            // CR 608.2e: Check for trailing "instead" — indicates replacement semantics.
-            let (body, condition) = if let Some(stripped) = body
-                .to_lowercase()
+            // CR 608.2e: Check for trailing or leading "instead" — indicates replacement
+            // semantics (the kicked/bargained effect replaces the base effect).
+            let body_lower = body.to_lowercase();
+            let (body, condition) = if let Some(stripped) = body_lower
                 .strip_suffix(" instead")
                 .map(|_| &body[..body.len() - " instead".len()])
             {
+                // Trailing: "if kicked, destroy target creature instead"
                 (
                     stripped.to_string(),
                     AbilityCondition::AdditionalCostPaidInstead,
                 )
             } else {
-                (body, AbilityCondition::AdditionalCostPaid)
+                // Leading: "if kicked, instead destroy target creature"
+                let stripped = strip_leading_instead(&body);
+                if stripped.len() < body.len() {
+                    (stripped, AbilityCondition::AdditionalCostPaidInstead)
+                } else {
+                    (body, AbilityCondition::AdditionalCostPaid)
+                }
             };
             (Some(condition), body)
         }
@@ -4333,36 +4362,50 @@ fn parse_condition_text(text: &str) -> Option<AbilityCondition> {
     })
 }
 
-/// CR 608.2e: Parse "if [condition], [effect] instead" — the generic pattern where a
-/// conditional clause replaces the preceding effect entirely (Scute Swarm, etc.).
+/// CR 608.2c: Parse "if [condition], [effect] instead" or "if [condition], instead [effect]"
+/// — the generic pattern where a conditional clause replaces the preceding effect
+/// entirely (Scute Swarm, Traverse the Ulvenwald, etc.).
 ///
 /// Returns a new `AbilityDefinition` with the condition and "instead" effect set.
 /// The caller is responsible for setting the preceding def as `else_ability`.
+///
+/// Delegates to `split_leading_conditional` for the paren/quote-aware condition split.
 fn try_parse_generic_instead_clause(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
-    let lower = text.to_lowercase();
-    // Must end with "instead" (with optional trailing period)
-    let stripped = lower.trim_end_matches('.').trim();
-    if !stripped.ends_with("instead") {
+    // Use paren/quote-aware splitter to find the condition boundary
+    let (condition_fragment, raw_body) = split_leading_conditional(text)?;
+
+    // Strip "if " prefix from condition fragment (case-insensitive)
+    let condition_lower = condition_fragment.to_lowercase();
+    let cond_text = nom_on_lower(&condition_fragment, &condition_lower, |i| {
+        value((), tag("if ")).parse(i)
+    })
+    .map(|((), rest)| rest)
+    .unwrap_or(&condition_fragment)
+    .trim();
+
+    // CR 608.2c: "instead" can appear as a trailing suffix ("if [cond], [effect] instead")
+    // or a leading prefix ("if [cond], instead [effect]"). Both indicate the same
+    // replacement semantics — the conditional effect replaces the preceding one.
+    let trimmed_body = raw_body.trim_end_matches('.').trim();
+    let trimmed_lower = trimmed_body.to_lowercase();
+    let effect_text = if let Some(stripped) = trimmed_body.strip_suffix(" instead") {
+        // Trailing: "if [cond], [effect] instead"
+        stripped.trim()
+    } else if let Some((_, rest)) = nom_on_lower(trimmed_body, &trimmed_lower, |i| {
+        value((), tag("instead ")).parse(i)
+    }) {
+        // Leading: "if [cond], instead [effect]"
+        rest.trim()
+    } else {
         return None;
-    }
-    // Must start with "if " to be a conditional-instead clause
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("if ")
-        .parse(lower.as_str())
-        .ok()?;
-    // Find the comma separating the condition from the effect
-    let comma_pos = rest.find(", ")?;
-    let condition_text = &rest[..comma_pos];
-    let effect_text = &text["if ".len() + comma_pos + ", ".len()..];
-    // Strip trailing " instead" from the effect text
-    let effect_text = effect_text.trim_end_matches('.').trim();
-    let effect_text = effect_text.strip_suffix(" instead")?.trim();
+    };
 
     // Try nom condition combinator first (covers control-count, control-presence,
     // quantity thresholds, turn conditions, etc.), then "{lhs} is {cmp} {rhs}" patterns,
     // then opponent-comparison fallback.
-    let condition = try_nom_condition_as_ability_condition(condition_text)
-        .or_else(|| parse_condition_text(condition_text))
-        .or_else(|| parse_control_count_as_ability_condition(condition_text))?;
+    let condition = try_nom_condition_as_ability_condition(cond_text)
+        .or_else(|| parse_condition_text(cond_text))
+        .or_else(|| parse_control_count_as_ability_condition(cond_text))?;
 
     // Parse the replacement effect
     let instead_def = parse_effect_chain(effect_text, kind);
@@ -7929,6 +7972,45 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn kicker_leading_instead_produces_correct_condition() {
+        // CR 608.2e: "if kicked, instead [effect]" — leading "instead" variant.
+        // Must produce AdditionalCostPaidInstead, same as trailing "instead".
+        let ability = parse_effect_chain(
+            "Destroy target creature or planeswalker with mana value 2 or less. If this spell was kicked, instead destroy target creature or planeswalker",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*ability.effect, Effect::Destroy { .. }),
+            "Base effect should be Destroy"
+        );
+        let sub = ability.sub_ability.as_ref().expect("expected sub_ability");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead)
+        );
+        assert!(
+            matches!(&*sub.effect, Effect::Destroy { .. }),
+            "Kicked effect should be Destroy"
+        );
+    }
+
+    #[test]
+    fn general_condition_leading_instead_strips_prefix() {
+        // CR 608.2e: Ability-word / general condition with leading "instead"
+        // (cross-line pattern like Traverse the Ulvenwald's delirium).
+        let ability = parse_effect_chain(
+            "If you control three or more creatures, instead draw two cards",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*ability.effect, Effect::Draw { .. }),
+            "Expected Draw effect after stripping 'instead', got {:?}",
+            ability.effect
+        );
+        assert!(ability.condition.is_some(), "Condition should be extracted");
     }
 
     #[test]

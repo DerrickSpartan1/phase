@@ -1,6 +1,5 @@
 ---
 source: crates/engine/tests/oracle_parser.rs
-assertion_line: 92
 expression: result
 ---
 {
@@ -72,17 +71,13 @@ expression: result
       "sub_ability": {
         "kind": "Activated",
         "effect": {
-          "type": "ChangeZone",
-          "origin": "Hand",
-          "destination": "Library",
+          "type": "PutAtLibraryPosition",
           "target": {
             "type": "Any"
           },
-          "owner_library": false,
-          "enter_transformed": false,
-          "under_your_control": false,
-          "enter_tapped": false,
-          "enters_attacking": false
+          "position": {
+            "type": "Top"
+          }
         },
         "cost": null,
         "sub_ability": null,

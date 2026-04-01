@@ -500,6 +500,9 @@ pub fn resolve_ability_chain(
                     _ => None,
                 })
                 .is_some_and(|obj| obj.has_keyword(keyword))
+        } else if let Some(AbilityCondition::ConditionInstead { ref inner }) = sub.condition {
+            // CR 608.2c: General "instead" replacement — evaluate the wrapped condition.
+            evaluate_condition(inner, state, ability)
         } else {
             false
         };
@@ -732,13 +735,29 @@ pub fn resolve_ability_chain(
         if let Some(ref condition) = sub.condition {
             // CR 608.2e: "Instead" overrides are terminal — the Cow swap above either
             // replaced the parent's effect (condition met) or didn't (condition not met).
-            // Either way, this sub is fully consumed and must not chain further.
+            // For kicker/ninjutsu/keyword-instead, the base has no continuation chain.
+            // For ConditionInstead, the base chain (else_ability) must run when NOT swapped.
             if matches!(
                 condition,
                 AbilityCondition::AdditionalCostPaidInstead
                     | AbilityCondition::NinjutsuVariantPaidInstead { .. }
                     | AbilityCondition::TargetHasKeywordInstead { .. }
             ) {
+                return Ok(());
+            }
+            if matches!(condition, AbilityCondition::ConditionInstead { .. }) {
+                // CR 608.2c: Swap didn't fire (condition not met). The parent's own
+                // effect has already executed; now run the base continuation chain
+                // stored in else_ability (e.g., the "put into hand, then shuffle"
+                // that follows the base SearchLibrary).
+                if let Some(ref base_chain) = sub.else_ability {
+                    let mut resolved = base_chain.as_ref().clone();
+                    if resolved.targets.is_empty() && !ability.targets.is_empty() {
+                        resolved.targets = ability.targets.clone();
+                    }
+                    resolved.context = ability.context.clone();
+                    resolve_ability_chain(state, &resolved, events, depth + 1)?;
+                }
                 return Ok(());
             }
 
@@ -1074,6 +1093,9 @@ fn evaluate_condition(
                 )
             })
         }
+        // CR 608.2c: General "instead" — delegate to the wrapped inner condition.
+        // The "instead" semantics are handled by the swap/guard in resolve_ability_chain.
+        AbilityCondition::ConditionInstead { inner } => evaluate_condition(inner, state, ability),
     }
 }
 
@@ -1746,6 +1768,131 @@ mod tests {
         assert_eq!(
             state.players[1].life, 18,
             "Expected 2 damage from parent, override should be skipped"
+        );
+    }
+
+    #[test]
+    fn condition_instead_swaps_when_met() {
+        // CR 608.2c: ConditionInstead wraps a general condition with "instead" swap
+        // semantics. When the inner condition is met, the sub's effect replaces the
+        // parent's. The sub's chain continues after the swap.
+        let mut state = GameState::new_two_player(42);
+
+        // Instead sub: deal 5 damage (replaces parent when condition is met)
+        let instead_sub = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: TargetFilter::ParentTarget,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::ConditionInstead {
+            inner: Box::new(AbilityCondition::IsYourTurn { negated: false }),
+        });
+
+        // Parent: deal 2 damage — should be replaced
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(instead_sub);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // IsYourTurn is true (player 0 is active), so the swap fires: 5 damage
+        assert_eq!(
+            state.players[1].life, 15,
+            "Expected 5 damage from instead override"
+        );
+    }
+
+    #[test]
+    fn condition_instead_runs_base_chain_when_not_met() {
+        // CR 608.2c: When ConditionInstead condition is NOT met, the parent effect
+        // runs and the base continuation chain (else_ability) executes after it.
+        let mut state = GameState::new_two_player(42);
+        // Give player 0 cards to draw
+        for i in 0..3 {
+            crate::game::zones::create_object(
+                &mut state,
+                CardId(i + 50),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+
+        // Base continuation: draw 1 card (stored in else_ability)
+        let base_chain = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        // Instead sub: deal 5 damage (with its own chain: draw 2)
+        let instead_chain = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut instead_sub = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: TargetFilter::ParentTarget,
+                damage_source: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::ConditionInstead {
+            // negated: true → NOT your turn → condition NOT met (it IS our turn)
+            inner: Box::new(AbilityCondition::IsYourTurn { negated: true }),
+        })
+        .sub_ability(instead_chain);
+        instead_sub.else_ability = Some(Box::new(base_chain));
+
+        // Parent: deal 2 damage — should execute (condition not met)
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Any,
+                damage_source: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(instead_sub);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // IsYourTurn negated=true → NOT met → parent runs (2 damage) + base chain (draw 1)
+        assert_eq!(
+            state.players[1].life, 18,
+            "Expected 2 damage from parent (condition not met)"
+        );
+        assert_eq!(
+            state.players[0].hand.len(),
+            1,
+            "Expected 1 card drawn from base continuation chain"
         );
     }
 

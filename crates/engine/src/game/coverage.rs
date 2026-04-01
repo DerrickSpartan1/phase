@@ -3096,6 +3096,7 @@ fn condition_variant_name(cond: &AbilityCondition) -> &'static str {
         AbilityCondition::SourceMatchesFilter { .. } => "SourceMatchesFilter",
         AbilityCondition::IsYourTurn { .. } => "IsYourTurn",
         AbilityCondition::ZoneChangedThisWay { .. } => "ZoneChangedThisWay",
+        AbilityCondition::ConditionInstead { .. } => "ConditionInstead",
     }
 }
 
