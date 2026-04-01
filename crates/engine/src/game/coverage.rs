@@ -16,6 +16,7 @@ use crate::types::card_type::CoreType;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::phase::Phase;
+use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -3536,6 +3537,108 @@ fn extract_pt_modifier(lower: &str) -> Option<(i32, i32)> {
     Some((power, toughness))
 }
 
+/// Returns true when the +N/+M counter mention in the Oracle line is NOT a counter-placement
+/// effect — i.e., it's a filter, condition, cost, quantity reference, replacement, or quoted
+/// sub-ability context. These should not be flagged as WrongParameter when no PutCounter
+/// effect is found on the matched element.
+fn is_non_effect_counter_context(lower: &str) -> bool {
+    // Cost context: "+1/+1 counter" appears before a colon (ability cost, not effect)
+    if let Some(colon_pos) = lower.find(':') {
+        if let Some(counter_pos) = lower.find("counter") {
+            // Only suppress if the counter mention is entirely in the cost portion
+            if counter_pos < colon_pos {
+                return true;
+            }
+        }
+    }
+
+    // Filter/condition phrases where the counter is a qualifier, not an operation
+    let filter_phrases = [
+        "with a +",
+        "with a -",
+        "with +",
+        "with -",
+        "has a +",
+        "has a -",
+        "have a +",
+        "have a -",
+        "has five or more",
+        "unless it has",
+        "doesn't have a +",
+        "doesn't have a -",
+        "as long as",
+        "each creature you control with",
+        "each creature you control that has",
+        "creatures you control with three or more",
+        "creatures you control with",
+    ];
+    for phrase in &filter_phrases {
+        if lower.contains(phrase) {
+            // Ensure the +N/+N counter mention is actually near this phrase
+            if let Some(phrase_pos) = lower.find(phrase) {
+                // Look for counter mention after this phrase
+                let after = &lower[phrase_pos..];
+                if after.contains("counter") {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Quantity/for-each references: "number of +1/+1 counters", "for each +1/+1 counter"
+    if lower.contains("number of") && lower.contains("counter") {
+        return true;
+    }
+    if lower.contains("for each") && lower.contains("counter") {
+        return true;
+    }
+
+    // Enters-with replacement: "enters with ... counter" — parsed as replacement, not PutCounter
+    if lower.contains("enters with") && lower.contains("counter") {
+        return true;
+    }
+    if lower.contains("enter with") && lower.contains("counter") {
+        return true;
+    }
+
+    // "remove ... counter" as the main verb (not cost) — removal, not placement
+    if lower.contains("remove a +")
+        || lower.contains("remove a -")
+        || lower.contains("remove all +")
+        || lower.contains("remove all -")
+    {
+        return true;
+    }
+
+    // Conditional/replacement: "if you would put ... counters" or "if you've put ... counters"
+    if (lower.contains("if you would put") || lower.contains("if you've put"))
+        && lower.contains("counter")
+    {
+        return true;
+    }
+
+    // "one or more +1/+1 counters are put" / "would be put" — trigger condition, not effect
+    if lower.contains("counters are put") || lower.contains("counters would be put") {
+        return true;
+    }
+
+    // Quoted sub-ability: counter mention inside granted ability text
+    if let Some(quote_pos) = lower.find('"') {
+        if let Some(counter_pos) = lower.find("counter") {
+            if counter_pos > quote_pos {
+                return true;
+            }
+        }
+    }
+
+    // "distribute ... counters" — different effect type than PutCounter
+    if lower.contains("distribute") && lower.contains("counter") {
+        return true;
+    }
+
+    false
+}
+
 /// Returns true if the Oracle line's +N/+M pattern refers to counters rather than a pump effect.
 fn is_counter_reference(lower: &str) -> bool {
     if lower.contains("counter") {
@@ -3787,6 +3890,18 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             continue;
         }
 
+        // Skip Case card "To solve —" condition lines (structural, like saga chapter markers)
+        if lower.starts_with("to solve") {
+            continue;
+        }
+
+        // Skip Day/Night reminder lines ("If it's neither day nor night, it becomes day...")
+        if lower.starts_with("if it's neither day nor night")
+            || lower.starts_with("if it\u{2019}s neither day nor night")
+        {
+            continue;
+        }
+
         // Strip structural prefixes (bullet, saga chapter, spree mode,
         // attraction/dungeon) to get the semantic effect text for matching.
         let effective_lower = strip_structural_prefix(&lower).unwrap_or_else(|| lower.clone());
@@ -3900,15 +4015,95 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             })
         });
 
+        // Static abilities matched by mode pattern when description matching fails.
+        // Covers "you may cast/play ... from" (GraveyardCastPermission) and
+        // "can't cast spells during" (CantCastDuring/PerTurnCastLimit) lines.
+        let covered_by_static_mode = face.static_abilities.iter().any(|s| match &s.mode {
+            StaticMode::GraveyardCastPermission { .. } => {
+                effective_lower.contains("you may cast") || effective_lower.contains("you may play")
+            }
+            StaticMode::CantCastDuring { .. } => {
+                effective_lower.contains("can't cast spells during")
+                    || effective_lower.contains("can cast spells only during")
+            }
+            StaticMode::PerTurnCastLimit { .. } => {
+                effective_lower.contains("can't cast more than")
+                    || effective_lower.contains("cast no more than")
+            }
+            StaticMode::CantBeCast => {
+                effective_lower.contains("can't cast") && !effective_lower.contains("during")
+            }
+            StaticMode::CantCastFrom => effective_lower.contains("can't cast"),
+            StaticMode::RevealTopOfLibrary { .. } => {
+                effective_lower.contains("play with the top card")
+                    || effective_lower.contains("play with the top")
+            }
+            StaticMode::ReduceCost { .. } => {
+                effective_lower.contains("cost") && effective_lower.contains("less")
+            }
+            StaticMode::RaiseCost { .. } => {
+                effective_lower.contains("cost") && effective_lower.contains("more")
+            }
+            _ => false,
+        });
+
+        // Replacement effects matched by event type when description doesn't align.
+        // Covers "prevent ... damage", "enters with ... counter", and damage redirection.
+        let covered_by_replacement_event = face.replacements.iter().any(|r| match r.event {
+            ReplacementEvent::DamageDone | ReplacementEvent::DealtDamage => {
+                (effective_lower.contains("prevent") && effective_lower.contains("damage"))
+                    || (effective_lower.contains("damage") && effective_lower.contains("instead"))
+            }
+            ReplacementEvent::ChangeZone => {
+                (effective_lower.contains("enters with") || effective_lower.contains("enter with"))
+                    && effective_lower.contains("counter")
+            }
+            _ => false,
+        });
+
+        // Lines that are entirely within quotes are granted sub-abilities —
+        // they are parsed as part of the parent static/trigger ability.
+        let covered_by_quoted = {
+            let trimmed = effective_lower.trim();
+            // If the Oracle line itself is a quoted string from a parent line
+            // (e.g. an ability grants a creature an ability in quotes),
+            // check if ANY ability/trigger/static description contains this text.
+            let is_inside_parent_quotes = face.abilities.iter().any(|a| {
+                a.description.as_ref().is_some_and(|d| {
+                    let dl = d.to_lowercase();
+                    dl.contains(trimmed) && dl.contains('"')
+                })
+            }) || face.static_abilities.iter().any(|s| {
+                s.description.as_ref().is_some_and(|d| {
+                    let dl = d.to_lowercase();
+                    dl.contains(trimmed) && dl.contains('"')
+                })
+            }) || face.triggers.iter().any(|t| {
+                t.description.as_ref().is_some_and(|d| {
+                    let dl = d.to_lowercase();
+                    dl.contains(trimmed) && dl.contains('"')
+                }) || t.execute.as_ref().is_some_and(|e| {
+                    e.description.as_ref().is_some_and(|d| {
+                        let dl = d.to_lowercase();
+                        dl.contains(trimmed) && dl.contains('"')
+                    })
+                })
+            });
+            is_inside_parent_quotes
+        };
+
         if matched.is_empty()
             && !covered_by_keyword
             && !covered_by_casting
             && !covered_by_additional_cost
             && !covered_by_enchant
             && !covered_by_replacement
+            && !covered_by_replacement_event
             && !covered_by_modal
             && !covered_by_saga
             && !covered_by_attraction
+            && !covered_by_static_mode
+            && !covered_by_quoted
         {
             // Unmatched line → SilentDrop (only for substantive lines)
             if effective_lower.len() > 20 {
@@ -3973,36 +4168,40 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             if power == 0 && toughness == 0 {
                 // +0/+0 is meaningless, skip
             } else if is_counter_reference(&lower_for_pt) {
-                let normalized =
-                    crate::parser::oracle_effect::counter::normalize_counter_type(&format!(
-                        "{}{}/{}{}",
-                        if power >= 0 { "+" } else { "" },
-                        power,
-                        if toughness >= 0 { "+" } else { "" },
-                        toughness
-                    ));
-                let any_has_counter = matched.iter().any(|e| e.has_counter_effect(&normalized))
-                    || modal_any(&|d: &AbilityDefinition| {
-                        matches!(
-                            &*d.effect,
-                            Effect::PutCounter { counter_type: ct, .. }
-                            | Effect::PutCounterAll { counter_type: ct, .. }
-                            if ct == &normalized
-                        )
-                    });
-                if !any_has_counter {
-                    findings.push(SemanticFinding::WrongParameter {
-                        oracle_line: line.to_string(),
-                        field: "counter".to_string(),
-                        expected: format!(
+                // Skip false positives: counter mentioned in filter, condition, cost,
+                // quantity reference, replacement, or quoted sub-ability context
+                if !is_non_effect_counter_context(&lower_for_pt) {
+                    let normalized =
+                        crate::parser::oracle_effect::counter::normalize_counter_type(&format!(
                             "{}{}/{}{}",
                             if power >= 0 { "+" } else { "" },
                             power,
                             if toughness >= 0 { "+" } else { "" },
                             toughness
-                        ) + " counter",
-                        actual: "no matching counter effect on this line's element".to_string(),
-                    });
+                        ));
+                    let any_has_counter = matched.iter().any(|e| e.has_counter_effect(&normalized))
+                        || modal_any(&|d: &AbilityDefinition| {
+                            matches!(
+                                &*d.effect,
+                                Effect::PutCounter { counter_type: ct, .. }
+                                | Effect::PutCounterAll { counter_type: ct, .. }
+                                if ct == &normalized
+                            )
+                        });
+                    if !any_has_counter {
+                        findings.push(SemanticFinding::WrongParameter {
+                            oracle_line: line.to_string(),
+                            field: "counter".to_string(),
+                            expected: format!(
+                                "{}{}/{}{}",
+                                if power >= 0 { "+" } else { "" },
+                                power,
+                                if toughness >= 0 { "+" } else { "" },
+                                toughness
+                            ) + " counter",
+                            actual: "no matching counter effect on this line's element".to_string(),
+                        });
+                    }
                 }
             } else {
                 let any_has_pump = matched.iter().any(|e| e.has_pump(power, toughness))
@@ -4213,6 +4412,105 @@ fn is_keyword_line(lower: &str) -> bool {
         "companion \u{2014}",
         "companion\u{2014}",
         "friends forever",
+        "prototype ",
+        "overload ",
+        "overload\u{2014}",
+        "overload {",
+        "bestow ",
+        "bestow\u{2014}",
+        "dash ",
+        "dash\u{2014}",
+        "emerge ",
+        "emerge\u{2014}",
+        "evoke ",
+        "evoke\u{2014}",
+        "ninjutsu ",
+        "ninjutsu\u{2014}",
+        "craft with ",
+        "craft\u{2014}",
+        "disturb ",
+        "disturb\u{2014}",
+        "madness ",
+        "madness\u{2014}",
+        "miracle ",
+        "miracle\u{2014}",
+        "morph ",
+        "morph\u{2014}",
+        "megamorph ",
+        "megamorph\u{2014}",
+        "spectacle ",
+        "spectacle\u{2014}",
+        "encore ",
+        "encore\u{2014}",
+        "foretell ",
+        "foretell\u{2014}",
+        "blitz ",
+        "blitz\u{2014}",
+        "embalm ",
+        "embalm\u{2014}",
+        "eternalize ",
+        "eternalize\u{2014}",
+        "unearth ",
+        "unearth\u{2014}",
+        "flashback ",
+        "flashback\u{2014}",
+        "retrace ",
+        "adapt ",
+        "crew ",
+        "reconfigure ",
+        "channel\u{2014}",
+        "channel ",
+        "boast\u{2014}",
+        "boast ",
+        "scavenge ",
+        "scavenge\u{2014}",
+        "prowl ",
+        "prowl\u{2014}",
+        "buyback ",
+        "buyback\u{2014}",
+        "entwine ",
+        "entwine\u{2014}",
+        "amplify ",
+        "bloodrush\u{2014}",
+        "bloodrush ",
+        "outlast ",
+        "forecast\u{2014}",
+        "forecast ",
+        "transfigure ",
+        "transmute ",
+        "bargain",
+        "casualty ",
+        "connive",
+        "exploit",
+        "offspring ",
+        "enlist",
+        "living weapon",
+        "living metal",
+        "totem armor",
+        "web-slinging ",
+        "fabricate ",
+        "investigate",
+        "food ",
+        "squad ",
+        "backup ",
+        "devour ",
+        "modular ",
+        "vanishing ",
+        "fading ",
+        "tribute ",
+        "hideaway ",
+        "storm",
+        "annihilator ",
+        "battle cry",
+        "exalted",
+        "soulbond",
+        "evolve",
+        "riot",
+        "ascend",
+        "afterlife ",
+        "adventure ",
+        "mobilize ",
+        "gift ",
     ];
     // Check if the line starts with any keyword (possibly comma-separated list)
     let trimmed = lower.trim().trim_end_matches('.');
