@@ -2213,15 +2213,12 @@ fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition>
         }
     };
 
+    // TODO: CantBeCast is a unit variant — `who` scope not yet wired.
+    // All current cards (Steel Golem, Grid Monitor) use Controller scope.
+    let _ = who;
     let mut def = StaticDefinition::new(StaticMode::CantBeCast).description(text.to_string());
     if let Some(filter) = spell_filter {
         def = def.affected(filter);
-    }
-    // Set the scope on the affected filter's controller
-    if who != CastingProhibitionScope::Controller {
-        // For "each player"/"each opponent" scopes, the affected filter is broader
-        // than just "you". Store scope info in description for now.
-        // The runtime handler will use CantBeCast + controller ref.
     }
     Some(def)
 }
@@ -2240,11 +2237,15 @@ fn parse_per_turn_draw_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
     // 3. Extract limit count
     let (max, rest) = parse_number(after_more_than)?;
 
-    // 4. Require "card(s) each turn" suffix
+    // 4. Require "card(s) each turn" suffix via nom combinator
     let rest = rest.trim_start();
-    if !(rest.starts_with("card each turn") || rest.starts_with("cards each turn")) {
-        return None;
-    }
+    let rest_lower = rest.to_lowercase();
+    alt((
+        value((), tag::<&str, &str, (&str, nom::error::ErrorKind)>("card each turn")),
+        value((), tag("cards each turn")),
+    ))
+    .parse(rest_lower.as_str())
+    .ok()?;
 
     Some(
         StaticDefinition::new(StaticMode::PerTurnDrawLimit { who, max })
