@@ -1148,6 +1148,16 @@ fn evaluate_replacement_condition(
                 crate::game::quantity::resolve_quantity(state, rhs, controller, source_id);
             !comparator.evaluate(lhs_val, rhs_val)
         }
+        // CR 702.138c: "escapes with" — applies only when the source was cast via escape.
+        // Check cast_from_zone on the entering permanent as a proxy for escape.
+        ReplacementCondition::CastViaEscape => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|o| o.cast_from_zone == Some(Zone::Graveyard)),
+        // CR 702.33d: "if was kicked" — applies only when the kicker cost was paid.
+        // TODO: Propagate additional_cost_paid to GameObject for precise evaluation.
+        // For now, conservatively apply the replacement (counters always placed).
+        ReplacementCondition::CastViaKicker { .. } => true,
         // Unrecognized condition — always applies (enters tapped) as a safe default.
         // The engine recognizes the replacement but cannot evaluate the condition,
         // so it conservatively taps the land.

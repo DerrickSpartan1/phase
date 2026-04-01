@@ -3892,6 +3892,16 @@ pub enum ReplacementCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         active_player_req: Option<ControllerRef>,
     },
+    /// CR 702.138c: "escapes with" — replacement applies only when the creature
+    /// entered the battlefield via escape.
+    CastViaEscape,
+    /// CR 702.33d: "if was kicked" — replacement applies only when the creature
+    /// was cast with its kicker cost paid. Optional `cost_text` narrows to a specific
+    /// kicker variant (e.g., "its {1}{R} kicker").
+    CastViaKicker {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_text: Option<String>,
+    },
     /// "unless you revealed a [type] card" / "unless you paid {mana}"
     /// CR 614.1d — Generic condition text that the engine does not yet decompose further.
     /// Using this variant lets the replacement be recognized for coverage while deferring

@@ -163,8 +163,10 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
         );
     }
 
-    // --- "[Subject] enters with N [type] counter(s)" ---
-    if lower.contains("enters") && lower.contains("counter") {
+    // --- "[Subject] enters/escapes with N [type] counter(s)" ---
+    // CR 614.1c: Handles "enters with", "escapes with" (CR 702.138), and
+    // kicker-conditional "if was kicked, it enters with" (CR 702.33d).
+    if (lower.contains("enters") || lower.contains("escapes")) && lower.contains("counter") {
         if let Some(def) = parse_enters_with_counters(&norm_lower, &text) {
             return Some(def);
         }
@@ -546,14 +548,24 @@ fn extract_life_payment(text: &str) -> Option<i32> {
     num_str.parse().ok()
 }
 
-/// Parse "enters with N [type] counter(s)" patterns into a Moved replacement.
-/// Handles both self ("~ enters with") and other ("each other creature ... enters with").
+/// Parse "enters/escapes with N [type] counter(s)" patterns into a Moved replacement.
+/// Handles self ("~ enters with"), other ("each other creature ... enters with"),
+/// escape ("~ escapes with", CR 702.138c), and kicker-conditional
+/// ("if ~ was kicked, it enters with", CR 702.33d).
 fn parse_enters_with_counters(
     norm_lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
-    // Find "with [N] [type] counter" to extract count and counter type
-    let after_with = strip_after(norm_lower, "with ")?;
+    // Detect kicker-conditional prefix: "if ~ was kicked [with its {cost} kicker], it enters with"
+    // CR 702.33d: kicker condition gates the replacement effect.
+    let (kicker_condition, work_text) = extract_kicker_enters_condition(norm_lower);
+
+    // CR 702.138c: "escapes with" is semantically "enters with" gated on escape.
+    let is_escape = work_text.contains("escapes with");
+
+    // Find "with [N] [type] counter" to extract count and counter type.
+    // For escape, the "with" follows "escapes"; for enters, it follows "enters".
+    let after_with = strip_after(work_text, "with ")?;
     // Skip "an additional" if present
     let after_additional = alt((
         tag::<_, _, VerboseError<&str>>("an additional "),
@@ -591,7 +603,7 @@ fn parse_enters_with_counters(
         tag::<_, _, VerboseError<&str>>("each other "),
         tag("other "),
     ))
-    .parse(norm_lower)
+    .parse(work_text)
     .ok()
     .map(|(rest, _)| rest)
     .filter(|s| s.contains("creature") || s.contains("permanent"));
@@ -624,7 +636,67 @@ fn parse_enters_with_counters(
     if let Some(filter) = valid_card {
         def = def.valid_card(filter);
     }
+
+    // Apply condition: escape or kicker
+    if is_escape {
+        def = def.condition(ReplacementCondition::CastViaEscape);
+    } else if let Some(cond) = kicker_condition {
+        def = def.condition(cond);
+    }
+
     Some(def)
+}
+
+/// Extract kicker-conditional prefix from "if ~ was kicked [with its {cost} kicker], it enters with..."
+/// Returns `(Option<ReplacementCondition>, remaining_text)` where remaining_text has the
+/// conditional prefix stripped (just "it enters with..." or the original text if no prefix).
+/// CR 702.33d
+fn extract_kicker_enters_condition(norm_lower: &str) -> (Option<ReplacementCondition>, &str) {
+    // Match "if ~ was kicked" or "if this creature was kicked"
+    let after_if = match tag::<_, _, VerboseError<&str>>("if ")
+        .parse(norm_lower)
+        .ok()
+    {
+        Some((rest, _)) => rest,
+        None => return (None, norm_lower),
+    };
+
+    // Find "was kicked" — subject can be "~", "it", "this creature", etc.
+    let after_kicked = if let Some(pos) = after_if.find("was kicked") {
+        &after_if[pos + "was kicked".len()..]
+    } else {
+        return (None, norm_lower);
+    };
+
+    // Optional "with its {cost} kicker" variant specification
+    let (cost_text, after_kicker_clause) =
+        if let Some(rest) = after_kicked.strip_prefix(" with its ") {
+            // Extract cost text up to " kicker"
+            if let Some(kicker_pos) = rest.find(" kicker") {
+                let cost = rest[..kicker_pos].trim().to_string();
+                (Some(cost), &rest[kicker_pos + " kicker".len()..])
+            } else {
+                (None, after_kicked)
+            }
+        } else {
+            (None, after_kicked)
+        };
+
+    // Expect ", it enters with" or ", it enters the battlefield with"
+    let body = after_kicker_clause
+        .strip_prefix(", it enters with")
+        .or_else(|| after_kicker_clause.strip_prefix(", it enters the battlefield with"));
+
+    match body {
+        Some(_) => {
+            // Reconstruct the enters-with text for downstream parsing.
+            // "it enters with..." is what parse_enters_with_counters needs.
+            let enters_start = norm_lower.len() - after_kicker_clause.len() + 2; // skip ", "
+            let condition = ReplacementCondition::CastViaKicker { cost_text };
+            (Some(condition), &norm_lower[enters_start..])
+        }
+        None => (None, norm_lower),
+    }
 }
 
 /// Parse "[Type] enter tapped" / "[Type] enters tapped" — external replacement effects.
@@ -890,14 +962,10 @@ fn parse_damage_target_phrase(
 
 /// Scan for damage modification formula at word boundaries using nom combinators.
 fn scan_damage_modification(text: &str) -> Option<DamageModification> {
-    let mut remaining = text;
-    while !remaining.is_empty() {
-        if let Ok((_, modification)) = parse_damage_modification_phrase(remaining) {
-            return Some(modification);
-        }
-        remaining = remaining
-            .find(' ')
-            .map_or("", |i| remaining[i + 1..].trim_start());
+    if let Some(modification) =
+        nom_primitives::scan_at_word_boundaries(text, parse_damage_modification_phrase)
+    {
+        return Some(modification);
     }
     // Fallback: "that much damage plus/minus N" uses strip_after for the number
     if let Some(rest) = strip_after(text, "that much damage plus ") {
@@ -938,24 +1006,16 @@ fn parse_damage_modification_phrase(
 /// Scan for combat damage scope at word boundaries.
 /// "noncombat" tried first since "combat damage" is a substring.
 fn scan_combat_scope(text: &str) -> Option<CombatDamageScope> {
-    let mut remaining = text;
-    while !remaining.is_empty() {
-        if let Ok((_, scope)) = alt((
+    nom_primitives::scan_at_word_boundaries(text, |input| {
+        alt((
             value(
                 CombatDamageScope::NoncombatOnly,
                 tag::<_, _, VerboseError<&str>>("noncombat damage"),
             ),
             value(CombatDamageScope::CombatOnly, tag("combat damage")),
         ))
-        .parse(remaining)
-        {
-            return Some(scope);
-        }
-        remaining = remaining
-            .find(' ')
-            .map_or("", |i| remaining[i + 1..].trim_start());
-    }
-    None
+        .parse(input)
+    })
 }
 
 fn parse_color_word(word: &str) -> Option<ManaColor> {
@@ -1755,6 +1815,99 @@ mod tests {
                     )))));
             }
             other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    // ── Escape-with-counters ──
+
+    #[test]
+    fn escape_with_three_counters() {
+        // CR 702.138c: "This creature escapes with three +1/+1 counters on it."
+        let def = parse_replacement_line(
+            "This creature escapes with three +1/+1 counters on it.",
+            "Voracious Typhon",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Fixed { value: 3 },
+                ..
+            } if counter_type == "P1P1"
+        ));
+        assert_eq!(def.condition, Some(ReplacementCondition::CastViaEscape));
+    }
+
+    #[test]
+    fn escape_with_one_counter() {
+        let def = parse_replacement_line(
+            "This creature escapes with a +1/+1 counter on it.",
+            "Underworld Rage-Hound",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            } if counter_type == "P1P1"
+        ));
+        assert_eq!(def.condition, Some(ReplacementCondition::CastViaEscape));
+    }
+
+    // ── Kicker-conditional enters-with-counters ──
+
+    #[test]
+    fn kicked_enters_with_counter() {
+        // CR 702.33d: "If this creature was kicked, it enters with a +1/+1 counter on it."
+        let def = parse_replacement_line(
+            "If this creature was kicked, it enters with a +1/+1 counter on it and with flying.",
+            "Ana Battlemage",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            } if counter_type == "P1P1"
+        ));
+        assert!(matches!(
+            def.condition,
+            Some(ReplacementCondition::CastViaKicker { cost_text: None })
+        ));
+    }
+
+    #[test]
+    fn kicked_with_specific_cost_enters_with_counters() {
+        // CR 702.33d: "If this creature was kicked with its {1}{R} kicker, it enters with
+        // two +1/+1 counters on it and with first strike."
+        let def = parse_replacement_line(
+            "If this creature was kicked with its {1}{R} kicker, it enters with two +1/+1 counters on it and with first strike.",
+            "Necravolver",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            } if counter_type == "P1P1"
+        ));
+        match &def.condition {
+            Some(ReplacementCondition::CastViaKicker { cost_text }) => {
+                assert_eq!(cost_text.as_deref(), Some("{1}{r}"));
+            }
+            other => panic!("Expected CastViaKicker, got {other:?}"),
         }
     }
 

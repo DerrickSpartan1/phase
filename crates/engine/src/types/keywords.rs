@@ -283,9 +283,12 @@ pub enum Keyword {
     /// CR 702.41a: Affinity for [type] — this spell costs {1} less for each [type] you control.
     Affinity(TypedFilter),
 
+    /// CR 702.24a: Cumulative upkeep — triggered ability that imposes an increasing cost.
+    /// The cost string contains the per-age-counter cost (mana, life payment, sacrifice, etc.).
+    CumulativeUpkeep(String),
+
     // Simple keywords (no params)
     Banding,
-    Cumulative,
     Epic,
     Fuse,
     Gravestorm,
@@ -806,7 +809,7 @@ impl FromStr for Keyword {
             "livingmetal" => Ok(Keyword::LivingMetal),
             "firebending" => Ok(Keyword::Firebending(1)),
             "hideaway" => Ok(Keyword::Hideaway(4)),
-            "cumulative" => Ok(Keyword::Cumulative),
+            "cumulative" => Ok(Keyword::CumulativeUpkeep(String::new())),
             "ripple" => Ok(Keyword::Ripple),
             "totem" => Ok(Keyword::Totem),
             _ => Ok(Keyword::Unknown(s.to_string())),
@@ -972,7 +975,10 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Dethrone" => Ok(Keyword::Dethrone),
         "DoubleTeam" => Ok(Keyword::DoubleTeam),
         "LivingMetal" => Ok(Keyword::LivingMetal),
-        "Cumulative" => Ok(Keyword::Cumulative),
+        "Cumulative" => Ok(Keyword::CumulativeUpkeep(String::new())),
+        "CumulativeUpkeep" => Ok(Keyword::CumulativeUpkeep(
+            data.as_str().unwrap_or("").to_string(),
+        )),
         "Ripple" => Ok(Keyword::Ripple),
         "Totem" => Ok(Keyword::Totem),
         // Parameterized: ManaCost (new keywords)
@@ -1427,7 +1433,7 @@ mod tests {
         assert_eq!(Keyword::from_str("Hideaway").unwrap(), Keyword::Hideaway(4));
         assert_eq!(
             Keyword::from_str("Cumulative").unwrap(),
-            Keyword::Cumulative
+            Keyword::CumulativeUpkeep(String::new())
         );
         assert_eq!(Keyword::from_str("Ripple").unwrap(), Keyword::Ripple);
         assert_eq!(Keyword::from_str("Totem").unwrap(), Keyword::Totem);

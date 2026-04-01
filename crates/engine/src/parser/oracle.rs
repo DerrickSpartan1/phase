@@ -837,6 +837,17 @@ pub fn parse_oracle_text(
             }
         }
 
+        // CR 702.24: Cumulative upkeep — parse cost from Oracle text.
+        // Must run before is_keyword_cost_line so the line is not silently skipped.
+        // Format: "Cumulative upkeep—[cost]" or "Cumulative upkeep {mana}" (space-separated).
+        if lower_starts_with(&lower, "cumulative upkeep") {
+            if let Some(kw) = parse_cumulative_upkeep_keyword(&line) {
+                result.extracted_keywords.push(kw);
+                i += 1;
+                continue;
+            }
+        }
+
         // Priority 13: Keyword cost lines — skip (handled by MTGJSON keywords)
         if is_keyword_cost_line(&lower) {
             i += 1;
@@ -1745,8 +1756,9 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
     if lower.contains("as ") && lower.contains("enters") && lower.contains("choose a") {
         return true;
     }
-    // "enters ... counter" pattern
-    if lower.contains("enters") && lower.contains("counter") {
+    // "enters/escapes ... counter" pattern
+    // CR 614.1c + CR 702.138c: covers "enters with N counters" and "escapes with N counters"
+    if (lower.contains("enters") || lower.contains("escapes")) && lower.contains("counter") {
         return true;
     }
     // CR 614.1a: Mana production replacement
@@ -2252,6 +2264,38 @@ fn parse_harmonize_keyword(line: &str) -> Option<Keyword> {
 
     let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
     Some(Keyword::Harmonize(cost))
+}
+
+/// CR 702.24: Parse "Cumulative upkeep—[cost]" or "Cumulative upkeep {mana}" from Oracle text.
+/// Extracts the per-age-counter cost as a string and returns `Keyword::CumulativeUpkeep(cost)`.
+/// Handles both em-dash format (non-mana costs) and space-separated format (mana-only costs).
+fn parse_cumulative_upkeep_keyword(line: &str) -> Option<Keyword> {
+    let lower = line.to_lowercase();
+
+    // Try em-dash format first: "Cumulative upkeep—Pay 2 life. (reminder)"
+    if let Some((_, after_dash)) = line.split_once('\u{2014}') {
+        let cost_text = super::oracle_util::strip_reminder_text(after_dash)
+            .trim()
+            .trim_end_matches('.')
+            .to_string();
+        if !cost_text.is_empty() {
+            return Some(Keyword::CumulativeUpkeep(cost_text));
+        }
+    }
+
+    // Space-separated format: "Cumulative upkeep {R} (reminder)" or "Cumulative upkeep {G} or {W}"
+    let ((), rest) = nom_on_lower(line, &lower, |i| {
+        value((), tag("cumulative upkeep ")).parse(i)
+    })?;
+
+    let cost_text = super::oracle_util::strip_reminder_text(rest)
+        .trim()
+        .trim_end_matches('.')
+        .to_string();
+    if cost_text.is_empty() {
+        return None;
+    }
+    Some(Keyword::CumulativeUpkeep(cost_text))
 }
 
 #[cfg(test)]
@@ -4315,6 +4359,92 @@ mod tests {
             Keyword::Harmonize(cost) => {
                 assert_eq!(cost.mana_value(), 10);
             }
+            _ => unreachable!(),
+        }
+    }
+
+    // ── Cumulative upkeep (CR 702.24) ──
+
+    #[test]
+    fn parse_cumulative_upkeep_mana_cost() {
+        // CR 702.24: Mana-only cumulative upkeep — space-separated format.
+        let r = parse(
+            "Cumulative upkeep {1} (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)",
+            "Mystic Remora",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let cu_kw = r
+            .extracted_keywords
+            .iter()
+            .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
+        assert!(cu_kw.is_some(), "CumulativeUpkeep keyword not extracted");
+        match cu_kw.unwrap() {
+            Keyword::CumulativeUpkeep(cost) => assert_eq!(cost, "{1}"),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn parse_cumulative_upkeep_life_payment() {
+        // CR 702.24: Non-mana cost with em-dash separator.
+        let r = parse(
+            "Cumulative upkeep\u{2014}Pay 2 life. (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)",
+            "Inner Sanctum",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let cu_kw = r
+            .extracted_keywords
+            .iter()
+            .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
+        assert!(cu_kw.is_some(), "CumulativeUpkeep keyword not extracted");
+        match cu_kw.unwrap() {
+            Keyword::CumulativeUpkeep(cost) => assert_eq!(cost, "Pay 2 life"),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn parse_cumulative_upkeep_sacrifice() {
+        // CR 702.24: Sacrifice cost.
+        let r = parse(
+            "Cumulative upkeep\u{2014}Sacrifice a land. (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)",
+            "Polar Kraken",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        let cu_kw = r
+            .extracted_keywords
+            .iter()
+            .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
+        assert!(cu_kw.is_some(), "CumulativeUpkeep keyword not extracted");
+        match cu_kw.unwrap() {
+            Keyword::CumulativeUpkeep(cost) => assert_eq!(cost, "Sacrifice a land"),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn parse_cumulative_upkeep_or_mana() {
+        // CR 702.24: "{G} or {W}" — alternative mana cost.
+        let r = parse(
+            "Cumulative upkeep {G} or {W} (At the beginning of your upkeep, put an age counter on this permanent, then sacrifice it unless you pay its upkeep cost for each age counter on it.)",
+            "Elephant Grass",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        let cu_kw = r
+            .extracted_keywords
+            .iter()
+            .find(|k| matches!(k, Keyword::CumulativeUpkeep(_)));
+        assert!(cu_kw.is_some(), "CumulativeUpkeep keyword not extracted");
+        match cu_kw.unwrap() {
+            Keyword::CumulativeUpkeep(cost) => assert_eq!(cost, "{G} or {W}"),
             _ => unreachable!(),
         }
     }

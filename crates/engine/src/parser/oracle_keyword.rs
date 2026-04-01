@@ -446,7 +446,13 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::StartYourEngines => "start your engines!".to_string(),
         Keyword::Soulbond => "soulbond".to_string(),
         Keyword::Banding => "banding".to_string(),
-        Keyword::Cumulative => "cumulative".to_string(),
+        Keyword::CumulativeUpkeep(ref cost) => {
+            if cost.is_empty() {
+                "cumulative upkeep".to_string()
+            } else {
+                format!("cumulative upkeep\u{2014}{cost}")
+            }
+        }
         Keyword::Epic => "epic".to_string(),
         Keyword::Fuse => "fuse".to_string(),
         Keyword::Gravestorm => "gravestorm".to_string(),
@@ -620,7 +626,6 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
         "impending",
         "reconfigure",
         "suspend",
-        "cumulative upkeep",
         "level up",
         "transfigure",
         "transmute",
