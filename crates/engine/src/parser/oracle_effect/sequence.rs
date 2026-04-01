@@ -660,14 +660,18 @@ pub(super) fn parse_intrinsic_continuation_ast(
             // Safety net: verify the clause splitter correctly separated all boundaries.
             // If this fires, a verb is missing from starts_clause_text() or the splitter's
             // search_start guard is incorrectly suppressing a split.
-            // "shuffle" is excluded — it's part of the search compound action (CR 701.18a).
+            // CR 701.18a: Shuffle clauses are part of the search compound action —
+            // both "shuffle" and "that player shuffles" are valid terminators.
             #[cfg(debug_assertions)]
             if let Some(then_pos) = lower.rfind(", then ") {
                 let after_then = lower[then_pos + ", then ".len()..].trim_end_matches('.');
-                if tag::<_, _, VerboseError<&str>>("shuffle")
-                    .parse(after_then)
-                    .is_err()
-                {
+                let is_shuffle_clause = alt((
+                    value((), tag::<_, _, VerboseError<&str>>("shuffle")),
+                    value((), tag("that player shuffles")),
+                ))
+                .parse(after_then)
+                .is_ok();
+                if !is_shuffle_clause {
                     debug_assert!(
                         !starts_clause_text(after_then),
                         "Unsplit clause boundary in SearchLibrary continuation: \
