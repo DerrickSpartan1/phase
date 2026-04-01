@@ -7,10 +7,9 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
     AdditionalCost, AggregateFunction, ChoiceType, ContinuousModification, ControllerRef,
     CountScope, DelayedTriggerCondition, DoublePTMode, Duration, Effect, FilterProp,
-    GainLifePlayer, ManaProduction, ModalChoice, ObjectProperty, PlayerFilter, PtValue,
-    QuantityExpr, QuantityRef, ReplacementDefinition, ReplacementMode, SharedQuality,
-    StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
-    ZoneRef,
+    GainLifePlayer, ManaProduction, ObjectProperty, PlayerFilter, PtValue, QuantityExpr,
+    QuantityRef, ReplacementDefinition, ReplacementMode, SharedQuality, StaticCondition,
+    StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -3812,37 +3811,61 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             .collect();
 
         // Check if this line's text matches any modal mode_description.
-        // Collects mode_descriptions from the card-level modal, trigger
-        // execute modals, and ability-level modals.
-        let covered_by_modal = {
+        // Collects matching mode abilities so property checks (duration, pump,
+        // counter) can inspect them even when the top-level ability description
+        // doesn't match the Oracle line.
+        let modal_matched_abilities: Vec<&AbilityDefinition> = {
             let norm_modal = normalize_for_matching(&effective_lower, &card_name_lower);
-            let matches_mode_desc = |m: &ModalChoice| {
-                m.mode_descriptions.iter().any(|desc| {
-                    let dl = desc.to_lowercase();
-                    let dn = normalize_for_matching(&dl, &card_name_lower);
-                    dl.contains(effective_lower.as_str())
-                        || effective_lower.contains(dl.as_str())
-                        || dl.contains(norm_modal.as_str())
-                        || norm_modal.contains(dl.as_str())
-                        || dn.contains(effective_lower.as_str())
-                        || effective_lower.contains(dn.as_str())
-                })
+            let desc_matches = |desc: &str| {
+                let dl = desc.to_lowercase();
+                let dn = normalize_for_matching(&dl, &card_name_lower);
+                dl.contains(effective_lower.as_str())
+                    || effective_lower.contains(dl.as_str())
+                    || dl.contains(norm_modal.as_str())
+                    || norm_modal.contains(dl.as_str())
+                    || dn.contains(effective_lower.as_str())
+                    || effective_lower.contains(dn.as_str())
             };
-            // Card-level modal (sorcery/instant modal spells)
-            face.modal.as_ref().is_some_and(&matches_mode_desc)
-                // Trigger execute modals (triggered modal abilities)
-                || face.triggers.iter().any(|t| {
-                    t.execute
-                        .as_ref()
-                        .and_then(|e| e.modal.as_ref())
-                        .is_some_and(&matches_mode_desc)
-                })
-                // Ability-level modals (activated modal abilities)
-                || face
-                    .abilities
-                    .iter()
-                    .any(|a| a.modal.as_ref().is_some_and(&matches_mode_desc))
+            let mut modal_abs: Vec<&AbilityDefinition> = Vec::new();
+            // Collect from card-level modal + top-level abilities (spell modes)
+            if let Some(ref modal) = face.modal {
+                for (i, desc) in modal.mode_descriptions.iter().enumerate() {
+                    if desc_matches(desc) {
+                        if let Some(ab) = face.abilities.get(i) {
+                            modal_abs.push(ab);
+                        }
+                    }
+                }
+            }
+            // Collect from ability-level modals (activated/triggered modal abilities)
+            for a in &face.abilities {
+                if let Some(ref modal) = a.modal {
+                    for (i, desc) in modal.mode_descriptions.iter().enumerate() {
+                        if desc_matches(desc) {
+                            if let Some(ab) = a.mode_abilities.get(i) {
+                                modal_abs.push(ab);
+                            }
+                        }
+                    }
+                }
+            }
+            // Collect from trigger execute modals
+            for t in &face.triggers {
+                if let Some(ref exec) = t.execute {
+                    if let Some(ref modal) = exec.modal {
+                        for (i, desc) in modal.mode_descriptions.iter().enumerate() {
+                            if desc_matches(desc) {
+                                if let Some(ab) = exec.mode_abilities.get(i) {
+                                    modal_abs.push(ab);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            modal_abs
         };
+        let covered_by_modal = !modal_matched_abilities.is_empty();
 
         // Check if this line matches a saga chapter trigger's effect
         let covered_by_saga = is_saga_chapter_line(&lower) && !face.triggers.is_empty();
@@ -3896,13 +3919,33 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             continue;
         }
 
+        // Keyword/cost definition lines are structural — skip property checks
+        // since they don't represent in-game effects with durations or P/T values.
+        if matched.is_empty()
+            && (covered_by_keyword
+                || covered_by_enchant
+                || covered_by_casting
+                || covered_by_additional_cost)
+        {
+            continue;
+        }
+
         // --- Check matched element(s) for expected properties ---
         // Use the FIRST matched element for property checks (most specific match).
         // If multiple match, any having the property is sufficient.
+        // For modal lines, also check the matched mode abilities directly.
+
+        // Helper: check if any modal-matched ability satisfies a predicate via ability_tree_any
+        let modal_any = |pred: &dyn Fn(&AbilityDefinition) -> bool| -> bool {
+            modal_matched_abilities
+                .iter()
+                .any(|a| ability_tree_any(a, &|d| pred(d)))
+        };
 
         // 1. Condition check: does Oracle text contain condition language?
         if let Some(cond_label) = line_has_condition_text(&lower) {
-            let any_has_condition = matched.iter().any(|e| e.has_condition() || e.has_unless());
+            let any_has_condition = matched.iter().any(|e| e.has_condition() || e.has_unless())
+                || modal_any(&|d: &AbilityDefinition| d.condition.is_some());
             if !any_has_condition && !covered_by_casting {
                 findings.push(SemanticFinding::DroppedCondition {
                     oracle_line: line.to_string(),
@@ -3913,7 +3956,8 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
 
         // 2. Duration check: does Oracle text contain duration language?
         if let Some(dur_label) = line_has_duration_text(&lower) {
-            let any_has_duration = matched.iter().any(|e| e.has_duration());
+            let any_has_duration = matched.iter().any(|e| e.has_duration())
+                || modal_any(&|d: &AbilityDefinition| d.duration.is_some());
             if !any_has_duration {
                 findings.push(SemanticFinding::DroppedDuration {
                     oracle_line: line.to_string(),
@@ -3937,7 +3981,15 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                         if toughness >= 0 { "+" } else { "" },
                         toughness
                     ));
-                let any_has_counter = matched.iter().any(|e| e.has_counter_effect(&normalized));
+                let any_has_counter = matched.iter().any(|e| e.has_counter_effect(&normalized))
+                    || modal_any(&|d: &AbilityDefinition| {
+                        matches!(
+                            &*d.effect,
+                            Effect::PutCounter { counter_type: ct, .. }
+                            | Effect::PutCounterAll { counter_type: ct, .. }
+                            if ct == &normalized
+                        )
+                    });
                 if !any_has_counter {
                     findings.push(SemanticFinding::WrongParameter {
                         oracle_line: line.to_string(),
@@ -3953,7 +4005,8 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                     });
                 }
             } else {
-                let any_has_pump = matched.iter().any(|e| e.has_pump(power, toughness));
+                let any_has_pump = matched.iter().any(|e| e.has_pump(power, toughness))
+                    || modal_any(&|d: &AbilityDefinition| pump_matches_oracle(d, power, toughness));
                 if !any_has_pump {
                     findings.push(SemanticFinding::WrongParameter {
                         oracle_line: line.to_string(),
@@ -4036,6 +4089,8 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
 
 /// Check if a line is a standalone keyword ability line (may be comma-separated).
 /// Covers common keywords that don't always match the Keyword enum's Debug format.
+/// Also covers keyword cost definition lines (escape, kicker, companion, cycling, equip, etc.)
+/// which declare a cost or constraint rather than an in-game effect.
 fn is_keyword_line(lower: &str) -> bool {
     const KEYWORDS: &[&str] = &[
         "flying",
@@ -4066,7 +4121,7 @@ fn is_keyword_line(lower: &str) -> bool {
         "flanking",
         "rampage ",
         "bushido ",
-        "cumulative upkeep ",
+        "cumulative upkeep",
         "affinity for ",
         "convoke",
         "delve",
@@ -4082,12 +4137,34 @@ fn is_keyword_line(lower: &str) -> bool {
         "extort",
         "dredge ",
         "suspend ",
+        // Keyword cost definition lines (not in-game effects)
+        "escape\u{2014}", // em dash
+        "escape —",
+        "kicker ",
+        "kicker\u{2014}",
+        "companion \u{2014}",
+        "companion\u{2014}",
+        "friends forever",
     ];
     // Check if the line starts with any keyword (possibly comma-separated list)
     let trimmed = lower.trim().trim_end_matches('.');
-    KEYWORDS
+    if KEYWORDS
         .iter()
         .any(|kw| trimmed.starts_with(kw) || trimmed == kw.trim())
+    {
+        return true;
+    }
+    // Cycling/landcycling keyword cost lines: "[type]cycling {cost}" patterns
+    // e.g. "basic landcycling {2}", "mountaincycling {2}, forestcycling {2}"
+    if trimmed.contains("cycling {") || trimmed.contains("cycling\u{2014}") {
+        return true;
+    }
+    // Equip cost lines: "equip {N}", "equip legendary creature {N}", etc.
+    // Only match simple cost declarations, not "equipped creature gets..." effect lines
+    if trimmed.starts_with("equip") && trimmed.contains('{') && !trimmed.contains("equipped") {
+        return true;
+    }
+    false
 }
 
 /// Check if an Oracle line contains duration language, returning the label if so.
