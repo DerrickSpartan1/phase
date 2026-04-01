@@ -3686,8 +3686,9 @@ fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCondition>, S
         .parse(lower.as_str())
         .is_ok()
     {
-        if let Ok((_, (_, rest))) = nom_primitives::split_once_on(lower.as_str(), " wasn't kicked, ")
-            .or_else(|_| nom_primitives::split_once_on(lower.as_str(), " wasn't bargained, "))
+        if let Ok((_, (_, rest))) =
+            nom_primitives::split_once_on(lower.as_str(), " wasn't kicked, ")
+                .or_else(|_| nom_primitives::split_once_on(lower.as_str(), " wasn't bargained, "))
         {
             let offset = text.len() - rest.len();
             return (
@@ -4807,7 +4808,8 @@ fn parse_for_as_long_as_condition(condition: &str) -> Option<Duration> {
     }
 
     // "it has a {type} counter on it" / "~ has a {type} counter on it"
-    if scan_contains_phrase(condition, "has a") && scan_contains_phrase(condition, "counter on it") {
+    if scan_contains_phrase(condition, "has a") && scan_contains_phrase(condition, "counter on it")
+    {
         if let Some(after_has) = strip_after(condition, " has a ") {
             if let Some(counter_end) = after_has.find(" counter") {
                 let counter_type = after_has[..counter_end].trim().to_string();
@@ -5935,8 +5937,7 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
             }
             let (target, _) = parse_target(target_text);
             // CR 110.2: "under your control" overrides the entering object's controller.
-            let under_your_control =
-                scan_contains_phrase(after_put_tp.lower, "under your control");
+            let under_your_control = scan_contains_phrase(after_put_tp.lower, "under your control");
             return Some(Effect::ChangeZone {
                 origin: infer_origin_zone(after_put_tp.lower),
                 destination,

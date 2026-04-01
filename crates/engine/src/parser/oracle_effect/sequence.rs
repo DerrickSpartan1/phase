@@ -716,9 +716,7 @@ fn parse_dig_from_among(lower: &str, _original: &str) -> Option<ContinuationAst>
 
     // "put N of them into your hand [and the rest on the bottom]" — no filter, count explicit.
     // Must be checked BEFORE the "from among" path since "of them" appears in both forms.
-    if let Ok((_, before_of)) =
-        take_until::<_, _, VerboseError<&str>>(" of them").parse(lower)
-    {
+    if let Ok((_, before_of)) = take_until::<_, _, VerboseError<&str>>(" of them").parse(lower) {
         let before_of = before_of.trim();
         let after_put = alt((tag::<_, _, VerboseError<&str>>("you may put "), tag("put ")))
             .parse(before_of)
@@ -751,10 +749,9 @@ fn parse_dig_from_among(lower: &str, _original: &str) -> Option<ContinuationAst>
     }
 
     // Find "from among" to split the text into count+filter vs destination
-    let (_, before_from) =
-        take_until::<_, _, VerboseError<&str>>("from among")
-            .parse(lower)
-            .ok()?;
+    let (_, before_from) = take_until::<_, _, VerboseError<&str>>("from among")
+        .parse(lower)
+        .ok()?;
     let before_from = &before_from.trim();
 
     // Strip leading "put " or "you may reveal " using nom combinators.

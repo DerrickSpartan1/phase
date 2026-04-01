@@ -687,16 +687,15 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
         && nom_primitives::scan_contains(lower, "librar")
     {
         // Delegate to nom combinator (input already lowercase from lower).
-        let count = if let Ok((_, (_, after_top))) =
-            nom_primitives::split_once_on(lower, "the top ")
-        {
-            nom_primitives::parse_number
-                .parse(after_top)
-                .map(|(_, n)| n)
-                .unwrap_or(1)
-        } else {
-            1
-        };
+        let count =
+            if let Ok((_, (_, after_top))) = nom_primitives::split_once_on(lower, "the top ") {
+                nom_primitives::parse_number
+                    .parse(after_top)
+                    .map(|(_, n)| n)
+                    .unwrap_or(1)
+            } else {
+                1
+            };
         return Some(HandRevealImperativeAst::RevealTop { count });
     }
 
@@ -706,9 +705,7 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
 
     // Fallback: reveal from top of library without explicit "library" mention
     // Delegate to nom combinator (input already lowercase from lower).
-    let count = if let Ok((_, (_, after_top))) =
-        nom_primitives::split_once_on(lower, "the top ")
-    {
+    let count = if let Ok((_, (_, after_top))) = nom_primitives::split_once_on(lower, "the top ") {
         nom_primitives::parse_number
             .parse(after_top)
             .map(|(_, n)| n)
@@ -920,9 +917,7 @@ fn parse_prevent_effect(text: &str) -> Effect {
     {
         // Extract the target from the text
         let tp = TextPair::new(text, &lower);
-        if let Ok((_, before)) =
-            take_until::<_, _, VerboseError<&str>>("target ").parse(tp.lower)
-        {
+        if let Ok((_, before)) = take_until::<_, _, VerboseError<&str>>("target ").parse(tp.lower) {
             let (_, from_target) = tp.split_at(before.len());
             let (t, _) = parse_target(from_target.original);
             t
@@ -2085,8 +2080,7 @@ pub(crate) fn try_parse_die_result_line(text: &str) -> Option<(u8, u8, &str)> {
     let trimmed = text.trim();
 
     // Find the pipe separator: "N—M | effect" or "N | effect"
-    let (_, (range_part, effect_text)) =
-        nom_primitives::split_once_on(trimmed, " | ").ok()?;
+    let (_, (range_part, effect_text)) = nom_primitives::split_once_on(trimmed, " | ").ok()?;
     let range_part = range_part.trim();
     let effect_text = effect_text.trim();
 

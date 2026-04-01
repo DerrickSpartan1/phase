@@ -3711,7 +3711,29 @@ enum ParsedElement<'a> {
 impl<'a> ParsedElement<'a> {
     fn description_lower(&self) -> Option<String> {
         match self {
-            ParsedElement::Ability(a) => a.description.as_ref().map(|d| d.to_lowercase()),
+            ParsedElement::Ability(a) => {
+                // Check the ability's own description first
+                if let Some(desc) = a.description.as_ref() {
+                    return Some(desc.to_lowercase());
+                }
+                // Fallback: for GenericEffect abilities with no top-level description,
+                // concatenate nested static ability descriptions so the matcher can find
+                // lines like "can't be blocked except by creatures with flying" or
+                // "all creatures able to block this creature do so".
+                if let Effect::GenericEffect {
+                    static_abilities, ..
+                } = &*a.effect
+                {
+                    let descs: Vec<String> = static_abilities
+                        .iter()
+                        .filter_map(|s| s.description.as_ref().map(|d| d.to_lowercase()))
+                        .collect();
+                    if !descs.is_empty() {
+                        return Some(descs.join("; "));
+                    }
+                }
+                None
+            }
             ParsedElement::Trigger(t) => {
                 // Prefer the trigger's execute description, fall back to trigger description
                 t.execute
@@ -3832,15 +3854,40 @@ impl<'a> ParsedElement<'a> {
 /// Normalize Oracle text for description matching: replace card-name self-references
 /// with `~` so they match parsed descriptions (which use `~` normalization).
 fn normalize_for_matching(lower: &str, card_name_lower: &str) -> String {
-    // Replace the full card name (or comma-truncated form) with ~
+    // Replace the full card name (or comma-truncated/word-prefix form) with ~
     let mut result = lower.to_string();
     if !card_name_lower.is_empty() {
-        // Try full name first, then comma-truncated (e.g. "Akiri, Line-Slinger" → "Akiri")
+        // Try full name first
         result = result.replace(card_name_lower, "~");
+        // Comma-truncated: "akiri, line-slinger" → "akiri"
         if let Some(short) = card_name_lower.split(',').next() {
             let short = short.trim();
             if short.len() > 2 {
                 result = result.replace(short, "~");
+            }
+        }
+        // "of"-based: "rosie cotton of south lane" → "rosie cotton"
+        if !result.contains('~') {
+            if let Some(of_pos) = card_name_lower.find(" of ") {
+                let short = &card_name_lower[..of_pos];
+                if short.len() >= 3 {
+                    result = result.replace(short, "~");
+                }
+            }
+        }
+        // First-word prefix fallback: "bontu the glorified" → try "bontu the", "bontu"
+        // Mirrors the parser's normalize_card_name_refs short-name strategy.
+        if !result.contains('~') {
+            let name_words: Vec<&str> = card_name_lower.split_whitespace().collect();
+            for len in (1..name_words.len()).rev() {
+                let candidate: String = name_words[..len].join(" ");
+                if candidate.len() >= 3 {
+                    let replaced = result.replace(candidate.as_str(), "~");
+                    if replaced != result {
+                        result = replaced;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -3853,6 +3900,8 @@ fn normalize_for_matching(lower: &str, card_name_lower: &str) -> String {
         "this land",
         "this spell",
         "this aura",
+        "this equipment",
+        "this vehicle",
     ] {
         result = result.replace(phrase, "~");
     }
@@ -4355,8 +4404,9 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             // "if they do" / "if they don't" — opponent/player action results
             || lower.contains("if they do")
             || lower.contains("if they don't")
-            // "if you can't" — failure path, not a gating condition
+            // "if you can't" / "if the player can't" — failure path, not a gating condition
             || lower.contains("if you can't")
+            || lower.contains("if the player can't")
             // "if you chose" / "if you choose" — modal choice results
             || lower.contains("if you chose")
             || lower.contains("if you choose")
@@ -4381,6 +4431,8 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || lower.contains("this spell costs")
             || lower.contains("spells cost")
             || lower.contains("starting player")
+            // "if the {cost} cost was paid" / "if its madness cost was paid"
+            || lower.contains("cost was paid")
             // --- Duration patterns (audited by DroppedDuration, not DroppedCondition) ---
             // "for as long as" is a duration, not a condition
             || lower.contains("for as long as")
@@ -4399,7 +4451,32 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || lower.contains("unless you pay")
             || lower.contains("unless a player")
             || lower.contains("unless its controller")
+            || lower.contains("unless their controller")
             || lower.contains("unless that player")
+            // --- Unless-action patterns (trigger-level sacrifice/discard alternatives) ---
+            // "sacrifice X unless you Y" — the "unless" is part of the effect, not a
+            // gating condition. These are audited for effect correctness, not condition presence.
+            || lower.contains("unless you sacrifice")
+            || lower.contains("unless you discard")
+            || lower.contains("unless you exile")
+            || lower.contains("unless you return")
+            || lower.contains("unless you tap")
+            || lower.contains("unless you reveal")
+            || lower.contains("unless you remove")
+            || lower.contains("unless you compliment")
+            || lower.contains("unless they sacrifice")
+            || lower.contains("unless they discard")
+            || lower.contains("unless they exile")
+            || lower.contains("unless they pay")
+            || lower.contains("unless they return")
+            || lower.contains("unless any player pays")
+            // "unless they're mana abilities" — structural restriction qualifier
+            || lower.contains("unless they're mana abilities")
+            // "unless it escaped" — cast-method condition (escape keyword)
+            || lower.contains("unless it escaped")
+            // "unless {W} was spent" / "unless two or more colors of mana were spent" — casting conditions
+            || (lower.contains("unless") && lower.contains("was spent"))
+            || (lower.contains("unless") && lower.contains("were spent"))
             // --- Reminder text in parentheses (not part of the ability's condition) ---
             || lower.contains("(if ")
             || lower.contains("(unless ")
@@ -4411,6 +4488,9 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             // --- Enchanted/equipped state checks (resolve-time, not ability conditions) ---
             || lower.contains("if enchanted")
             || lower.contains("if equipped")
+            // --- Replacement effect "if ... would" — already caught by the
+            // "would ... instead" check but also catch standalone "if X would be destroyed"
+            || lower.contains("would be destroyed")
             // --- Leyline / opening-hand structural patterns ---
             || lower.contains("in your opening hand")
             // --- Resolution-count conditions (not board-state gating) ---
@@ -4418,12 +4498,104 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             || lower.contains("if this is the ")
             || lower.contains("if it's the second")
             || lower.contains("if it's the third")
+            || lower.contains("if it's the first")
+            // --- "Landfall — If you had a land enter" — keyword ability name, not standalone condition ---
+            || lower.contains("if you had a land enter")
+            // --- Team-based / event-based conditions (Archenemy, special events) ---
+            || lower.contains("if you're on the")
+            || lower.contains("if the mirrans")
+            || lower.contains("if the phyrexians")
+            // --- "Coven — If you control three or more creatures with different powers" ---
+            // Coven is a keyword ability; the "if" is its intervening-if, but these are
+            // typically on triggers that the auditor already checks. The ability description
+            // uses the keyword name, not a standalone condition. Mark as structural.
+            || (lower.starts_with("coven") && lower.contains("if "))
             // --- Activation/resolution count conditions ---
             || lower.contains("this ability has been activated")
             // --- Zone-referential conditions (structural, not board-state) ---
             // "if this card is suspended" / "if this card is in your graveyard"
             || lower.contains("is suspended")
             || lower.contains("if this card is in your")
+            // --- Coin flip / die roll resolve-time results ---
+            || lower.contains("if you lose the flip")
+            || lower.contains("if you win the flip")
+            || lower.contains("if the result")
+            // --- Beheld mechanic: resolve-time check on previous action ---
+            || lower.contains("beheld")
+            // --- Color checks at resolution (not ability gating conditions) ---
+            // "counter target spell if it's red" — resolve-time type/color check
+            || lower.contains("if it's red")
+            || lower.contains("if it's blue")
+            || lower.contains("if it's green")
+            || lower.contains("if it's white")
+            || lower.contains("if it's black")
+            || lower.contains("if it's colorless")
+            // --- Self-state checks (resolve-time property queries on this object) ---
+            // "if this creature is/has/didn't" — state of the source at resolution
+            || lower.contains("if this creature is")
+            || lower.contains("if this creature has")
+            || lower.contains("if this creature didn't")
+            || lower.contains("if this enchantment has")
+            || lower.contains("if this enchantment is")
+            || lower.contains("if this artifact is")
+            || lower.contains("if this artifact has")
+            || lower.contains("if this permanent is")
+            || lower.contains("if this permanent has")
+            // --- Turn-action resolve-time conditions ---
+            // "if you attacked this turn" / "if you attacked with" — turn event checks
+            || lower.contains("if you attacked")
+            // "if you haven't cast a spell" / "if you didn't cast" — turn-action checks
+            || lower.contains("if you haven't cast")
+            || lower.contains("if you didn't cast")
+            || lower.contains("if you didn't play")
+            // "if a creature died this turn" — turn-event checks
+            || lower.contains("if a creature died")
+            // "if a permanent left the battlefield" — Void mechanic turn-event
+            || lower.contains("if a permanent left")
+            || lower.contains("if a nonland permanent left")
+            || lower.contains("a spell was warped")
+            // --- Object property checks at resolution ---
+            // "if it shares a" — property comparison at resolution
+            || lower.contains("if it shares")
+            // "if it doesn't have" / "if it had no" — state check on result object
+            || lower.contains("if it doesn't have")
+            || lower.contains("if it had no")
+            // "if it's on the battlefield" — zone check at resolution
+            || lower.contains("if it's on the battlefield")
+            // "this way" — resolve-time checks on what happened during resolution
+            // "if you reveal a creature card this way" / "if a card is put into a graveyard this way"
+            || lower.contains("this way")
+            // "if it's paired" — paired state check at resolution
+            || lower.contains("if it's paired")
+            || lower.contains("if it is paired")
+            // --- Object-referential resolve-time checks ---
+            // "if you controlled that [object]" — state of the destroyed/exiled object
+            || lower.contains("if you controlled that")
+            // "if the player does" — player action result at resolution
+            || lower.contains("if the player does")
+            // "if defending player" — combat-time checks (not board-state gating)
+            || lower.contains("if defending player")
+            // "if [subject] is dealt damage" — resolve-time damage check
+            || lower.contains("is dealt damage")
+            // "if fewer than" / "if exactly" — resolve-time count checks
+            || lower.contains("if fewer than")
+            || lower.contains("if exactly ")
+            // "if X is N or more" — X-spell resolve-time variable checks
+            || lower.contains("if x is ")
+            // "if it attacked or blocked this turn" — resolve-time combat state
+            || lower.contains("if it attacked")
+            || lower.contains("if it blocked")
+            || lower.contains("it wasn't blocking")
+            // "if the discovered card's" — resolve-time check on discovered card
+            || lower.contains("if the discovered")
+            // "if it's night" / "if it's day" — day/night state check (not ability gating)
+            || lower.contains("if it's night")
+            || lower.contains("if it's day")
+            // "if it's an instant or sorcery" — resolve-time card type check
+            || lower.contains("if it's an instant")
+            || lower.contains("if it's a sorcery")
+            // "if it isn't being declared" — replacement timing check
+            || lower.contains("isn't being declared")
             // --- Quoted sub-abilities: condition is inside a granted ability, not on the granter ---
             || condition_inside_quotes(lower, phrase)
         {
