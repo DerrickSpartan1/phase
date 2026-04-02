@@ -152,6 +152,7 @@ parse_effect_clause()                    — entry point (oracle_effect/mod.rs)
 - **Nom combinators** handle ALL parsing dispatch — atomic, structural, sentence-level verb dispatch, and top-level routing.
 - **`TextPair`** provides dual-string case-bridging (subject-predicate decomposition, clause AST classification). `TextPair::strip_prefix` is correct for these structural operations.
 - **`oracle_classifier.rs`** owns reusable line-classification helpers such as trigger-prefix, static-pattern, and replacement-pattern detection. `oracle.rs` remains the priority router that calls them.
+- **`oracle_special.rs`** owns the router-adjacent special helpers for solve conditions, Defiler two-line statics, die-roll tables, self-reference normalization for static parsing, and keyword-line parsers like Escape/Harmonize/Cumulative Upkeep.
 - **`oracle_effect/conditions.rs`** owns leading-condition splitting and ability-condition helpers. `oracle_effect/mod.rs` remains the clause/effect orchestrator and re-exports `split_leading_conditional`.
 - **`oracle_effect/search.rs`** owns search/seek filter parsing helpers. `oracle_effect/mod.rs` re-exports the stable search helper surface used by imperative and continuation parsing.
 - **New parser code** MUST use nom combinators. `starts_with`/`strip_prefix` for parsing dispatch is NOT acceptable (see Rule Zero).
@@ -366,6 +367,7 @@ Predicate hierarchy: `try_parse_subject_continuous_clause()` → `try_parse_subj
 |--------|---------|-------------------|
 | `oracle_classifier.rs` | Shared line-classification helpers: trigger prefixes, static/replacement detection, special routing heuristics. Called by `oracle.rs`, `oracle_dispatch.rs`, and class parsing. | Priority router support |
 | `oracle_dispatch.rs` | Nom fallback dispatch for effect/static/replacement candidates before `Unimplemented`. | P14a |
+| `oracle_special.rs` | Router-adjacent helpers for solve conditions, Defiler two-line statics, die-roll tables, static self-ref normalization, and keyword-line parsing (Escape/Harmonize/Cumulative Upkeep). | Priority router support |
 | `oracle_trigger.rs` | Trigger parsing: subject + event decomposition, constraint parsing (OncePerTurn, OncePerGame). Uses `parse_trigger_subject()` → `try_parse_event()` pipeline. | P7 |
 | `oracle_static.rs` | Static ability parsing: turn-condition handling (prefix "During your turn" and suffix "during your turn"), continuous modifications via `parse_continuous_modifications()`. | P8 |
 | `oracle_replacement.rs` | Replacement effects: priority-ordered pattern matching (as-enters-choose before shock-land before fast-land, etc.), builder pattern with `ReplacementDefinition::new()`. | P9 |

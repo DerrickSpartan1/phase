@@ -5,9 +5,7 @@ use crate::types::ability::{
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
-use super::oracle::{
-    has_unimplemented, make_unimplemented, normalize_self_refs_for_static, ParsedAbilities,
-};
+use super::oracle::{has_unimplemented, make_unimplemented, ParsedAbilities};
 use super::oracle_classifier::{
     is_effect_sentence_candidate, is_granted_static_line, is_replacement_pattern, is_static_pattern,
 };
@@ -17,6 +15,7 @@ use super::oracle_keyword::extract_keyword_line;
 use super::oracle_modal::strip_ability_word;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_replacement::parse_replacement_line;
+use super::oracle_special::normalize_self_refs_for_static;
 use super::oracle_static::parse_static_line;
 use super::oracle_trigger::parse_trigger_line;
 use super::oracle_util::{strip_reminder_text, TextPair};
