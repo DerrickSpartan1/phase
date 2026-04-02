@@ -1,9 +1,7 @@
 use rand::Rng;
 use thiserror::Error;
 
-use crate::types::ability::{
-    AbilityDefinition, Effect, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
-};
+use crate::types::ability::{EffectKind, TargetFilter, TargetRef};
 use crate::types::actions::GameAction;
 use crate::types::events::{BendingType, GameEvent};
 use crate::types::game_state::{
@@ -25,6 +23,7 @@ use super::engine_combat;
 use super::engine_modes;
 use super::engine_payment_choices;
 use super::engine_priority;
+use super::engine_replacement;
 use super::engine_resolution_choices;
 use super::engine_stack;
 use super::mana_abilities;
@@ -1015,117 +1014,18 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             engine_combat::handle_declare_blockers(state, &assignments, &mut events)?
         }
         (WaitingFor::ReplacementChoice { .. }, GameAction::ChooseReplacement { index }) => {
-            match super::replacement::continue_replacement(state, index, &mut events) {
-                super::replacement::ReplacementResult::Execute(event) => {
-                    // Execute the resolved proposed event (e.g., zone change after
-                    // replacement choice like shock land pay-life decision)
-                    let mut zone_change_object_id = None;
-                    if let crate::types::proposed_event::ProposedEvent::ZoneChange {
-                        object_id,
-                        to,
-                        from,
-                        enter_tapped,
-                        enter_with_counters,
-                        controller_override,
-                        ..
-                    } = event
-                    {
-                        zones::move_to_zone(state, object_id, to, &mut events);
-                        if to == Zone::Battlefield {
-                            if let Some(obj) = state.objects.get_mut(&object_id) {
-                                obj.tapped = enter_tapped;
-                                obj.entered_battlefield_turn = Some(state.turn_number);
-                                if let Some(new_controller) = controller_override {
-                                    obj.controller = new_controller;
-                                }
-                                apply_etb_counters(obj, &enter_with_counters, &mut events);
-                            }
-                        }
-                        if to == Zone::Battlefield || from == Zone::Battlefield {
-                            state.layers_dirty = true;
-                        }
-                        zone_change_object_id = Some(object_id);
-                    }
-
-                    let mut waiting_for = WaitingFor::Priority {
-                        player: state.active_player,
-                    };
-                    state.waiting_for = waiting_for.clone();
-
-                    // Apply post-replacement side effect (e.g., pay life or enter tapped)
-                    if let Some(effect_def) = state.post_replacement_effect.take() {
-                        if let Some(next_waiting_for) = apply_post_replacement_effect(
-                            state,
-                            &effect_def,
-                            zone_change_object_id,
-                            &mut events,
-                        ) {
-                            waiting_for = next_waiting_for;
-                        }
-                    }
-
-                    // Resume interrupted multi-step operations (e.g., Learn draw after
-                    // Madness replacement). Only fire when no further interactive state
-                    // was entered by post_replacement_effect.
-                    if matches!(waiting_for, WaitingFor::Priority { .. }) {
-                        if let Some(cont) = state.pending_continuation.take() {
-                            let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
-                        }
-                    }
-
-                    waiting_for
-                }
-                super::replacement::ReplacementResult::NeedsChoice(player) => {
-                    super::replacement::replacement_choice_waiting_for(player, state)
-                }
-                super::replacement::ReplacementResult::Prevented => {
-                    // CR 701.48a: "If you do" — a prevented discard/sacrifice means
-                    // the condition was not met. Clear any stale continuation (e.g.,
-                    // Learn draw) so it doesn't fire via another code path.
-                    state.pending_continuation = None;
-                    WaitingFor::Priority {
-                        player: state.active_player,
-                    }
-                }
-            }
+            engine_replacement::handle_replacement_choice(state, index, &mut events)?
         }
         // CR 707.9: Player chose a permanent to copy for "enter as a copy of" replacement.
         (
-            WaitingFor::CopyTargetChoice {
-                player,
-                source_id,
-                valid_targets,
-            },
+            waiting_for @ WaitingFor::CopyTargetChoice { .. },
             GameAction::ChooseTarget { target },
-        ) => {
-            let target_id = match target {
-                Some(TargetRef::Object(id)) if valid_targets.contains(&id) => id,
-                _ => {
-                    return Err(EngineError::InvalidAction(
-                        "Invalid copy target".to_string(),
-                    ));
-                }
-            };
-            // CR 707.2: Copy copiable characteristics from the chosen permanent.
-            let ability = ResolvedAbility::new(
-                Effect::BecomeCopy {
-                    target: TargetFilter::Any,
-                    duration: None,
-                },
-                vec![TargetRef::Object(target_id)],
-                *source_id,
-                *player,
-            );
-            let _ = effects::resolve_ability_chain(state, &ability, &mut events, 0);
-            state.layers_dirty = true;
-            // CR 707.9: Resume interrupted ability chain after copy-replacement resolution.
-            if let Some(cont) = state.pending_continuation.take() {
-                let _ = effects::resolve_ability_chain(state, &cont, &mut events, 0);
-            }
-            WaitingFor::Priority {
-                player: state.active_player,
-            }
-        }
+        ) => engine_replacement::handle_copy_target_choice(
+            state,
+            waiting_for.clone(),
+            target,
+            &mut events,
+        )?,
         (
             WaitingFor::ExploreChoice {
                 player,
@@ -1690,128 +1590,6 @@ pub(super) fn begin_pending_trigger_target_selection(
     }))
 }
 
-/// Apply ETB counters from replacement effects to an object entering the battlefield.
-fn apply_etb_counters(
-    obj: &mut super::game_object::GameObject,
-    counters: &[(String, u32)],
-    events: &mut Vec<GameEvent>,
-) {
-    for (counter_type_str, count) in counters {
-        let ct = crate::types::counter::parse_counter_type(counter_type_str);
-        *obj.counters.entry(ct.clone()).or_insert(0) += count;
-        events.push(GameEvent::CounterAdded {
-            object_id: obj.id,
-            counter_type: ct,
-            count: *count,
-        });
-    }
-}
-
-/// Apply a post-replacement side effect after a zone change has been executed.
-/// Used by Optional replacements (e.g., shock lands: pay life on accept, tap on decline).
-/// CR 707.9: For "enter as a copy" replacements, sets up CopyTargetChoice instead of
-/// immediate resolution, since the player must choose which permanent to copy.
-fn apply_post_replacement_effect(
-    state: &mut GameState,
-    effect_def: &crate::types::ability::AbilityDefinition,
-    object_id: Option<ObjectId>,
-    events: &mut Vec<GameEvent>,
-) -> Option<WaitingFor> {
-    let (source_id, controller) = object_id
-        .and_then(|obj_id| {
-            state
-                .objects
-                .get(&obj_id)
-                .map(|obj| (obj_id, obj.controller))
-        })
-        .unwrap_or((ObjectId(0), state.active_player));
-
-    // CR 707.9: BecomeCopy needs interactive target selection — the player chooses
-    // which permanent to copy. This is a choice, not targeting (hexproof doesn't apply).
-    if let Effect::BecomeCopy { ref target, .. } = *effect_def.effect {
-        let valid_targets = find_copy_targets(state, target, source_id, controller);
-        if valid_targets.is_empty() {
-            // No valid targets — clone enters as itself (no copy)
-            return None;
-        }
-        return Some(WaitingFor::CopyTargetChoice {
-            player: controller,
-            source_id,
-            valid_targets,
-        });
-    }
-
-    let targets = object_id
-        .map(TargetRef::Object)
-        .into_iter()
-        .collect::<Vec<_>>();
-    let resolved = resolved_ability_from_definition(effect_def, source_id, controller, targets);
-    let _ = effects::resolve_ability_chain(state, &resolved, events, 0);
-
-    match &state.waiting_for {
-        WaitingFor::Priority { .. } => None,
-        wf => Some(wf.clone()),
-    }
-}
-
-/// CR 707.9: Find valid permanents on the battlefield that match the copy filter.
-/// This is a choice, not targeting — hexproof/shroud/protection don't apply.
-fn find_copy_targets(
-    state: &GameState,
-    filter: &TargetFilter,
-    source_id: ObjectId,
-    controller: PlayerId,
-) -> Vec<ObjectId> {
-    state
-        .objects
-        .iter()
-        .filter(|(id, obj)| {
-            // Must be on the battlefield
-            obj.zone == Zone::Battlefield
-                // Can't copy itself
-                && **id != source_id
-                // Must match the type filter
-                && super::filter::matches_target_filter_controlled(
-                    state, **id, filter, source_id, controller,
-                )
-        })
-        .map(|(id, _)| *id)
-        .collect()
-}
-
-fn resolved_ability_from_definition(
-    def: &AbilityDefinition,
-    source_id: ObjectId,
-    controller: PlayerId,
-    targets: Vec<TargetRef>,
-) -> ResolvedAbility {
-    let mut resolved =
-        ResolvedAbility::new(*def.effect.clone(), targets, source_id, controller).kind(def.kind);
-    if let Some(sub) = &def.sub_ability {
-        resolved = resolved.sub_ability(resolved_ability_from_definition(
-            sub,
-            source_id,
-            controller,
-            Vec::new(),
-        ));
-    }
-    if let Some(else_ab) = &def.else_ability {
-        resolved.else_ability = Some(Box::new(resolved_ability_from_definition(
-            else_ab,
-            source_id,
-            controller,
-            Vec::new(),
-        )));
-    }
-    if let Some(d) = def.duration.clone() {
-        resolved = resolved.duration(d);
-    }
-    if let Some(c) = def.condition.clone() {
-        resolved = resolved.condition(c);
-    }
-    resolved
-}
-
 /// CR 604.2: If a land was played from the graveyard via a once-per-turn permission source,
 /// record the source as used to prevent a second play/cast from the same source this turn.
 fn record_graveyard_play_permission(state: &mut GameState, source: Option<ObjectId>) {
@@ -1962,7 +1740,7 @@ fn handle_play_land(
                     if let Some(new_controller) = controller_override {
                         obj.controller = new_controller;
                     }
-                    apply_etb_counters(obj, &enter_with_counters, events);
+                    engine_replacement::apply_etb_counters(obj, &enter_with_counters, events);
                 }
             }
         }
@@ -4965,7 +4743,8 @@ mod trigger_target_tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ControllerRef, Effect, GainLifePlayer, ModalChoice,
-        ModalSelectionConstraint, QuantityExpr, TargetFilter, TargetRef, TypedFilter,
+        ModalSelectionConstraint, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
+        TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::TargetSelectionConstraint;
@@ -7185,8 +6964,12 @@ mod phase_trigger_regression_tests {
             },
         ));
 
-        let waiting_for =
-            apply_post_replacement_effect(&mut state, &effect_def, Some(source_id), &mut events);
+        let waiting_for = engine_replacement::apply_post_replacement_effect(
+            &mut state,
+            &effect_def,
+            Some(source_id),
+            &mut events,
+        );
 
         assert!(matches!(
             waiting_for,

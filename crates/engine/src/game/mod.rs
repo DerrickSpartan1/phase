@@ -21,6 +21,7 @@ pub(crate) mod engine_combat;
 pub(crate) mod engine_modes;
 pub(crate) mod engine_payment_choices;
 pub(crate) mod engine_priority;
+pub(crate) mod engine_replacement;
 pub(crate) mod engine_resolution_choices;
 pub(crate) mod engine_stack;
 pub mod filter;
