@@ -376,7 +376,7 @@ function GamePageContent({
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const objects = useGameStore((s) => s.gameState?.objects);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
-  const playerIds = useGameStore((s) => s.gameState?.players.map((player) => player.id));
+  const players = useGameStore((s) => s.gameState?.players);
   const eliminatedPlayers = useGameStore((s) => s.gameState?.eliminated_players);
   const turnNumber = useGameStore((s) => s.gameState?.turn_number);
   const engineWaitingFor = useGameStore((s) => s.gameState?.waiting_for);
@@ -394,10 +394,10 @@ function GamePageContent({
   const adapter = useGameStore((s) => s.adapter);
   const focusedOpponent = useUiStore((s) => s.focusedOpponent);
   const opponents = useMemo(() => {
-    const orderedPlayers = seatOrder ?? playerIds ?? [];
+    const orderedPlayers = seatOrder ?? players?.map((player) => player.id) ?? [];
     const eliminated = new Set(eliminatedPlayers ?? []);
     return orderedPlayers.filter((id) => id !== playerId && !eliminated.has(id));
-  }, [eliminatedPlayers, playerId, playerIds, seatOrder]);
+  }, [eliminatedPlayers, playerId, players, seatOrder]);
   const activeOpponentId =
     focusedOpponent ?? opponents[0] ?? (playerId === 0 ? 1 : 0);
 

@@ -27,11 +27,15 @@ function hasAdventureCreaturePermission(obj: GameObject): boolean {
 
 export function ZoneViewer({ zone, playerId, onClose }: ZoneViewerProps) {
   const objects = useGameStore((s) => s.gameState?.objects);
-  const zoneIds = useGameStore((s) => getPlayerZoneIds(s.gameState, zone, playerId));
+  const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
   const dispatchAction = useGameDispatch();
   const currentPlayerId = usePlayerId();
+  const zoneIds = useMemo(
+    () => getPlayerZoneIds(gameState, zone, playerId),
+    [gameState, playerId, zone],
+  );
 
   const cards = useMemo(() => {
     if (!objects) return [];

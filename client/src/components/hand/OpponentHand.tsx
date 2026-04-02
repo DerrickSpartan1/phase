@@ -16,14 +16,13 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
   const myId = usePlayerId();
   const focusedOpponent = useUiStore((s) => s.focusedOpponent);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
-  const playerIds = useGameStore((s) => s.gameState?.players.map((player) => player.id));
   const eliminatedPlayers = useGameStore((s) => s.gameState?.eliminated_players);
   const players = useGameStore((s) => s.gameState?.players);
   const opponents = useMemo(() => {
-    const orderedPlayers = seatOrder ?? playerIds ?? [];
+    const orderedPlayers = seatOrder ?? players?.map((player) => player.id) ?? [];
     const eliminated = new Set(eliminatedPlayers ?? []);
     return orderedPlayers.filter((id) => id !== myId && !eliminated.has(id));
-  }, [eliminatedPlayers, myId, playerIds, seatOrder]);
+  }, [eliminatedPlayers, myId, players, seatOrder]);
   const opponentId = focusedOpponent ?? opponents[0] ?? (myId === 0 ? 1 : 0);
   const opponent = players?.[opponentId];
   const objects = useGameStore((s) => s.gameState?.objects);

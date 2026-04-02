@@ -23,6 +23,7 @@ function getHandOverlap(handSize: number): string {
 
 export function PlayerHand() {
   const playerId = usePlayerId();
+  const handContainerRef = useRef<HTMLDivElement | null>(null);
   const player = useGameStore((s) => s.gameState?.players[playerId]);
   const objects = useGameStore((s) => s.gameState?.objects);
   // Use dispatchAction (animation pipeline) instead of store dispatch
@@ -91,9 +92,19 @@ export function PlayerHand() {
 
   const handleDragEnd = useCallback(
     (objectId: number, _event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => {
-      if (info.offset.y < DRAG_PLAY_THRESHOLD && hasPriority) {
+      const handBounds = handContainerRef.current?.getBoundingClientRect();
+      const droppedInsideHand = handBounds != null
+        && info.point.x >= handBounds.left
+        && info.point.x <= handBounds.right
+        && info.point.y >= handBounds.top
+        && info.point.y <= handBounds.bottom;
+
+      const willPlay = !droppedInsideHand && info.offset.y < DRAG_PLAY_THRESHOLD && hasPriority;
+      if (willPlay) {
         playCard(objectId);
       }
+
+      return willPlay;
     },
     [hasPriority, playCard],
   );
@@ -144,6 +155,7 @@ export function PlayerHand() {
 
   return (
     <div
+      ref={handContainerRef}
       className="relative flex min-h-[calc(var(--card-h)*1.4)] shrink-0 items-end justify-center overflow-visible px-4 py-1"
       style={{ perspective: "800px", zIndex: draggingCardId != null ? 30 : undefined }}
       onClick={handleContainerClick}
@@ -202,7 +214,7 @@ interface HandCardProps {
   hasPriority: boolean;
   onDragStart: (id: number) => void;
   onDragStop: () => void;
-  onDragEnd: (objectId: number, event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => void;
+  onDragEnd: (objectId: number, event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => boolean;
   onClick: (objectId: number) => void;
   onDoubleClick: (objectId: number) => void;
   onMouseEnter: (id: number) => void;
@@ -284,11 +296,10 @@ const HandCard = memo(function HandCard({
       onDragEnd={(event, info) => {
         setDragging(false);
         onDragStop();
-        const willPlay = info.offset.y < DRAG_PLAY_THRESHOLD && hasPriority && isPlayable;
-        if (willPlay) {
+        const didPlay = onDragEnd(objectId, event, info);
+        if (didPlay) {
           playedRef.current = true;
         }
-        onDragEnd(objectId, event, info);
       }}
       onClick={(e) => {
         e.stopPropagation();
