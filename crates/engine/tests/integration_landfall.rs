@@ -4,9 +4,9 @@
 //! - DoublePT effects from Mightform Harmonizer
 //! - Conditional reflexive triggers from Earthbender Ascension (quest counters → +1/+1 + trample)
 
-use engine::game::game_object::CounterType;
 use engine::game::scenario::{GameScenario, P0, P1};
 use engine::types::actions::GameAction;
+use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::ObjectId;
 use engine::types::keywords::Keyword;

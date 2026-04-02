@@ -75,7 +75,7 @@ pub(crate) fn parse_saga_chapters(
             let trigger = TriggerDefinition::new(TriggerMode::CounterAdded)
                 .valid_card(TargetFilter::SelfRef)
                 .counter_filter(CounterTriggerFilter {
-                    counter_type: crate::game::game_object::CounterType::Lore,
+                    counter_type: crate::types::counter::CounterType::Lore,
                     threshold: Some(n),
                 })
                 .execute(parse_effect_chain(effect_text, AbilityKind::Spell))

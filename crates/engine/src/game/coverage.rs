@@ -34,6 +34,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::ReduceCost { .. }
             | StaticMode::RaiseCost { .. }
             | StaticMode::DefilerCostReduction { .. }
+            | StaticMode::CantBeCast { .. }
             | StaticMode::CantCastDuring { .. }
             | StaticMode::PerTurnCastLimit { .. }
             | StaticMode::PerTurnDrawLimit { .. }
@@ -4233,7 +4234,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
                 effective_lower.contains("can't cast more than")
                     || effective_lower.contains("cast no more than")
             }
-            StaticMode::CantBeCast => {
+            StaticMode::CantBeCast { .. } => {
                 effective_lower.contains("can't cast") && !effective_lower.contains("during")
             }
             StaticMode::CantCastFrom => effective_lower.contains("can't cast"),

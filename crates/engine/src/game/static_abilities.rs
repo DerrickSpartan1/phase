@@ -43,7 +43,8 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     registry.insert(StaticMode::CantBlock, handle_rule_mod);
     registry.insert(StaticMode::CantAttackOrBlock, handle_rule_mod);
     registry.insert(StaticMode::CantBeTargeted, handle_rule_mod);
-    registry.insert(StaticMode::CantBeCast, handle_rule_mod);
+    // Note: CantBeCast is a data-carrying variant — runtime enforcement is in
+    // casting.rs::is_blocked_by_cant_be_cast(). Coverage support is via is_data_carrying_static().
     registry.insert(StaticMode::CantBeActivated, handle_rule_mod);
     // CR 702.8a: CastWithFlash — card may be cast at instant speed.
     registry.insert(StaticMode::CastWithFlash, handle_rule_mod);

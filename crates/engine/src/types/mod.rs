@@ -2,6 +2,7 @@ pub mod ability;
 pub mod actions;
 pub mod card;
 pub mod card_type;
+pub mod counter;
 pub mod events;
 pub mod format;
 pub mod game_state;
@@ -29,6 +30,7 @@ pub use ability::{
 pub use actions::GameAction;
 pub use card::{CardFace, CardLayout, CardRules};
 pub use card_type::{is_land_subtype, CardType, CoreType, Supertype};
+pub use counter::{parse_counter_type, CounterType};
 pub use events::GameEvent;
 pub use format::{FormatConfig, GameFormat};
 pub use game_state::{

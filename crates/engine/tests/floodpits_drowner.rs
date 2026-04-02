@@ -10,13 +10,13 @@
 //!   {1}{U}, {T}: Shuffle this creature and target creature with a stun counter on it into their owners' libraries.
 
 use engine::game::effects;
-use engine::game::game_object::CounterType;
 use engine::game::zones::create_object;
 use engine::types::ability::{
     ControllerRef, Effect, FilterProp, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
     TypeFilter, TypedFilter,
 };
 use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::events::GameEvent;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::{CardId, ObjectId};
@@ -157,7 +157,7 @@ fn activated_shuffle_both_into_owners_libraries() {
                 type_filters: vec![TypeFilter::Creature],
                 controller: None,
                 properties: vec![FilterProp::CountersGE {
-                    counter_type: engine::game::game_object::CounterType::Stun,
+                    counter_type: engine::types::counter::CounterType::Stun,
                     count: 1,
                 }],
             }),

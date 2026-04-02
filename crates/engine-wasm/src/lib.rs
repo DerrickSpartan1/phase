@@ -541,7 +541,7 @@ mod tests {
         );
         let obj = state.objects.get_mut(&object_id).unwrap();
         obj.counters
-            .insert(engine::game::CounterType::Plus1Plus1, 1);
+            .insert(engine::types::CounterType::Plus1Plus1, 1);
         state.add_transient_continuous_effect(
             object_id,
             PlayerId(0),
@@ -565,7 +565,7 @@ mod tests {
         assert!(obj.keywords.contains(&Keyword::Flying));
         assert_eq!(
             obj.counters
-                .get(&engine::game::CounterType::Plus1Plus1)
+                .get(&engine::types::CounterType::Plus1Plus1)
                 .copied(),
             Some(1)
         );

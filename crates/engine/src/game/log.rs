@@ -732,6 +732,8 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::identifiers::CardId;
@@ -824,6 +826,7 @@ mod tests {
                 controller: PlayerId(0),
                 owner: PlayerId(0),
                 card_types: vec![],
+                counters: HashMap::new(),
             },
         );
         assert_eq!(resolve_object_name(&state, ObjectId(42)), "Grizzly Bears");

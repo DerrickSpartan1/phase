@@ -1,7 +1,7 @@
 use crate::game::effects::counters::add_counter_with_replacement;
-use crate::game::game_object::CounterType;
 use crate::game::quantity::resolve_quantity;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 

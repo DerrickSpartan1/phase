@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
-use crate::game::game_object::{parse_counter_type, CounterType};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
+use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::proposed_event::ProposedEvent;

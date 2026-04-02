@@ -8,7 +8,6 @@
 //! - Tap + stun counters: -2 loyalty ability
 
 use engine::game::combat::{AttackerInfo, CombatState};
-use engine::game::game_object::CounterType;
 use engine::game::scenario::{GameRunner, GameScenario, P0, P1};
 use engine::game::zones;
 use engine::types::ability::{
@@ -18,6 +17,7 @@ use engine::types::ability::{
 };
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
+use engine::types::counter::CounterType;
 use engine::types::game_state::WaitingFor;
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::keywords::Keyword;

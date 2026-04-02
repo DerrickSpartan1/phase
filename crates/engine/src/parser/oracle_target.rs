@@ -1250,7 +1250,7 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
         let consumed = text.len() - rest[counter_end + suffix.len()..].len();
         return Some((
             FilterProp::CountersGE {
-                counter_type: crate::game::game_object::parse_counter_type(counter_type),
+                counter_type: crate::types::counter::parse_counter_type(counter_type),
                 count: 1,
             },
             consumed,
@@ -1828,7 +1828,7 @@ fn parse_zone_suffix(text: &str) -> Option<(FilterProp, Option<ControllerRef>, u
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::game_object::CounterType;
+    use crate::types::counter::CounterType;
 
     #[test]
     fn any_target() {

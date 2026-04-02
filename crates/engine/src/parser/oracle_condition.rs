@@ -8,12 +8,12 @@ use nom::Parser;
 use nom_language::error::{VerboseError, VerboseErrorKind};
 
 use super::oracle_nom::primitives as nom_primitives;
-use crate::game::game_object::{parse_counter_type, CounterType};
 use crate::types::ability::{
     Comparator, ControllerRef, ParsedCondition, PlayerFilter, QuantityRef, TargetFilter,
     TypedFilter,
 };
 use crate::types::card_type::CoreType;
+use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;

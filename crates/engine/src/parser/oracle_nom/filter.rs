@@ -13,8 +13,8 @@ use nom::Parser;
 
 use super::error::OracleResult;
 use super::primitives::{parse_number, parse_pt_modifier};
-use crate::game::game_object::CounterType;
 use crate::types::ability::{ControllerRef, FilterProp};
+use crate::types::counter::CounterType;
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 

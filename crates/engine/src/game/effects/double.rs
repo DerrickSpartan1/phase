@@ -1,8 +1,8 @@
-use crate::game::game_object::{parse_counter_type, CounterType};
 use crate::game::mana_sources::mana_color_to_type;
 use crate::types::ability::{
     DoubleTarget, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
+use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -47,7 +47,7 @@ fn resolve_double_counters(
 
     for obj_id in obj_ids {
         // Snapshot current counters to avoid borrow issues
-        let counters_snapshot: Vec<(crate::game::game_object::CounterType, u32)> = {
+        let counters_snapshot: Vec<(crate::types::counter::CounterType, u32)> = {
             let obj = state
                 .objects
                 .get(&obj_id)
@@ -259,8 +259,9 @@ fn resolve_player_target(ability: &ResolvedAbility, target: &TargetFilter) -> Pl
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::game_object::{CounterType, GameObject};
+    use crate::game::game_object::GameObject;
     use crate::types::ability::{AbilityKind, SpellContext};
+    use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;

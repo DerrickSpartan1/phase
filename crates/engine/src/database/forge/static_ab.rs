@@ -35,8 +35,10 @@ pub(crate) fn translate_static(
         // CR 509.1a: Restriction on blocking.
         "CantBlockBy" => Ok(StaticDefinition::new(StaticMode::CantBlock)),
 
-        // CR 101.2: Restriction on casting.
-        "CantBeCast" => Ok(StaticDefinition::new(StaticMode::CantBeCast)),
+        // CR 101.2: Restriction on casting (Forge data defaults to Controller scope).
+        "CantBeCast" => Ok(StaticDefinition::new(StaticMode::CantBeCast {
+            who: crate::types::statics::CastingProhibitionScope::Controller,
+        })),
 
         // Restriction on activation.
         "CantBeActivated" => Ok(StaticDefinition::new(StaticMode::CantBeActivated)),

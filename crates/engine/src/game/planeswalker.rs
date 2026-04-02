@@ -6,8 +6,8 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 
 use super::engine::EngineError;
-use super::game_object::CounterType;
 use super::stack;
+use crate::types::counter::CounterType;
 
 use crate::types::ability::ResolvedAbility;
 
@@ -110,13 +110,13 @@ pub fn handle_activate_loyalty(
     if loyalty_cost > 0 {
         events.push(GameEvent::CounterAdded {
             object_id: pw_id,
-            counter_type: crate::game::game_object::CounterType::Loyalty,
+            counter_type: crate::types::counter::CounterType::Loyalty,
             count: loyalty_cost as u32,
         });
     } else if loyalty_cost < 0 {
         events.push(GameEvent::CounterRemoved {
             object_id: pw_id,
-            counter_type: crate::game::game_object::CounterType::Loyalty,
+            counter_type: crate::types::counter::CounterType::Loyalty,
             count: (-loyalty_cost) as u32,
         });
     }

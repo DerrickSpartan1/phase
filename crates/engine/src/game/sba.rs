@@ -1,10 +1,10 @@
 use std::collections::HashSet;
 
-use crate::game::game_object::CounterType;
 use crate::game::layers;
 use crate::game::replacement::{self, ReplacementResult};
 use crate::types::ability::{ControllerRef, TargetFilter, TypedFilter};
 use crate::types::card_type::{CoreType, Supertype};
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::player::PlayerId;

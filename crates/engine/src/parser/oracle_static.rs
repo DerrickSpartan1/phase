@@ -2213,10 +2213,9 @@ fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition>
         }
     };
 
-    // TODO: CantBeCast is a unit variant — `who` scope not yet wired.
-    // All current cards (Steel Golem, Grid Monitor) use Controller scope.
-    let _ = who;
-    let mut def = StaticDefinition::new(StaticMode::CantBeCast).description(text.to_string());
+    // CR 101.2: Wire the casting prohibition scope from the subject parse.
+    let mut def =
+        StaticDefinition::new(StaticMode::CantBeCast { who }).description(text.to_string());
     if let Some(filter) = spell_filter {
         def = def.affected(filter);
     }
@@ -4614,7 +4613,7 @@ mod tests {
             def.affected,
             Some(TargetFilter::Typed(TypedFilter::creature().properties(
                 vec![FilterProp::CountersGE {
-                    counter_type: crate::game::game_object::CounterType::Generic("ice".to_string()),
+                    counter_type: crate::types::counter::CounterType::Generic("ice".to_string()),
                     count: 1,
                 },]
             )))
@@ -5178,7 +5177,7 @@ mod tests {
                 assert!(properties.iter().any(|p| matches!(
                     p,
                     FilterProp::CountersGE {
-                        counter_type: crate::game::game_object::CounterType::Plus1Plus1,
+                        counter_type: crate::types::counter::CounterType::Plus1Plus1,
                         count: 1,
                     }
                 )));
@@ -5207,7 +5206,7 @@ mod tests {
                 assert!(properties.iter().any(|p| matches!(
                     p,
                     FilterProp::CountersGE {
-                        counter_type: crate::game::game_object::CounterType::Plus1Plus1,
+                        counter_type: crate::types::counter::CounterType::Plus1Plus1,
                         count: 1,
                     }
                 )));
@@ -5235,7 +5234,7 @@ mod tests {
                 assert!(properties.iter().any(|p| matches!(
                     p,
                     FilterProp::CountersGE {
-                        counter_type: crate::game::game_object::CounterType::Plus1Plus1,
+                        counter_type: crate::types::counter::CounterType::Plus1Plus1,
                         count: 1,
                     }
                 )));
@@ -6868,21 +6867,36 @@ mod tests {
     fn cant_cast_creature_spells() {
         // CR 101.2: Steel Golem — "You can't cast creature spells."
         let def = parse_static_line("You can't cast creature spells.").unwrap();
-        assert_eq!(def.mode, StaticMode::CantBeCast);
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeCast {
+                who: CastingProhibitionScope::Controller,
+            }
+        );
     }
 
     #[test]
     fn cant_cast_instant_or_sorcery_spells() {
         // CR 101.2: Hymn of the Wilds — "You can't cast instant or sorcery spells."
         let def = parse_static_line("You can't cast instant or sorcery spells.").unwrap();
-        assert_eq!(def.mode, StaticMode::CantBeCast);
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeCast {
+                who: CastingProhibitionScope::Controller,
+            }
+        );
     }
 
     #[test]
     fn cant_cast_noncreature_spells() {
         // CR 101.2: Generic noncreature prohibition
         let def = parse_static_line("You can't cast noncreature spells.").unwrap();
-        assert_eq!(def.mode, StaticMode::CantBeCast);
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeCast {
+                who: CastingProhibitionScope::Controller,
+            }
+        );
     }
 
     // --- "don't lose the game" ---

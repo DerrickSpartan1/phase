@@ -5,7 +5,9 @@ use crate::types::game_state::GameState;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 
 use super::derived::derive_display_state;
-use super::game_object::{BackFaceData, CounterType, GameObject};
+use crate::types::counter::CounterType;
+
+use super::game_object::{BackFaceData, GameObject};
 use super::layers::evaluate_layers;
 
 pub fn printed_ref_from_face(card_face: &CardFace) -> Option<PrintedCardRef> {

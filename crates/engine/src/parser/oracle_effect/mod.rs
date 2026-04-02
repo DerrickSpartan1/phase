@@ -3106,21 +3106,20 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             def.condition,
             Some(AbilityCondition::AdditionalCostPaidInstead)
         ) && matches!(&*def.effect, Effect::SearchLibrary { .. })
+            && defs.len() >= 2
         {
-            if defs.len() >= 2 {
-                let previous_is_search =
-                    matches!(&*defs[defs.len() - 2].effect, Effect::SearchLibrary { .. });
-                let trailing_is_search_destination = matches!(
-                    &*defs[defs.len() - 1].effect,
-                    Effect::ChangeZone {
-                        origin: Some(Zone::Library),
-                        destination: Zone::Hand,
-                        ..
-                    }
-                );
-                if previous_is_search && trailing_is_search_destination {
-                    def.else_ability = Some(Box::new(defs.pop().unwrap()));
+            let previous_is_search =
+                matches!(&*defs[defs.len() - 2].effect, Effect::SearchLibrary { .. });
+            let trailing_is_search_destination = matches!(
+                &*defs[defs.len() - 1].effect,
+                Effect::ChangeZone {
+                    origin: Some(Zone::Library),
+                    destination: Zone::Hand,
+                    ..
                 }
+            );
+            if previous_is_search && trailing_is_search_destination {
+                def.else_ability = Some(Box::new(defs.pop().unwrap()));
             }
         }
 

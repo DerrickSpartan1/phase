@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
-use crate::game::game_object::CounterType;
 use crate::game::replacement::{self, ReplacementResult};
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
 use crate::types::phase::Phase;

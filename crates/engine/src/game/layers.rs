@@ -3,13 +3,13 @@ use petgraph::graph::DiGraph;
 
 use crate::game::devotion::count_devotion;
 use crate::game::filter::matches_target_filter;
-use crate::game::game_object::CounterType;
 use crate::game::speed::{effective_speed, has_max_speed};
 use crate::types::ability::{
     BasicLandType, ContinuousModification, Duration, QuantityExpr, StaticCondition,
     StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::card_type::is_land_subtype;
+use crate::types::counter::CounterType;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
@@ -232,8 +232,7 @@ pub(crate) fn evaluate_condition(
         // CR 724.1: True when the controller is the monarch.
         StaticCondition::IsMonarch => state.monarch == Some(controller),
         // CR 702.131a: True when the controller has the city's blessing.
-        // TODO: Add city_blessing tracking to GameState when Ascend is fully implemented.
-        StaticCondition::HasCityBlessing => false,
+        StaticCondition::HasCityBlessing => state.city_blessing.contains(&controller),
         // CR 118.12: "unless pays" conditions evaluate as false (restriction active)
         // until the cost payment system is fully wired for attack/block tax costs.
         // TODO: Wire into the attack/block cost payment flow.
@@ -1926,7 +1925,7 @@ mod tests {
         let mut state = setup();
         let id = make_creature(&mut state, "Kaito", 0, 0, PlayerId(0));
         {
-            use crate::game::game_object::CounterType;
+            use crate::types::counter::CounterType;
             let obj = state.objects.get_mut(&id).unwrap();
             obj.counters.insert(CounterType::Loyalty, 3);
         }
@@ -1956,7 +1955,7 @@ mod tests {
         state.active_player = PlayerId(0);
         let id = make_creature(&mut state, "Kaito", 0, 0, PlayerId(0));
         {
-            use crate::game::game_object::CounterType;
+            use crate::types::counter::CounterType;
             state
                 .objects
                 .get_mut(&id)
@@ -1983,7 +1982,7 @@ mod tests {
         state.active_player = PlayerId(1); // opponent's turn
         let id = make_creature(&mut state, "Kaito", 0, 0, PlayerId(0));
         {
-            use crate::game::game_object::CounterType;
+            use crate::types::counter::CounterType;
             state
                 .objects
                 .get_mut(&id)
@@ -2029,7 +2028,7 @@ mod tests {
         state.active_player = PlayerId(1); // opponent's turn
         let id = make_creature(&mut state, "Kaito", 0, 0, PlayerId(0));
         {
-            use crate::game::game_object::CounterType;
+            use crate::types::counter::CounterType;
             state
                 .objects
                 .get_mut(&id)
@@ -2059,7 +2058,7 @@ mod tests {
         // Create a planeswalker-like object
         let id = make_creature(&mut state, "Kaito", 0, 0, PlayerId(0));
         {
-            use crate::game::game_object::CounterType;
+            use crate::types::counter::CounterType;
             let obj = state.objects.get_mut(&id).unwrap();
             // Start as planeswalker, not creature
             obj.card_types.core_types.clear();
@@ -2136,7 +2135,7 @@ mod tests {
 
         let id = make_creature(&mut state, "Kaito", 0, 0, PlayerId(0));
         {
-            use crate::game::game_object::CounterType;
+            use crate::types::counter::CounterType;
             let obj = state.objects.get_mut(&id).unwrap();
             obj.card_types.core_types.clear();
             obj.card_types.core_types.push(CoreType::Planeswalker);

@@ -58,7 +58,7 @@ pub use deck_validation::{
     DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage, UnsupportedCard,
 };
 pub use engine::{apply, new_game, start_game, start_game_skip_mulligan, EngineError};
-pub use game_object::{BackFaceData, CounterType, GameObject};
+pub use game_object::{BackFaceData, GameObject};
 pub use keywords::parse_keywords;
 pub use layers::evaluate_layers;
 pub use mana_payment::{can_pay, pay_cost, produce_mana, PaymentError};

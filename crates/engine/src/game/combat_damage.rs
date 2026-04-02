@@ -1019,7 +1019,7 @@ mod tests {
         assert_eq!(
             state.objects[&blocker]
                 .counters
-                .get(&crate::game::game_object::CounterType::Minus1Minus1)
+                .get(&crate::types::counter::CounterType::Minus1Minus1)
                 .copied()
                 .unwrap_or(0),
             3
@@ -1067,7 +1067,7 @@ mod tests {
         assert_eq!(
             state.objects[&blocker]
                 .counters
-                .get(&crate::game::game_object::CounterType::Minus1Minus1)
+                .get(&crate::types::counter::CounterType::Minus1Minus1)
                 .copied()
                 .unwrap_or(0),
             3

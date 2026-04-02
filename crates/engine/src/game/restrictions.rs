@@ -905,11 +905,11 @@ fn is_source_blocked(state: &crate::types::game_state::GameState, source_id: Obj
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::game_object::CounterType;
     use crate::game::zones::create_object;
     use crate::parser::oracle_condition::parse_restriction_condition;
     use crate::types::ability::{AbilityKind, Effect, QuantityExpr};
     use crate::types::card_type::CoreType;
+    use crate::types::counter::CounterType;
     use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::CardId;
     use crate::types::zones::Zone;

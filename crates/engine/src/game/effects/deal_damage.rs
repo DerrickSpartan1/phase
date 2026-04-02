@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 
 use crate::game::filter;
-use crate::game::game_object::CounterType;
 use crate::game::keywords;
 use crate::game::quantity::resolve_quantity;
 use crate::game::quantity::resolve_quantity_with_targets;
@@ -11,6 +10,7 @@ use crate::types::ability::{
     TargetRef,
 };
 use crate::types::card_type::CoreType;
+use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -986,7 +986,7 @@ mod tests {
         assert_eq!(
             state.objects[&target_id]
                 .counters
-                .get(&crate::game::game_object::CounterType::Minus1Minus1)
+                .get(&crate::types::counter::CounterType::Minus1Minus1)
                 .copied()
                 .unwrap_or(0),
             2

@@ -89,7 +89,11 @@ pub enum StaticMode {
     CantBlock,
     CantAttackOrBlock,
     CantBeTargeted,
-    CantBeCast,
+    /// CR 101.2: Blanket casting prohibition — prevents the scoped player(s) from casting spells.
+    /// E.g., Steel Golem: "You can't cast creature spells." (Controller scope + creature filter)
+    CantBeCast {
+        who: CastingProhibitionScope,
+    },
     CantBeActivated,
     CastWithFlash,
     /// CR 601.2f: Reduces the cost of spells matching the filter.
@@ -303,7 +307,7 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBlock => write!(f, "CantBlock"),
             StaticMode::CantAttackOrBlock => write!(f, "CantAttackOrBlock"),
             StaticMode::CantBeTargeted => write!(f, "CantBeTargeted"),
-            StaticMode::CantBeCast => write!(f, "CantBeCast"),
+            StaticMode::CantBeCast { who } => write!(f, "CantBeCast({who})"),
             StaticMode::CantBeActivated => write!(f, "CantBeActivated"),
             StaticMode::CastWithFlash => write!(f, "CastWithFlash"),
             StaticMode::ReduceCost { .. } => write!(f, "ReduceCost"),
@@ -404,7 +408,9 @@ impl FromStr for StaticMode {
             "CantBlock" => StaticMode::CantBlock,
             "CantAttackOrBlock" => StaticMode::CantAttackOrBlock,
             "CantBeTargeted" => StaticMode::CantBeTargeted,
-            "CantBeCast" => StaticMode::CantBeCast,
+            "CantBeCast" => StaticMode::CantBeCast {
+                who: CastingProhibitionScope::Controller,
+            },
             "CantBeActivated" => StaticMode::CantBeActivated,
             "CastWithFlash" => StaticMode::CastWithFlash,
             "ReduceCost" => StaticMode::ReduceCost {
@@ -499,6 +505,14 @@ impl FromStr for StaticMode {
             // Parameterized
             other => {
                 if let Some(inner) = other
+                    .strip_prefix("CantBeCast(")
+                    .and_then(|s| s.strip_suffix(')'))
+                {
+                    if let Ok(who) = CastingProhibitionScope::from_str(inner) {
+                        return Ok(StaticMode::CantBeCast { who });
+                    }
+                    return Ok(StaticMode::Other(other.to_string()));
+                } else if let Some(inner) = other
                     .strip_prefix("CantCastDuring(")
                     .and_then(|s| s.strip_suffix(')'))
                 {
@@ -685,6 +699,12 @@ mod tests {
                 play_mode: CardPlayMode::Play,
             },
             // Casting prohibitions
+            StaticMode::CantBeCast {
+                who: CastingProhibitionScope::Controller,
+            },
+            StaticMode::CantBeCast {
+                who: CastingProhibitionScope::Opponents,
+            },
             StaticMode::CantCastDuring {
                 who: CastingProhibitionScope::Opponents,
                 when: CastingProhibitionCondition::DuringYourTurn,

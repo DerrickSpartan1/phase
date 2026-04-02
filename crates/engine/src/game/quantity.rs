@@ -7,13 +7,13 @@
 use std::collections::HashSet;
 
 use crate::game::filter::{matches_target_filter_controlled, spell_record_matches_filter};
-use crate::game::game_object::parse_counter_type;
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
     AggregateFunction, CountScope, ObjectProperty, PlayerFilter, QuantityExpr, QuantityRef,
     ResolvedAbility, RoundingMode, TargetRef, TypeFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
+use crate::types::counter::parse_counter_type;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
@@ -590,13 +590,15 @@ pub(crate) fn resolve_player_count(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
-    use crate::game::game_object::CounterType;
     use crate::game::zones::create_object;
     use crate::types::ability::{
         ControllerRef, Effect, FilterProp, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
+    use crate::types::counter::CounterType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
@@ -1157,6 +1159,7 @@ mod tests {
                 controller: PlayerId(0),
                 owner: PlayerId(0),
                 card_types: vec![],
+                counters: HashMap::new(),
             },
         );
         state.current_trigger_event =
@@ -1184,6 +1187,7 @@ mod tests {
                 controller: PlayerId(0),
                 owner: PlayerId(0),
                 card_types: vec![],
+                counters: HashMap::new(),
             },
         );
         assert!(!state.lki_cache.is_empty());

@@ -1222,7 +1222,7 @@ pub(crate) fn check_trigger_condition(
         // CR 724.1: True when the controller is the monarch.
         TriggerCondition::IsMonarch => state.monarch == Some(controller),
         // CR 702.131a: True when the controller has the city's blessing.
-        TriggerCondition::HasCityBlessing => false, // TODO: city_blessing tracking
+        TriggerCondition::HasCityBlessing => state.city_blessing.contains(&controller),
         // CR 611.2b: True when the trigger source is tapped.
         TriggerCondition::SourceIsTapped => source_id
             .and_then(|id| state.objects.get(&id))
@@ -1249,8 +1249,17 @@ pub(crate) fn check_trigger_condition(
         // CR 601.2b: General mana spending condition (text-based fallback).
         TriggerCondition::ManaSpentCondition { .. } => false,
         // CR 400.7: "if it had counters on it" — check LKI for counters.
-        // TODO: Add counter snapshot to LKISnapshot to enable counter checks.
-        TriggerCondition::HadCounters { .. } => false,
+        TriggerCondition::HadCounters { counter_type } => source_id
+            .and_then(|id| state.lki_cache.get(&id))
+            .is_some_and(|lki| match counter_type {
+                // Specific counter type: parse to CounterType for canonical comparison.
+                Some(ct) => {
+                    let target = crate::types::counter::parse_counter_type(ct);
+                    lki.counters.get(&target).is_some_and(|&v| v > 0)
+                }
+                // Any counter: check if any counter was present.
+                None => lki.counters.values().any(|&v| v > 0),
+            }),
         TriggerCondition::And { conditions } => conditions
             .iter()
             .all(|c| check_trigger_condition(state, c, controller, source_id)),

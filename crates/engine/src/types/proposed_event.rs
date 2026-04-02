@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-use crate::game::game_object::CounterType;
+use super::counter::CounterType;
 
 use super::ability::TargetRef;
 use super::identifiers::ObjectId;
