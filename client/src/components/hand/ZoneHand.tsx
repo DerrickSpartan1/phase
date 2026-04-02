@@ -6,6 +6,7 @@ import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
+import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 
 interface ZoneHandProps {
   zone: "exile" | "graveyard";
@@ -73,18 +74,7 @@ export function ZoneHand({ zone }: ZoneHandProps) {
       const obj = objects[objectId];
       if (!obj) return;
 
-      const castAction = legalActions.find(
-        (a) =>
-          (a.type === "PlayLand" || a.type === "CastSpell") &&
-          Number((a as Extract<GameAction, { type: "PlayLand" | "CastSpell" }>).data.object_id) === objectId,
-      );
-      const abilityActions = legalActions.filter(
-        (a) => a.type === "ActivateAbility" && Number(a.data.source_id) === objectId,
-      );
-
-      const allActions: GameAction[] = [];
-      if (castAction) allActions.push(castAction);
-      allActions.push(...abilityActions);
+      const allActions = collectObjectActions(legalActions, objectId as ObjectId);
 
       if (allActions.length === 0) return;
       inspectObject(null);

@@ -10,6 +10,7 @@ import { useLongPress } from "../../hooks/useLongPress.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import type { GameAction, ManaCost, ObjectId } from "../../adapter/types.ts";
+import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 
 /** Cards are played when dragged above their starting position (any upward drag counts). */
 const DRAG_PLAY_THRESHOLD = -20;
@@ -74,20 +75,7 @@ export function PlayerHand() {
       const obj = objects[objectId];
       if (!obj) return;
 
-      // Find cast/play action by object_id
-      const castAction = legalActions.find(
-        (a) =>
-          (a.type === "PlayLand" || a.type === "CastSpell") &&
-          Number((a as Extract<GameAction, { type: "PlayLand" | "CastSpell" }>).data.object_id) === objectId,
-      );
-      // Find hand-activated ability actions by object_id (Channel, etc.)
-      const abilityActions = legalActions.filter(
-        (a) => a.type === "ActivateAbility" && Number(a.data.source_id) === objectId,
-      );
-
-      const allActions: GameAction[] = [];
-      if (castAction) allActions.push(castAction);
-      allActions.push(...abilityActions);
+      const allActions = collectObjectActions(legalActions, objectId as ObjectId);
 
       if (allActions.length === 0) return;
       inspectObject(null);

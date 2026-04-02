@@ -1,4 +1,9 @@
-import type { AdditionalCost, GameAction, SerializedAbilityCost } from "../adapter/types.ts";
+import type {
+  AdditionalCost,
+  GameAction,
+  GameObject,
+  SerializedAbilityCost,
+} from "../adapter/types.ts";
 
 // Converts Rust ManaCostShard variant names to MTG abbreviations.
 // This is the canonical bridge between engine serialization and display—
@@ -56,12 +61,24 @@ export function abilityLabel(ability: unknown): string {
   return cost ? formatCost(cost) : "0";
 }
 
-export function abilityChoiceLabel(action: GameAction, abilities: unknown[]): { label: string; description?: string } {
+export function abilityChoiceLabel(
+  action: GameAction,
+  object: GameObject,
+): { label: string; description?: string } {
   if (action.type === "ActivateAbility") {
-    const ability = abilities[action.data.ability_index] as { cost?: SerializedCost; description?: string } | null;
+    const ability = object.abilities[action.data.ability_index] as { cost?: SerializedCost; description?: string } | null;
     const label = abilityLabel(ability);
     const description = ability?.description ? stripCostPrefix(ability.description) : undefined;
     return { label, description };
+  }
+  if (action.type === "CastSpell") {
+    return { label: `Cast ${object.name}` };
+  }
+  if (action.type === "PlayLand") {
+    const landFaceName = object.card_types.core_types.includes("Land")
+      ? object.name
+      : object.back_face?.name ?? object.name;
+    return { label: `Play ${landFaceName}`, description: "Play this card as a land" };
   }
   return { label: "Tap for Mana" };
 }

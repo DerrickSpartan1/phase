@@ -1594,7 +1594,7 @@ function AbilityChoiceModal() {
       options={pending.actions.map((action, i) => {
         const { label, description } = abilityChoiceLabel(
           action,
-          obj.abilities,
+          obj,
         );
         return { id: String(i), label, description };
       })}
