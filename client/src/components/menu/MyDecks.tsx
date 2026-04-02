@@ -575,7 +575,7 @@ export function MyDecks({
         </div>
 
         {mode === "manage" && (<>
-        {FORMAT_FILTERS.filter((f) => !(mode === "select" && contextualFilter && f.key === "all")).map(({ key, label, aetherhubUrl }) => (
+        {FORMAT_FILTERS.map(({ key, label, aetherhubUrl }) => (
           <span key={key} className="inline-flex items-center gap-0.5">
             <button
               onClick={() => setActiveFilter(key)}

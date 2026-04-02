@@ -834,7 +834,7 @@ function GamePageContent({
 
       {/* WaitingFor-driven prompt overlays (only for human player) */}
       {waitingFor != null &&
-        ["TargetSelection", "TriggerTargetSelection", "CopyTargetChoice", "ExploreChoice", "TapCreaturesForManaAbility"].includes(waitingFor.type) &&
+        (waitingFor.type === "TargetSelection" || waitingFor.type === "TriggerTargetSelection" || waitingFor.type === "CopyTargetChoice" || waitingFor.type === "ExploreChoice" || waitingFor.type === "TapCreaturesForManaAbility") &&
         waitingFor.data.player === playerId && <TargetingOverlay />}
       {waitingFor?.type === "ManaPayment" &&
         waitingFor.data.player === playerId && <ManaPaymentUI />}

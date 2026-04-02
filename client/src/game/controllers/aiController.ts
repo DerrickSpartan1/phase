@@ -1,5 +1,6 @@
 import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS } from "../../constants/game";
 import { useGameStore } from "../../stores/gameStore";
+import type { GameAction } from "../../adapter/types";
 import { debugLog } from "../debugLog";
 import { dispatchAction } from "../dispatch";
 import type { OpponentController } from "./types";
