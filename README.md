@@ -36,6 +36,16 @@
 
 A Rust-native MTG engine compiling to native and WASM, powering a Tauri desktop app, browser PWA, and WebSocket multiplayer. Implements comprehensive MTG rules using functional architecture — pure reducers, discriminated unions, and immutable state with structural sharing — with an Arena-quality React/TypeScript UI.
 
+## Story
+
+I'm Matt — a millennial software engineer who loves Magic. My six-year-old son asks me to play with him all the time, but the real game is just too complicated for a kid his age.
+
+So I built [Alchemy](https://matthewevans.github.io/alchemy) ([source](https://github.com/matthewevans/alchemy)) — a simplified, kid-friendly version of MTG we could play together on our iPads. Fewer keywords, no lands, energy that builds each turn, and an adaptive learning mode where he solves math problems for combat bonuses. I had a working version in a single afternoon and fleshed it out over the following week.
+
+After that I wanted to see how far I could push it — a real MTG rules engine in Rust, compiling to WASM, with the same React frontend so the whole thing runs in a browser. This whole project went from nothing to where it is now in a matter of weeks.
+
+I'm not trying to make money off this. There are no ads. I'm just a dude who likes Magic.
+
 ## Features
 
 - **Rules engine** — Turns, priority, stack, combat, state-based actions, layers, triggers, replacement effects

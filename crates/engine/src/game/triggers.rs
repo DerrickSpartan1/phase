@@ -133,7 +133,13 @@ fn collect_matching_triggers(
                     continue;
                 }
                 if let Some(ref condition) = trig_def.condition {
-                    if !check_trigger_condition(state, condition, controller, Some(obj_id)) {
+                    if !check_trigger_condition(
+                        state,
+                        condition,
+                        controller,
+                        Some(obj_id),
+                        Some(event),
+                    ) {
                         continue;
                     }
                 }
@@ -1031,6 +1037,7 @@ pub(crate) fn check_trigger_condition(
     condition: &TriggerCondition,
     controller: PlayerId,
     source_id: Option<ObjectId>,
+    trigger_event: Option<&GameEvent>,
 ) -> bool {
     match condition {
         TriggerCondition::GainedLife { minimum } => {
@@ -1100,11 +1107,23 @@ pub(crate) fn check_trigger_condition(
         // CR 601.2: True when the current turn's active player is an opponent.
         TriggerCondition::DuringOpponentsTurn => state.active_player != controller,
         // CR 700.4 + CR 120.1: True when the dying creature was dealt damage by the
-        // trigger source this turn. Requires damage-tracking infrastructure — stub returns
-        // false until the runtime tracks per-source damage history.
+        // trigger source this turn.
         TriggerCondition::DealtDamageBySourceThisTurn => {
-            // TODO: Implement damage-by-source tracking in game state
-            false
+            // Extract the dying creature's ID from the trigger event. Only
+            // CreatureDestroyed and ZoneChanged (dies = battlefield→graveyard)
+            // carry the dying creature — other event shapes are not valid here.
+            let dying_creature = trigger_event.and_then(|e| match e {
+                GameEvent::CreatureDestroyed { object_id } => Some(*object_id),
+                GameEvent::ZoneChanged { object_id, .. } => Some(*object_id),
+                _ => None,
+            });
+            match (source_id, dying_creature) {
+                (Some(src), Some(subj)) => state
+                    .damage_dealt_this_turn
+                    .iter()
+                    .any(|r| r.source_id == src && r.target == TargetRef::Object(subj)),
+                _ => false,
+            }
         }
         // CR 400.7 + CR 603.10: "if it was a [type]" — check LKI for the source's
         // core types at the time it left the battlefield.
@@ -1262,10 +1281,10 @@ pub(crate) fn check_trigger_condition(
             }),
         TriggerCondition::And { conditions } => conditions
             .iter()
-            .all(|c| check_trigger_condition(state, c, controller, source_id)),
+            .all(|c| check_trigger_condition(state, c, controller, source_id, trigger_event)),
         TriggerCondition::Or { conditions } => conditions
             .iter()
-            .any(|c| check_trigger_condition(state, c, controller, source_id)),
+            .any(|c| check_trigger_condition(state, c, controller, source_id, trigger_event)),
         // CR 309.7: True when the controller has completed at least one dungeon.
         TriggerCondition::CompletedADungeon => state
             .dungeon_progress
@@ -3083,5 +3102,86 @@ pub mod tests {
             controller,
             &controller_draw,
         ));
+    }
+
+    #[test]
+    fn test_dealt_damage_by_source_condition() {
+        use crate::types::game_state::DamageRecord;
+
+        let mut state = setup();
+        let source = ObjectId(10); // The permanent with the trigger
+        let dying_creature = ObjectId(20); // The creature that died
+
+        // Record damage: source dealt 3 damage to dying_creature
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: source,
+            target: TargetRef::Object(dying_creature),
+            amount: 3,
+            is_combat: false,
+        });
+
+        let condition = TriggerCondition::DealtDamageBySourceThisTurn;
+        let event = GameEvent::CreatureDestroyed {
+            object_id: dying_creature,
+        };
+
+        // Matching source + matching dying creature → true
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&event),
+        ));
+
+        // Non-matching source → false
+        let wrong_source = ObjectId(99);
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(wrong_source),
+            Some(&event),
+        ));
+
+        // Non-matching dying creature → false
+        let wrong_event = GameEvent::CreatureDestroyed {
+            object_id: ObjectId(88),
+        };
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&wrong_event),
+        ));
+
+        // No trigger event → false
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            None,
+        ));
+    }
+
+    #[test]
+    fn test_damage_dealt_this_turn_cleared_on_turn() {
+        use crate::types::game_state::DamageRecord;
+
+        let mut state = setup();
+        state.damage_dealt_this_turn.push(DamageRecord {
+            source_id: ObjectId(1),
+            target: TargetRef::Object(ObjectId(2)),
+            amount: 2,
+            is_combat: true,
+        });
+        assert!(!state.damage_dealt_this_turn.is_empty());
+
+        // Call the actual turn-start function to verify the real code path clears it
+        let mut events = Vec::new();
+        crate::game::turns::start_next_turn(&mut state, &mut events);
+        assert!(state.damage_dealt_this_turn.is_empty());
     }
 }

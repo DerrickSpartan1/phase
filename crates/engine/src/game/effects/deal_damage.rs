@@ -12,7 +12,7 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{DamageRecord, GameState};
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
 use crate::types::player::PlayerId;
@@ -238,6 +238,16 @@ pub(crate) fn apply_damage_to_target(
                     excess,
                 });
 
+                // CR 120.1: Record damage for "was dealt damage by" condition queries.
+                if actual_amount > 0 {
+                    state.damage_dealt_this_turn.push(DamageRecord {
+                        source_id: ctx.source_id,
+                        target: t.clone(),
+                        amount: actual_amount,
+                        is_combat,
+                    });
+                }
+
                 // CR 702.15b / CR 120.3f: Lifelink — controller gains life equal to damage dealt.
                 if ctx.has_lifelink
                     && actual_amount > 0
@@ -379,7 +389,8 @@ pub fn resolve_all(
         .collect();
 
     // TODO(CR 120.3h): Battle card type not handled — damage to a battle should remove defense counters.
-    // TODO: resolve_all does not yet target players (e.g., "each opponent"); only battlefield objects are matched.
+    // Player damage uses the separate DamageEachPlayer effect type (PlayerFilter +
+    // per-player quantity resolution). DamageAll is intentionally object-only.
     // TODO(CR 120.3): NeedsChoice during batch damage returns early — remaining targets skip damage.
     //   This is an engine-wide replacement-choice limitation, not specific to resolve_all.
     let ctx = DamageContext::from_source(state, ability.source_id)

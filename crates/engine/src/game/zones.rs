@@ -133,12 +133,26 @@ pub fn move_to_zone(
             if is_blocked_from_entering_battlefield(state, obj) {
                 return;
             }
-            // CR 304.4 / CR 307.4: Instants and sorceries can't enter the battlefield.
+            // CR 304.4 / CR 307.4 / CR 400.4a: Instants and sorceries can't enter
+            // the battlefield. Skip for face-down (morph/manifest) and objects with
+            // a permanent type (MDFC back faces).
             if !obj.face_down
                 && (obj.card_types.core_types.contains(&CoreType::Instant)
                     || obj.card_types.core_types.contains(&CoreType::Sorcery))
+                && !obj.card_types.core_types.iter().any(|ct| {
+                    matches!(
+                        ct,
+                        // CR 110.4: Permanent types
+                        CoreType::Creature
+                            | CoreType::Artifact
+                            | CoreType::Enchantment
+                            | CoreType::Planeswalker
+                            | CoreType::Land
+                            | CoreType::Battle
+                    )
+                })
             {
-                return; // CR 304.4: Remain in previous zone
+                return; // CR 400.4a: Remain in previous zone
             }
         }
     }
@@ -297,7 +311,7 @@ pub fn add_to_zone(state: &mut GameState, object_id: ObjectId, zone: Zone, owner
                 _ => unreachable!(),
             }
         }
-        // TODO(CR 400.4a): No guard preventing instants/sorceries from entering the battlefield.
+        // CR 400.4a: Instants/sorceries blocked by early check in move_to_zone.
         Zone::Battlefield => state.battlefield.push(object_id),
         Zone::Stack => {} // Stack entries are managed separately via StackEntry
         Zone::Exile => state.exile.push(object_id),
@@ -754,6 +768,57 @@ mod tests {
         move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
 
         // Face-down instants (morph) can enter the battlefield
+        assert_eq!(state.objects[&id].zone, Zone::Battlefield);
+    }
+
+    #[test]
+    fn sorcery_cannot_enter_battlefield() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Time Walk".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Sorcery);
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+
+        // CR 307.4 / CR 400.4a: Sorcery should remain in hand
+        assert_eq!(state.objects[&id].zone, Zone::Hand);
+        assert!(state.players[0].hand.contains(&id));
+    }
+
+    #[test]
+    fn instant_creature_mdfc_can_enter_battlefield() {
+        // CR 110.4: An object with both Instant and Creature types (MDFC back face)
+        // should be allowed to enter the battlefield because it has a permanent type.
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "MDFC Back".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Battlefield, &mut events);
+
+        // Should enter because it has a permanent type (Creature)
         assert_eq!(state.objects[&id].zone, Zone::Battlefield);
     }
 }

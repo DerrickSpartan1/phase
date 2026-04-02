@@ -28,6 +28,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     if let StackEntryKind::TriggeredAbility {
         condition: Some(ref condition),
         source_id,
+        ref trigger_event,
         ..
     } = entry.kind
     {
@@ -36,6 +37,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             condition,
             entry.controller,
             Some(source_id),
+            trigger_event.as_ref(),
         ) {
             events.push(GameEvent::StackResolved {
                 object_id: entry.id,

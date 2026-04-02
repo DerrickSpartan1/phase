@@ -578,7 +578,10 @@ pub(super) fn parse_search_and_creation_ast(
         // resolved later by apply_where_x_effect_expression.
         let count = if let Ok((_, n)) = nom_primitives::parse_number.parse(rest_lower) {
             QuantityExpr::Fixed { value: n as i32 }
-        } else if tag::<_, _, VerboseError<&str>>("x").parse(rest_lower).is_ok() {
+        } else if tag::<_, _, VerboseError<&str>>("x")
+            .parse(rest_lower)
+            .is_ok()
+        {
             QuantityExpr::Ref {
                 qty: QuantityRef::Variable {
                     name: "X".to_string(),

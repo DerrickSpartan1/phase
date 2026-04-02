@@ -170,6 +170,16 @@ pub struct BattlefieldEntryRecord {
     pub controller: PlayerId,
 }
 
+/// CR 120.1: Snapshot of a damage event for "was dealt damage by" queries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct DamageRecord {
+    pub source_id: ObjectId,
+    pub target: TargetRef,
+    pub amount: u32,
+    #[serde(default)]
+    pub is_combat: bool,
+}
+
 /// CR 607.2a + CR 406.6: Tracks the link between an exiling source and the exiled card.
 /// When the source leaves the battlefield, the exiled card returns (CR 610.3a).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1305,6 +1315,9 @@ pub struct GameState {
     /// CR 403.3: Battlefield entry snapshots this turn, enabling data-driven ETB queries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub battlefield_entries_this_turn: Vec<BattlefieldEntryRecord>,
+    /// CR 120.1: Damage records this turn for "was dealt damage by" condition queries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub damage_dealt_this_turn: Vec<DamageRecord>,
     /// CR 700.14: Cumulative mana spent on spells this turn per player (for Expend triggers).
     #[serde(default)]
     pub mana_spent_on_spells_this_turn: HashMap<PlayerId, u32>,
@@ -1554,6 +1567,7 @@ impl GameState {
             players_who_sacrificed_artifact_this_turn: HashSet::new(),
             zone_changes_this_turn: Vec::new(),
             battlefield_entries_this_turn: Vec::new(),
+            damage_dealt_this_turn: Vec::new(),
             mana_spent_on_spells_this_turn: HashMap::new(),
             modal_modes_chosen_this_turn: HashSet::new(),
             modal_modes_chosen_this_game: HashSet::new(),
@@ -1701,6 +1715,7 @@ impl PartialEq for GameState {
                 == other.players_who_sacrificed_artifact_this_turn
             && self.zone_changes_this_turn == other.zone_changes_this_turn
             && self.battlefield_entries_this_turn == other.battlefield_entries_this_turn
+            && self.damage_dealt_this_turn == other.damage_dealt_this_turn
             && self.modal_modes_chosen_this_turn == other.modal_modes_chosen_this_turn
             && self.modal_modes_chosen_this_game == other.modal_modes_chosen_this_game
             && self.pending_continuation == other.pending_continuation

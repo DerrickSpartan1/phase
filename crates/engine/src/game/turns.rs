@@ -120,6 +120,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.players_who_sacrificed_artifact_this_turn.clear();
     state.zone_changes_this_turn.clear();
     state.battlefield_entries_this_turn.clear();
+    state.damage_dealt_this_turn.clear();
     // CR 500.8: Clear any leftover extra phases from the previous turn.
     state.extra_phases.clear();
     // CR 700.14: Reset cumulative mana spent on spells for Expend triggers.
