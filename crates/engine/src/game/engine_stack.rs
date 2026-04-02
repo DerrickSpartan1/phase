@@ -14,7 +14,7 @@ use super::engine::{resume_pending_continuation_if_priority, EngineError};
 use super::triggers::PendingTrigger;
 use super::{casting, triggers};
 
-fn finalize_trigger_target_selection(
+pub(super) fn finalize_trigger_target_selection(
     state: &mut GameState,
     trigger: PendingTrigger,
     ability: ResolvedAbility,

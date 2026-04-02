@@ -18,16 +18,13 @@ use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
-use super::ability_utils::{
-    assign_targets_in_chain, auto_select_targets, begin_target_selection, build_chained_resolved,
-    build_target_slots, compute_unavailable_modes, flatten_targets_in_chain,
-    record_modal_mode_choices, validate_modal_indices,
-};
+use super::ability_utils::{begin_target_selection, build_target_slots, compute_unavailable_modes};
 use super::casting;
 use super::casting_costs;
 use super::effects;
 use super::engine_casting;
 use super::engine_combat;
+use super::engine_modes;
 use super::engine_priority;
 use super::engine_stack;
 use super::mana_abilities;
@@ -38,7 +35,6 @@ use super::mulligan;
 use super::planeswalker;
 use super::priority;
 use super::public_state::{finalize_public_state, sync_waiting_for};
-use super::restrictions;
 use super::turns;
 use super::zones;
 
@@ -2814,172 +2810,14 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
         ) => match_flow::handle_choose_play_draw(state, *player, play_first, &mut events)
             .map_err(EngineError::InvalidAction)?,
         (
-            WaitingFor::AbilityModeChoice {
-                player,
-                modal,
-                source_id,
-                mode_abilities,
-                is_activated,
-                ability_index,
-                ability_cost,
-                unavailable_modes,
-            },
+            waiting_for @ WaitingFor::AbilityModeChoice { .. },
             GameAction::SelectModes { indices },
-        ) => {
-            validate_modal_indices(modal, &indices, unavailable_modes)?;
-            record_modal_mode_choices(state, *source_id, modal, &indices);
-
-            let p = *player;
-            let sid = *source_id;
-            let resolved = build_chained_resolved(mode_abilities, indices.as_slice(), sid, p)?;
-
-            if *is_activated {
-                if state.layers_dirty {
-                    super::layers::evaluate_layers(state);
-                }
-
-                let target_slots = build_target_slots(state, &resolved)?;
-                let target_constraints = super::ability_utils::target_constraints_from_modal(modal);
-                if !target_slots.is_empty() {
-                    if let Some(targets) = auto_select_targets(&target_slots, &target_constraints)?
-                    {
-                        let mut resolved = resolved;
-                        assign_targets_in_chain(&mut resolved, &targets)?;
-
-                        if let Some(cost) = ability_cost {
-                            casting::pay_ability_cost(state, p, sid, cost, &mut events)?;
-                        }
-                        casting::emit_targeting_events(
-                            state,
-                            &flatten_targets_in_chain(&resolved),
-                            sid,
-                            p,
-                            &mut events,
-                        );
-
-                        let entry_id = ObjectId(state.next_object_id);
-                        state.next_object_id += 1;
-                        super::stack::push_to_stack(
-                            state,
-                            crate::types::game_state::StackEntry {
-                                id: entry_id,
-                                source_id: sid,
-                                controller: p,
-                                kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
-                                    source_id: sid,
-                                    ability: resolved,
-                                },
-                            },
-                            &mut events,
-                        );
-                        if let Some(idx) = ability_index {
-                            restrictions::record_ability_activation(state, sid, *idx);
-                        }
-                    } else {
-                        let selection = begin_target_selection(&target_slots, &target_constraints)?;
-                        let mut pending_eng = crate::types::game_state::PendingCast::new(
-                            sid,
-                            CardId(0),
-                            resolved,
-                            crate::types::mana::ManaCost::NoCost,
-                        );
-                        pending_eng.activation_cost = ability_cost.clone();
-                        pending_eng.activation_ability_index = *ability_index;
-                        pending_eng.target_constraints = target_constraints;
-                        return Ok(ActionResult {
-                            events,
-                            waiting_for: WaitingFor::TargetSelection {
-                                player: p,
-                                pending_cast: Box::new(pending_eng),
-                                target_slots,
-                                selection,
-                            },
-                            log_entries: vec![],
-                        });
-                    }
-                } else {
-                    if let Some(cost) = ability_cost {
-                        casting::pay_ability_cost(state, p, sid, cost, &mut events)?;
-                    }
-                    let entry_id = ObjectId(state.next_object_id);
-                    state.next_object_id += 1;
-                    super::stack::push_to_stack(
-                        state,
-                        crate::types::game_state::StackEntry {
-                            id: entry_id,
-                            source_id: sid,
-                            controller: p,
-                            kind: crate::types::game_state::StackEntryKind::ActivatedAbility {
-                                source_id: sid,
-                                ability: resolved,
-                            },
-                        },
-                        &mut events,
-                    );
-                    if let Some(idx) = ability_index {
-                        restrictions::record_ability_activation(state, sid, *idx);
-                    }
-                }
-
-                events.push(GameEvent::AbilityActivated { source_id: sid });
-                state.priority_passes.clear();
-                state.priority_pass_count = 0;
-                WaitingFor::Priority { player: p }
-            } else {
-                // CR 603.3: Once the player has chosen modes for a triggered ability,
-                // consume the pending trigger and either finish putting it on the stack
-                // now or re-stash it only if further target selection is required.
-                let mut trigger = state
-                    .pending_trigger
-                    .take()
-                    .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
-                let target_slots = build_target_slots(state, &resolved)?;
-                let target_constraints = super::ability_utils::target_constraints_from_modal(modal);
-                trigger.ability = resolved;
-                trigger.target_constraints = target_constraints.clone();
-                trigger.modal = None;
-                trigger.mode_abilities.clear();
-
-                if !target_slots.is_empty() {
-                    if let Some(targets) = auto_select_targets(&target_slots, &target_constraints)?
-                    {
-                        assign_targets_in_chain(&mut trigger.ability, &targets)?;
-                        casting::emit_targeting_events(
-                            state,
-                            &flatten_targets_in_chain(&trigger.ability),
-                            sid,
-                            p,
-                            &mut events,
-                        );
-                        super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
-                    } else {
-                        state.pending_trigger = Some(trigger);
-                        let trigger_description = state
-                            .pending_trigger
-                            .as_ref()
-                            .and_then(|t| t.description.clone());
-                        let selection = begin_target_selection(&target_slots, &target_constraints)?;
-                        return Ok(ActionResult {
-                            events,
-                            waiting_for: WaitingFor::TriggerTargetSelection {
-                                player: p,
-                                target_slots,
-                                target_constraints,
-                                selection,
-                                source_id: Some(sid),
-                                description: trigger_description,
-                            },
-                            log_entries: vec![],
-                        });
-                    }
-                } else {
-                    super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
-                }
-                state.priority_passes.clear();
-                state.priority_pass_count = 0;
-                WaitingFor::Priority { player: p }
-            }
-        }
+        ) => engine_modes::handle_ability_mode_choice(
+            state,
+            waiting_for.clone(),
+            indices,
+            &mut events,
+        )?,
         // CR 601.2c: Player selected targets from a multi-target set ("any number of").
         (WaitingFor::MultiTargetSelection { .. }, GameAction::SelectCards { cards: selected }) => {
             let waiting_for = state.waiting_for.clone();
@@ -7102,7 +6940,7 @@ mod trigger_target_tests {
         match &state.stack[0].kind {
             crate::types::game_state::StackEntryKind::TriggeredAbility { ability, .. } => {
                 assert_eq!(
-                    flatten_targets_in_chain(ability),
+                    crate::game::ability_utils::flatten_targets_in_chain(ability),
                     vec![
                         TargetRef::Player(PlayerId(0)),
                         TargetRef::Player(PlayerId(1))

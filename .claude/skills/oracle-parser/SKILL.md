@@ -109,10 +109,10 @@ parse_oracle_text()             — classify line by priority (see §3)
     ├─ Keywords-only            → keyword extraction
     ├─ "When/Whenever/At"       → parse_trigger_line()        [oracle_trigger.rs]
     ├─ Contains ":"             → activated ability parsing     [oracle_cost.rs + oracle_effect/]
-    ├─ is_static_pattern()      → parse_static_line()          [oracle_static.rs]
-    ├─ is_replacement_pattern() → parse_replacement_line()     [oracle_replacement.rs]
+    ├─ is_static_pattern()      → parse_static_line()          [oracle_classifier.rs → oracle_static.rs]
+    ├─ is_replacement_pattern() → parse_replacement_line()     [oracle_classifier.rs → oracle_replacement.rs]
     ├─ Imperative verb          → parse_effect_chain()         [oracle_effect/]
-    ├─ dispatch_line_nom()      → parse_effect_chain_with_context() [oracle.rs]
+    ├─ dispatch_line_nom()      → parse_effect_chain_with_context() [oracle_dispatch.rs → oracle_effect/]
     └─ Fallback                 → Effect::Unimplemented
 ```
 
@@ -151,6 +151,8 @@ parse_effect_clause()                    — entry point (oracle_effect/mod.rs)
 
 - **Nom combinators** handle ALL parsing dispatch — atomic, structural, sentence-level verb dispatch, and top-level routing.
 - **`TextPair`** provides dual-string case-bridging (subject-predicate decomposition, clause AST classification). `TextPair::strip_prefix` is correct for these structural operations.
+- **`oracle_classifier.rs`** owns reusable line-classification helpers such as trigger-prefix, static-pattern, and replacement-pattern detection. `oracle.rs` remains the priority router that calls them.
+- **`oracle_effect/conditions.rs`** owns leading-condition splitting and ability-condition helpers. `oracle_effect/mod.rs` remains the clause/effect orchestrator and re-exports `split_leading_conditional`.
 - **New parser code** MUST use nom combinators. `starts_with`/`strip_prefix` for parsing dispatch is NOT acceptable (see Rule Zero).
 
 ---
@@ -290,6 +292,7 @@ Before parsing, `normalize_self_refs()` replaces the card's name and phrases lik
 ```
 oracle_effect/
 ├── mod.rs          — Orchestrator: parse_effect_chain(), parse_effect_clause(), compound detection
+├── conditions.rs   — Leading condition splitting and AbilityCondition extraction helpers
 ├── imperative.rs   — Imperative verb family parsing: parse_*_ast() + lower_*_ast()
 ├── subject.rs      — Subject-predicate parsing: try_parse_subject_predicate_ast()
 ├── sequence.rs     — Clause boundary splitting and continuation absorption
@@ -359,6 +362,8 @@ Predicate hierarchy: `try_parse_subject_continuous_clause()` → `try_parse_subj
 
 | Module | Purpose | Invoked at Priority |
 |--------|---------|-------------------|
+| `oracle_classifier.rs` | Shared line-classification helpers: trigger prefixes, static/replacement detection, special routing heuristics. Called by `oracle.rs`, `oracle_dispatch.rs`, and class parsing. | Priority router support |
+| `oracle_dispatch.rs` | Nom fallback dispatch for effect/static/replacement candidates before `Unimplemented`. | P14a |
 | `oracle_trigger.rs` | Trigger parsing: subject + event decomposition, constraint parsing (OncePerTurn, OncePerGame). Uses `parse_trigger_subject()` → `try_parse_event()` pipeline. | P7 |
 | `oracle_static.rs` | Static ability parsing: turn-condition handling (prefix "During your turn" and suffix "during your turn"), continuous modifications via `parse_continuous_modifications()`. | P8 |
 | `oracle_replacement.rs` | Replacement effects: priority-ordered pattern matching (as-enters-choose before shock-land before fast-land, etc.), builder pattern with `ReplacementDefinition::new()`. | P9 |
@@ -538,7 +543,7 @@ Cross-reference the `/add-trigger` skill. Parser-specific: add pattern in `try_p
 | Monolithic condition parsing | Fragile, card-specific | Use subject+event decomposition |
 | Splitting on " and " naively | Breaks compound effects | Use `try_split_targeted_compound` |
 | Putting `Fixed(i32)` inside `QuantityRef` | Wrong abstraction layer | `QuantityRef` = dynamic only; `Fixed` in `QuantityExpr` |
-| Editing `mod.rs` when sub-module is right | Bloats orchestrator | Token → `token.rs`, mana → `mana.rs`, counters → `counter.rs` |
+| Editing `mod.rs` when sub-module is right | Bloats orchestrator | Token → `token.rs`, mana → `mana.rs`, counters → `counter.rs`, leading conditions → `conditions.rs` |
 | `unwrap()` on parse results | Parser panics on unknown text | Return `None` or `Effect::Unimplemented` |
 | Not recognizing `~` as self-reference | Self-targeting fails | `parse_target` handles both `~` and type phrases |
 | Inline `use nom::*` in function bodies | CLAUDE.md prohibition | All imports at file top |
@@ -560,12 +565,14 @@ After completing work using this skill:
 
 ```bash
 rg -q "fn parse_oracle_text" crates/engine/src/parser/oracle.rs && \
-rg -q "fn is_static_pattern" crates/engine/src/parser/oracle.rs && \
-rg -q "fn is_replacement_pattern" crates/engine/src/parser/oracle.rs && \
-rg -q "fn dispatch_line_nom" crates/engine/src/parser/oracle.rs && \
+rg -q "fn is_static_pattern" crates/engine/src/parser/oracle_classifier.rs && \
+rg -q "fn is_replacement_pattern" crates/engine/src/parser/oracle_classifier.rs && \
+rg -q "fn dispatch_line_nom" crates/engine/src/parser/oracle_dispatch.rs && \
 rg -q "fn parse_effect_chain" crates/engine/src/parser/oracle_effect/mod.rs && \
 rg -q "fn parse_effect_clause" crates/engine/src/parser/oracle_effect/mod.rs && \
 rg -q "fn parse_imperative_effect" crates/engine/src/parser/oracle_effect/mod.rs && \
+rg -q "fn split_leading_conditional" crates/engine/src/parser/oracle_effect/conditions.rs && \
+rg -q "fn strip_leading_general_conditional" crates/engine/src/parser/oracle_effect/conditions.rs && \
 rg -q "fn strip_subject_clause" crates/engine/src/parser/oracle_effect/subject.rs && \
 rg -q "fn try_parse_subject_predicate_ast" crates/engine/src/parser/oracle_effect/subject.rs && \
 rg -q "fn try_parse_targeted_controller_gain_life" crates/engine/src/parser/oracle_effect/subject.rs && \

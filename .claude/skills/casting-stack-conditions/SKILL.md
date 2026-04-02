@@ -234,12 +234,18 @@ Casting-relevant states:
 | `ModeChoice { player, modal, pending_cast }` | Modal spell ("Choose one —") detected via `obj.modal` | `SelectModes { indices }` |
 | `ManaPayment { player }` | X in mana cost | Mana declaration |
 
-The `apply()` function in `engine.rs` matches `(WaitingFor, GameAction)` pairs to route to handlers.
+The public reducer entry point remains `engine.rs::apply()`, but casting/stack state-machine ownership is now split across helper families:
+
+- `engine.rs` — top-level `(WaitingFor, GameAction)` routing facade
+- `engine_casting.rs` — cast/target/continuation reducer helpers
+- `engine_stack.rs` — trigger-target and stack-entry continuation helpers
+- `engine_modes.rs` — `AbilityModeChoice` routing for activated and triggered modal abilities
+- `engine_priority.rs` — priority-pass and post-resolution resume helpers
 
 ### Adding a new WaitingFor state requires:
 
 1. `types/game_state.rs` — `WaitingFor` variant + `GameAction` variant
-2. `engine.rs::apply()` — Match arm for `(WaitingFor::New, GameAction::NewResponse)` pair
+2. `engine.rs::apply()` — Match arm for `(WaitingFor::New, GameAction::NewResponse)` pair, delegating into the appropriate helper family if the flow is extracted
 3. `engine/src/ai_support/candidates.rs` — Generate legal responses for AI
 4. `client/adapter/types.ts` — TypeScript discriminated union variant
 5. Frontend component (if interactive choice needed)
@@ -303,7 +309,7 @@ AbilityDefinition.modal
        ability_cost,
      }
   -> GameAction::SelectModes { indices }
-  -> engine.rs validates indices + target constraints
+  -> engine_modes::handle_ability_mode_choice() validates indices + target constraints
   -> build_chained_resolved(mode_abilities, indices)
   -> push to stack (activated) or replace pending trigger ability (triggered)
 ```
@@ -340,7 +346,7 @@ if let Some((_, rest)) = nom_on_lower(text, lower, tag("you may ")) {
 | Pitfall | Consequence |
 |---------|-------------|
 | Data on `PendingCast` not propagated to `StackEntry` | Data lost after casting completes |
-| New `WaitingFor` without `GameAction` handler in `engine.rs` | Game hangs — response never processed |
+| New `WaitingFor` without an `engine.rs::apply()` routing arm | Game hangs — response never processed |
 | New `WaitingFor` without AI candidate generation in `ai_support/` | AI hangs on the choice |
 | New field on `StackEntry` without `#[serde(default)]` | Deserialization breaks for in-progress games |
 | Condition check only at resolution, not at trigger time | Violates MTG intervening-if rules (triggers only) |
@@ -358,6 +364,9 @@ rg -q "fn pay_and_push" crates/engine/src/game/casting.rs && \
 rg -q "fn pay_mana_cost" crates/engine/src/game/casting.rs && \
 rg -q "fn pay_ability_cost" crates/engine/src/game/casting.rs && \
 rg -q "fn requires_untapped" crates/engine/src/game/casting.rs && \
+rg -q "fn handle_ability_mode_choice" crates/engine/src/game/engine_modes.rs && \
+test -f crates/engine/src/game/engine_casting.rs && \
+test -f crates/engine/src/game/engine_stack.rs && \
 rg -q "fn resolve_top" crates/engine/src/game/stack.rs && \
 rg -q "fn resolve_ability_chain" crates/engine/src/game/effects/mod.rs && \
 rg -q "struct PendingCast" crates/engine/src/types/game_state.rs && \
