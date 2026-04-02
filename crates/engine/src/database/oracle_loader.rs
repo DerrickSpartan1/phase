@@ -82,6 +82,7 @@ pub fn load_from_mtgjson(mtgjson_path: &Path) -> Result<CardDatabase, Box<dyn Er
         cards,
         face_index,
         oracle_id_index: HashMap::new(),
+        layout_index: HashMap::new(),
         legalities,
         errors,
     })

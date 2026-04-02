@@ -21,6 +21,11 @@ struct CardExportEntry {
     face: CardFace,
     #[serde(default)]
     legalities: BTreeMap<String, String>,
+    /// MTGJSON layout string for multi-face cards (e.g. "modal_dfc", "transform",
+    /// "adventure"). Enables the runtime card database to determine the correct
+    /// `LayoutKind` when loading from the export (where `CardRules` is not available).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    layout: Option<String>,
 }
 
 fn build_export_layout(
@@ -226,7 +231,18 @@ fn main() {
                 if let Some(ref fi) = forge_index {
                     engine::database::forge::apply_forge_fallback(&mut face, fi);
                 }
-                face_index.insert(key, CardExportEntry { face, legalities });
+                let layout_str = match layout_kind {
+                    LayoutKind::Single => None,
+                    _ => Some(faces[0].layout.clone()),
+                };
+                face_index.insert(
+                    key,
+                    CardExportEntry {
+                        face,
+                        legalities,
+                        layout: layout_str,
+                    },
+                );
             }
         } else {
             let face = build_oracle_face(&faces[0], oracle_id);
@@ -241,7 +257,14 @@ fn main() {
                 cards_with_unimplemented += 1;
             }
 
-            face_index.insert(key, CardExportEntry { face, legalities });
+            face_index.insert(
+                key,
+                CardExportEntry {
+                    face,
+                    legalities,
+                    layout: None,
+                },
+            );
         }
     }
 

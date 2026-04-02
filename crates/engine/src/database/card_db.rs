@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde::Deserialize;
 
 use super::legality::{normalize_legalities, CardLegalities, LegalityFormat, LegalityStatus};
-use crate::types::card::{CardFace, CardRules, PrintedCardRef};
+use crate::types::card::{CardFace, CardRules, LayoutKind, PrintedCardRef};
 
 use std::io::BufReader;
 
@@ -13,6 +13,11 @@ pub struct CardDatabase {
     pub(crate) cards: HashMap<String, CardRules>,
     pub(crate) face_index: HashMap<String, CardFace>,
     pub(crate) oracle_id_index: HashMap<String, Vec<String>>,
+    /// Maps oracle_id → runtime LayoutKind for multi-face cards.
+    /// Populated only from the export path (the MTGJSON path uses `cards` directly).
+    /// Enables `rehydrate_game_from_card_db` to determine the correct layout kind
+    /// when `get_by_name` returns None (export path doesn't build `CardRules`).
+    pub(crate) layout_index: HashMap<String, LayoutKind>,
     pub(crate) legalities: HashMap<String, CardLegalities>,
     pub(crate) errors: Vec<(PathBuf, String)>,
 }
@@ -42,15 +47,19 @@ impl CardDatabase {
     fn from_export_entries(entries: HashMap<String, CardExportEntry>) -> Self {
         let mut face_index = HashMap::with_capacity(entries.len());
         let mut oracle_id_index: HashMap<String, Vec<String>> = HashMap::new();
+        let mut layout_index: HashMap<String, LayoutKind> = HashMap::new();
         let mut legalities = HashMap::new();
 
         for (_name, entry) in entries {
             let key = entry.face.name.to_lowercase();
             if let Some(oracle_id) = entry.face.scryfall_oracle_id.clone() {
                 oracle_id_index
-                    .entry(oracle_id)
+                    .entry(oracle_id.clone())
                     .or_default()
                     .push(key.clone());
+                if let Some(layout_kind) = entry.layout.as_deref().and_then(map_layout_str) {
+                    layout_index.entry(oracle_id).or_insert(layout_kind);
+                }
             }
             face_index.insert(key.clone(), entry.face);
 
@@ -64,6 +73,7 @@ impl CardDatabase {
             cards: HashMap::new(),
             face_index,
             oracle_id_index,
+            layout_index,
             legalities,
             errors: Vec::new(),
         }
@@ -112,6 +122,13 @@ impl CardDatabase {
         self.cards.len().max(self.face_index.len())
     }
 
+    /// Returns the runtime layout kind for a face identified by oracle_id.
+    /// Used by `rehydrate_game_from_card_db` to determine the correct layout
+    /// discriminant when `get_by_name` returns None (export loading path).
+    pub fn get_layout_kind(&self, oracle_id: &str) -> Option<LayoutKind> {
+        self.layout_index.get(oracle_id).copied()
+    }
+
     pub fn errors(&self) -> &[(PathBuf, String)] {
         &self.errors
     }
@@ -142,6 +159,24 @@ struct CardExportEntry {
     face: CardFace,
     #[serde(default)]
     legalities: HashMap<String, String>,
+    /// MTGJSON layout string for multi-face cards (e.g. "modal_dfc", "transform").
+    #[serde(default)]
+    layout: Option<String>,
+}
+
+/// Convert MTGJSON layout string to runtime `LayoutKind`.
+/// Returns `None` for single-face layouts since they don't need a layout discriminant.
+fn map_layout_str(s: &str) -> Option<LayoutKind> {
+    match s {
+        "modal_dfc" => Some(LayoutKind::Modal),
+        "transform" => Some(LayoutKind::Transform),
+        "adventure" => Some(LayoutKind::Adventure),
+        "meld" => Some(LayoutKind::Meld),
+        "split" => Some(LayoutKind::Split),
+        "flip" => Some(LayoutKind::Flip),
+        "omen" => Some(LayoutKind::Omen),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

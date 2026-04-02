@@ -200,16 +200,23 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
                 // CR 712.12: Restore layout_kind if it was cleared (e.g. after MDFC
                 // front-face choice). Ensures bounced MDFCs can prompt face choice again.
                 if back_face.layout_kind.is_none() {
-                    if let Some(card_rules) = db.get_by_name(&card_face.name) {
-                        back_face.layout_kind = match &card_rules.layout {
+                    back_face.layout_kind = db
+                        .get_by_name(&card_face.name)
+                        .and_then(|rules| match &rules.layout {
                             CardLayout::Adventure(..) => Some(LayoutKind::Adventure),
                             CardLayout::Transform(..) => Some(LayoutKind::Transform),
                             CardLayout::Modal(..) => Some(LayoutKind::Modal),
                             CardLayout::Meld(..) => Some(LayoutKind::Meld),
                             CardLayout::Omen(..) => Some(LayoutKind::Omen),
                             _ => None,
-                        };
-                    }
+                        })
+                        .or_else(|| {
+                            // Fallback for export-loaded databases where `cards` is empty.
+                            card_face
+                                .scryfall_oracle_id
+                                .as_deref()
+                                .and_then(|id| db.get_layout_kind(id))
+                        });
                 }
             }
 
@@ -230,11 +237,18 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
                         _ => None,
                     })
                     .or_else(|| {
-                        // Fallback: no layout info available from face-only lookup
+                        // Fallback for export-loaded databases where `cards` is empty.
+                        // Use the layout_index (populated from the `layout` field in
+                        // card-data.json) to determine the correct LayoutKind.
+                        let layout_kind = card_face
+                            .scryfall_oracle_id
+                            .as_deref()
+                            .and_then(|id| db.get_layout_kind(id))
+                            .unwrap_or(LayoutKind::Single);
                         obj.printed_ref
                             .as_ref()
                             .and_then(|printed_ref| db.get_other_face_by_printed_ref(printed_ref))
-                            .map(|face| (LayoutKind::Single, face))
+                            .map(|face| (layout_kind, face))
                     });
                 if let Some((layout_kind, face)) = second_face {
                     let mut back = BackFaceData {
@@ -420,6 +434,59 @@ mod tests {
         }
     }
 
+    /// CR 712.12: MDFC land face selection requires `LayoutKind::Modal` on the back
+    /// face. When loading from the export path (card-data.json), the `layout` field
+    /// in the export entry must be propagated through the layout_index so that
+    /// `rehydrate_game_from_card_db` stamps the correct LayoutKind.
+    #[test]
+    fn rehydrate_populates_modal_dfc_layout_kind_from_export() {
+        let cragcrown = test_face(
+            "Cragcrown Pathway",
+            "shared-mdfc-oracle-id",
+            vec![CoreType::Land],
+            ManaCost::default(),
+        );
+        let timbercrown = test_face(
+            "Timbercrown Pathway",
+            "shared-mdfc-oracle-id",
+            vec![CoreType::Land],
+            ManaCost::default(),
+        );
+        // Simulate an export with the `layout` field set (as oracle_gen now does).
+        // Wrap each CardFace with the export-only `layout` field via JSON merge.
+        let mut cragcrown_json = serde_json::to_value(&cragcrown).unwrap();
+        cragcrown_json["layout"] = serde_json::json!("modal_dfc");
+        let mut timbercrown_json = serde_json::to_value(&timbercrown).unwrap();
+        timbercrown_json["layout"] = serde_json::json!("modal_dfc");
+        let export = serde_json::json!({
+            "cragcrown pathway": cragcrown_json,
+            "timbercrown pathway": timbercrown_json,
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+
+        let mut state = GameState::default();
+        let object_id = create_object_from_card_face(
+            &mut state,
+            db.get_face_by_name("Cragcrown Pathway").unwrap(),
+            PlayerId(0),
+        );
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        let obj = state.objects.get(&object_id).unwrap();
+        let back_face = obj
+            .back_face
+            .as_ref()
+            .expect("rehydrate should attach the MDFC back face");
+        assert_eq!(back_face.name, "Timbercrown Pathway");
+        assert_eq!(
+            back_face.layout_kind,
+            Some(LayoutKind::Modal),
+            "CR 712.12: MDFC back face must have LayoutKind::Modal for face choice prompt"
+        );
+    }
+
     #[test]
     fn rehydrate_populates_adventure_back_face_from_export_db() {
         let giant = test_face(
@@ -440,9 +507,13 @@ mod tests {
                 generic: 1,
             },
         );
+        let mut giant_json = serde_json::to_value(&giant).unwrap();
+        giant_json["layout"] = serde_json::json!("adventure");
+        let mut stomp_json = serde_json::to_value(&stomp).unwrap();
+        stomp_json["layout"] = serde_json::json!("adventure");
         let export = serde_json::json!({
-            "bonecrusher giant": giant,
-            "stomp": stomp,
+            "bonecrusher giant": giant_json,
+            "stomp": stomp_json,
         })
         .to_string();
         let db = CardDatabase::from_json_str(&export).expect("export db should parse");
@@ -468,5 +539,10 @@ mod tests {
             .expect("rehydrate should attach the adventure face");
         assert_eq!(back_face.name, "Stomp");
         assert_eq!(back_face.color, vec![ManaColor::Red]);
+        assert_eq!(
+            back_face.layout_kind,
+            Some(LayoutKind::Adventure),
+            "Adventure back face should carry LayoutKind::Adventure from export"
+        );
     }
 }
