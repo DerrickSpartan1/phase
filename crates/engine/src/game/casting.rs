@@ -317,15 +317,15 @@ fn effective_spell_keyword_kinds(state: &GameState, object_id: ObjectId) -> Vec<
         }
     }
 
-    if obj.zone != Zone::Battlefield {
-        if super::keywords::object_has_effective_keyword_kind(
+    if obj.zone != Zone::Battlefield
+        && super::keywords::object_has_effective_keyword_kind(
             state,
             object_id,
             KeywordKind::Flashback,
-        ) && !kinds.contains(&KeywordKind::Flashback)
-        {
-            kinds.push(KeywordKind::Flashback);
-        }
+        )
+        && !kinds.contains(&KeywordKind::Flashback)
+    {
+        kinds.push(KeywordKind::Flashback);
     }
 
     kinds

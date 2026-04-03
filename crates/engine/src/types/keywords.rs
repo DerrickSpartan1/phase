@@ -598,7 +598,7 @@ impl Keyword {
             Keyword::Escape { .. } => KeywordKind::Escape,
             Keyword::Morph(_) => KeywordKind::Morph,
             Keyword::Megamorph(_) => KeywordKind::Megamorph,
-            Keyword::Suspend { .. } => KeywordKind::Suspend,
+            Keyword::Suspend => KeywordKind::Suspend,
             Keyword::Blitz(_) => KeywordKind::Blitz,
             Keyword::Disturb(_) => KeywordKind::Disturb,
             Keyword::Foretell(_) => KeywordKind::Foretell,

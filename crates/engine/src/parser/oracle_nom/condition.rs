@@ -100,12 +100,7 @@ fn parse_opponent_poison_conditions(input: &str) -> OracleResult<'_, StaticCondi
     let (rest, _) = tag("an opponent has ").parse(input)?;
     let (rest, count) = parse_number(rest)?;
     let (rest, _) = tag(" or more poison counters").parse(rest)?;
-    Ok((
-        rest,
-        StaticCondition::OpponentPoisonAtLeast {
-            count: count as u32,
-        },
-    ))
+    Ok((rest, StaticCondition::OpponentPoisonAtLeast { count }))
 }
 
 /// CR 611.2b: Compose subject × predicate for tapped/untapped.
