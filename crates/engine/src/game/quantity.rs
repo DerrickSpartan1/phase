@@ -274,7 +274,7 @@ fn resolve_ref(
                         ZoneRef::Exile => state
                             .exile
                             .iter()
-                            .filter(|&&id| state.objects.get(&id).map_or(false, |o| o.owner == pid))
+                            .filter(|&&id| state.objects.get(&id).is_some_and(|o| o.owner == pid))
                             .count() as i32,
                     })
             } else {

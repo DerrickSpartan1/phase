@@ -203,7 +203,7 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
     if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("sacrifice ").parse(lower) {
         let (count, after_count) = nom_primitives::parse_number
             .parse(rest)
-            .map(|(rem, n)| (n as u32, rem.trim_start()))
+            .map(|(rem, n)| (n, rem.trim_start()))
             .unwrap_or((
                 1,
                 rest.strip_prefix("a ")

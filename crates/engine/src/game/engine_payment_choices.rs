@@ -448,7 +448,7 @@ pub(super) fn handle_ward_sacrifice_choice(
     if remaining > 1 {
         let eligible: Vec<ObjectId> = permanents
             .into_iter()
-            .filter(|&id| id != chosen[0] && state.objects.get(&id).is_some())
+            .filter(|&id| id != chosen[0] && state.objects.contains_key(&id))
             .collect();
         state.waiting_for = WaitingFor::WardSacrificeChoice {
             player,
