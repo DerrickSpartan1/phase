@@ -6,8 +6,8 @@ use crate::types::game_state::{
 use crate::types::player::PlayerId;
 
 use super::ability_utils::{
-    assign_selected_slots_in_chain, assign_targets_in_chain, choose_target,
-    flatten_targets_in_chain, validate_selected_targets, TargetSelectionAdvance,
+    assign_selected_slots_in_chain, assign_targets_in_chain, choose_target_for_ability,
+    flatten_targets_in_chain, validate_selected_targets_for_ability, TargetSelectionAdvance,
 };
 use super::effects;
 use super::engine::{resume_pending_continuation_if_priority, EngineError};
@@ -43,8 +43,17 @@ pub(super) fn handle_trigger_target_selection_select_targets(
     targets: Vec<TargetRef>,
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    validate_selected_targets(target_slots, &targets, target_constraints)?;
-
+    let trigger = state
+        .pending_trigger
+        .as_ref()
+        .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
+    validate_selected_targets_for_ability(
+        state,
+        &trigger.ability,
+        target_slots,
+        &targets,
+        target_constraints,
+    )?;
     let trigger = state
         .pending_trigger
         .take()
@@ -86,11 +95,18 @@ pub(super) fn handle_trigger_target_selection_choose_target(
             }
         };
 
-    let Some(_pending_trigger) = state.pending_trigger.as_ref() else {
+    let Some(pending_trigger) = state.pending_trigger.as_ref() else {
         return Err(EngineError::InvalidAction("No pending trigger".to_string()));
     };
 
-    match choose_target(&target_slots, &target_constraints, &selection, target)? {
+    match choose_target_for_ability(
+        state,
+        &pending_trigger.ability,
+        &target_slots,
+        &target_constraints,
+        &selection,
+        target,
+    )? {
         TargetSelectionAdvance::InProgress(selection) => Ok(WaitingFor::TriggerTargetSelection {
             player,
             target_slots,

@@ -4,9 +4,9 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::ManaCost;
 
 use super::ability_utils::{
-    assign_targets_in_chain, auto_select_targets, begin_target_selection, build_chained_resolved,
-    build_target_slots, flatten_targets_in_chain, record_modal_mode_choices,
-    target_constraints_from_modal, validate_modal_indices,
+    assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
+    build_chained_resolved, build_target_slots, flatten_targets_in_chain,
+    record_modal_mode_choices, target_constraints_from_modal, validate_modal_indices,
 };
 use super::casting;
 use super::engine::EngineError;
@@ -99,7 +99,9 @@ fn handle_activated_mode_choice(
     let target_constraints = target_constraints_from_modal(&modal);
 
     if !target_slots.is_empty() {
-        if let Some(targets) = auto_select_targets(&target_slots, &target_constraints)? {
+        if let Some(targets) =
+            auto_select_targets_for_ability(state, &resolved, &target_slots, &target_constraints)?
+        {
             let mut resolved = resolved;
             assign_targets_in_chain(&mut resolved, &targets)?;
 
@@ -133,7 +135,12 @@ fn handle_activated_mode_choice(
                 restrictions::record_ability_activation(state, source_id, index);
             }
         } else {
-            let selection = begin_target_selection(&target_slots, &target_constraints)?;
+            let selection = begin_target_selection_for_ability(
+                state,
+                &resolved,
+                &target_slots,
+                &target_constraints,
+            )?;
             let mut pending = PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
             pending.activation_cost = ability_cost;
             pending.activation_ability_index = ability_index;
@@ -207,14 +214,28 @@ fn handle_triggered_mode_choice(
     trigger.mode_abilities.clear();
 
     if !target_slots.is_empty() {
-        if let Some(targets) = auto_select_targets(&target_slots, &target_constraints)? {
+        if let Some(targets) = auto_select_targets_for_ability(
+            state,
+            &trigger.ability,
+            &target_slots,
+            &target_constraints,
+        )? {
             let mut resolved = trigger.ability.clone();
             assign_targets_in_chain(&mut resolved, &targets)?;
             engine_stack::finalize_trigger_target_selection(state, trigger, resolved, events);
         } else {
             let description = trigger.description.clone();
             state.pending_trigger = Some(trigger);
-            let selection = begin_target_selection(&target_slots, &target_constraints)?;
+            let pending_trigger = state
+                .pending_trigger
+                .as_ref()
+                .expect("pending trigger stored before target selection");
+            let selection = begin_target_selection_for_ability(
+                state,
+                &pending_trigger.ability,
+                &target_slots,
+                &target_constraints,
+            )?;
             return Ok(WaitingFor::TriggerTargetSelection {
                 player,
                 target_slots,

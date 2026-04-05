@@ -5,10 +5,10 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
 use super::ability_utils::{
-    assign_selected_slots_in_chain, assign_targets_in_chain, auto_select_targets,
-    begin_target_selection, build_chained_resolved, build_target_slots, choose_target,
-    flatten_targets_in_chain, validate_modal_indices, validate_selected_targets,
-    TargetSelectionAdvance,
+    assign_selected_slots_in_chain, assign_targets_in_chain, auto_select_targets_for_ability,
+    begin_target_selection_for_ability, build_chained_resolved, build_target_slots,
+    choose_target_for_ability, flatten_targets_in_chain, validate_modal_indices,
+    validate_selected_targets_for_ability, TargetSelectionAdvance,
 };
 use super::casting::{emit_targeting_events, pay_ability_cost};
 use super::casting_costs::{
@@ -82,7 +82,12 @@ pub(crate) fn handle_select_modes(
 
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
-        if let Some(targets) = auto_select_targets(&target_slots, &pending.target_constraints)? {
+        if let Some(targets) = auto_select_targets_for_ability(
+            state,
+            &resolved,
+            &target_slots,
+            &pending.target_constraints,
+        )? {
             let mut resolved = resolved;
             assign_targets_in_chain(&mut resolved, &targets)?;
             return check_additional_cost_or_pay(
@@ -97,7 +102,12 @@ pub(crate) fn handle_select_modes(
             );
         }
 
-        let selection = begin_target_selection(&target_slots, &pending.target_constraints)?;
+        let selection = begin_target_selection_for_ability(
+            state,
+            &resolved,
+            &target_slots,
+            &pending.target_constraints,
+        )?;
         let mut pending_sel =
             PendingCast::new(pending.object_id, pending.card_id, resolved, total_cost);
         pending_sel.target_constraints = pending.target_constraints;
@@ -137,7 +147,13 @@ pub(crate) fn handle_select_targets(
             target_slots,
             ..
         } => {
-            validate_selected_targets(target_slots, &targets, &pending_cast.target_constraints)?;
+            validate_selected_targets_for_ability(
+                state,
+                &pending_cast.ability,
+                target_slots,
+                &targets,
+                &pending_cast.target_constraints,
+            )?;
             *pending_cast.clone()
         }
         _ => {
@@ -248,7 +264,9 @@ pub(crate) fn handle_choose_target(
         }
     };
 
-    match choose_target(
+    match choose_target_for_ability(
+        state,
+        &pending.ability,
         &target_slots,
         &pending.target_constraints,
         &selection,

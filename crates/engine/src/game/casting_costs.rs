@@ -22,8 +22,8 @@ use super::stack;
 use super::zones;
 
 use super::ability_utils::{
-    assign_targets_in_chain, auto_select_targets, begin_target_selection, build_target_slots,
-    flatten_targets_in_chain,
+    assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
+    build_target_slots, flatten_targets_in_chain,
 };
 
 /// Handle the player's decision on an additional cost (kicker, blight, "or pay").
@@ -289,7 +289,9 @@ pub(super) fn push_activated_ability_to_stack(
     // before target selection in handle_activate_ability.
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
-        if let Some(targets) = auto_select_targets(&target_slots, &[])? {
+        if let Some(targets) =
+            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
+        {
             let mut resolved = resolved;
             assign_targets_in_chain(&mut resolved, &targets)?;
 
@@ -300,7 +302,7 @@ pub(super) fn push_activated_ability_to_stack(
         }
 
         // Targets need interactive selection
-        let selection = begin_target_selection(&target_slots, &[])?;
+        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
         let mut pending_act = PendingCast::new(
             source_id,
             CardId(0),

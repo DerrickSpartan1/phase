@@ -1673,12 +1673,15 @@ fn try_parse_verb_and_target<'a>(
 
     // Return: determine destination separately, use parse_target remainder for compound detection
     if let Some((_, rest)) = nom_on_lower(text, lower, |i| value((), tag("return ")).parse(i)) {
+        let rest_lower = &lower[lower.len() - rest.len()..];
         let (_, dest) = strip_return_destination_ext(rest);
         let (target, rem) = parse_target(rest);
+        let origin = infer_origin_zone(rest_lower);
         return match dest {
             Some(d) if d.zone == Zone::Battlefield => Some((
                 TargetedImperativeAst::ReturnToBattlefield {
                     target,
+                    origin,
                     enter_transformed: d.transformed,
                     under_your_control: d.under_your_control,
                     enter_tapped: d.enter_tapped,
@@ -1691,6 +1694,7 @@ fn try_parse_verb_and_target<'a>(
             Some(d) => Some((
                 TargetedImperativeAst::ReturnToZone {
                     target,
+                    origin,
                     destination: d.zone,
                 },
                 rem,

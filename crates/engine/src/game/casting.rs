@@ -17,7 +17,8 @@ use crate::types::zones::Zone;
 use std::collections::HashSet;
 
 use super::ability_utils::{
-    assign_targets_in_chain, auto_select_targets, begin_target_selection, build_resolved_from_def,
+    assign_targets_in_chain, auto_select_targets, auto_select_targets_for_ability,
+    begin_target_selection, begin_target_selection_for_ability, build_resolved_from_def,
     build_target_slots, compute_unavailable_modes, flatten_targets_in_chain,
     target_constraints_from_modal,
 };
@@ -1048,7 +1049,9 @@ pub fn handle_adventure_choice(
 
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
-        if let Some(targets) = auto_select_targets(&target_slots, &[])? {
+        if let Some(targets) =
+            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
+        {
             let mut resolved = resolved;
             assign_targets_in_chain(&mut resolved, &targets)?;
             if creature {
@@ -1077,7 +1080,7 @@ pub fn handle_adventure_choice(
             }
         }
 
-        let selection = begin_target_selection(&target_slots, &[])?;
+        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
         let mut pending_adv = PendingCast::new(
             prepared.object_id,
             prepared.card_id,
@@ -1377,7 +1380,9 @@ fn continue_with_prepared(
 
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
-        if let Some(targets) = auto_select_targets(&target_slots, &[])? {
+        if let Some(targets) =
+            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
+        {
             let mut resolved = resolved;
             assign_targets_in_chain(&mut resolved, &targets)?;
             return check_additional_cost_or_pay(
@@ -1392,7 +1397,7 @@ fn continue_with_prepared(
             );
         }
 
-        let selection = begin_target_selection(&target_slots, &[])?;
+        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
         let mut pending_targets = PendingCast::new(
             prepared.object_id,
             prepared.card_id,
@@ -1470,7 +1475,7 @@ pub fn spell_has_legal_targets(
             if target_slots.is_empty() {
                 true
             } else {
-                auto_select_targets(&target_slots, &[]).is_ok()
+                auto_select_targets_for_ability(&simulated, &resolved, &target_slots, &[]).is_ok()
             }
         }
         Err(_) => false,
@@ -1912,7 +1917,9 @@ pub fn can_activate_ability_now(
 
     match build_target_slots(&simulated, &resolved) {
         Ok(target_slots) => {
-            target_slots.is_empty() || auto_select_targets(&target_slots, &[]).is_ok()
+            target_slots.is_empty()
+                || auto_select_targets_for_ability(&simulated, &resolved, &target_slots, &[])
+                    .is_ok()
         }
         Err(_) => false,
     }
@@ -2038,7 +2045,9 @@ pub fn handle_activate_ability(
 
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
-        if let Some(targets) = auto_select_targets(&target_slots, &[])? {
+        if let Some(targets) =
+            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
+        {
             let mut resolved = resolved;
             assign_targets_in_chain(&mut resolved, &targets)?;
 
@@ -2083,7 +2092,7 @@ pub fn handle_activate_ability(
             return Ok(WaitingFor::Priority { player });
         }
 
-        let selection = begin_target_selection(&target_slots, &[])?;
+        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
         let mut pending_target = PendingCast::new(
             source_id,
             CardId(0),

@@ -7,8 +7,8 @@ use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 
 use super::ability_utils::{
-    assign_targets_in_chain, auto_select_targets, begin_target_selection, build_target_slots,
-    flatten_targets_in_chain,
+    assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
+    build_target_slots, flatten_targets_in_chain,
 };
 use super::casting::emit_targeting_events;
 use super::engine::EngineError;
@@ -107,7 +107,9 @@ pub fn handle_activate_loyalty(
     // If this ability requires targets, prompt for selection first.
     let target_slots = build_target_slots(state, &resolved)?;
     if !target_slots.is_empty() {
-        if let Some(targets) = auto_select_targets(&target_slots, &[])? {
+        if let Some(targets) =
+            auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
+        {
             let mut resolved = resolved;
             assign_targets_in_chain(&mut resolved, &targets)?;
             return Ok(finalize_loyalty_activation(
@@ -131,7 +133,7 @@ pub fn handle_activate_loyalty(
             .loyalty_activated_this_turn = true;
         state.lands_tapped_for_mana.remove(&player);
 
-        let selection = begin_target_selection(&target_slots, &[])?;
+        let selection = begin_target_selection_for_ability(state, &resolved, &target_slots, &[])?;
         let mut pending = PendingCast::new(pw_id, CardId(0), resolved, ManaCost::NoCost);
         pending.activation_ability_index = Some(ability_index);
         // CR 606.4: Loyalty cost is paid after targets are chosen.

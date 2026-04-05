@@ -181,7 +181,7 @@ pub fn move_to_zone(
         }
     }
 
-    // Track descended: a permanent card was put into its owner's graveyard
+    // Track descended: a permanent card was put into its owner's graveyard.
     if to == Zone::Graveyard {
         let is_permanent_card = obj_mut.card_types.core_types.iter().any(|ct| {
             matches!(
@@ -194,7 +194,7 @@ pub fn move_to_zone(
                     | CoreType::Battle
             )
         });
-        if is_permanent_card {
+        if is_permanent_card && !obj_mut.is_token {
             if let Some(player) = state.players.iter_mut().find(|p| p.id == owner) {
                 player.descended_this_turn = true;
             }
@@ -483,6 +483,52 @@ mod tests {
         assert!(!state.battlefield.contains(&id));
         assert!(state.players[0].graveyard.contains(&id));
         assert_eq!(state.objects[&id].zone, Zone::Graveyard);
+    }
+
+    #[test]
+    fn token_dying_does_not_count_as_descending() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Token".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.is_token = true;
+        }
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+
+        assert!(!state.players[0].descended_this_turn);
+    }
+
+    #[test]
+    fn permanent_card_to_graveyard_counts_as_descending() {
+        let mut state = setup();
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let mut events = Vec::new();
+        move_to_zone(&mut state, id, Zone::Graveyard, &mut events);
+
+        assert!(state.players[0].descended_this_turn);
     }
 
     #[test]

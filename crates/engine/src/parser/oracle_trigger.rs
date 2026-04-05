@@ -28,6 +28,26 @@ use crate::types::phase::Phase;
 use crate::types::triggers::{AttackTargetFilter, TriggerMode};
 use crate::types::zones::Zone;
 
+fn self_recursion_trigger_zone(ability: &crate::types::ability::AbilityDefinition) -> Option<Zone> {
+    match ability.effect.as_ref() {
+        crate::types::ability::Effect::ChangeZone {
+            origin: Some(origin),
+            target: TargetFilter::SelfRef,
+            ..
+        } if *origin != Zone::Battlefield => Some(*origin),
+        _ => ability
+            .sub_ability
+            .as_deref()
+            .and_then(self_recursion_trigger_zone)
+            .or_else(|| {
+                ability
+                    .else_ability
+                    .as_deref()
+                    .and_then(self_recursion_trigger_zone)
+            }),
+    }
+}
+
 /// Parse a full trigger line into a TriggerDefinition.
 /// Input: a line starting with "When", "Whenever", or "At".
 /// The card_name is used for self-reference substitution.
@@ -103,11 +123,14 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     // Preserve the original oracle text for coverage/UI annotation
     def.description = Some(text.to_string());
 
-    // CR 603.6c: Override trigger_zones when the trigger fires from a non-battlefield zone.
-    // "When ~ is put into a graveyard from the battlefield" — the trigger fires while the
-    // card is already in the graveyard, so it needs trigger_zones: [Graveyard].
-    if lower.contains("is put into a graveyard") || lower.contains("is put into your graveyard") {
+    // CR 603.6c: Self zone-change triggers and self-recursive effects can function from
+    // non-battlefield zones. Derive the active zone from the typed trigger/effect data.
+    if matches!(def.valid_card, Some(TargetFilter::SelfRef))
+        && def.destination == Some(Zone::Graveyard)
+    {
         def.trigger_zones = vec![Zone::Graveyard];
+    } else if let Some(zone) = def.execute.as_deref().and_then(self_recursion_trigger_zone) {
+        def.trigger_zones = vec![zone];
     }
 
     def
@@ -4611,6 +4634,29 @@ mod tests {
     fn trigger_commit_crime_mode() {
         let def = parse_trigger_line("Whenever you commit a crime, draw a card.", "At Knifepoint");
         assert_eq!(def.mode, TriggerMode::CommitCrime);
+    }
+
+    #[test]
+    fn trigger_commit_crime_returns_this_card_from_graveyard_sets_graveyard_zone() {
+        let def = parse_trigger_line(
+            "Whenever you commit a crime, you may pay {B}. If you do, return this card from your graveyard to the battlefield.",
+            "Forsaken Miner",
+        );
+        assert_eq!(def.mode, TriggerMode::CommitCrime);
+        assert_eq!(def.trigger_zones, vec![Zone::Graveyard]);
+        let execute = def.execute.expect("should have execute");
+        let if_you_do = execute
+            .sub_ability
+            .expect("should have if-you-do sub ability");
+        assert!(matches!(
+            *if_you_do.effect,
+            crate::types::ability::Effect::ChangeZone {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                ..
+            }
+        ));
     }
 
     #[test]

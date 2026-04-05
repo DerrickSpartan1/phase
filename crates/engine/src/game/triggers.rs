@@ -758,8 +758,12 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
             continue;
         }
 
-        match super::ability_utils::auto_select_targets(&target_slots, &trigger.target_constraints)
-        {
+        match super::ability_utils::auto_select_targets_for_ability(
+            state,
+            &trigger.ability,
+            &target_slots,
+            &trigger.target_constraints,
+        ) {
             Ok(Some(targets)) => {
                 let mut trigger = trigger;
                 if super::ability_utils::assign_targets_in_chain(&mut trigger.ability, &targets)

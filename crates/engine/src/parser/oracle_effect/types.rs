@@ -373,6 +373,7 @@ pub(super) enum TargetedImperativeAst {
     /// CR 400.7: Return to the battlefield (zone change, not bounce).
     ReturnToBattlefield {
         target: TargetFilter,
+        origin: Option<Zone>,
         /// CR 712.2: "return ... transformed" (DFC entering with back face up)
         enter_transformed: bool,
         /// CR 110.2: "under your control" — controller override.
@@ -383,6 +384,7 @@ pub(super) enum TargetedImperativeAst {
     /// CR 400.6: Return to a specific non-hand, non-battlefield zone (zone change).
     ReturnToZone {
         target: TargetFilter,
+        origin: Option<Zone>,
         destination: Zone,
     },
     Fight {

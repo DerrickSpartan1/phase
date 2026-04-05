@@ -487,94 +487,6 @@ pub fn resolve_ability_chain(
         return Ok(());
     }
 
-    // CR 608.2d + CR 101.4: "Any opponent may" — prompt opponents in APNAP order.
-    if ability.optional && ability.optional_for.is_some() {
-        let description = ability.description.clone();
-        let mut opponent_order: Vec<PlayerId> = crate::game::players::apnap_order(state)
-            .into_iter()
-            .filter(|p| *p != ability.controller)
-            .collect();
-        if let Some(first) = opponent_order.first().copied() {
-            let remaining = opponent_order.split_off(1);
-            state.pending_optional_effect = Some(Box::new(ability.clone()));
-            state.waiting_for = WaitingFor::OpponentMayChoice {
-                player: first,
-                source_id: ability.source_id,
-                description,
-                remaining,
-            };
-        }
-        return Ok(());
-    }
-
-    // CR 609.3: "You may" effects prompt the controller before execution.
-    if ability.optional {
-        let description = ability.description.clone();
-        state.pending_optional_effect = Some(Box::new(ability.clone()));
-        state.waiting_for = WaitingFor::OptionalEffectChoice {
-            player: ability.controller,
-            source_id: ability.source_id,
-            description,
-        };
-        return Ok(());
-    }
-
-    // CR 118.12: "Effect unless [player] pays {cost}" — tax trigger modifier.
-    if let Some(ref unless_pay) = ability.unless_pay {
-        if let Some(payer) = resolve_unless_payer(state, &unless_pay.payer) {
-            // CR 702.21a: Non-mana costs (PayLife, DiscardCard, Sacrifice) bypass
-            // mana resolution — pass through to UnlessPayment directly.
-            match &unless_pay.cost {
-                UnlessCost::PayLife { .. }
-                | UnlessCost::DiscardCard
-                | UnlessCost::Sacrifice { .. } => {
-                    let mut pending = ability.clone();
-                    pending.unless_pay = None;
-                    state.waiting_for = WaitingFor::UnlessPayment {
-                        player: payer,
-                        cost: unless_pay.cost.clone(),
-                        pending_effect: Box::new(pending),
-                        effect_description: ability.description.clone(),
-                    };
-                    return Ok(());
-                }
-                _ => {}
-            }
-            let resolved_cost = match &unless_pay.cost {
-                UnlessCost::Fixed { cost } => cost.clone(),
-                UnlessCost::DynamicGeneric { quantity } => {
-                    let amount = crate::game::quantity::resolve_quantity(
-                        state,
-                        quantity,
-                        ability.controller,
-                        ability.source_id,
-                    );
-                    ManaCost::generic(amount.max(0) as u32)
-                }
-                // Non-mana costs handled above.
-                UnlessCost::PayLife { .. }
-                | UnlessCost::DiscardCard
-                | UnlessCost::Sacrifice { .. } => unreachable!(),
-            };
-            // CR 118.5: If the cost is {0}, the player is considered to have paid.
-            if resolved_cost != ManaCost::zero() {
-                // Strip unless_pay from the pending effect to prevent re-prompting.
-                let mut pending = ability.clone();
-                pending.unless_pay = None;
-                state.waiting_for = WaitingFor::UnlessPayment {
-                    player: payer,
-                    cost: UnlessCost::Fixed {
-                        cost: resolved_cost,
-                    },
-                    pending_effect: Box::new(pending),
-                    effect_description: ability.description.clone(),
-                };
-                return Ok(());
-            }
-            // Cost is {0} — fall through and execute the effect normally.
-        }
-    }
-
     // CR 608.2e: "Instead" kicker — check if a sub overrides the parent.
     // When condition is met, replace the current ability's effect with the sub's
     // effect, preserving the full resolution flow (tracked sets, continuations).
@@ -675,10 +587,9 @@ pub fn resolve_ability_chain(
         return Ok(());
     }
 
-    // CR 608.2c: Evaluate top-level condition before resolving the effect.
-    // Some abilities (e.g. Tribute to the World Tree) have a condition directly on
-    // the execute ability rather than on a sub_ability. When the condition is false,
-    // execute the else_ability branch if present, otherwise skip the effect entirely.
+    // CR 608.2c: Evaluate top-level condition before emitting any optional or unless-pay
+    // choice. This must run after player_scope rebinding so scoped abilities test
+    // conditions relative to the scoped player.
     if let Some(ref condition) = ability.condition {
         if !evaluate_condition(condition, state, ability) {
             if let Some(ref else_branch) = ability.else_ability {
@@ -690,6 +601,94 @@ pub fn resolve_ability_chain(
                 resolve_ability_chain(state, &else_resolved, events, depth + 1)?;
             }
             return Ok(());
+        }
+    }
+
+    // CR 608.2d + CR 101.4: "Any opponent may" — prompt opponents in APNAP order.
+    if ability.optional && ability.optional_for.is_some() {
+        let description = ability.description.clone();
+        let mut opponent_order: Vec<PlayerId> = crate::game::players::apnap_order(state)
+            .into_iter()
+            .filter(|p| *p != ability.controller)
+            .collect();
+        if let Some(first) = opponent_order.first().copied() {
+            let remaining = opponent_order.split_off(1);
+            state.pending_optional_effect = Some(Box::new(ability.clone()));
+            state.waiting_for = WaitingFor::OpponentMayChoice {
+                player: first,
+                source_id: ability.source_id,
+                description,
+                remaining,
+            };
+        }
+        return Ok(());
+    }
+
+    // CR 609.3: "You may" effects prompt the controller before execution.
+    if ability.optional {
+        let description = ability.description.clone();
+        state.pending_optional_effect = Some(Box::new(ability.clone()));
+        state.waiting_for = WaitingFor::OptionalEffectChoice {
+            player: ability.controller,
+            source_id: ability.source_id,
+            description,
+        };
+        return Ok(());
+    }
+
+    // CR 118.12: "Effect unless [player] pays {cost}" — tax trigger modifier.
+    if let Some(ref unless_pay) = ability.unless_pay {
+        if let Some(payer) = resolve_unless_payer(state, &unless_pay.payer) {
+            // CR 702.21a: Non-mana costs (PayLife, DiscardCard, Sacrifice) bypass
+            // mana resolution — pass through to UnlessPayment directly.
+            match &unless_pay.cost {
+                UnlessCost::PayLife { .. }
+                | UnlessCost::DiscardCard
+                | UnlessCost::Sacrifice { .. } => {
+                    let mut pending = ability.clone();
+                    pending.unless_pay = None;
+                    state.waiting_for = WaitingFor::UnlessPayment {
+                        player: payer,
+                        cost: unless_pay.cost.clone(),
+                        pending_effect: Box::new(pending),
+                        effect_description: ability.description.clone(),
+                    };
+                    return Ok(());
+                }
+                _ => {}
+            }
+            let resolved_cost = match &unless_pay.cost {
+                UnlessCost::Fixed { cost } => cost.clone(),
+                UnlessCost::DynamicGeneric { quantity } => {
+                    let amount = crate::game::quantity::resolve_quantity(
+                        state,
+                        quantity,
+                        ability.controller,
+                        ability.source_id,
+                    );
+                    ManaCost::generic(amount.max(0) as u32)
+                }
+                // Non-mana costs handled above.
+                UnlessCost::PayLife { .. }
+                | UnlessCost::DiscardCard
+                | UnlessCost::Sacrifice { .. } => unreachable!(),
+            };
+            // CR 118.5: If the cost is {0}, the player is considered to have paid.
+            if resolved_cost != ManaCost::zero() {
+                // Strip unless_pay from the pending effect to prevent re-prompting.
+                let mut pending = ability.clone();
+                pending.unless_pay = None;
+                state.waiting_for = WaitingFor::UnlessPayment {
+                    player: payer,
+                    cost: UnlessCost::Fixed {
+                        cost: resolved_cost,
+                    },
+                    pending_effect: Box::new(pending),
+                    effect_description: ability.description.clone(),
+                };
+                return Ok(());
+            }
+            // Cost is {0} — fall through and execute the effect normally.
         }
     }
 
@@ -938,9 +937,13 @@ pub fn resolve_ability_chain(
                     // Compute selection first — if this fails (no legal targets for a
                     // required slot), we skip the reflexive trigger cleanly without
                     // leaving an orphaned pending_trigger.
-                    let selection =
-                        crate::game::ability_utils::begin_target_selection(&target_slots, &[])
-                            .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
+                    let selection = crate::game::ability_utils::begin_target_selection_for_ability(
+                        state,
+                        sub,
+                        &target_slots,
+                        &[],
+                    )
+                    .map_err(|e| EffectError::InvalidParam(e.to_string()))?;
 
                     let mut reflexive = sub.as_ref().clone();
                     reflexive.context = ability.context.clone();
@@ -1416,6 +1419,40 @@ mod tests {
         assert_eq!(state.players[1].life, 18);
         // Controller drew a card
         assert_eq!(state.players[0].hand.len(), 1);
+    }
+
+    #[test]
+    fn resolve_ability_chain_condition_blocks_optional_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let mut ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: crate::types::ability::PaymentCost::Life { amount: 1 },
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::IsYourTurn { negated: true })
+        .sub_ability(ResolvedAbility::new(
+            Effect::Bounce {
+                target: TargetFilter::SelfRef,
+                destination: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        ));
+        ability.optional = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert!(!matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice { .. }
+        ));
+        assert!(state.pending_optional_effect.is_none());
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -2176,6 +2213,44 @@ mod tests {
             1,
             "opponent should have drawn a card"
         );
+    }
+
+    #[test]
+    fn resolve_ability_chain_evaluates_condition_per_scoped_player() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(0);
+
+        create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card A".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Card B".to_string(),
+            Zone::Library,
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::IsYourTurn { negated: true });
+        ability.player_scope = Some(PlayerFilter::All);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].hand.len(), 0);
+        assert_eq!(state.players[1].hand.len(), 1);
     }
 
     #[test]

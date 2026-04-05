@@ -14,7 +14,9 @@ use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
-use super::ability_utils::{begin_target_selection, build_target_slots, compute_unavailable_modes};
+use super::ability_utils::{
+    begin_target_selection_for_ability, build_target_slots, compute_unavailable_modes,
+};
 use super::casting;
 use super::casting_costs;
 use super::effects;
@@ -1617,7 +1619,12 @@ pub(super) fn begin_pending_trigger_target_selection(
 
     let player = trigger.controller;
     let target_constraints = trigger.target_constraints.clone();
-    let selection = begin_target_selection(&target_slots, &target_constraints)?;
+    let selection = begin_target_selection_for_ability(
+        state,
+        &trigger.ability,
+        &target_slots,
+        &target_constraints,
+    )?;
     Ok(Some(WaitingFor::TriggerTargetSelection {
         player,
         target_slots,

@@ -188,12 +188,42 @@ pub enum TargetSelectionAdvance {
     Complete(Vec<Option<TargetRef>>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TargetSlotSpec {
+    filter: TargetFilter,
+    optional: bool,
+}
+
+struct AbilityTargetingView<'a> {
+    state: &'a GameState,
+    ability: &'a ResolvedAbility,
+    specs: &'a [TargetSlotSpec],
+    target_slots: &'a [TargetSelectionSlot],
+    constraints: &'a [TargetSelectionConstraint],
+}
+
 /// CR 601.2c: Begin target selection by computing legal targets for the first slot.
 pub fn begin_target_selection(
     target_slots: &[TargetSelectionSlot],
     constraints: &[TargetSelectionConstraint],
 ) -> Result<TargetSelectionProgress, EngineError> {
     build_target_selection_progress(target_slots, constraints, 0, Vec::new())
+}
+
+pub fn begin_target_selection_for_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_slots: &[TargetSelectionSlot],
+    constraints: &[TargetSelectionConstraint],
+) -> Result<TargetSelectionProgress, EngineError> {
+    build_target_selection_progress_for_ability(
+        state,
+        ability,
+        target_slots,
+        constraints,
+        0,
+        Vec::new(),
+    )
 }
 
 /// CR 115.1: Targets are declared as part of putting a spell or ability on the stack.
@@ -247,11 +277,92 @@ pub fn choose_target(
     ))
 }
 
+pub fn choose_target_for_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_slots: &[TargetSelectionSlot],
+    constraints: &[TargetSelectionConstraint],
+    progress: &TargetSelectionProgress,
+    target: Option<TargetRef>,
+) -> Result<TargetSelectionAdvance, EngineError> {
+    if progress.current_slot >= target_slots.len() {
+        return Err(EngineError::InvalidAction(
+            "No target slot is currently active".to_string(),
+        ));
+    }
+    if progress.selected_slots.len() != progress.current_slot {
+        return Err(EngineError::InvalidAction(
+            "Target selection progress is out of sync".to_string(),
+        ));
+    }
+
+    let slot = &target_slots[progress.current_slot];
+    let mut selected_slots = progress.selected_slots.clone();
+    match target {
+        Some(target) => {
+            if !progress.current_legal_targets.contains(&target) {
+                return Err(EngineError::InvalidAction(
+                    "Illegal target selected".to_string(),
+                ));
+            }
+            selected_slots.push(Some(target));
+        }
+        None => {
+            if !slot.optional {
+                return Err(EngineError::InvalidAction(
+                    "Cannot skip a required target".to_string(),
+                ));
+            }
+            selected_slots.push(None);
+        }
+    }
+
+    let next_slot = progress.current_slot + 1;
+    if next_slot == target_slots.len() {
+        validate_selected_slots_for_ability(
+            state,
+            ability,
+            target_slots,
+            &selected_slots,
+            constraints,
+        )?;
+        return Ok(TargetSelectionAdvance::Complete(selected_slots));
+    }
+
+    Ok(TargetSelectionAdvance::InProgress(
+        build_target_selection_progress_for_ability(
+            state,
+            ability,
+            target_slots,
+            constraints,
+            next_slot,
+            selected_slots,
+        )?,
+    ))
+}
+
 pub fn auto_select_targets(
     target_slots: &[TargetSelectionSlot],
     constraints: &[TargetSelectionConstraint],
 ) -> Result<Option<Vec<TargetRef>>, EngineError> {
     let assignments = generate_target_assignments(target_slots, constraints);
+    match assignments.as_slice() {
+        [] => Err(EngineError::ActionNotAllowed(
+            "No legal target combinations available".to_string(),
+        )),
+        [only] => Ok(Some(only.clone())),
+        _ => Ok(None),
+    }
+}
+
+pub fn auto_select_targets_for_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_slots: &[TargetSelectionSlot],
+    constraints: &[TargetSelectionConstraint],
+) -> Result<Option<Vec<TargetRef>>, EngineError> {
+    let assignments =
+        build_target_assignments_for_ability(state, ability, target_slots, constraints);
     match assignments.as_slice() {
         [] => Err(EngineError::ActionNotAllowed(
             "No legal target combinations available".to_string(),
@@ -278,6 +389,25 @@ pub fn validate_selected_targets(
     }
 
     validate_target_prefix(target_slots, targets, constraints)
+}
+
+pub fn validate_selected_targets_for_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_slots: &[TargetSelectionSlot],
+    targets: &[TargetRef],
+    constraints: &[TargetSelectionConstraint],
+) -> Result<(), EngineError> {
+    let minimum_targets = target_slots.iter().filter(|slot| !slot.optional).count();
+    if targets.len() < minimum_targets || targets.len() > target_slots.len() {
+        return Err(EngineError::InvalidAction(format!(
+            "Expected between {minimum_targets} and {} targets, got {}",
+            target_slots.len(),
+            targets.len()
+        )));
+    }
+
+    validate_target_prefix_for_ability(state, ability, target_slots, targets, constraints)
 }
 
 fn validate_target_prefix(
@@ -401,8 +531,7 @@ fn collect_target_slots(
     slots: &mut Vec<TargetSelectionSlot>,
 ) -> Result<(), EngineError> {
     if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
-        let legal_targets =
-            targeting::find_legal_targets(state, filter, ability.controller, ability.source_id);
+        let legal_targets = legal_targets_for_ability_filter(state, ability, filter, slots);
         if legal_targets.is_empty() && !ability.optional_targeting {
             return Err(EngineError::ActionNotAllowed(
                 "No legal targets available".to_string(),
@@ -446,6 +575,125 @@ fn collect_target_slots(
         }
     }
     Ok(())
+}
+
+fn collect_target_slot_specs(ability: &ResolvedAbility, specs: &mut Vec<TargetSlotSpec>) {
+    if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
+        if let Some(spec) = ability.multi_target.as_ref() {
+            match spec.max {
+                Some(max_targets) => {
+                    for slot_index in 0..max_targets {
+                        specs.push(TargetSlotSpec {
+                            filter: filter.clone(),
+                            optional: slot_index >= spec.min,
+                        });
+                    }
+                }
+                None => specs.push(TargetSlotSpec {
+                    filter: filter.clone(),
+                    optional: true,
+                }),
+            }
+        } else {
+            specs.push(TargetSlotSpec {
+                filter: filter.clone(),
+                optional: ability.optional_targeting,
+            });
+        }
+    }
+    if defers_sub_ability_target_selection(&ability.effect) {
+        return;
+    }
+    if let Some(sub_ability) = ability.sub_ability.as_deref() {
+        if !defers_conditional_target_selection(sub_ability) {
+            collect_target_slot_specs(sub_ability, specs);
+        }
+    }
+}
+
+fn legal_targets_for_ability_filter(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+    existing_slots: &[TargetSelectionSlot],
+) -> Vec<TargetRef> {
+    if !uses_relative_controller_you(filter) {
+        return targeting::find_legal_targets(state, filter, ability.controller, ability.source_id);
+    }
+
+    let Some(player_slot) = existing_slots.iter().rev().find(|slot| {
+        !slot.legal_targets.is_empty()
+            && slot
+                .legal_targets
+                .iter()
+                .all(|target| matches!(target, TargetRef::Player(_)))
+    }) else {
+        return targeting::find_legal_targets(state, filter, ability.controller, ability.source_id);
+    };
+
+    let mut legal_targets = Vec::new();
+    for player_id in player_slot
+        .legal_targets
+        .iter()
+        .filter_map(|target| match target {
+            TargetRef::Player(player_id) => Some(*player_id),
+            TargetRef::Object(_) => None,
+        })
+    {
+        for target in targeting::find_legal_targets(state, filter, player_id, ability.source_id) {
+            if !legal_targets.contains(&target) {
+                legal_targets.push(target);
+            }
+        }
+    }
+
+    legal_targets
+}
+
+fn uses_relative_controller_you(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.controller == Some(crate::types::ability::ControllerRef::You),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(uses_relative_controller_you)
+        }
+        TargetFilter::Not { filter } => uses_relative_controller_you(filter),
+        _ => false,
+    }
+}
+
+fn target_slot_specs(ability: &ResolvedAbility) -> Vec<TargetSlotSpec> {
+    let mut specs = Vec::new();
+    collect_target_slot_specs(ability, &mut specs);
+    specs
+}
+
+fn relative_filter_controller(
+    ability: &ResolvedAbility,
+    selected_slots: &[Option<TargetRef>],
+) -> PlayerId {
+    selected_slots
+        .iter()
+        .rev()
+        .find_map(|slot| match slot {
+            Some(TargetRef::Player(player_id)) => Some(*player_id),
+            Some(TargetRef::Object(_)) | None => None,
+        })
+        .unwrap_or(ability.controller)
+}
+
+fn legal_targets_for_selected_slot(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    spec: &TargetSlotSpec,
+    selected_slots: &[Option<TargetRef>],
+) -> Vec<TargetRef> {
+    let controller = if uses_relative_controller_you(&spec.filter) {
+        relative_filter_controller(ability, selected_slots)
+    } else {
+        ability.controller
+    };
+
+    targeting::find_legal_targets(state, &spec.filter, controller, ability.source_id)
 }
 
 /// CR 603.12: Check if a sub-ability represents a reflexive trigger whose targeting
@@ -499,6 +747,80 @@ fn build_target_assignments(
     }
 }
 
+fn build_target_assignments_for_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_slots: &[TargetSelectionSlot],
+    constraints: &[TargetSelectionConstraint],
+) -> Vec<Vec<TargetRef>> {
+    let specs = target_slot_specs(ability);
+    let view = AbilityTargetingView {
+        state,
+        ability,
+        specs: &specs,
+        target_slots,
+        constraints,
+    };
+    let mut current = Vec::with_capacity(target_slots.len());
+    let mut out = Vec::new();
+    build_target_assignments_with_specs(&view, 0, &mut current, &mut out);
+    out
+}
+
+fn build_target_assignments_with_specs(
+    view: &AbilityTargetingView<'_>,
+    index: usize,
+    current: &mut Vec<TargetRef>,
+    out: &mut Vec<Vec<TargetRef>>,
+) {
+    if index == view.target_slots.len() {
+        if validate_target_prefix_with_specs(
+            view.state,
+            view.ability,
+            view.specs,
+            view.target_slots,
+            current,
+            view.constraints,
+        )
+        .is_ok()
+        {
+            out.push(current.clone());
+        }
+        return;
+    }
+
+    let slot = &view.target_slots[index];
+    if slot.optional {
+        build_target_assignments_with_specs(view, index + 1, current, out);
+    }
+
+    let selected_slots: Vec<Option<TargetRef>> = current.iter().cloned().map(Some).collect();
+    let legal_targets = legal_targets_for_spec_slot(
+        view.state,
+        view.ability,
+        view.specs,
+        view.target_slots,
+        index,
+        &selected_slots,
+    );
+    for target in legal_targets {
+        current.push(target);
+        if validate_target_prefix_with_specs(
+            view.state,
+            view.ability,
+            view.specs,
+            view.target_slots,
+            current,
+            view.constraints,
+        )
+        .is_ok()
+        {
+            build_target_assignments_with_specs(view, index + 1, current, out);
+        }
+        current.pop();
+    }
+}
+
 fn build_target_selection_progress(
     target_slots: &[TargetSelectionSlot],
     constraints: &[TargetSelectionConstraint],
@@ -527,6 +849,72 @@ fn build_target_selection_progress(
     skipped_slots.push(None);
     let can_skip = slot.optional
         && has_legal_completion(target_slots, constraints, current_slot + 1, &skipped_slots);
+
+    if current_legal_targets.is_empty() && !can_skip {
+        return Err(EngineError::ActionNotAllowed(
+            "No legal target combinations available".to_string(),
+        ));
+    }
+
+    Ok(TargetSelectionProgress {
+        current_slot,
+        selected_slots,
+        current_legal_targets,
+    })
+}
+
+fn build_target_selection_progress_for_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_slots: &[TargetSelectionSlot],
+    constraints: &[TargetSelectionConstraint],
+    current_slot: usize,
+    selected_slots: Vec<Option<TargetRef>>,
+) -> Result<TargetSelectionProgress, EngineError> {
+    if current_slot > target_slots.len() || selected_slots.len() != current_slot {
+        return Err(EngineError::InvalidAction(
+            "Target selection progress is out of sync".to_string(),
+        ));
+    }
+    validate_selected_slots_for_ability(
+        state,
+        ability,
+        target_slots,
+        &selected_slots,
+        constraints,
+    )?;
+
+    if current_slot == target_slots.len() {
+        return Ok(TargetSelectionProgress {
+            current_slot,
+            selected_slots,
+            current_legal_targets: Vec::new(),
+        });
+    }
+
+    let specs = target_slot_specs(ability);
+    let current_legal_targets = legal_targets_for_slot_with_specs(
+        state,
+        ability,
+        &specs,
+        target_slots,
+        constraints,
+        current_slot,
+        &selected_slots,
+    );
+    let slot = &target_slots[current_slot];
+    let mut skipped_slots = selected_slots.clone();
+    skipped_slots.push(None);
+    let can_skip = slot.optional
+        && has_legal_completion_with_specs(
+            state,
+            ability,
+            &specs,
+            target_slots,
+            constraints,
+            current_slot + 1,
+            &skipped_slots,
+        );
 
     if current_legal_targets.is_empty() && !can_skip {
         return Err(EngineError::ActionNotAllowed(
@@ -590,6 +978,130 @@ fn has_legal_completion(
     })
 }
 
+fn legal_targets_for_spec_slot(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    specs: &[TargetSlotSpec],
+    target_slots: &[TargetSelectionSlot],
+    current_slot: usize,
+    selected_slots: &[Option<TargetRef>],
+) -> Vec<TargetRef> {
+    let Some(spec) = specs.get(current_slot) else {
+        return target_slots
+            .get(current_slot)
+            .map(|slot| slot.legal_targets.clone())
+            .unwrap_or_default();
+    };
+    legal_targets_for_selected_slot(state, ability, spec, selected_slots)
+}
+
+fn legal_targets_for_slot_with_specs(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    specs: &[TargetSlotSpec],
+    target_slots: &[TargetSelectionSlot],
+    constraints: &[TargetSelectionConstraint],
+    current_slot: usize,
+    selected_slots: &[Option<TargetRef>],
+) -> Vec<TargetRef> {
+    legal_targets_for_spec_slot(
+        state,
+        ability,
+        specs,
+        target_slots,
+        current_slot,
+        selected_slots,
+    )
+    .into_iter()
+    .filter(|target| {
+        let mut next_slots = selected_slots.to_vec();
+        next_slots.push(Some(target.clone()));
+        validate_selected_slots_with_specs(
+            state,
+            ability,
+            specs,
+            target_slots,
+            &next_slots,
+            constraints,
+        )
+        .is_ok()
+            && has_legal_completion_with_specs(
+                state,
+                ability,
+                specs,
+                target_slots,
+                constraints,
+                current_slot + 1,
+                &next_slots,
+            )
+    })
+    .collect()
+}
+
+fn has_legal_completion_with_specs(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    specs: &[TargetSlotSpec],
+    target_slots: &[TargetSelectionSlot],
+    constraints: &[TargetSelectionConstraint],
+    index: usize,
+    selected_slots: &[Option<TargetRef>],
+) -> bool {
+    if index == target_slots.len() {
+        return validate_selected_slots_with_specs(
+            state,
+            ability,
+            specs,
+            target_slots,
+            selected_slots,
+            constraints,
+        )
+        .is_ok();
+    }
+
+    let slot = &target_slots[index];
+    if slot.optional {
+        let mut skipped_slots = selected_slots.to_vec();
+        skipped_slots.push(None);
+        if has_legal_completion_with_specs(
+            state,
+            ability,
+            specs,
+            target_slots,
+            constraints,
+            index + 1,
+            &skipped_slots,
+        ) {
+            return true;
+        }
+    }
+
+    legal_targets_for_spec_slot(state, ability, specs, target_slots, index, selected_slots)
+        .into_iter()
+        .any(|target| {
+            let mut next_slots = selected_slots.to_vec();
+            next_slots.push(Some(target));
+            validate_selected_slots_with_specs(
+                state,
+                ability,
+                specs,
+                target_slots,
+                &next_slots,
+                constraints,
+            )
+            .is_ok()
+                && has_legal_completion_with_specs(
+                    state,
+                    ability,
+                    specs,
+                    target_slots,
+                    constraints,
+                    index + 1,
+                    &next_slots,
+                )
+        })
+}
+
 fn validate_selected_slot_prefix(
     target_slots: &[TargetSelectionSlot],
     selected_slots: &[Option<TargetRef>],
@@ -612,6 +1124,110 @@ fn validate_selected_slot_prefix(
         match selected_slot {
             Some(target) => {
                 if !slot.legal_targets.contains(target) {
+                    return Err(EngineError::InvalidAction(
+                        "Illegal target selected".to_string(),
+                    ));
+                }
+                compact_targets.push(target.clone());
+            }
+            None if slot.optional => {}
+            None => {
+                return Err(EngineError::InvalidAction(
+                    "Missing required target".to_string(),
+                ));
+            }
+        }
+    }
+
+    validate_target_constraints(&compact_targets, constraints)
+}
+
+fn validate_target_prefix_for_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_slots: &[TargetSelectionSlot],
+    targets: &[TargetRef],
+    constraints: &[TargetSelectionConstraint],
+) -> Result<(), EngineError> {
+    let specs = target_slot_specs(ability);
+    validate_target_prefix_with_specs(state, ability, &specs, target_slots, targets, constraints)
+}
+
+fn validate_target_prefix_with_specs(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    specs: &[TargetSlotSpec],
+    target_slots: &[TargetSelectionSlot],
+    targets: &[TargetRef],
+    constraints: &[TargetSelectionConstraint],
+) -> Result<(), EngineError> {
+    if targets.len() > target_slots.len() {
+        return Err(EngineError::InvalidAction(
+            "Too many targets selected".to_string(),
+        ));
+    }
+
+    let selected_slots: Vec<Option<TargetRef>> = targets.iter().cloned().map(Some).collect();
+    validate_selected_slots_with_specs(
+        state,
+        ability,
+        specs,
+        target_slots,
+        &selected_slots,
+        constraints,
+    )
+}
+
+fn validate_selected_slots_for_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_slots: &[TargetSelectionSlot],
+    selected_slots: &[Option<TargetRef>],
+    constraints: &[TargetSelectionConstraint],
+) -> Result<(), EngineError> {
+    let specs = target_slot_specs(ability);
+    validate_selected_slots_with_specs(
+        state,
+        ability,
+        &specs,
+        target_slots,
+        selected_slots,
+        constraints,
+    )
+}
+
+fn validate_selected_slots_with_specs(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    specs: &[TargetSlotSpec],
+    target_slots: &[TargetSelectionSlot],
+    selected_slots: &[Option<TargetRef>],
+    constraints: &[TargetSelectionConstraint],
+) -> Result<(), EngineError> {
+    if selected_slots.len() > target_slots.len() {
+        return Err(EngineError::InvalidAction(
+            "Too many targets selected".to_string(),
+        ));
+    }
+
+    let mut compact_targets = Vec::new();
+    for (index, selected_slot) in selected_slots.iter().enumerate() {
+        let Some(slot) = target_slots.get(index) else {
+            return Err(EngineError::InvalidAction(
+                "Too many targets selected".to_string(),
+            ));
+        };
+
+        let legal_targets = specs
+            .get(index)
+            .map(|spec| {
+                legal_targets_for_selected_slot(state, ability, spec, &selected_slots[..index])
+            })
+            .unwrap_or_else(|| slot.legal_targets.clone());
+
+        match selected_slot {
+            Some(target) => {
+                if !legal_targets.contains(target) {
                     return Err(EngineError::InvalidAction(
                         "Illegal target selected".to_string(),
                     ));
@@ -1275,6 +1891,169 @@ mod tests {
             progress.current_legal_targets,
             vec![TargetRef::Object(ObjectId(42))]
         );
+    }
+
+    #[test]
+    fn build_target_slots_uses_prior_player_targets_for_relative_controller_filters() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::ControllerRef;
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let your_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Your Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for creature in [your_creature, opponent_creature] {
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        ));
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        assert_eq!(slots.len(), 2);
+        assert_eq!(slots[0].legal_targets, vec![TargetRef::Player(PlayerId(1))]);
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(opponent_creature)]
+        );
+    }
+
+    #[test]
+    fn choose_target_for_ability_rebinds_relative_controller_to_selected_player() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::ControllerRef;
+        use crate::types::card_type::CoreType;
+        use crate::types::format::FormatConfig;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let opponent_one_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent One Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let opponent_two_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(2),
+            "Opponent Two Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for creature in [opponent_one_creature, opponent_two_creature] {
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(
+                    TypedFilter::default().controller(ControllerRef::Opponent),
+                ),
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        ));
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+        let progress =
+            begin_target_selection_for_ability(&state, &ability, &slots, &[]).expect("selection");
+
+        let TargetSelectionAdvance::InProgress(progress) = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Player(PlayerId(1))),
+        )
+        .expect("first opponent target should be accepted") else {
+            panic!("expected second slot to remain");
+        };
+
+        assert_eq!(progress.current_slot, 1);
+        assert_eq!(
+            progress.current_legal_targets,
+            vec![TargetRef::Object(opponent_one_creature)]
+        );
+
+        let result = choose_target_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[],
+            &progress,
+            Some(TargetRef::Object(opponent_two_creature)),
+        );
+        assert!(result.is_err());
     }
 
     #[test]

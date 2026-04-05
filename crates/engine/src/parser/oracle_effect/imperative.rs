@@ -395,14 +395,17 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("return ")).parse(input))
     {
+        let rest_lower = &lower[lower.len() - rest.len()..];
         let (target_text, dest) = super::strip_return_destination_ext(rest);
         let (target, _rem) = parse_target(target_text);
+        let origin = super::infer_origin_zone(rest_lower);
         #[cfg(debug_assertions)]
         super::types::assert_no_compound_remainder(_rem, text);
         return match dest {
             Some(d) if d.zone == Zone::Battlefield => {
                 Some(TargetedImperativeAst::ReturnToBattlefield {
                     target,
+                    origin,
                     enter_transformed: d.transformed,
                     under_your_control: d.under_your_control,
                     enter_tapped: d.enter_tapped,
@@ -411,6 +414,7 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
             Some(d) if d.zone == Zone::Hand => Some(TargetedImperativeAst::Return { target }),
             Some(d) => Some(TargetedImperativeAst::ReturnToZone {
                 target,
+                origin,
                 destination: d.zone,
             }),
             None => Some(TargetedImperativeAst::Return { target }),
@@ -521,11 +525,12 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         // CR 400.7: Return to battlefield is a zone change, not a bounce.
         TargetedImperativeAst::ReturnToBattlefield {
             target,
+            origin,
             enter_transformed,
             under_your_control,
             enter_tapped,
         } => Effect::ChangeZone {
-            origin: None,
+            origin,
             destination: Zone::Battlefield,
             target,
             owner_library: false,
@@ -538,9 +543,10 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
         TargetedImperativeAst::ReturnToZone {
             target,
+            origin,
             destination,
         } => Effect::ChangeZone {
-            origin: None,
+            origin,
             destination,
             target,
             owner_library: false,
