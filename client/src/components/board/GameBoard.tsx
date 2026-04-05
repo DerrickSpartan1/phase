@@ -121,10 +121,8 @@ export function GameBoard() {
       for (const action of legalActions) {
         if (action.type !== "ActivateAbility") continue;
         const object = gameState.objects[action.data.source_id];
-        const ability = object?.abilities?.[action.data.ability_index] as
-          | { effect?: { type?: string } }
-          | undefined;
-        if (ability?.effect?.type !== "Mana") {
+        const effectType = object?.abilities?.[action.data.ability_index]?.effect?.type;
+        if (effectType !== "Mana") {
           activatableObjectIds.add(action.data.source_id);
         }
       }

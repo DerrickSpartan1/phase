@@ -186,6 +186,25 @@ export type GameRestriction = {
   scope?: RestrictionScope | null;
 };
 
+export interface SerializedManaProduction {
+  type: string;
+  colors?: string[];
+  [key: string]: unknown;
+}
+
+export interface SerializedAbilityEffect {
+  type?: string;
+  produced?: SerializedManaProduction;
+  [key: string]: unknown;
+}
+
+export interface SerializedAbility {
+  cost?: SerializedAbilityCost;
+  effect?: SerializedAbilityEffect;
+  description?: string;
+  [key: string]: unknown;
+}
+
 // ── Game Object ──────────────────────────────────────────────────────────
 
 export interface GameObject {
@@ -210,7 +229,7 @@ export interface GameObject {
   card_types: CardType;
   mana_cost: ManaCost;
   keywords: Keyword[];
-  abilities: unknown[];
+  abilities: SerializedAbility[];
   trigger_definitions: unknown[];
   replacement_definitions: unknown[];
   static_definitions: unknown[];
@@ -241,7 +260,7 @@ export interface GameObject {
     card_types: CardType;
     mana_cost: ManaCost;
     keywords: Keyword[];
-    abilities: unknown[];
+    abilities: SerializedAbility[];
     color: ManaColor[];
   } | null;
 }

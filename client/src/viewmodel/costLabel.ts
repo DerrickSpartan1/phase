@@ -2,6 +2,7 @@ import type {
   AdditionalCost,
   GameAction,
   GameObject,
+  SerializedAbility,
   SerializedAbilityCost,
 } from "../adapter/types.ts";
 
@@ -20,6 +21,7 @@ export const SHARD_ABBREVIATION: Record<string, string> = {
 type SerializedCost = {
   type: string;
   amount?: number;
+  count?: number;
   costs?: SerializedCost[];
   cost?: { type: string; shards?: string[]; generic?: number };
 };
@@ -45,10 +47,10 @@ export function formatCost(cost: SerializedCost): string {
     case "PayLife": return `${cost.amount} life`;
     case "Sacrifice": return "Sacrifice";
     case "Discard": {
-      const count = (cost as { count?: number }).count ?? 1;
+      const count = cost.count ?? 1;
       return `Discard ${count} card${count > 1 ? "s" : ""}`;
     }
-    case "Blight": return `Blight ${(cost as { count?: number }).count ?? 1}`;
+    case "Blight": return `Blight ${cost.count ?? 1}`;
     case "CollectEvidence":
       return `Collect evidence ${cost.amount ?? 0}`;
     case "Composite":
@@ -58,8 +60,8 @@ export function formatCost(cost: SerializedCost): string {
   }
 }
 
-export function abilityLabel(ability: unknown): string {
-  const cost = (ability as { cost?: SerializedCost } | null)?.cost;
+export function abilityLabel(ability: SerializedAbility | null | undefined): string {
+  const cost = ability?.cost;
   return cost ? formatCost(cost) : "0";
 }
 
@@ -73,7 +75,7 @@ export function abilityChoiceLabel(
   object: GameObject,
 ): { label: string; description?: string } {
   if (action.type === "ActivateAbility") {
-    const ability = object.abilities[action.data.ability_index] as { cost?: SerializedCost; effect?: { type?: string; produced?: { type?: string; colors?: string[] } }; description?: string } | null;
+    const ability = object.abilities[action.data.ability_index];
     // For mana abilities, show what they produce (e.g., "Add {U}") instead of just the cost
     if (ability?.effect?.type === "Mana" && ability.effect.produced) {
       const produced = ability.effect.produced;
@@ -103,7 +105,7 @@ export function abilityChoiceLabel(
 
 /** Format a SerializedAbilityCost (same shape as SerializedCost but from the AdditionalCost type). */
 function formatAbilityCost(cost: SerializedAbilityCost): string {
-  return formatCost(cost as SerializedCost);
+  return formatCost(cost);
 }
 
 /** Build title + option labels for the OptionalCostChoice modal. */

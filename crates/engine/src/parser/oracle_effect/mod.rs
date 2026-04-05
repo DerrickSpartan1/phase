@@ -3148,9 +3148,9 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         // "Tap target creature. Put two stun counters on it." — "it" refers to the
         // tapped creature from the previous sentence, not the ability source.
         if condition.is_none()
-            && defs.last().is_some_and(|prev| {
-                prev.condition.is_none() && has_typed_target(&prev.effect)
-            })
+            && defs
+                .last()
+                .is_some_and(|prev| prev.condition.is_none() && has_typed_target(&prev.effect))
             && has_anaphoric_reference(&text.to_lowercase())
         {
             replace_target_with_parent(&mut def.effect);
@@ -9558,17 +9558,28 @@ mod tests {
 
         // Primary effect: Tap with a typed creature filter.
         assert!(
-            matches!(def.effect.as_ref(), Effect::Tap { target: TargetFilter::Typed(_) }),
+            matches!(
+                def.effect.as_ref(),
+                Effect::Tap {
+                    target: TargetFilter::Typed(_)
+                }
+            ),
             "expected Tap with typed target, got: {:?}",
             def.effect
         );
 
         // Sub-ability: PutCounter targeting ParentTarget (the same creature).
-        let sub = def.sub_ability.as_ref().expect("should have sub_ability for 'put counters on it'");
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("should have sub_ability for 'put counters on it'");
         assert!(
             matches!(
                 sub.effect.as_ref(),
-                Effect::PutCounter { target: TargetFilter::ParentTarget, .. }
+                Effect::PutCounter {
+                    target: TargetFilter::ParentTarget,
+                    ..
+                }
             ),
             "expected PutCounter with ParentTarget, got: {:?}",
             sub.effect

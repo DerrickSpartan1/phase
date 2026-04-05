@@ -2973,11 +2973,12 @@ mod tests {
 
         let result = apply(
             &mut state,
-            GameAction::TapLandForMana {
-                object_id: dual_id,
-            },
+            GameAction::TapLandForMana { object_id: dual_id },
         );
-        assert!(result.is_err(), "TapLandForMana should reject multi-mana lands");
+        assert!(
+            result.is_err(),
+            "TapLandForMana should reject multi-mana lands"
+        );
     }
 
     #[test]
@@ -3106,9 +3107,7 @@ mod tests {
         // Undo via UntapLandForMana
         apply(
             &mut state,
-            GameAction::UntapLandForMana {
-                object_id: dual_id,
-            },
+            GameAction::UntapLandForMana { object_id: dual_id },
         )
         .unwrap();
         assert!(!state.objects[&dual_id].tapped);

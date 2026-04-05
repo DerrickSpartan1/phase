@@ -2,6 +2,7 @@ import { motion } from "framer-motion";
 import { memo, useCallback, useMemo, useRef } from "react";
 import { useShallow } from "zustand/react/shallow";
 
+import type { GameAction } from "../../adapter/types.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
@@ -185,15 +186,19 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
       const o = useGameStore.getState().gameState?.objects[objectId];
       // Filter out mana abilities from non-mana ability actions — mana abilities
       // are in legalActions for auto-pass awareness but handled by canTapForMana.
-      const allLegalForObject = useGameStore.getState().legalActions.filter((a) =>
-        a.type === "ActivateAbility" && a.data.source_id === objectId,
-      );
-      const abilityActions = allLegalForObject.filter((a) =>
-        (o?.abilities?.[a.data.ability_index] as { effect?: { type?: string } } | undefined)?.effect?.type !== "Mana",
-      );
-      const manaActions = allLegalForObject.filter((a) =>
-        (o?.abilities?.[a.data.ability_index] as { effect?: { type?: string } } | undefined)?.effect?.type === "Mana",
-      );
+      const abilityActions: Array<Extract<GameAction, { type: "ActivateAbility" }>> = [];
+      const manaActions: Array<Extract<GameAction, { type: "ActivateAbility" }>> = [];
+      for (const action of useGameStore.getState().legalActions) {
+        if (action.type !== "ActivateAbility" || action.data.source_id !== objectId) {
+          continue;
+        }
+        const effectType = o?.abilities?.[action.data.ability_index]?.effect?.type;
+        if (effectType === "Mana") {
+          manaActions.push(action);
+        } else {
+          abilityActions.push(action);
+        }
+      }
       if (abilityActions.length === 0 && canTapForMana) {
         // No non-mana abilities — tap for mana directly
         if (o && !o.card_types.core_types.includes("Land") && o.mana_ability_index != null) {
@@ -209,7 +214,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
         dispatchAction(abilityActions[0]);
       } else {
         // Multiple abilities or both ability + mana — show choice modal
-        const allActions = [...abilityActions];
+        const allActions: GameAction[] = [...abilityActions];
         if (canTapForMana) {
           if (o && !o.card_types.core_types.includes("Land") && o.mana_ability_index != null) {
             allActions.push({ type: "ActivateAbility", data: { source_id: objectId, ability_index: o.mana_ability_index } });

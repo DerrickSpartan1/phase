@@ -124,7 +124,11 @@ pub fn handle_activate_loyalty(
         // CR 606.3: Mark activated this turn at announcement time to prevent re-activation.
         // Only needed here — finalize_loyalty_activation handles the auto-select and
         // non-targeted paths.
-        state.objects.get_mut(&pw_id).unwrap().loyalty_activated_this_turn = true;
+        state
+            .objects
+            .get_mut(&pw_id)
+            .unwrap()
+            .loyalty_activated_this_turn = true;
         state.lands_tapped_for_mana.remove(&player);
 
         let selection = begin_target_selection(&target_slots, &[])?;
@@ -194,7 +198,11 @@ fn finalize_loyalty_activation(
     };
     super::casting::pay_ability_cost(state, player, pw_id, &cost, events)
         .expect("loyalty validation passed in handle_activate_loyalty");
-    state.objects.get_mut(&pw_id).unwrap().loyalty_activated_this_turn = true;
+    state
+        .objects
+        .get_mut(&pw_id)
+        .unwrap()
+        .loyalty_activated_this_turn = true;
 
     let assigned_targets = flatten_targets_in_chain(&resolved);
     emit_targeting_events(state, &assigned_targets, pw_id, player, events);
@@ -560,7 +568,13 @@ mod tests {
                 "Goblin".to_string(),
                 Zone::Battlefield,
             );
-            state.objects.get_mut(&c).unwrap().card_types.core_types.push(CoreType::Creature);
+            state
+                .objects
+                .get_mut(&c)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
         }
 
         let mut events = Vec::new();
@@ -568,7 +582,11 @@ mod tests {
             .expect("activation should succeed with a legal target");
 
         // Loyalty is NOT deducted yet — cost is paid after target selection.
-        assert_eq!(state.objects[&pw].loyalty, Some(4), "loyalty unchanged before target selection");
+        assert_eq!(
+            state.objects[&pw].loyalty,
+            Some(4),
+            "loyalty unchanged before target selection"
+        );
         // But activation is marked to prevent re-activation this turn.
         assert!(state.objects[&pw].loyalty_activated_this_turn);
         // Engine waits for the player to select a target.
