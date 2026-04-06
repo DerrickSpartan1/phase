@@ -2186,11 +2186,14 @@ fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
     )
 }
 
-/// CR 101.2: Parse blanket casting prohibition from Oracle text.
-/// Handles "[Subject] can't cast [type] spells" where [type] is creature, instant,
-/// sorcery, noncreature, etc.
-/// E.g., Steel Golem: "You can't cast creature spells."
-/// E.g., Hymn of the Wilds: "You can't cast instant or sorcery spells."
+/// CR 101.2: Parse casting prohibition from Oracle text.
+/// Handles multiple patterns:
+/// - "[Subject] can't cast [type] spells" (Steel Golem, Hymn of the Wilds)
+/// - "[Type] spells can't be cast" — passive voice (Aether Storm)
+/// - "[Subject] can't cast spells with mana value N or less/greater" (Brisela)
+/// - "[Subject] can't cast spells with the chosen name" (Alhammarret)
+/// - "[Subject] can't cast spells of the chosen type" (Archon of Valor's Reach)
+/// - "Enchanted creature's controller can't cast [type] spells" (Brand of Ill Omen)
 fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition> {
     // Exclude patterns handled by other parsers
     if tp.contains("can't cast more than")
@@ -2201,19 +2204,65 @@ fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition>
         return None;
     }
 
+    // --- Passive voice: "[Type] spells can't be cast" (Aether Storm) ---
+    // CR 101.2: "Creature spells can't be cast" → AllPlayers, Creature filter
+    if let Some(def) = parse_passive_cant_be_cast(tp, text) {
+        return Some(def);
+    }
+
+    // --- "Enchanted creature's controller can't cast [type] spells" ---
+    // CR 303.4e: Aura-based restriction on the enchanted creature's controller.
+    if let Some(def) = parse_enchanted_controller_cant_cast(tp, text) {
+        return Some(def);
+    }
+
     // 1. Strip subject → scope
     let (who, predicate) = strip_casting_prohibition_subject(tp)?;
 
-    // 2. Match "can't cast [types] spell(s)"
+    // 2. Match "can't cast "
     let after_cant_cast = nom_tag_lower(predicate, predicate, "can't cast ")?;
 
-    // 3. Require it ends with "spell" or "spells" (possibly with a period)
+    // 3. Strip trailing period and parenthetical conditions
     let trimmed = after_cant_cast.trim_end_matches('.');
+    // Strip trailing parenthetical like "(as long as this creature is on the battlefield)"
+    let trimmed = if let Some(pos) = trimmed.rfind(" (") {
+        trimmed[..pos].trim()
+    } else {
+        trimmed
+    };
+
+    // --- "spells with mana value N or less/greater" ---
+    if let Some(rest) = nom_tag_lower(trimmed, trimmed, "spells with mana value ") {
+        return parse_cant_cast_mana_value(rest, who, text);
+    }
+
+    // --- "spells with the chosen name" ---
+    if nom_tag_lower(trimmed, trimmed, "spells with the chosen name").is_some() {
+        let def = StaticDefinition::new(StaticMode::CantBeCast { who })
+            .affected(TargetFilter::HasChosenName)
+            .description(text.to_string());
+        return Some(def);
+    }
+
+    // --- "spells of the chosen type" ---
+    if nom_tag_lower(trimmed, trimmed, "spells of the chosen type").is_some() {
+        let filter = TargetFilter::Typed(TypedFilter {
+            properties: vec![FilterProp::IsChosenCardType],
+            ..TypedFilter::default()
+        });
+        let def = StaticDefinition::new(StaticMode::CantBeCast { who })
+            .affected(filter)
+            .description(text.to_string());
+        return Some(def);
+    }
+
+    // --- "[type] spells" / "[type] spell" — standard type-based prohibition ---
+    // 4. Require it ends with "spell" or "spells"
     let before_spells = trimmed
         .strip_suffix(" spells")
         .or_else(|| trimmed.strip_suffix(" spell"))?;
 
-    // 4. Parse type filter from the remaining text
+    // 5. Parse type filter from the remaining text
     let type_text = before_spells.trim();
     let spell_filter = if type_text.is_empty() {
         None
@@ -2232,6 +2281,100 @@ fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition>
         def = def.affected(filter);
     }
     Some(def)
+}
+
+/// Parse passive voice "[Type] spells can't be cast" pattern.
+/// E.g., Aether Storm: "Creature spells can't be cast."
+fn parse_passive_cant_be_cast(tp: &str, text: &str) -> Option<StaticDefinition> {
+    // Look for "spells can't be cast" suffix
+    let trimmed = tp.trim_end_matches('.');
+    let before_cant = trimmed.strip_suffix(" can't be cast")?;
+    // Require " spells" at the end of the subject
+    let type_text = before_cant.strip_suffix(" spells")?;
+
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+    match &filter {
+        TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => {}
+        _ => return None,
+    }
+
+    Some(
+        StaticDefinition::new(StaticMode::CantBeCast {
+            who: CastingProhibitionScope::AllPlayers,
+        })
+        .affected(filter)
+        .description(text.to_string()),
+    )
+}
+
+/// Parse "Enchanted creature's controller can't cast [type] spells" pattern.
+/// E.g., Brand of Ill Omen: "Enchanted creature's controller can't cast creature spells."
+fn parse_enchanted_controller_cant_cast(tp: &str, text: &str) -> Option<StaticDefinition> {
+    let rest = nom_tag_lower(tp, tp, "enchanted creature's controller ")
+        .or_else(|| nom_tag_lower(tp, tp, "enchanted creature\u{2019}s controller "))?;
+    let after_cant_cast = nom_tag_lower(rest, rest, "can't cast ")
+        .or_else(|| nom_tag_lower(rest, rest, "can\u{2019}t cast "))?;
+
+    let trimmed = after_cant_cast.trim_end_matches('.');
+    let before_spells = trimmed
+        .strip_suffix(" spells")
+        .or_else(|| trimmed.strip_suffix(" spell"))?;
+
+    let type_text = before_spells.trim();
+    let spell_filter = if type_text.is_empty() {
+        None
+    } else {
+        let (filter, _) = parse_type_phrase(type_text);
+        match &filter {
+            TargetFilter::Typed(tf) if !tf.type_filters.is_empty() => Some(filter),
+            _ => None,
+        }
+    };
+
+    let mut def = StaticDefinition::new(StaticMode::CantBeCast {
+        who: CastingProhibitionScope::EnchantedCreatureController,
+    })
+    .description(text.to_string());
+    if let Some(filter) = spell_filter {
+        def = def.affected(filter);
+    }
+    Some(def)
+}
+
+/// Parse "mana value N or less" / "mana value N or greater" from the remainder
+/// after "spells with mana value ".
+fn parse_cant_cast_mana_value(
+    rest: &str,
+    who: CastingProhibitionScope,
+    text: &str,
+) -> Option<StaticDefinition> {
+    let (n, after_n) = parse_number(rest)?;
+    let after_n = after_n.trim_start();
+
+    let prop = if nom_tag_lower(after_n, after_n, "or less").is_some() {
+        FilterProp::CmcLE {
+            value: QuantityExpr::Fixed { value: n as i32 },
+        }
+    } else if nom_tag_lower(after_n, after_n, "or greater").is_some() {
+        FilterProp::CmcGE {
+            value: QuantityExpr::Fixed { value: n as i32 },
+        }
+    } else {
+        return None;
+    };
+
+    let filter = TargetFilter::Typed(TypedFilter {
+        properties: vec![prop],
+        ..TypedFilter::default()
+    });
+    Some(
+        StaticDefinition::new(StaticMode::CantBeCast { who })
+            .affected(filter)
+            .description(text.to_string()),
+    )
 }
 
 /// CR 101.2: Parse per-turn draw limit from Oracle text.
@@ -7134,6 +7277,163 @@ mod tests {
                 ..
             } => assert_eq!(scope, CountScope::Controller),
             other => panic!("expected card-types-in-graveyard cost reduction, got {other:?}"),
+        }
+    }
+
+    // --- Expanded CantBeCast pattern tests ---
+
+    #[test]
+    fn cant_cast_passive_voice_creature_spells() {
+        // Aether Storm: "Creature spells can't be cast."
+        let def = parse_static_line("Creature spells can't be cast.").unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeCast {
+                who: CastingProhibitionScope::AllPlayers,
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("Expected Typed filter with Creature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cant_cast_spells_with_mana_value_or_less() {
+        // Brisela: "Your opponents can't cast spells with mana value 3 or less."
+        let def = parse_static_line("Your opponents can't cast spells with mana value 3 or less.")
+            .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeCast {
+                who: CastingProhibitionScope::Opponents,
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::CmcLE {
+                        value: QuantityExpr::Fixed { value: 3 }
+                    }
+                )));
+            }
+            other => panic!("Expected Typed filter with CmcLE, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cant_cast_spells_with_chosen_name() {
+        // Alhammarret: "Your opponents can't cast spells with the chosen name."
+        let def =
+            parse_static_line("Your opponents can't cast spells with the chosen name.").unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeCast {
+                who: CastingProhibitionScope::Opponents,
+            }
+        );
+        assert_eq!(def.affected, Some(TargetFilter::HasChosenName));
+    }
+
+    #[test]
+    fn cant_cast_spells_with_chosen_name_parenthetical() {
+        // Alhammarret full text with parenthetical condition
+        let def = parse_static_line(
+            "Your opponents can't cast spells with the chosen name (as long as this creature is on the battlefield).",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeCast {
+                who: CastingProhibitionScope::Opponents,
+            }
+        );
+        assert_eq!(def.affected, Some(TargetFilter::HasChosenName));
+    }
+
+    #[test]
+    fn cant_cast_spells_of_chosen_type() {
+        // Archon of Valor's Reach: "Players can't cast spells of the chosen type."
+        let def = parse_static_line("Players can't cast spells of the chosen type.").unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeCast {
+                who: CastingProhibitionScope::AllPlayers,
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::IsChosenCardType)));
+            }
+            other => panic!("Expected Typed filter with IsChosenCardType, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enchanted_controller_cant_cast_creature_spells() {
+        // Brand of Ill Omen: "Enchanted creature's controller can't cast creature spells."
+        let def = parse_static_line("Enchanted creature's controller can't cast creature spells.")
+            .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeCast {
+                who: CastingProhibitionScope::EnchantedCreatureController,
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("Expected Typed filter with Creature, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cant_cast_mana_value_or_greater() {
+        // Angel of Eternal Dawn pattern: "can't cast spells with mana value 5 or greater"
+        let def =
+            parse_static_line("Your opponents can't cast spells with mana value 5 or greater.")
+                .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeCast {
+                who: CastingProhibitionScope::Opponents,
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::CmcGE {
+                        value: QuantityExpr::Fixed { value: 5 }
+                    }
+                )));
+            }
+            other => panic!("Expected Typed filter with CmcGE, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cant_cast_opponents_creature_spells() {
+        // "Your opponents can't cast creature spells." — existing pattern with opponent scope
+        let def = parse_static_line("Your opponents can't cast creature spells.").unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::CantBeCast {
+                who: CastingProhibitionScope::Opponents,
+            }
+        );
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            }
+            other => panic!("Expected Typed filter with Creature, got {other:?}"),
         }
     }
 }

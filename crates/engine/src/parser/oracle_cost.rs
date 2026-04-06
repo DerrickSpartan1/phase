@@ -518,20 +518,20 @@ pub(crate) fn try_parse_cost_reduction(text: &str) -> Option<CostReduction> {
 
 fn strip_count_article_prefix(text: &str) -> &str {
     let trimmed = text.trim();
-    nom_on_lower(trimmed, &trimmed.to_lowercase(), |i| {
-        value((), alt((tag("a "), tag("an ")))).parse(i)
-    })
+    nom_on_lower(
+        trimmed,
+        &trimmed.to_lowercase(),
+        nom_primitives::parse_article,
+    )
     .map(|((), rest)| rest)
     .unwrap_or(trimmed)
 }
 
 /// Strip leading "a " / "an " article from mixed-case text, using lowercase for matching.
 fn strip_article<'a>(text: &'a str, lower: &str) -> &'a str {
-    nom_on_lower(text, lower, |i| {
-        value((), alt((tag("a "), tag("an ")))).parse(i)
-    })
-    .map(|((), rest)| rest)
-    .unwrap_or(text)
+    nom_on_lower(text, lower, nom_primitives::parse_article)
+        .map(|((), rest)| rest)
+        .unwrap_or(text)
 }
 
 /// CR 112.3: Parse self-exile cost patterns like "this card from your graveyard",
@@ -629,11 +629,9 @@ fn try_parse_return_to_hand_cost(rest_lower: &str, _rest_original: &str) -> Opti
         .next()
         .or_else(|| rest_lower.split(" to your hand").next())?;
     // Strip article using nom
-    let filter_text = nom_on_lower(filter_text, filter_text, |i| {
-        value((), alt((tag("a "), tag("an ")))).parse(i)
-    })
-    .map(|((), rest)| rest)
-    .unwrap_or(filter_text);
+    let filter_text = nom_on_lower(filter_text, filter_text, nom_primitives::parse_article)
+        .map(|((), rest)| rest)
+        .unwrap_or(filter_text);
     let target_text = format!("target {filter_text}");
     let (filter, _) = parse_target(&target_text);
     Some(AbilityCost::ReturnToHand {

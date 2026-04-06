@@ -173,6 +173,15 @@ pub(super) enum ContinuationAst {
     EntersTappedAttacking,
     /// "After that turn, that player takes an extra turn." after a controlled-turn effect.
     GrantExtraTurnAfterControlledTurn,
+    /// CR 701.20a: "Put that card [onto the battlefield / into your hand]" after RevealUntil —
+    /// overrides kept_destination on the preceding RevealUntil effect.
+    /// When the compound sentence also includes "and the rest [into zone]",
+    /// `rest_destination` is extracted from the same clause.
+    RevealUntilKept {
+        destination: Zone,
+        enter_tapped: bool,
+        rest_destination: Option<Zone>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

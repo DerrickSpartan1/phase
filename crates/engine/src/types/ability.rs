@@ -857,6 +857,10 @@ pub enum FilterProp {
     /// Matches objects whose subtypes include the source object's chosen creature type.
     /// Used for "of the chosen type" patterns (Cavern of Souls, Metallic Mimic).
     IsChosenCreatureType,
+    /// Matches objects whose core type includes the source object's chosen card type.
+    /// Used for "spells of the chosen type" patterns (Archon of Valor's Reach).
+    /// Reads `ChosenAttribute::CardType` from the source permanent.
+    IsChosenCardType,
     /// CR 115.7: Matches stack entries that have exactly one target.
     /// Used for "with a single target" qualifiers on retarget effects.
     HasSingleTarget,
@@ -2588,6 +2592,19 @@ pub enum Effect {
     ExileFromTopUntil {
         filter: TargetFilter,
     },
+    /// CR 701.20a: Reveal cards from the top of your library one at a time until
+    /// you reveal a card matching the filter. The matching card goes to
+    /// `kept_destination`, the rest go to `rest_destination`.
+    RevealUntil {
+        filter: TargetFilter,
+        /// Where the matching card goes (Hand or Battlefield).
+        kept_destination: Zone,
+        /// Where non-matching revealed cards go (Library bottom or Graveyard).
+        rest_destination: Zone,
+        /// CR 110.6d: When true, the matching card enters the battlefield tapped.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        enter_tapped: bool,
+    },
     /// CR 701.57a: Discover N — exile from top until nonland with MV ≤ N,
     /// cast free or put to hand, rest to bottom in random order.
     Discover {
@@ -2985,6 +3002,7 @@ impl Effect {
             | Effect::ChooseFromZone { .. }
             | Effect::GainEnergy { .. }
             | Effect::ExileFromTopUntil { .. }
+            | Effect::RevealUntil { .. }
             | Effect::Discover { .. }
             | Effect::GiftDelivery { .. }
             | Effect::ExchangeControl
@@ -3112,6 +3130,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::GainEnergy { .. } => "GainEnergy",
         Effect::GivePlayerCounter { .. } => "GivePlayerCounter",
         Effect::ExileFromTopUntil { .. } => "ExileFromTopUntil",
+        Effect::RevealUntil { .. } => "RevealUntil",
         Effect::Discover { .. } => "Discover",
         Effect::PutAtLibraryPosition { .. } => "PutAtLibraryPosition",
         Effect::PutOnTopOrBottom { .. } => "PutOnTopOrBottom",
@@ -3243,6 +3262,7 @@ pub enum EffectKind {
     GainEnergy,
     GivePlayerCounter,
     ExileFromTopUntil,
+    RevealUntil,
     Discover,
     PutAtLibraryPosition,
     PutOnTopOrBottom,
@@ -3375,6 +3395,7 @@ impl From<&Effect> for EffectKind {
             Effect::GainEnergy { .. } => EffectKind::GainEnergy,
             Effect::GivePlayerCounter { .. } => EffectKind::GivePlayerCounter,
             Effect::ExileFromTopUntil { .. } => EffectKind::ExileFromTopUntil,
+            Effect::RevealUntil { .. } => EffectKind::RevealUntil,
             Effect::Discover { .. } => EffectKind::Discover,
             Effect::PutAtLibraryPosition { .. } => EffectKind::PutAtLibraryPosition,
             Effect::PutOnTopOrBottom { .. } => EffectKind::PutOnTopOrBottom,

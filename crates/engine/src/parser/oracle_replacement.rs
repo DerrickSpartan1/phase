@@ -871,7 +871,7 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
     }
 
     // Strip leading "a " or "an "
-    let subject = alt((tag::<_, _, VerboseError<&str>>("a "), tag("an ")))
+    let subject = nom_primitives::parse_article
         .parse(subject)
         .map_or(subject, |(rest, _)| rest)
         .trim();

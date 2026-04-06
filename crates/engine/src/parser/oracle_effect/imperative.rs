@@ -257,11 +257,9 @@ pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect 
 /// Follows the same pattern used by `oracle_cost.rs` for sacrifice cost parsing.
 fn strip_article(text: &str) -> &str {
     let lower = text.to_lowercase();
-    nom_on_lower(text, &lower, |input| {
-        value((), alt((tag("a "), tag("an ")))).parse(input)
-    })
-    .map(|(_, rest)| rest)
-    .unwrap_or(text)
+    nom_on_lower(text, &lower, nom_primitives::parse_article)
+        .map(|(_, rest)| rest)
+        .unwrap_or(text)
 }
 
 /// CR 608.2c: Extract "unless you discard a [type] card" suffix from discard text.
@@ -2150,15 +2148,14 @@ fn try_parse_player_counter(lower: &str) -> Option<ImperativeFamilyAst> {
 
     // Parse quantity + counter kind from the remaining text.
     // Patterns: "a poison" / "an experience" / "two rad" / "10 poison"
-    let (count, counter_kind) = if let Ok((kind, _)) =
-        alt((tag::<_, _, VerboseError<&str>>("a "), tag("an "))).parse(before_counter)
-    {
-        (1u32, kind.trim())
-    } else if let Ok((rest, n)) = nom_primitives::parse_number.parse(before_counter) {
-        (n, rest.trim())
-    } else {
-        return None;
-    };
+    let (count, counter_kind) =
+        if let Ok((kind, _)) = nom_primitives::parse_article.parse(before_counter) {
+            (1u32, kind.trim())
+        } else if let Ok((rest, n)) = nom_primitives::parse_number.parse(before_counter) {
+            (n, rest.trim())
+        } else {
+            return None;
+        };
 
     // Validate: counter kind should be a single word (no spaces) to avoid false positives
     // like "gets +1/+1 counter" which is an object counter, not a player counter.

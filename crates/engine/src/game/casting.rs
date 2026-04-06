@@ -2199,6 +2199,26 @@ fn apply_cost_reduction(
     }
 }
 
+/// CR 101.2: Check if a casting prohibition scope applies to the given caster.
+/// Shared by CantBeCast, CantCastDuring, and PerTurnCastLimit.
+fn casting_prohibition_scope_matches(
+    who: &CastingProhibitionScope,
+    caster: PlayerId,
+    source_obj: &super::game_object::GameObject,
+    state: &GameState,
+) -> bool {
+    match who {
+        CastingProhibitionScope::Opponents => caster != source_obj.controller,
+        CastingProhibitionScope::AllPlayers => true,
+        CastingProhibitionScope::Controller => caster == source_obj.controller,
+        // CR 303.4e: Resolve the enchanted creature's controller for aura-based restrictions.
+        CastingProhibitionScope::EnchantedCreatureController => source_obj
+            .attached_to
+            .and_then(|target_id| state.objects.get(&target_id))
+            .is_some_and(|enchanted| enchanted.controller == caster),
+    }
+}
+
 /// CR 604.3 + CR 101.2: Check if any active CantCastFrom static prevents casting
 /// the given object from its current zone.
 /// e.g., Grafdigger's Cage: "Players can't cast spells from graveyards or libraries."
@@ -2248,12 +2268,7 @@ fn is_blocked_by_cant_cast_during(state: &GameState, caster: PlayerId) -> bool {
             };
 
             // CR 101.2: Check if the caster is in the affected scope.
-            let caster_affected = match who {
-                CastingProhibitionScope::Opponents => caster != bf_obj.controller,
-                CastingProhibitionScope::AllPlayers => true,
-                CastingProhibitionScope::Controller => caster == bf_obj.controller,
-            };
-            if !caster_affected {
+            if !casting_prohibition_scope_matches(who, caster, bf_obj, state) {
                 continue;
             }
 
@@ -2289,8 +2304,8 @@ fn is_blocked_by_cant_cast_during(state: &GameState, caster: PlayerId) -> bool {
 
 /// CR 101.2: Check if any CantBeCast static on the battlefield prevents
 /// the given player from casting the given spell.
-/// E.g., Steel Golem: "You can't cast creature spells."
-/// E.g., Grid Monitor: "You can't cast creature spells."
+/// Handles scope-based checks (opponents, all players, controller, enchanted creature's
+/// controller) and filter-based checks (type, mana value, chosen name, chosen card type).
 fn is_blocked_by_cant_be_cast(
     state: &GameState,
     caster: PlayerId,
@@ -2306,27 +2321,13 @@ fn is_blocked_by_cant_be_cast(
             };
 
             // CR 101.2: Check if the caster is in the affected scope.
-            let caster_affected = match who {
-                CastingProhibitionScope::Opponents => caster != bf_obj.controller,
-                CastingProhibitionScope::AllPlayers => true,
-                CastingProhibitionScope::Controller => caster == bf_obj.controller,
-            };
-            if !caster_affected {
+            if !casting_prohibition_scope_matches(who, caster, bf_obj, state) {
                 continue;
             }
 
-            // CR 604.1: Check spell type filter if present (e.g., "creature spells").
+            // CR 604.1: Check spell filter if present.
             if let Some(ref affected) = def.affected {
-                let record = SpellCastRecord {
-                    core_types: spell_obj.card_types.core_types.clone(),
-                    supertypes: spell_obj.card_types.supertypes.clone(),
-                    subtypes: spell_obj.card_types.subtypes.clone(),
-                    keywords: spell_obj.keywords.clone(),
-                    colors: spell_obj.color.clone(),
-                    mana_value: spell_obj.mana_cost.mana_value(),
-                };
-                if !super::filter::spell_record_matches_filter(&record, affected, bf_obj.controller)
-                {
+                if !cant_cast_filter_matches(state, spell_obj, affected, bf_obj) {
                     continue;
                 }
             }
@@ -2347,6 +2348,62 @@ fn is_blocked_by_cant_be_cast(
         }
     }
     false
+}
+
+/// CR 101.2: Check if a spell matches a CantBeCast affected filter.
+/// Handles type filters, mana value comparisons, chosen name, and chosen card type.
+/// Source-dependent filters (HasChosenName, IsChosenCardType) are resolved here
+/// because they need the source permanent's chosen attributes.
+fn cant_cast_filter_matches(
+    _state: &GameState,
+    spell_obj: &super::game_object::GameObject,
+    filter: &TargetFilter,
+    source_obj: &super::game_object::GameObject,
+) -> bool {
+    use crate::types::ability::{ChosenAttribute, FilterProp};
+
+    match filter {
+        // CR 201.2: "spells with the chosen name" — match spell name against source's chosen name.
+        TargetFilter::HasChosenName => {
+            let chosen_name = source_obj.chosen_attributes.iter().find_map(|a| match a {
+                ChosenAttribute::CardName(n) => Some(n.as_str()),
+                _ => None,
+            });
+            chosen_name.is_some_and(|name| name.eq_ignore_ascii_case(&spell_obj.name))
+        }
+        // CR 205: Typed filter with IsChosenCardType requires source's chosen card type.
+        TargetFilter::Typed(tf)
+            if tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenCardType)) =>
+        {
+            let chosen_type = source_obj.chosen_attributes.iter().find_map(|a| match a {
+                ChosenAttribute::CardType(ct) => Some(ct),
+                _ => None,
+            });
+            let Some(chosen_type) = chosen_type else {
+                return false;
+            };
+            spell_obj
+                .card_types
+                .core_types
+                .iter()
+                .any(|ct| ct == chosen_type)
+        }
+        // All other filters delegate to the spell record matcher.
+        _ => {
+            let record = SpellCastRecord {
+                core_types: spell_obj.card_types.core_types.clone(),
+                supertypes: spell_obj.card_types.supertypes.clone(),
+                subtypes: spell_obj.card_types.subtypes.clone(),
+                keywords: spell_obj.keywords.clone(),
+                colors: spell_obj.color.clone(),
+                mana_value: spell_obj.mana_cost.mana_value(),
+            };
+            super::filter::spell_record_matches_filter(&record, filter, source_obj.controller)
+        }
+    }
 }
 
 /// CR 101.2 + CR 604.1: Check if any PerTurnCastLimit static on the battlefield prevents
@@ -2373,12 +2430,7 @@ fn is_blocked_by_per_turn_cast_limit(
             };
 
             // CR 101.2: Check if the caster is in the affected scope.
-            let caster_affected = match who {
-                CastingProhibitionScope::Opponents => caster != bf_obj.controller,
-                CastingProhibitionScope::AllPlayers => true,
-                CastingProhibitionScope::Controller => caster == bf_obj.controller,
-            };
-            if !caster_affected {
+            if !casting_prohibition_scope_matches(who, caster, bf_obj, state) {
                 continue;
             }
 

@@ -769,6 +769,11 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
         return clause;
     }
 
+    // CR 701.20a: "reveal cards from the top of your library until you reveal a [filter]"
+    if let Some(clause) = try_parse_reveal_until(tp) {
+        return clause;
+    }
+
     // CR 122.3: "cast that card by paying an amount of {E} equal to its mana value"
     // → GrantCastingPermission with ExileWithEnergyCost
     if scan_contains_phrase(tp.lower, "by paying an amount of {e}")
@@ -951,7 +956,7 @@ fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
     })?;
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
     let ((), type_name_orig) = nom_on_lower(rest_orig, rest_lower, |input| {
-        value((), alt((tag("a "), tag("an ")))).parse(input)
+        nom_primitives::parse_article(input)
     })?;
     let type_name_lower = &rest_lower[rest_lower.len() - type_name_orig.len()..];
     let core_type = CoreType::from_str(&capitalize(type_name_lower)).ok()?;
@@ -1046,13 +1051,10 @@ fn try_parse_put_on_top_or_bottom(tp: TextPair) -> Option<ParsedEffectClause> {
 }
 
 fn try_parse_exile_from_top_until(tp: TextPair) -> Option<ParsedEffectClause> {
-    // Match: "exile cards from the top of your library until you exile a {filter} card"
+    // Match: "exile cards from the top of your library until you exile a/an {filter} card"
     let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
-        value(
-            (),
-            tag("exile cards from the top of your library until you exile a "),
-        )
-        .parse(i)
+        let (i, _) = tag("exile cards from the top of your library until you exile ").parse(i)?;
+        nom_primitives::parse_article(i)
     })?;
     let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
 
@@ -1070,6 +1072,42 @@ fn try_parse_exile_from_top_until(tp: TextPair) -> Option<ParsedEffectClause> {
     };
 
     Some(parsed_clause(Effect::ExileFromTopUntil { filter }))
+}
+
+/// CR 701.20a: Parse "reveal cards from the top of your library until you reveal a [filter]".
+/// Defaults: kept_destination = Hand, rest_destination = Library (bottom).
+/// Subsequent "put that card" / "put the rest" sentences override via ContinuationAst.
+fn try_parse_reveal_until(tp: TextPair) -> Option<ParsedEffectClause> {
+    let (_, rest_orig) = nom_on_lower(tp.original, tp.lower, |i| {
+        let (i, _) = tag("reveal cards from the top of your library until you reveal ").parse(i)?;
+        nom_primitives::parse_article(i)
+    })?;
+    let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
+
+    // Strip trailing period and " card" suffix to get the filter text.
+    let filter_text = rest_lower.trim_end_matches('.').trim_end_matches(" card");
+
+    // Parse "card with the chosen name" specially.
+    let filter = if nom_primitives::scan_contains(filter_text, "with the chosen name") {
+        TargetFilter::HasChosenName
+    } else if filter_text == "nonland" {
+        TargetFilter::Typed(
+            TypedFilter::default().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+        )
+    } else {
+        let (parsed, _) = parse_target(filter_text);
+        parsed
+    };
+
+    // CR 701.20a: Default destinations — most cards use hand + library bottom.
+    // Subsequent "put that card" / "put the rest" sentences refine these via
+    // RevealUntilKept / PutRest continuations.
+    Some(parsed_clause(Effect::RevealUntil {
+        filter,
+        kept_destination: Zone::Hand,
+        rest_destination: Zone::Library,
+        enter_tapped: false,
+    }))
 }
 
 /// CR 400.7i: Parse "you may play/cast that card [this turn]" — impulse draw permission.
@@ -2551,7 +2589,7 @@ fn is_choose_as_targeting(rest: &str) -> bool {
     }
 
     // "choose a/an {type} ... you control / an opponent controls"
-    if let Some(after_article) = alt((tag::<_, _, VerboseError<&str>>("a "), tag("an ")))
+    if let Some(after_article) = nom_primitives::parse_article
         .parse(rest)
         .ok()
         .map(|(rest, _)| rest)
@@ -9615,6 +9653,92 @@ mod tests {
             ),
             "expected PutCounter with ParentTarget, got: {:?}",
             sub.effect
+        );
+    }
+
+    // ── RevealUntil tests ──
+
+    #[test]
+    fn reveal_until_creature_to_hand_rest_to_library() {
+        let def = parse_effect_chain(
+            "Reveal cards from the top of your library until you reveal a creature card. Put that card into your hand and the rest on the bottom of your library in a random order.",
+            AbilityKind::Activated,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+                    kept_destination: Zone::Hand,
+                    rest_destination: Zone::Library,
+                    enter_tapped: false,
+                } if type_filters.contains(&TypeFilter::Creature)
+            ),
+            "expected RevealUntil creature->hand, rest->library, got: {:?}",
+            def.effect
+        );
+        // No sub_ability — destinations are baked in
+        assert!(def.sub_ability.is_none(), "should have no sub_ability");
+    }
+
+    #[test]
+    fn reveal_until_artifact_to_battlefield() {
+        let def = parse_effect_chain(
+            "Reveal cards from the top of your library until you reveal an artifact card. Put that card onto the battlefield and the rest on the bottom of your library in a random order.",
+            AbilityKind::Activated,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+                    kept_destination: Zone::Battlefield,
+                    rest_destination: Zone::Library,
+                    enter_tapped: false,
+                } if type_filters.contains(&TypeFilter::Artifact)
+            ),
+            "expected RevealUntil artifact->battlefield, got: {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn reveal_until_creature_rest_to_graveyard() {
+        let def = parse_effect_chain(
+            "Reveal cards from the top of your library until you reveal a creature card. Put that card into your hand and the rest into your graveyard.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    kept_destination: Zone::Hand,
+                    rest_destination: Zone::Graveyard,
+                    ..
+                }
+            ),
+            "expected rest->graveyard, got: {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn reveal_until_nonland_card() {
+        let def = parse_effect_chain(
+            "Reveal cards from the top of your library until you reveal a nonland card. Put the revealed cards on the bottom of your library in a random order.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+                    rest_destination: Zone::Library,
+                    ..
+                } if matches!(&type_filters[..], [TypeFilter::Non(inner)] if matches!(**inner, TypeFilter::Land))
+            ),
+            "expected RevealUntil nonland, got: {:?}",
+            def.effect
         );
     }
 }

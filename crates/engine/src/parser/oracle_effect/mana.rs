@@ -4,6 +4,7 @@ use nom::combinator::value;
 use nom::Parser;
 
 use crate::parser::oracle_nom::error::OracleResult;
+use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
     Effect, ManaProduction, ManaSpendRestriction, QuantityExpr, QuantityRef,
 };
@@ -566,11 +567,9 @@ pub(crate) fn parse_mana_spend_restriction(lower: &str) -> Option<ManaSpendRestr
 
     // "creature spells" / "a creature spell" / "artifact spells" etc.
     let spell_part_lower = spell_part.to_lowercase();
-    let spell_part = nom_on_lower(spell_part, &spell_part_lower, |i| {
-        alt((value((), tag("a ")), value((), tag("an ")))).parse(i)
-    })
-    .map(|(_, rest)| rest)
-    .unwrap_or(spell_part);
+    let spell_part = nom_on_lower(spell_part, &spell_part_lower, nom_primitives::parse_article)
+        .map(|(_, rest)| rest)
+        .unwrap_or(spell_part);
 
     // Handle compound type: "instant or sorcery spells" -> "Instant or Sorcery"
     // Check for "[type] or [type] spell(s)" pattern

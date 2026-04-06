@@ -80,6 +80,7 @@ pub mod put_on_top_or_bottom;
 pub mod regenerate;
 pub mod reveal_hand;
 pub mod reveal_top;
+pub mod reveal_until;
 pub mod ring;
 pub mod roll_die;
 pub mod sacrifice;
@@ -289,6 +290,7 @@ pub fn resolve_effect(
         Effect::GivePlayerCounter { .. } => player_counter::resolve(state, ability, events),
         Effect::AdditionalCombatPhase { .. } => additional_combat::resolve(state, ability, events),
         Effect::ExileFromTopUntil { .. } => exile_from_top_until::resolve(state, ability, events),
+        Effect::RevealUntil { .. } => reveal_until::resolve(state, ability, events),
         Effect::Discover { .. } => discover::resolve(state, ability, events),
         Effect::PutAtLibraryPosition { .. } => put_on_top::resolve(state, ability, events),
         Effect::PutOnTopOrBottom { .. } => put_on_top_or_bottom::resolve(state, ability, events),

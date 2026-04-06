@@ -19,6 +19,9 @@ pub enum CastingProhibitionScope {
     AllPlayers,
     /// "you" — only the controller is prohibited.
     Controller,
+    /// "enchanted creature's controller" — the controller of the creature this aura enchants.
+    /// CR 303.4e: Used by auras that restrict the enchanted creature's controller.
+    EnchantedCreatureController,
 }
 
 impl fmt::Display for CastingProhibitionScope {
@@ -27,6 +30,9 @@ impl fmt::Display for CastingProhibitionScope {
             CastingProhibitionScope::Opponents => write!(f, "opponents"),
             CastingProhibitionScope::AllPlayers => write!(f, "all_players"),
             CastingProhibitionScope::Controller => write!(f, "controller"),
+            CastingProhibitionScope::EnchantedCreatureController => {
+                write!(f, "enchanted_creature_controller")
+            }
         }
     }
 }
@@ -39,6 +45,9 @@ impl FromStr for CastingProhibitionScope {
             "opponents" => Ok(CastingProhibitionScope::Opponents),
             "all_players" => Ok(CastingProhibitionScope::AllPlayers),
             "controller" => Ok(CastingProhibitionScope::Controller),
+            "enchanted_creature_controller" => {
+                Ok(CastingProhibitionScope::EnchantedCreatureController)
+            }
             other => Err(format!("unknown CastingProhibitionScope: {other}")),
         }
     }

@@ -119,6 +119,9 @@ const STATIC_CONTAINS_PATTERNS: &[&str] = &[
     "can't cast instant",
     "can't cast sorcery",
     "can't cast noncreature",
+    "spells can't be cast",
+    "can't cast spells with",
+    "can't cast spells of the chosen",
     "can't draw more than",
     "can cast spells only during",
     "skip your ",
@@ -201,6 +204,10 @@ fn is_static_compound_pattern(lower: &str) -> bool {
         return true;
     }
     if lower.contains("can't cast") && lower.contains("spells") {
+        return true;
+    }
+    // Passive voice: "Creature spells can't be cast."
+    if lower.contains("spells can't be cast") {
         return true;
     }
     if lower.contains("no more than") && lower.contains("spells") && lower.contains("each turn") {

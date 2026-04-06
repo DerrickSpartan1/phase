@@ -1,4 +1,3 @@
-use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -92,7 +91,7 @@ pub(super) fn parse_seek_details(lower: &str) -> SeekDetails {
     };
 
     // Strip leading article "a "/"an "
-    let remaining = alt((tag::<_, _, VerboseError<&str>>("a "), tag("an ")))
+    let remaining = nom_primitives::parse_article
         .parse(remaining)
         .map(|(rest, _)| rest)
         .unwrap_or(remaining);

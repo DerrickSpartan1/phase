@@ -259,7 +259,8 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::HasSupertype { value } => {
                 parts.push(format!("{value}").to_lowercase());
             }
-            FilterProp::IsChosenCreatureType => parts.push("chosen type".into()),
+            FilterProp::IsChosenCreatureType => parts.push("chosen creature type".into()),
+            FilterProp::IsChosenCardType => parts.push("chosen card type".into()),
             FilterProp::NotColor { color } => {
                 parts.push(format!("non-{}", format!("{color:?}").to_lowercase()));
             }
@@ -1175,6 +1176,16 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::ExileFromTopUntil { filter } => {
             d.push(("until".into(), fmt_target(filter)));
+        }
+        Effect::RevealUntil {
+            filter,
+            kept_destination,
+            rest_destination,
+            ..
+        } => {
+            d.push(("until".into(), fmt_target(filter)));
+            d.push(("kept".into(), format!("{:?}", kept_destination)));
+            d.push(("rest".into(), format!("{:?}", rest_destination)));
         }
         Effect::Discover { mana_value_limit } => {
             d.push(("mv limit".into(), mana_value_limit.to_string()));

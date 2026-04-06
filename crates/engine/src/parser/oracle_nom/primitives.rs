@@ -77,6 +77,14 @@ fn parse_article_number(input: &str) -> OracleResult<'_, u32> {
     }
 }
 
+/// Parse article "a " or "an " (including trailing space), returning `()`.
+///
+/// Word-boundary-safe because the trailing space acts as a boundary check.
+/// Longest match first: "an " is tried before "a " to avoid partial matches.
+pub fn parse_article(input: &str) -> OracleResult<'_, ()> {
+    value((), alt((tag("an "), tag("a ")))).parse(input)
+}
+
 /// Parse a number OR "x" (as 0). Use for costs, P/T, counter amounts where
 /// X represents a variable that resolves to 0 at parse time.
 ///

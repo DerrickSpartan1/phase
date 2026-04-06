@@ -11,7 +11,7 @@ use nom::sequence::preceded;
 use nom::Parser;
 
 use super::error::OracleResult;
-use super::primitives::{parse_mana_cost, parse_number};
+use super::primitives::{parse_article, parse_mana_cost, parse_number};
 use super::quantity as nom_quantity;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
@@ -157,14 +157,12 @@ fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
 /// activation level gates on the source's current subtype.
 fn parse_source_is_type(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = alt((
-        tag("this creature is a "),
-        tag("this creature is an "),
-        tag("this permanent is a "),
-        tag("this permanent is an "),
-        tag("~ is a "),
-        tag("~ is an "),
+        tag("this creature is "),
+        tag("this permanent is "),
+        tag("~ is "),
     ))
     .parse(input)?;
+    let (rest, _) = parse_article(rest)?;
     let (filter, remainder) = parse_type_phrase(rest);
     Ok((remainder, StaticCondition::SourceMatchesFilter { filter }))
 }
@@ -455,8 +453,8 @@ fn parse_you_control_no(input: &str) -> OracleResult<'_, StaticCondition> {
 
 /// Parse "you don't control a/an [type]" → Not(IsPresent).
 fn parse_you_dont_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) =
-        alt((tag("you don't control a "), tag("you don't control an "))).parse(input)?;
+    let (rest, _) = tag("you don't control ").parse(input)?;
+    let (rest, _) = parse_article(rest)?;
     let (filter, remainder) = parse_type_phrase(rest);
     if matches!(filter, TargetFilter::Any) {
         return Err(nom::Err::Error(nom_language::error::VerboseError {
@@ -682,7 +680,7 @@ fn parse_combat_context_conditions(input: &str) -> OracleResult<'_, StaticCondit
 /// CR 509.1b: "defending player controls a/an [type]" → DefendingPlayerControls.
 fn parse_defending_player_controls(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("defending player controls ").parse(input)?;
-    let (rest, _) = alt((tag("a "), tag("an "))).parse(rest)?;
+    let (rest, _) = parse_article(rest)?;
     // parse_type_phrase returns (filter, remaining_str) — bridge to nom remainder
     let (filter, type_rest) = parse_type_phrase(rest);
     if matches!(filter, TargetFilter::Any) {
@@ -777,7 +775,7 @@ fn parse_you_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticConditi
         ));
     }
     // "a [type] spell this turn" / "an [type] spell this turn"
-    let (rest, _) = alt((tag("a "), tag("an "))).parse(rest)?;
+    let (rest, _) = parse_article(rest)?;
     if let Some(spell_pos) = rest.find(" spell this turn") {
         let type_text = &rest[..spell_pos];
         let (filter, leftover) = parse_type_phrase(type_text);
@@ -860,7 +858,7 @@ fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     }
 
     // Branch 2: "a/an [type] entered..."
-    let (type_and_rest, _) = alt((tag("a "), tag("an "))).parse(input)?;
+    let (type_and_rest, _) = parse_article(input)?;
     let (rest, type_text) = take_until(entered_suffix).parse(type_and_rest)?;
     let (rest, _) = tag(entered_suffix).parse(rest)?;
     let (filter, _) = parse_type_phrase(type_text.trim());

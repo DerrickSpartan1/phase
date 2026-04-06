@@ -147,11 +147,16 @@ fn filter_inner(
             let source_attached_to = source_obj.and_then(|s| s.attached_to);
             let source_chosen_creature_type =
                 source_obj.and_then(|s| s.chosen_creature_type().map(|t| t.to_string()));
+            let empty_attrs: Vec<crate::types::ability::ChosenAttribute> = Vec::new();
+            let source_chosen_attributes = source_obj
+                .map(|s| s.chosen_attributes.as_slice())
+                .unwrap_or(empty_attrs.as_slice());
             let source_ctx = SourceContext {
                 id: source_id,
                 controller: source_controller,
                 attached_to: source_attached_to,
                 chosen_creature_type: source_chosen_creature_type.as_deref(),
+                chosen_attributes: source_chosen_attributes,
             };
             properties
                 .iter()
@@ -404,6 +409,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::PowerLE { .. }
         | FilterProp::PowerGE { .. }
         | FilterProp::IsChosenCreatureType
+        | FilterProp::IsChosenCardType
         | FilterProp::HasSingleTarget
         | FilterProp::Suspected
         | FilterProp::ToughnessGTPower
@@ -430,6 +436,7 @@ struct SourceContext<'a> {
     controller: Option<PlayerId>,
     attached_to: Option<ObjectId>,
     chosen_creature_type: Option<&'a str>,
+    chosen_attributes: &'a [crate::types::ability::ChosenAttribute],
 }
 
 /// Check if an object satisfies a single FilterProp.
@@ -528,6 +535,16 @@ fn matches_filter_prop(
                 .any(|s| s.eq_ignore_ascii_case(chosen)),
             None => false,
         },
+        // CR 205: Match objects whose core type includes the source's chosen card type.
+        // Used for "spells of the chosen type" (Archon of Valor's Reach).
+        FilterProp::IsChosenCardType => source
+            .chosen_attributes
+            .iter()
+            .find_map(|a| match a {
+                crate::types::ability::ChosenAttribute::CardType(ct) => Some(ct),
+                _ => None,
+            })
+            .is_some_and(|chosen| obj.card_types.core_types.contains(chosen)),
         // CR 702.157a: Match creatures with the suspected designation.
         FilterProp::Suspected => obj.is_suspected,
         // CR 510.1c: Match creatures whose toughness exceeds their power.

@@ -12,7 +12,7 @@ use nom::sequence::preceded;
 use nom::Parser;
 
 use super::error::OracleResult;
-use super::primitives::{parse_number, parse_pt_modifier};
+use super::primitives::{parse_article, parse_number, parse_pt_modifier};
 use crate::types::ability::{ControllerRef, FilterProp};
 use crate::types::counter::CounterType;
 use crate::types::mana::ManaColor;
@@ -125,7 +125,7 @@ fn parse_with_toughness_constraint(input: &str) -> OracleResult<'_, FilterProp> 
 
 /// Parse "a +1/+1 counter" / "a -1/-1 counter" from a "with" clause.
 fn parse_with_counter_property(input: &str) -> OracleResult<'_, FilterProp> {
-    let (rest, _) = alt((tag("a "), tag("an "))).parse(input)?;
+    let (rest, _) = parse_article(input)?;
     let (rest, (p, t)) = parse_pt_modifier(rest)?;
     let (rest, _) = tag(" counter").parse(rest)?;
     // Consume optional "s" for plural

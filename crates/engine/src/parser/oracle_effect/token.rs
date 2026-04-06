@@ -286,9 +286,7 @@ fn parse_named_token_preamble(text: &str) -> Option<(String, &str)> {
 
     let after_comma = text[comma + 1..].trim_start();
     let after_lower = after_comma.to_lowercase();
-    let (_, rest) = nom_on_lower(after_comma, &after_lower, |i| {
-        alt((value((), tag("a ")), value((), tag("an ")))).parse(i)
-    })?;
+    let (_, rest) = nom_on_lower(after_comma, &after_lower, nom_primitives::parse_article)?;
     Some((name.to_string(), rest))
 }
 

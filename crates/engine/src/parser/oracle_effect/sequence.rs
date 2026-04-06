@@ -537,19 +537,24 @@ pub(super) fn apply_clause_continuation(
             }
         }
         ContinuationAst::PutRest { destination } => {
-            // Absorbed into preceding Dig — sets rest_destination for unchosen cards.
-            // If the Dig already has rest_destination set (e.g., by a preceding
-            // DigFromAmong), this is a no-op.
+            // Absorbed into preceding Dig or RevealUntil — sets rest_destination
+            // for unchosen/non-matching cards.
             let Some(previous) = defs.last_mut() else {
                 return;
             };
-            if let Effect::Dig {
-                rest_destination, ..
-            } = &mut *previous.effect
-            {
-                if rest_destination.is_none() {
-                    *rest_destination = Some(destination);
+            match &mut *previous.effect {
+                Effect::Dig {
+                    rest_destination: rest @ None,
+                    ..
+                } => {
+                    *rest = Some(destination);
                 }
+                Effect::RevealUntil {
+                    rest_destination, ..
+                } => {
+                    *rest_destination = destination;
+                }
+                _ => {}
             }
         }
         ContinuationAst::DigFromAmong {
@@ -624,6 +629,28 @@ pub(super) fn apply_clause_continuation(
                 _ => {}
             }
         }
+        ContinuationAst::RevealUntilKept {
+            destination,
+            enter_tapped: tapped,
+            rest_destination: rest_dest,
+        } => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::RevealUntil {
+                kept_destination,
+                enter_tapped,
+                rest_destination,
+                ..
+            } = &mut *previous.effect
+            {
+                *kept_destination = destination;
+                *enter_tapped = tapped;
+                if let Some(rest) = rest_dest {
+                    *rest_destination = rest;
+                }
+            }
+        }
         ContinuationAst::GrantExtraTurnAfterControlledTurn => {
             let Some(previous) = defs.last_mut() else {
                 return;
@@ -660,6 +687,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::EntersTappedAttacking => true,
         ContinuationAst::DigFromAmong { .. } => true,
         ContinuationAst::GrantExtraTurnAfterControlledTurn => true,
+        ContinuationAst::RevealUntilKept { .. } => true,
     }
 }
 
@@ -811,9 +839,7 @@ fn parse_dig_from_among(lower: &str, _original: &str) -> Option<ContinuationAst>
     {
         // "any number of creatures" → up_to with a high cap
         (255, true, rest)
-    } else if let Ok((rest, _)) =
-        alt((tag::<_, _, VerboseError<&str>>("a "), tag("an "))).parse(after_put)
-    {
+    } else if let Ok((rest, _)) = nom_primitives::parse_article.parse(after_put) {
         // "a creature card" / "an artifact card" — up_to 1 (player may choose none)
         (1, true, rest)
     } else if let Ok((remainder, n)) = nom_primitives::parse_number.parse(after_put) {
@@ -929,6 +955,61 @@ pub(super) fn parse_followup_continuation_ast(
                 Zone::Hand
             } else {
                 // Default: bottom of library (covers "on the bottom", "back in any order", etc.)
+                Zone::Library
+            };
+            Some(ContinuationAst::PutRest { destination })
+        }
+        // CR 701.20a: "put that card into your hand / onto the battlefield" after RevealUntil
+        // — overrides kept_destination. Also extracts rest_destination when the compound
+        // sentence includes "and the rest" (the "and" split is suppressed because "the rest"
+        // does not start with a recognized imperative verb).
+        Effect::RevealUntil { .. }
+            if nom_primitives::scan_contains(&lower, "put that card")
+                || nom_primitives::scan_contains(&lower, "put it") =>
+        {
+            let (destination, enter_tapped) =
+                if nom_primitives::scan_contains(&lower, "onto the battlefield") {
+                    let tapped = nom_primitives::scan_contains(&lower, "tapped");
+                    (Zone::Battlefield, tapped)
+                } else {
+                    // Default "into your hand"
+                    (Zone::Hand, false)
+                };
+            // Also extract rest_destination from compound "and the rest [into zone]"
+            let rest = if nom_primitives::scan_contains(&lower, "the rest") {
+                if nom_primitives::scan_contains(&lower, "into your graveyard")
+                    || nom_primitives::scan_contains(&lower, "into their graveyard")
+                {
+                    Some(Zone::Graveyard)
+                } else {
+                    // "on the bottom of your library in a random order" or similar
+                    Some(Zone::Library)
+                }
+            } else {
+                None
+            };
+            Some(ContinuationAst::RevealUntilKept {
+                destination,
+                enter_tapped,
+                rest_destination: rest,
+            })
+        }
+        // CR 701.20a: "put the rest" / "the rest on the bottom" / "put the revealed cards"
+        // after RevealUntil — overrides rest_destination. The "the rest" without "put"
+        // occurs when split_clause_sequence splits "put X and the rest" on "and".
+        Effect::RevealUntil { .. }
+            if nom_primitives::scan_contains(&lower, "put the rest")
+                || nom_primitives::scan_contains(&lower, "the rest on the bottom")
+                || nom_primitives::scan_contains(&lower, "the rest into your graveyard")
+                || nom_primitives::scan_contains(&lower, "put the revealed cards")
+                || nom_primitives::scan_contains(&lower, "put them back") =>
+        {
+            let destination = if nom_primitives::scan_contains(&lower, "into your graveyard")
+                || nom_primitives::scan_contains(&lower, "into their graveyard")
+            {
+                Zone::Graveyard
+            } else {
+                // Default: bottom of library
                 Zone::Library
             };
             Some(ContinuationAst::PutRest { destination })
