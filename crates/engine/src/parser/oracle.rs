@@ -154,6 +154,10 @@ fn parse_static_line_with_flashback_continuation(line: &str) -> Option<StaticDef
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ActivatedConstraintAst {
     restrictions: Vec<ActivationRestriction>,
+    /// CR 602.2: "Any player may activate this ability." — annotation recognized
+    /// during parsing. Runtime enforcement is a future item; currently stripped
+    /// so the sentence does not produce an `Unimplemented` fallback.
+    any_player_may_activate: bool,
 }
 
 impl ActivatedConstraintAst {
@@ -1283,6 +1287,20 @@ fn strip_activated_constraints(text: &str) -> (String, ActivatedConstraintAst) {
     'parse_constraints: loop {
         let lower = remaining.to_lowercase();
         let tp = TextPair::new(&remaining, &lower);
+
+        // CR 602.2: "Any player may activate this ability." — strip as a recognized
+        // annotation. This appears as a trailing sentence on activated abilities.
+        if let Some(prefix) = lower.strip_suffix("any player may activate this ability") {
+            let end = remaining.len() - "any player may activate this ability".len();
+            remaining = remaining[..end]
+                .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                .to_string();
+            constraints.any_player_may_activate = true;
+            if prefix.trim().is_empty() {
+                break;
+            }
+            continue;
+        }
 
         for (suffix, parsed) in [
             (

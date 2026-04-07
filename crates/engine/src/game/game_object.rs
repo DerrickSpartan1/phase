@@ -210,6 +210,12 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
     pub goaded_by: std::collections::HashSet<PlayerId>,
 
+    /// CR 701.35a: Which players have detained this permanent. A detained permanent
+    /// can't attack or block and its activated abilities can't be activated until the
+    /// detaining player's next turn. Cleared during layer evaluation like goaded_by.
+    #[serde(default, skip_serializing_if = "std::collections::HashSet::is_empty")]
+    pub detained_by: std::collections::HashSet<PlayerId>,
+
     /// CR 701.60a: Whether this creature is currently suspected.
     /// The designation is the source of truth; menace and CantBlock are derived
     /// via `base_keywords`/`base_static_definitions` (Option C architecture).
@@ -356,6 +362,7 @@ impl GameObject {
             casting_permissions: Vec::new(),
             chosen_attributes: Vec::new(),
             goaded_by: std::collections::HashSet::new(),
+            detained_by: std::collections::HashSet::new(),
             is_suspected: false,
             monstrous: false,
             assigns_damage_from_toughness: false,

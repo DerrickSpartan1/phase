@@ -237,6 +237,11 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
             return Err(format!("{:?} can't attack", id));
         }
 
+        // CR 701.35a: Detained creatures can't attack.
+        if !obj.detained_by.is_empty() {
+            return Err(format!("{:?} is detained", id));
+        }
+
         // CR 302.6: Summoning sickness — must have haste or have been under controller's
         // control since the beginning of the turn.
         if !obj.has_keyword(&Keyword::Haste) {
@@ -325,6 +330,11 @@ pub fn validate_blockers(
             )
         }) {
             return Err(format!("{:?} can't block", blocker_id));
+        }
+
+        // CR 701.35a: Detained creatures can't block.
+        if !blocker.detained_by.is_empty() {
+            return Err(format!("{:?} is detained", blocker_id));
         }
 
         // Check attacker exists and is actually attacking
@@ -615,6 +625,10 @@ pub fn validate_blockers(
                     StaticMode::CantBlock | StaticMode::CantAttackOrBlock
                 )
             }) {
+                continue;
+            }
+            // CR 701.35a: Detained creatures can't block.
+            if !obj.detained_by.is_empty() {
                 continue;
             }
             // Check if this creature could legally block any attacker attacking its controller

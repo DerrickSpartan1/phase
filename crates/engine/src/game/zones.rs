@@ -68,6 +68,9 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
         // CR 701.37b: Monstrous designation clears when a permanent leaves the battlefield.
         if from == Zone::Battlefield {
             obj_mut.monstrous = false;
+            // CR 701.15a / CR 701.35a: Goad and detain are battlefield-only designations.
+            obj_mut.goaded_by.clear();
+            obj_mut.detained_by.clear();
         }
 
         // CR 122.2: Counters cease to exist when an object changes zones.

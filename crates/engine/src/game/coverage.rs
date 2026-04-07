@@ -1215,6 +1215,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Goad { target } => {
             d.push(("target".into(), fmt_target(target)));
         }
+        Effect::Detain { target } => {
+            d.push(("target".into(), fmt_target(target)));
+        }
         Effect::ExtraTurn { target } => {
             d.push(("player".into(), fmt_target(target)));
         }

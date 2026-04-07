@@ -1701,6 +1701,42 @@ pub(super) fn parse_cost_resource_ast(
                 });
             }
         }
+        // CR 107.14: "pay any amount of {E}" → variable energy payment
+        if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>("any amount of {e}").parse(rest) {
+            return Some(CostResourceImperativeAst::Pay {
+                cost: PaymentCost::Energy {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                },
+            });
+        }
+        // "pay an amount of {e} equal to ..." → variable energy payment
+        if let Ok((rest_after, _)) =
+            tag::<_, _, VerboseError<&str>>("an amount of {e} equal to ").parse(rest)
+        {
+            // Parse the quantity reference after "equal to"
+            let rest_trimmed = rest_after.trim().trim_end_matches('.');
+            if let Some(qty) = super::super::oracle_quantity::parse_quantity_ref(rest_trimmed) {
+                return Some(CostResourceImperativeAst::Pay {
+                    cost: PaymentCost::Energy {
+                        amount: QuantityExpr::Ref { qty },
+                    },
+                });
+            }
+            // Fallback: variable energy payment
+            return Some(CostResourceImperativeAst::Pay {
+                cost: PaymentCost::Energy {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                },
+            });
+        }
         // CR 107.14: "pay {E}", "pay {E}{E}", "pay N {E}" → PaymentCost::Energy
         if rest.contains("{e}") {
             let energy_count = rest.matches("{e}").count() as u32;
@@ -1969,6 +2005,17 @@ pub(super) fn parse_imperative_family_ast(
                 crate::types::ability::TargetFilter::ParentTarget
             };
             Some(ImperativeFamilyAst::GainKeyword(Effect::Suspect { target }))
+        }
+        // CR 701.35a: "detain target creature an opponent controls"
+        "detain" | "detains" => {
+            let rest = lower[first_word.len()..].trim();
+            let target = if !rest.is_empty() {
+                let (t, _) = parse_target(rest);
+                t
+            } else {
+                crate::types::ability::TargetFilter::ParentTarget
+            };
+            Some(ImperativeFamilyAst::GainKeyword(Effect::Detain { target }))
         }
         // Blight N as an effect (e.g. trigger effect "blight 1")
         "blight" => {

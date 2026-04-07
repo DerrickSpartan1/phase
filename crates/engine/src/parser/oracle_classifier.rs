@@ -293,6 +293,7 @@ const EFFECT_IMPERATIVE_PREFIXES: &[&str] = &[
     "create ",
     "deal ",
     "destroy ",
+    "detain ",
     "discard ",
     "draw ",
     "each player ",

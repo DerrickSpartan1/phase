@@ -1884,6 +1884,10 @@ pub fn can_activate_ability_now(
     if obj.zone != required_zone {
         return false;
     }
+    // CR 701.35a: Detained permanents' activated abilities can't be activated.
+    if !obj.detained_by.is_empty() {
+        return false;
+    }
     if restrictions::check_activation_restrictions(
         state,
         player,

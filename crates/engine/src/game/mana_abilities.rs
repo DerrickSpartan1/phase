@@ -165,6 +165,15 @@ pub fn can_activate_mana_ability_now(
     source_id: ObjectId,
     ability_def: &AbilityDefinition,
 ) -> bool {
+    // CR 701.35a: Detained permanents' activated abilities can't be activated
+    // (mana abilities are activated abilities).
+    if state
+        .objects
+        .get(&source_id)
+        .is_some_and(|obj| !obj.detained_by.is_empty())
+    {
+        return false;
+    }
     if let Some((count, creatures)) =
         tap_creature_cost_choice(state, player, source_id, &ability_def.cost)
     {

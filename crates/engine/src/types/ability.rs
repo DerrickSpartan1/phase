@@ -2637,6 +2637,13 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 701.35a: Detain target permanent — until the controller's next turn, that
+    /// permanent can't attack or block and its activated abilities can't be activated.
+    /// Follows the same per-player tracking pattern as Goad (detained_by on GameObject).
+    Detain {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// CR 701.12a: Exchange control of two target permanents. Both targets come from
     /// ability.targets (two TargetRef::Object entries). If both have the same controller,
     /// the exchange does nothing (CR 701.12b). All-or-nothing semantics.
@@ -2979,6 +2986,7 @@ impl Effect {
             | Effect::PutAtLibraryPosition { target, .. }
             | Effect::PutOnTopOrBottom { target, .. }
             | Effect::Goad { target, .. }
+            | Effect::Detain { target, .. }
             | Effect::ExtraTurn { target, .. }
             | Effect::SkipNextTurn { target, .. }
             | Effect::AdditionalCombatPhase { target, .. }
@@ -3171,6 +3179,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::PutOnTopOrBottom { .. } => "PutOnTopOrBottom",
         Effect::GiftDelivery { .. } => "GiftDelivery",
         Effect::Goad { .. } => "Goad",
+        Effect::Detain { .. } => "Detain",
         Effect::ExchangeControl => "ExchangeControl",
         Effect::ChangeTargets { .. } => "ChangeTargets",
         Effect::Incubate { .. } => "Incubate",
@@ -3307,6 +3316,7 @@ pub enum EffectKind {
     PutOnTopOrBottom,
     GiftDelivery,
     Goad,
+    Detain,
     ExchangeControl,
     ChangeTargets,
     Incubate,
@@ -3444,6 +3454,7 @@ impl From<&Effect> for EffectKind {
             Effect::PutOnTopOrBottom { .. } => EffectKind::PutOnTopOrBottom,
             Effect::GiftDelivery { .. } => EffectKind::GiftDelivery,
             Effect::Goad { .. } => EffectKind::Goad,
+            Effect::Detain { .. } => EffectKind::Detain,
             Effect::ExchangeControl => EffectKind::ExchangeControl,
             Effect::ChangeTargets { .. } => EffectKind::ChangeTargets,
             Effect::Incubate { .. } => EffectKind::Incubate,

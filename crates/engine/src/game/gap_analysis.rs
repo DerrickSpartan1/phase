@@ -38,6 +38,7 @@ const IMPERATIVE_EXTRA_VERBS: &[&str] = &[
     "collect",
     "endure",
     "goad",
+    "detain",
     "exchange",
     "must",
     "earthbend",

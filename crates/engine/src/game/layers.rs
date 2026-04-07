@@ -56,9 +56,12 @@ pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: Playe
 
     // CR 701.15a: Goad expires at the goading player's next turn. Clear goaded_by entries
     // for the active player on all battlefield objects.
+    // CR 701.35a: Detain expires at the detaining player's next turn. Clear detained_by
+    // entries for the active player on all battlefield objects.
     for obj_id in state.battlefield.clone() {
         if let Some(obj) = state.objects.get_mut(&obj_id) {
             obj.goaded_by.remove(&active_player);
+            obj.detained_by.remove(&active_player);
         }
     }
 }

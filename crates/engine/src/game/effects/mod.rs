@@ -41,6 +41,7 @@ pub mod create_emblem;
 pub mod deal_damage;
 pub mod delayed_trigger;
 pub mod destroy;
+pub mod detain;
 pub mod dig;
 pub mod discard;
 pub mod discover;
@@ -231,6 +232,7 @@ pub fn resolve_effect(
         Effect::Dig { .. } => dig::resolve(state, ability, events),
         Effect::GainControl { .. } => gain_control::resolve(state, ability, events),
         Effect::Goad { .. } => goad::resolve(state, ability, events),
+        Effect::Detain { .. } => detain::resolve(state, ability, events),
         Effect::ExchangeControl => exchange_control::resolve(state, ability, events),
         Effect::Attach { .. } => attach::resolve(state, ability, events),
         Effect::ControlNextTurn { .. } => control_next_turn::resolve(state, ability, events),
