@@ -131,7 +131,7 @@ mod tests {
         ContinuousModification, Duration, QuantityExpr, StaticDefinition, TargetFilter,
     };
     use crate::types::identifiers::CardId;
-    use crate::types::keywords::{DynamicKeywordKind, Keyword, KeywordKind};
+    use crate::types::keywords::{DynamicKeywordKind, FlashbackCost, Keyword, KeywordKind};
     use crate::types::mana::{ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -160,10 +160,10 @@ mod tests {
             .get_mut(&card_id)
             .unwrap()
             .base_keywords
-            .push(Keyword::Flashback(ManaCost::Cost {
+            .push(Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
                 generic: 2,
                 shards: vec![ManaCostShard::Red],
-            }));
+            })));
         let base_keywords = state.objects.get(&card_id).unwrap().base_keywords.clone();
         state.objects.get_mut(&card_id).unwrap().keywords = base_keywords;
 
@@ -171,10 +171,10 @@ mod tests {
         assert_eq!(keywords.len(), 1);
         assert_eq!(
             keywords[0],
-            Keyword::Flashback(ManaCost::Cost {
+            Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
                 generic: 2,
                 shards: vec![ManaCostShard::Red],
-            })
+            }))
         );
     }
 
@@ -195,14 +195,16 @@ mod tests {
             Duration::UntilEndOfTurn,
             TargetFilter::SpecificObject { id: target_id },
             vec![ContinuousModification::AddKeyword {
-                keyword: Keyword::Flashback(ManaCost::SelfManaCost),
+                keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
             }],
             None,
         );
 
         assert_eq!(
             effective_off_zone_keyword(&state, target_id, KeywordKind::Flashback),
-            Some(Keyword::Flashback(ManaCost::SelfManaCost))
+            Some(Keyword::Flashback(FlashbackCost::Mana(
+                ManaCost::SelfManaCost
+            )))
         );
     }
 
@@ -221,7 +223,7 @@ mod tests {
                 StaticDefinition::continuous()
                     .affected(TargetFilter::SpecificObject { id: target_id })
                     .modifications(vec![ContinuousModification::AddKeyword {
-                        keyword: Keyword::Flashback(ManaCost::SelfManaCost),
+                        keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
                     }]),
             );
 
@@ -246,10 +248,10 @@ mod tests {
                 StaticDefinition::continuous()
                     .affected(TargetFilter::SelfRef)
                     .modifications(vec![ContinuousModification::AddKeyword {
-                        keyword: Keyword::Flashback(ManaCost::Cost {
+                        keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
                             generic: 2,
                             shards: vec![ManaCostShard::Green],
-                        }),
+                        })),
                     }]),
             );
         let base_static_definitions = state
@@ -262,10 +264,10 @@ mod tests {
 
         assert_eq!(
             effective_off_zone_keyword(&state, card_id, KeywordKind::Flashback),
-            Some(Keyword::Flashback(ManaCost::Cost {
+            Some(Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
                 generic: 2,
                 shards: vec![ManaCostShard::Green],
-            }))
+            })))
         );
     }
 
@@ -282,7 +284,7 @@ mod tests {
                 StaticDefinition::continuous()
                     .affected(TargetFilter::SpecificObject { id: target_id })
                     .modifications(vec![ContinuousModification::AddKeyword {
-                        keyword: Keyword::Flashback(ManaCost::SelfManaCost),
+                        keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
                     }]),
             );
         }
@@ -308,10 +310,10 @@ mod tests {
             .get_mut(&target_id)
             .unwrap()
             .base_keywords
-            .push(Keyword::Flashback(ManaCost::Cost {
+            .push(Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
                 generic: 2,
                 shards: vec![ManaCostShard::Red],
-            }));
+            })));
         let base_keywords = state.objects.get(&target_id).unwrap().base_keywords.clone();
         state.objects.get_mut(&target_id).unwrap().keywords = base_keywords;
 
@@ -325,10 +327,10 @@ mod tests {
                 StaticDefinition::continuous()
                     .affected(TargetFilter::SpecificObject { id: target_id })
                     .modifications(vec![ContinuousModification::RemoveKeyword {
-                        keyword: Keyword::Flashback(ManaCost::Cost {
+                        keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
                             generic: 2,
                             shards: vec![ManaCostShard::Red],
-                        }),
+                        })),
                     }]),
             );
 
@@ -360,10 +362,10 @@ mod tests {
         let static_def = StaticDefinition::continuous()
             .affected(TargetFilter::SelfRef)
             .modifications(vec![ContinuousModification::AddKeyword {
-                keyword: Keyword::Flashback(ManaCost::Cost {
+                keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
                     generic: 2,
                     shards: vec![ManaCostShard::Green],
-                }),
+                })),
             }]);
         state
             .objects
@@ -379,10 +381,10 @@ mod tests {
 
         assert_eq!(
             effective_off_zone_keyword(&state, card_id, KeywordKind::Flashback),
-            Some(Keyword::Flashback(ManaCost::Cost {
+            Some(Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
                 generic: 2,
                 shards: vec![ManaCostShard::Green],
-            }))
+            })))
         );
     }
 
@@ -400,10 +402,10 @@ mod tests {
             .get_mut(&target_id)
             .unwrap()
             .base_keywords
-            .push(Keyword::Flashback(ManaCost::Cost {
+            .push(Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
                 generic: 2,
                 shards: vec![ManaCostShard::Red],
-            }));
+            })));
         let base_keywords = state.objects.get(&target_id).unwrap().base_keywords.clone();
         state.objects.get_mut(&target_id).unwrap().keywords = base_keywords;
 
@@ -464,10 +466,10 @@ mod tests {
                 StaticDefinition::continuous()
                     .affected(TargetFilter::SpecificObject { id: target_id })
                     .modifications(vec![ContinuousModification::AddKeyword {
-                        keyword: Keyword::Flashback(ManaCost::Cost {
+                        keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
                             generic: 1,
                             shards: vec![ManaCostShard::Blue],
-                        }),
+                        })),
                     }]),
             );
         state
@@ -479,19 +481,19 @@ mod tests {
                 StaticDefinition::continuous()
                     .affected(TargetFilter::SpecificObject { id: target_id })
                     .modifications(vec![ContinuousModification::AddKeyword {
-                        keyword: Keyword::Flashback(ManaCost::Cost {
+                        keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
                             generic: 2,
                             shards: vec![ManaCostShard::Blue],
-                        }),
+                        })),
                     }]),
             );
 
         assert_eq!(
             effective_off_zone_keyword(&state, target_id, KeywordKind::Flashback),
-            Some(Keyword::Flashback(ManaCost::Cost {
+            Some(Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
                 generic: 2,
                 shards: vec![ManaCostShard::Blue],
-            }))
+            })))
         );
     }
 }

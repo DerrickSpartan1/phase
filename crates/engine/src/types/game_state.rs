@@ -776,6 +776,14 @@ pub enum WaitingFor {
         /// The pending cast to resume after the sacrifice is complete.
         pending_cast: Box<PendingCast>,
     },
+    /// CR 702.34a / CR 601.2b: Player must choose untapped creatures to tap as a spell cost
+    /// (e.g., "Flashback—Tap three untapped white creatures you control").
+    TapCreaturesForSpellCost {
+        player: PlayerId,
+        count: usize,
+        creatures: Vec<ObjectId>,
+        pending_cast: Box<PendingCast>,
+    },
     /// CR 118.3 / CR 605.3b: Player must choose untapped creatures to pay a mana ability cost.
     TapCreaturesForManaAbility {
         player: PlayerId,
@@ -988,6 +996,7 @@ impl WaitingFor {
             | WaitingFor::ChooseDungeonRoom { player, .. }
             | WaitingFor::DiscardForCost { player, .. }
             | WaitingFor::SacrificeForCost { player, .. }
+            | WaitingFor::TapCreaturesForSpellCost { player, .. }
             | WaitingFor::TapCreaturesForManaAbility { player, .. }
             | WaitingFor::ExileFromGraveyardForCost { player, .. }
             | WaitingFor::CollectEvidenceChoice { player, .. }
@@ -1025,6 +1034,7 @@ impl WaitingFor {
             | WaitingFor::DefilerPayment { .. }
             | WaitingFor::DiscardForCost { .. }
             | WaitingFor::SacrificeForCost { .. }
+            | WaitingFor::TapCreaturesForSpellCost { .. }
             | WaitingFor::TapCreaturesForManaAbility { .. }
             | WaitingFor::ExileFromGraveyardForCost { .. }
             | WaitingFor::HarmonizeTapChoice { .. } => true,

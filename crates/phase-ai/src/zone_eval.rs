@@ -223,7 +223,9 @@ mod tests {
             .get_mut(&plain_id)
             .unwrap()
             .keywords
-            .push(Keyword::Flashback(ManaCost::generic(3)));
+            .push(Keyword::Flashback(
+                engine::types::keywords::FlashbackCost::Mana(ManaCost::generic(3)),
+            ));
         let score_flashback = zone_bonus(&state, PlayerId(0), DeckArchetype::Midrange);
 
         assert!(

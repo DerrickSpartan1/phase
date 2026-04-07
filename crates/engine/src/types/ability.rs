@@ -1224,6 +1224,9 @@ pub enum QuantityRef {
     /// CR 400.7: Count of permanents the controller owned that left the battlefield this turn.
     /// Used for Revolt ability word ("if a permanent you controlled left the battlefield this turn").
     PermanentsLeftBattlefieldThisTurn,
+    /// CR 400.7: Count of nonland permanents (any controller) that left the battlefield this turn.
+    /// Used for Elegy Acolyte Void ability word and similar cards.
+    NonlandPermanentsLeftBattlefieldThisTurn,
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
     ChosenNumber,
@@ -1476,6 +1479,9 @@ pub enum StaticCondition {
     RingLevelAtLeast {
         level: u8,
     },
+    /// CR 903.3: True when the controller controls at least one of their commander(s).
+    /// Used for Lieutenant mechanic ("if you control your commander").
+    ControlsCommander,
     /// CR 611.2b: True when the source object is tapped.
     /// Used for "for as long as ~ remains tapped" duration conditions.
     SourceIsTapped,
@@ -2533,11 +2539,12 @@ pub enum Effect {
         target: TargetFilter,
         #[serde(default)]
         scope: PreventionScope,
-        /// CR 615 + CR 105.1: When true, the prevention shield filters damage sources
-        /// by the color chosen via a preceding Choose effect (stored as ChosenAttribute::Color
-        /// on the source object). Used by Prismatic Strands and similar cards.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        source_color_choice: bool,
+        /// CR 615 + CR 614.1a: Optional filter restricting which damage *sources* are
+        /// prevented. Resolved at effect resolution time against the source object's
+        /// chosen attributes (e.g., `IsChosenColor` → reads `ChosenAttribute::Color`
+        /// and builds a concrete `HasColor` filter on the shield).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        damage_source_filter: Option<TargetFilter>,
     },
     /// CR 104.3a: A player who meets this effect's condition loses the game.
     /// The affected player is determined by resolution context (controller's opponent
@@ -4105,6 +4112,11 @@ pub enum TriggerCondition {
     ManaSpentCondition { text: String },
     /// CR 400.7: "if it had a +1/+1 counter on it" / "if it had counters on it"
     HadCounters { counter_type: Option<String> },
+    /// CR 903.3: "if you control your commander" — Lieutenant mechanic.
+    /// True when the controller controls at least one of their commander(s) on the battlefield.
+    ControlsCommander,
+    /// CR 702.112a: "if ~ is renowned" — true when the source has been made renowned.
+    SourceIsRenowned,
 
     // -- Combinators --
     /// All conditions must be true ("if you gained and lost life this turn")

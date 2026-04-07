@@ -1096,6 +1096,7 @@ fn parse_prevent_effect(text: &str) -> Effect {
         amount,
         target,
         scope,
+        damage_source_filter: None,
     }
 }
 

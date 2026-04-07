@@ -851,6 +851,44 @@ pub fn parse_oracle_text(
             }
         }
 
+        // CR 615 + CR 105.1: "Prevent all damage that sources of the color of your choice
+        // would deal this turn." → Choose(Color) → PreventDamage chain.
+        // Must run before Priority 8 (replacement) to avoid being caught as a passive shield.
+        if is_spell
+            && lower.contains("prevent")
+            && lower.contains("damage")
+            && lower.contains("color of your choice")
+        {
+            use crate::types::ability::{
+                ChoiceType, FilterProp, PreventionAmount, PreventionScope,
+            };
+            // CR 615 + CR 105.1: Build a source filter using IsChosenColor —
+            // at resolution time the resolver reads ChosenAttribute::Color from
+            // the source object and converts to a concrete HasColor filter.
+            let mut source_filter = TypedFilter::default();
+            source_filter.properties.push(FilterProp::IsChosenColor);
+            let def = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Choose {
+                    choice_type: ChoiceType::Color,
+                    persist: true,
+                },
+            )
+            .sub_ability(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PreventDamage {
+                    amount: PreventionAmount::All,
+                    target: TargetFilter::Any,
+                    scope: PreventionScope::AllDamage,
+                    damage_source_filter: Some(TargetFilter::Typed(source_filter)),
+                },
+            ))
+            .description(line.to_string());
+            result.abilities.push(def);
+            i += 1;
+            continue;
+        }
+
         // Priority 8: Replacement patterns
         if is_replacement_pattern(&lower) {
             if let Some(rep_def) = parse_replacement_line(&line, card_name) {
@@ -1033,7 +1071,9 @@ pub fn parse_oracle_text(
                 continue;
             }
             result.extracted_keywords.push(Keyword::Flashback(
-                crate::types::mana::ManaCost::SelfManaCost,
+                crate::types::keywords::FlashbackCost::Mana(
+                    crate::types::mana::ManaCost::SelfManaCost,
+                ),
             ));
             i += 1;
             continue;
@@ -1751,7 +1791,7 @@ mod tests {
         ContinuousModification, FilterProp, ManaSpendRestriction, ModalSelectionConstraint,
         QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
-    use crate::types::keywords::KeywordKind;
+    use crate::types::keywords::{FlashbackCost, KeywordKind};
     use crate::types::mana::ManaCost;
     use crate::types::replacements::ReplacementEvent;
     use crate::types::statics::StaticMode;
@@ -4580,7 +4620,7 @@ mod tests {
             static_def
                 .modifications
                 .contains(&ContinuousModification::AddKeyword {
-                    keyword: Keyword::Flashback(ManaCost::SelfManaCost),
+                    keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
                 }),
             "missing flashback grant: {:?}",
             static_def.modifications
@@ -4602,7 +4642,7 @@ mod tests {
             static_def
                 .modifications
                 .contains(&ContinuousModification::AddKeyword {
-                    keyword: Keyword::Flashback(ManaCost::SelfManaCost),
+                    keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
                 })
         }));
     }
@@ -4623,10 +4663,10 @@ mod tests {
             static_def
                 .modifications
                 .contains(&ContinuousModification::AddKeyword {
-                    keyword: Keyword::Flashback(ManaCost::Cost {
+                    keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
                         generic: 2,
                         shards: vec![crate::types::mana::ManaCostShard::Green],
-                    }),
+                    })),
                 }),
             "missing flashback keyword: {:?}",
             static_def.modifications

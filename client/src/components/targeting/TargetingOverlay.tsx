@@ -16,7 +16,7 @@ export function TargetingOverlay() {
   const isTargetSelection = waitingFor?.type === "TargetSelection" || waitingFor?.type === "TriggerTargetSelection";
   const isCopyTargetChoice = waitingFor?.type === "CopyTargetChoice";
   const isExploreChoice = waitingFor?.type === "ExploreChoice";
-  const isTapCreatureChoice = waitingFor?.type === "TapCreaturesForManaAbility";
+  const isTapCreatureChoice = waitingFor?.type === "TapCreaturesForManaAbility" || waitingFor?.type === "TapCreaturesForSpellCost";
   const targetSlots = isTargetSelection ? waitingFor.data.target_slots : [];
   const selection = isTargetSelection ? waitingFor.data.selection : null;
   const currentTargetSlot = selection?.current_slot ?? 0;
@@ -32,6 +32,8 @@ export function TargetingOverlay() {
         ? waitingFor.data.source_id
       : waitingFor?.type === "TapCreaturesForManaAbility"
         ? (waitingFor.data.pending_mana_ability as { source_id?: number } | undefined)?.source_id
+      : waitingFor?.type === "TapCreaturesForSpellCost"
+        ? waitingFor.data.pending_cast?.object_id
       : undefined;
   const sourceName = sourceId != null ? objects?.[sourceId]?.name : undefined;
   const triggerDescription = waitingFor?.type === "TriggerTargetSelection"

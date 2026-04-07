@@ -64,7 +64,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
   const canTapForMana = manaTappableObjectIds.has(objectId);
   const isActivatable = hasActivatableAbility || canTapForMana;
   const tapCreatureCostChoice = useGameStore((s) =>
-    s.waitingFor?.type === "TapCreaturesForManaAbility" && s.waitingFor.data.player === playerId
+    (s.waitingFor?.type === "TapCreaturesForManaAbility" || s.waitingFor?.type === "TapCreaturesForSpellCost") && s.waitingFor.data.player === playerId
       ? s.waitingFor.data
       : null,
   );

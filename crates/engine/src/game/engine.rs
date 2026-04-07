@@ -593,6 +593,32 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             },
             GameAction::CancelCast,
         ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
+        // CR 702.34a: Player selected creatures to tap as a spell cost (flashback tap cost).
+        (
+            WaitingFor::TapCreaturesForSpellCost {
+                player,
+                count,
+                creatures,
+                pending_cast,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => engine_casting::handle_tap_creatures_for_spell_cost(
+            state,
+            *player,
+            *pending_cast.clone(),
+            *count,
+            creatures,
+            &chosen,
+            &mut events,
+        )?,
+        (
+            WaitingFor::TapCreaturesForSpellCost {
+                player,
+                pending_cast,
+                ..
+            },
+            GameAction::CancelCast,
+        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
         (
             WaitingFor::TapCreaturesForManaAbility {
                 count,

@@ -1334,8 +1334,17 @@ pub fn find_applicable_replacements(
             }
 
             if let Some(handler) = registry.get(&repl_def.event) {
-                // Game-state prevention always matches (no source object filtering needed)
-                // but still check combat scope and target filters.
+                // CR 615.3: Check combat scope, target filters, and source filters.
+                // CR 614.1a: Damage source filter — matches the damage *source* object
+                // against the filter (e.g., "sources of the chosen color").
+                if let Some(ref sf) = repl_def.damage_source_filter {
+                    if let ProposedEvent::Damage { source_id, .. } = event {
+                        if !super::filter::matches_target_filter(state, *source_id, sf, ObjectId(0))
+                        {
+                            continue;
+                        }
+                    }
+                }
                 if let Some(ref scope) = repl_def.combat_scope {
                     if let ProposedEvent::Damage { is_combat, .. } = event {
                         match scope {

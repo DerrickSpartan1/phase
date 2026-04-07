@@ -4,8 +4,19 @@ use std::str::FromStr;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::ability::{ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypedFilter};
+use super::ability::{
+    AbilityCost, ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypedFilter,
+};
 use super::mana::{ManaColor, ManaCost};
+
+/// CR 702.34a: Flashback cost — either a mana cost or a non-mana cost
+/// (e.g., "Tap three untapped white creatures you control").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", content = "data")]
+pub enum FlashbackCost {
+    Mana(ManaCost),
+    NonMana(AbilityCost),
+}
 
 /// Discriminant-level keyword identity used when the Oracle text refers to a keyword class
 /// without caring about its parameter payload.
@@ -357,7 +368,7 @@ pub enum Keyword {
     Protection(ProtectionTarget),
     Kicker(ManaCost),
     Cycling(ManaCost),
-    Flashback(ManaCost),
+    Flashback(FlashbackCost),
     Ward(WardCost),
     Equip(ManaCost),
     Landwalk(String),
@@ -817,7 +828,11 @@ impl FromStr for Keyword {
                 "protection" => return Ok(Keyword::Protection(parse_protection_target(p))),
                 "kicker" => return Ok(Keyword::Kicker(parse_keyword_mana_cost(p))),
                 "cycling" => return Ok(Keyword::Cycling(parse_keyword_mana_cost(p))),
-                "flashback" => return Ok(Keyword::Flashback(parse_keyword_mana_cost(p))),
+                "flashback" => {
+                    return Ok(Keyword::Flashback(FlashbackCost::Mana(
+                        parse_keyword_mana_cost(p),
+                    )))
+                }
                 "ward" => return Ok(Keyword::Ward(WardCost::Mana(parse_keyword_mana_cost(p)))),
                 "equip" => return Ok(Keyword::Equip(parse_keyword_mana_cost(p))),
                 "landwalk" => return Ok(Keyword::Landwalk(p.clone())),
@@ -1245,7 +1260,14 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         // Parameterized: ManaCost
         "Kicker" => Ok(Keyword::Kicker(mana(data)?)),
         "Cycling" => Ok(Keyword::Cycling(mana(data)?)),
-        "Flashback" => Ok(Keyword::Flashback(mana(data)?)),
+        "Flashback" => {
+            // Accept both legacy ManaCost format and new FlashbackCost tagged format
+            if let Ok(fb_cost) = serde_json::from_value::<FlashbackCost>(data.clone()) {
+                Ok(Keyword::Flashback(fb_cost))
+            } else {
+                Ok(Keyword::Flashback(FlashbackCost::Mana(mana(data)?)))
+            }
+        }
         "Ward" => {
             // Accept both legacy ManaCost format and new WardCost tagged format
             if let Ok(ward_cost) = serde_json::from_value::<WardCost>(data.clone()) {
@@ -1472,9 +1494,11 @@ mod tests {
         let flashback = Keyword::from_str("Flashback:3BB").unwrap();
         assert!(matches!(
             flashback,
-            Keyword::Flashback(ManaCost::Cost { .. })
+            Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost { .. }))
         ));
-        if let Keyword::Flashback(ManaCost::Cost { generic, shards }) = &flashback {
+        if let Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost { generic, shards })) =
+            &flashback
+        {
             assert_eq!(*generic, 3);
             assert_eq!(shards.len(), 2); // BB
         }

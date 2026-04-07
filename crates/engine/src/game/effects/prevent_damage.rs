@@ -1,11 +1,46 @@
 use crate::types::ability::{
-    CombatDamageScope, DamageTargetFilter, Effect, EffectError, EffectKind, PreventionScope,
-    ReplacementDefinition, ResolvedAbility, TargetFilter, TargetRef,
+    CombatDamageScope, DamageTargetFilter, Effect, EffectError, EffectKind, FilterProp,
+    PreventionScope, ReplacementDefinition, ResolvedAbility, TargetFilter, TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
+use crate::types::identifiers::ObjectId;
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
+
+/// CR 614.1a: Resolve a damage source filter, replacing dynamic references
+/// (e.g., `IsChosenColor`) with concrete values from the source object's state.
+fn resolve_source_filter(
+    filter: &TargetFilter,
+    state: &GameState,
+    source_id: ObjectId,
+) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            let has_chosen_ref = tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::IsChosenColor));
+            if !has_chosen_ref {
+                return filter.clone();
+            }
+            // Resolve IsChosenColor → concrete HasColor using source's chosen attributes.
+            let chosen_color = state
+                .objects
+                .get(&source_id)
+                .and_then(|obj| obj.chosen_color());
+            let mut resolved = tf.clone();
+            resolved
+                .properties
+                .retain(|p| !matches!(p, FilterProp::IsChosenColor));
+            if let Some(color) = chosen_color {
+                resolved.properties.push(FilterProp::HasColor { color });
+            }
+            TargetFilter::Typed(resolved)
+        }
+        _ => filter.clone(),
+    }
+}
 
 /// CR 615: Prevent damage — creates a prevention shield on the source object.
 ///
@@ -20,8 +55,13 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (amount, scope) = match &ability.effect {
-        Effect::PreventDamage { amount, scope, .. } => (*amount, *scope),
+    let (amount, scope, effect_source_filter) = match &ability.effect {
+        Effect::PreventDamage {
+            amount,
+            scope,
+            damage_source_filter,
+            ..
+        } => (*amount, *scope, damage_source_filter.clone()),
         _ => {
             return Err(EffectError::InvalidParam(
                 "expected PreventDamage effect".to_string(),
@@ -30,10 +70,19 @@ pub fn resolve(
     };
 
     // Build the prevention shield replacement definition.
+    // Note: valid_card is NOT set here — targeted shields scope via placement on the target
+    // object, and global shields (pending_damage_prevention) must match any damage event.
     let mut shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
         .prevention_shield(amount)
-        .valid_card(TargetFilter::SelfRef)
         .description("Prevent damage".to_string());
+
+    // CR 615 + CR 614.1a: Resolve damage source filter from effect definition.
+    // Filters using IsChosenColor need the chosen color resolved from the source object
+    // and converted to a concrete HasColor filter for the shield.
+    if let Some(src_filter) = effect_source_filter {
+        let resolved_filter = resolve_source_filter(&src_filter, state, ability.source_id);
+        shield = shield.damage_source_filter(resolved_filter);
+    }
 
     // CR 615: Scope restriction — combat damage only vs all damage
     if scope == PreventionScope::CombatDamage {
@@ -69,19 +118,22 @@ pub fn resolve(
             }
         }
     } else {
-        // CR 615.3: Untargeted prevention (e.g., Fog): check if source is a permanent
-        // on the battlefield. If so, attach to source. If source is an instant/sorcery
-        // (will move to graveyard on resolution), use the game-state-level registry.
-        let is_on_battlefield = state
+        // CR 615.3: Untargeted prevention — attach to source if it's a permanent on the
+        // battlefield. Instants/sorceries on the Stack will be moved to graveyard/exile
+        // after resolution, so their shields must go to the global registry instead.
+        // find_applicable_replacements only scans Battlefield/Command zones for
+        // object-attached shields.
+        let is_permanent_on_battlefield = state
             .objects
             .get(&ability.source_id)
-            .is_some_and(|obj| obj.zone == Zone::Battlefield || obj.zone == Zone::Stack);
-        if is_on_battlefield {
+            .is_some_and(|obj| obj.zone == Zone::Battlefield);
+        if is_permanent_on_battlefield {
             if let Some(obj) = state.objects.get_mut(&ability.source_id) {
                 obj.replacement_definitions.push(shield);
             }
         } else {
-            // Source left the battlefield (instant/sorcery resolved) — store globally.
+            // Source is on the Stack (instant/sorcery mid-resolution) or already left —
+            // store in game-state-level registry so it persists until end of turn.
             state.pending_damage_prevention.push(shield);
         }
     }
@@ -113,6 +165,7 @@ mod tests {
                 amount,
                 target: TargetFilter::Any,
                 scope,
+                damage_source_filter: None,
             },
             targets,
             source,

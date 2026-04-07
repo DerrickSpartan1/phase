@@ -8,7 +8,7 @@ use crate::types::ability::{AbilityCost, NinjutsuVariant};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::{CardId, ObjectId};
-use crate::types::keywords::{Keyword, KeywordKind, ProtectionTarget};
+use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind, ProtectionTarget};
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -42,10 +42,15 @@ pub fn object_has_effective_keyword_kind(
     crate::game::off_zone_characteristics::off_zone_has_keyword_kind(state, object_id, kind)
 }
 
-pub fn effective_flashback_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
+pub fn effective_flashback_cost(state: &GameState, object_id: ObjectId) -> Option<FlashbackCost> {
     let keyword = effective_keyword_for_object(state, object_id, KeywordKind::Flashback)?;
     match keyword {
-        Keyword::Flashback(cost) => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
+        Keyword::Flashback(cost) => match cost {
+            FlashbackCost::Mana(mana_cost) => Some(FlashbackCost::Mana(resolve_keyword_mana_cost(
+                state, object_id, &mana_cost,
+            ))),
+            FlashbackCost::NonMana(ability_cost) => Some(FlashbackCost::NonMana(ability_cost)),
+        },
         _ => None,
     }
 }

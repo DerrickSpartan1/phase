@@ -110,6 +110,26 @@ pub(super) fn handle_sacrifice_for_cost(
     )
 }
 
+pub(super) fn handle_tap_creatures_for_spell_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending_cast: PendingCast,
+    count: usize,
+    creatures: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    casting_costs::handle_tap_creatures_for_spell_cost(
+        state,
+        player,
+        pending_cast,
+        count,
+        creatures,
+        chosen,
+        events,
+    )
+}
+
 pub(super) fn handle_tap_creatures_for_mana_ability(
     state: &mut GameState,
     count: usize,

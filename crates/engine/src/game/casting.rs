@@ -8,7 +8,7 @@ use crate::types::game_state::{
     StackEntryKind, WaitingFor,
 };
 use crate::types::identifiers::{CardId, ObjectId};
-use crate::types::keywords::{Keyword, KeywordKind};
+use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{ManaCost, SpellMeta};
 use crate::types::player::PlayerId;
 use crate::types::statics::{CastingProhibitionCondition, CastingProhibitionScope, StaticMode};
@@ -702,6 +702,16 @@ fn prepare_spell_cast(
         None
     };
 
+    // CR 702.34a: Split flashback into mana vs non-mana components.
+    let flashback_mana_cost = flashback_cost.as_ref().and_then(|c| match c {
+        FlashbackCost::Mana(mana) => Some(mana.clone()),
+        FlashbackCost::NonMana(_) => None,
+    });
+    let flashback_non_mana_cost = flashback_cost.as_ref().and_then(|c| match c {
+        FlashbackCost::NonMana(cost) => Some(cost.clone()),
+        FlashbackCost::Mana(_) => None,
+    });
+
     // Precedence: Escape > Harmonize > Flashback > GraveyardPermission > Warp > Normal.
     // No standard card has multiple graveyard-cast keywords; if one did, the card's own
     // keyword overrides an external source's grant (GraveyardPermission).
@@ -726,16 +736,18 @@ fn prepare_spell_cast(
         obj.zone == Zone::Hand && has_hand_cast_free_permission(state, player, obj);
 
     // CR 118.9: Energy replaces mana cost entirely when casting with ExileWithEnergyCost.
-    let mut mana_cost = if energy_cost_from_exile || hand_cast_free {
-        crate::types::mana::ManaCost::NoCost
-    } else {
-        escape_cost
-            .or(harmonize_cost)
-            .or(flashback_cost)
-            .or(alt_cost_from_exile)
-            .or(warp_cost)
-            .unwrap_or_else(|| obj.mana_cost.clone())
-    };
+    // CR 702.34a: Non-mana flashback costs use NoCost for mana (cost is paid separately).
+    let mut mana_cost =
+        if energy_cost_from_exile || hand_cast_free || flashback_non_mana_cost.is_some() {
+            crate::types::mana::ManaCost::NoCost
+        } else {
+            escape_cost
+                .or(harmonize_cost)
+                .or(flashback_mana_cost)
+                .or(alt_cost_from_exile)
+                .or(warp_cost)
+                .unwrap_or_else(|| obj.mana_cost.clone())
+        };
     // CR 304.1: Instants can be cast any time a player has priority.
     // CR 301.1 / CR 306.1: Artifacts and planeswalkers are cast at sorcery speed.
     if let Err(base_timing_error) =
@@ -2547,7 +2559,7 @@ mod tests {
         TypedFilter,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::keywords::Keyword;
+    use crate::types::keywords::{FlashbackCost, Keyword};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::phase::Phase;
 
@@ -5331,7 +5343,9 @@ mod tests {
         obj.base_card_types = obj.card_types.clone();
         obj.mana_cost = mana_cost;
         obj.base_keywords
-            .push(Keyword::Flashback(flashback_cost.clone()));
+            .push(Keyword::Flashback(FlashbackCost::Mana(
+                flashback_cost.clone(),
+            )));
         obj.keywords = obj.base_keywords.clone();
         // Give it a simple draw effect so it has an ability to cast
         let ability = crate::types::ability::AbilityDefinition::new(
@@ -5421,7 +5435,9 @@ mod tests {
         obj.base_card_types = obj.card_types.clone();
         obj.mana_cost = card_cost.clone();
         obj.base_keywords
-            .push(Keyword::Flashback(flashback_cost.clone()));
+            .push(Keyword::Flashback(FlashbackCost::Mana(
+                flashback_cost.clone(),
+            )));
         obj.keywords = obj.base_keywords.clone();
         let ability = crate::types::ability::AbilityDefinition::new(
             crate::types::ability::AbilityKind::Spell,
@@ -5467,7 +5483,7 @@ mod tests {
             crate::types::ability::Duration::UntilEndOfTurn,
             TargetFilter::SpecificObject { id: obj_id },
             vec![crate::types::ability::ContinuousModification::AddKeyword {
-                keyword: Keyword::Flashback(ManaCost::SelfManaCost),
+                keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
             }],
             None,
         );
@@ -5526,7 +5542,7 @@ mod tests {
                 ))
                 .modifications(vec![
                     crate::types::ability::ContinuousModification::AddKeyword {
-                        keyword: Keyword::Flashback(ManaCost::SelfManaCost),
+                        keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::SelfManaCost)),
                     },
                 ]),
         );
@@ -5568,10 +5584,10 @@ mod tests {
                 })
                 .modifications(vec![
                     crate::types::ability::ContinuousModification::AddKeyword {
-                        keyword: Keyword::Flashback(ManaCost::Cost {
+                        keyword: Keyword::Flashback(FlashbackCost::Mana(ManaCost::Cost {
                             generic: 2,
                             shards: vec![ManaCostShard::Green],
-                        }),
+                        })),
                     },
                 ]),
         );

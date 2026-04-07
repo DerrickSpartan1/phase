@@ -194,6 +194,68 @@ pub(crate) fn handle_sacrifice_for_cost(
     }
 }
 
+/// CR 702.34a: Tap creatures cost — complete the tap-creatures cost after player selection.
+pub(crate) fn handle_tap_creatures_for_spell_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    pending: PendingCast,
+    count: usize,
+    legal_creatures: &[ObjectId],
+    chosen: &[ObjectId],
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if chosen.len() != count {
+        return Err(EngineError::InvalidAction(format!(
+            "Must tap exactly {} creature(s), got {}",
+            count,
+            chosen.len()
+        )));
+    }
+    for id in chosen {
+        if !legal_creatures.contains(id) {
+            return Err(EngineError::InvalidAction(
+                "Selected creature not eligible for tapping".to_string(),
+            ));
+        }
+    }
+
+    // Tap each chosen creature
+    for &id in chosen {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            obj.tapped = true;
+        }
+        events.push(GameEvent::PermanentTapped {
+            object_id: id,
+            caused_by: None,
+        });
+    }
+
+    // Resume path depends on whether this is a spell or activated ability
+    if let Some(ability_index) = pending.activation_ability_index {
+        push_activated_ability_to_stack(
+            state,
+            player,
+            pending.object_id,
+            ability_index,
+            pending.ability,
+            pending.activation_cost.as_ref(),
+            events,
+        )
+    } else {
+        pay_and_push(
+            state,
+            player,
+            pending.object_id,
+            pending.card_id,
+            pending.ability,
+            &pending.cost,
+            pending.casting_variant,
+            pending.distribute,
+            events,
+        )
+    }
+}
+
 /// CR 702.138a: Escape cost requires exiling other cards from your graveyard.
 /// Complete the exile-from-graveyard cost after player selection.
 pub(crate) fn handle_exile_from_graveyard_for_cost(
@@ -499,6 +561,23 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                 pending,
                 events,
             );
+        }
+    }
+
+    // CR 702.34a: Flashback with non-mana cost requires paying the cost as an additional cost.
+    if casting_variant == CastingVariant::Flashback {
+        if let Some(non_mana_cost) = state.objects.get(&object_id).and_then(|obj| {
+            obj.keywords.iter().find_map(|k| match k {
+                crate::types::keywords::Keyword::Flashback(
+                    crate::types::keywords::FlashbackCost::NonMana(c),
+                ) => Some(c.clone()),
+                _ => None,
+            })
+        }) {
+            let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+            pending.casting_variant = casting_variant;
+            pending.distribute = distribute;
+            return pay_additional_cost(state, player, non_mana_cost, pending, events);
         }
     }
 
@@ -808,6 +887,38 @@ fn pay_additional_cost(
             return super::effects::collect_evidence::begin_cost_payment(
                 state, player, amount, pending,
             );
+        }
+        AbilityCost::TapCreatures { count, ref filter } => {
+            // CR 702.34a: Tap untapped creatures matching filter as a cost.
+            let eligible: Vec<ObjectId> = state
+                .battlefield
+                .iter()
+                .copied()
+                .filter(|id| {
+                    state.objects.get(id).is_some_and(|obj| {
+                        obj.controller == player
+                            && !obj.tapped
+                            && obj.id != pending.object_id
+                            && super::filter::matches_target_filter(
+                                state,
+                                obj.id,
+                                filter,
+                                pending.object_id,
+                            )
+                    })
+                })
+                .collect();
+            if eligible.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible creatures to tap".into(),
+                ));
+            }
+            return Ok(WaitingFor::TapCreaturesForSpellCost {
+                player,
+                count: count as usize,
+                creatures: eligible,
+                pending_cast: Box::new(pending),
+            });
         }
         _ => {
             // Other cost types (Exile, etc.) — not yet interactive

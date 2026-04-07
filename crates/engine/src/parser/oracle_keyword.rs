@@ -8,7 +8,8 @@ use nom_language::error::VerboseError;
 
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_target::parse_type_phrase;
-use crate::types::keywords::{Keyword, WardCost};
+use crate::types::ability::AbilityCost;
+use crate::types::keywords::{FlashbackCost, Keyword, WardCost};
 
 /// CR 702.16 + CR 702.11f: Expand compound "X from A and from B" keyword lines.
 /// Handles both "protection from X and from Y" and "hexproof from X and from Y"
@@ -249,6 +250,24 @@ fn split_outside_braces(text: &str) -> Vec<&str> {
 }
 
 /// Parse a keyword from Oracle text format (natural language) into a `Keyword`.
+/// CR 702.34a: Parse a non-mana flashback cost.
+/// Handles "tap N untapped [color] creatures you control" patterns.
+/// Delegates to `parse_single_cost` for the actual parsing.
+fn parse_flashback_non_mana_cost(cost_text: &str) -> Option<AbilityCost> {
+    let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
+    // Strip reminder text in parentheses
+    let clean = if let Some(paren_idx) = trimmed.find(" (") {
+        trimmed[..paren_idx].trim()
+    } else {
+        trimmed
+    };
+    let cost = super::oracle_cost::parse_single_cost(clean);
+    match &cost {
+        AbilityCost::TapCreatures { .. } => Some(cost),
+        _ => None,
+    }
+}
+
 ///
 /// Oracle text uses space-separated format: "protection from red", "ward {2}",
 /// "flashback {2}{U}". Converts to the colon format that `FromStr` expects,
@@ -327,6 +346,19 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // "ward—pay N life", "ward—discard a card", "ward—sacrifice a permanent"
     if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("ward\u{2014}").parse(text) {
         return parse_ward_cost(rest);
+    }
+
+    // CR 702.34a: Flashback with non-mana cost — "flashback—tap N untapped [color] creatures you control"
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("flashback\u{2014}").parse(text) {
+        if let Some(cost) = parse_flashback_non_mana_cost(rest) {
+            return Some(Keyword::Flashback(FlashbackCost::NonMana(cost)));
+        }
+        // If non-mana cost parsing fails, try as mana cost
+        let cost_str = rest.trim();
+        if !cost_str.is_empty() {
+            let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+            return Some(Keyword::Flashback(FlashbackCost::Mana(cost)));
+        }
     }
 
     // CR 702.74a: "hideaway N" — parameterized keyword.

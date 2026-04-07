@@ -6806,15 +6806,17 @@ mod tests {
                 }
                 assert_eq!(*duration, Some(Duration::UntilEndOfTurn));
                 assert!(
-                    static_abilities
-                        .iter()
-                        .any(|static_def| static_def.modifications.contains(
-                            &ContinuousModification::AddKeyword {
+                    static_abilities.iter().any(|static_def| {
+                        static_def
+                            .modifications
+                            .contains(&ContinuousModification::AddKeyword {
                                 keyword: crate::types::keywords::Keyword::Flashback(
-                                    ManaCost::SelfManaCost,
+                                    crate::types::keywords::FlashbackCost::Mana(
+                                        ManaCost::SelfManaCost,
+                                    ),
                                 ),
-                            }
-                        )),
+                            })
+                    }),
                     "missing flashback grant: {:?}",
                     static_abilities
                 );

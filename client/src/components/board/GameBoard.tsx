@@ -93,7 +93,7 @@ export function GameBoard() {
       for (const objectId of waitingFor.data.choosable) {
         validTargetObjectIds.add(objectId);
       }
-    } else if (waitingFor?.type === "TapCreaturesForManaAbility") {
+    } else if (waitingFor?.type === "TapCreaturesForManaAbility" || waitingFor?.type === "TapCreaturesForSpellCost") {
       for (const objectId of waitingFor.data.creatures) {
         selectableManaCostCreatureIds.add(objectId);
       }

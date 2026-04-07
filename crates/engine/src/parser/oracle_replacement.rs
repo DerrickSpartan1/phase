@@ -1203,6 +1203,12 @@ fn parse_damage_prevention_replacement(
         return None;
     }
 
+    // CR 615: "sources of the color of your choice" requires interactive color choice —
+    // handled as a Choose → PreventDamage spell effect chain, not a passive replacement.
+    if norm_lower.contains("color of your choice") {
+        return None;
+    }
+
     // Redirection patterns ("prevent that damage. ~ deals that much damage to") are handled
     // by parse_damage_redirection_replacement — don't intercept them here.
     if norm_lower.contains("prevent that damage") && norm_lower.contains("deals that much damage") {
