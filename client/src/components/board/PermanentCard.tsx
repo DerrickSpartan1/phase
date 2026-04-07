@@ -156,7 +156,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
     : undefined;
 
   // Filter out loyalty counters — shown separately as the loyalty badge
-  const counters = Object.entries(obj.counters).filter(([type]) => type !== "loyalty");
+  const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
 
   // Tap rotation: 17deg in MTGA mode, 90deg in classic mode
   const tapOpacity = tapRotation === "mtga" && obj.tapped && !isAttacking ? 0.85 : 1;

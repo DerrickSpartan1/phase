@@ -62,7 +62,9 @@ export function toCardProps(obj: GameObject): CardViewProps {
     isPowerDebuffed,
     isToughnessBuffed,
     isToughnessDebuffed,
-    counters: Object.entries(obj.counters).map(([type, count]) => ({ type, count })),
+    counters: Object.entries(obj.counters)
+      .filter((entry): entry is [string, number] => entry[1] != null)
+      .map(([type, count]) => ({ type, count })),
     isCreature: obj.card_types.core_types.includes("Creature"),
     isLand: obj.card_types.core_types.includes("Land"),
     attachedTo: obj.attached_to,
