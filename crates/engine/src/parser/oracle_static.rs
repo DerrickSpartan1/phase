@@ -27,7 +27,7 @@ use crate::types::ability::{
     ContinuousModification, ControllerRef, FilterProp, QuantityExpr, QuantityRef, StaticCondition,
     StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
-use crate::types::card_type::Supertype;
+use crate::types::card_type::{CoreType, Supertype};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
@@ -260,6 +260,12 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         ) {
             return Some(def);
         }
+    }
+
+    // CR 205.1a: "All permanents are [type] in addition to their other types."
+    // Global type-addition effect (e.g., Mycosynth Lattice, Enchanted Evening).
+    if let Some(def) = parse_all_permanents_are_type(&tp, &text) {
+        return Some(def);
     }
 
     // CR 508.1d / CR 509.1c: Subject-scoped "attack/block each combat if able" patterns.
@@ -1062,6 +1068,71 @@ pub fn parse_static_line_multi(text: &str) -> Vec<StaticDefinition> {
     parse_static_line(text).into_iter().collect()
 }
 
+/// CR 105.2c / CR 205.4a: Parse property-based creature descriptors that are not subtypes.
+/// Handles "colorless", "multicolored", "snow", and "snow and [Subtype]" patterns.
+/// Returns a fully constructed `TargetFilter` with the appropriate properties.
+fn parse_property_descriptor(
+    desc_lower: &str,
+    desc_remaining: &str,
+    extra_props: &[FilterProp],
+    is_other: bool,
+) -> Option<TargetFilter> {
+    let mut props = extra_props.to_vec();
+    if is_other {
+        props.push(FilterProp::Another);
+    }
+
+    // CR 105.2c: "colorless creatures" — zero colors
+    if desc_lower == "colorless" {
+        props.push(FilterProp::Colorless);
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(props),
+        ));
+    }
+
+    // CR 105.2: "multicolored creatures" — two or more colors
+    if desc_lower == "multicolored" {
+        props.push(FilterProp::Multicolored);
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(props),
+        ));
+    }
+
+    // CR 205.4a: "snow and [Subtype]" — supertype + subtype compound
+    if let Some(rest) = desc_lower.strip_prefix("snow and ") {
+        props.push(FilterProp::HasSupertype {
+            value: Supertype::Snow,
+        });
+        // Remainder should be a capitalized subtype word
+        let subtype_part = &desc_remaining[desc_remaining.len() - rest.len()..];
+        if is_capitalized_words(subtype_part) {
+            return Some(TargetFilter::Typed(
+                typed_filter_for_subtype(subtype_part)
+                    .controller(ControllerRef::You)
+                    .properties(props),
+            ));
+        }
+    }
+
+    // CR 205.4a: "snow creatures" — just the supertype
+    if desc_lower == "snow" {
+        props.push(FilterProp::HasSupertype {
+            value: Supertype::Snow,
+        });
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(props),
+        ));
+    }
+
+    None
+}
+
 /// CR 205.3m: Try to parse a compound subtype descriptor like "Ninja and Rogue" or "Elf or Warrior"
 /// into an `Or` filter with one creature+subtype+controller per part.
 /// Returns `None` if the descriptor is not a compound subtype pattern.
@@ -1126,6 +1197,19 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                 extra_props.push(prop);
                 desc_remaining = desc_remaining[consumed..].trim_start();
                 desc_lower = desc_remaining.to_lowercase();
+            }
+            // CR 105.2c / CR 205.4a: Property-descriptor recognition for colorless,
+            // multicolored, and snow creatures before subtype parsing.
+            if let Some(prop_filter) =
+                parse_property_descriptor(&desc_lower, desc_remaining, &extra_props, is_other)
+            {
+                let (prop_filter, after_prefix) =
+                    if let Some((prop, rest)) = strip_counter_condition_prefix(after_prefix) {
+                        (add_property(prop_filter, prop), rest)
+                    } else {
+                        (prop_filter, after_prefix)
+                    };
+                return parse_continuous_gets_has(after_prefix, prop_filter, text);
             }
             // CR 205.3m: Try compound subtypes first ("Ninja and Rogue", "Elf or Warrior")
             // The helper bakes in extra_props and is_other, so skip add_another_filter below.
@@ -4183,6 +4267,57 @@ fn parse_basic_land_type_plural(name: &str) -> Option<BasicLandType> {
     parse_basic_land_type(name).or_else(|| name.strip_suffix('s').and_then(parse_basic_land_type))
 }
 
+/// CR 305.7: Parse a comma-and-separated list of basic land types.
+/// "Mountain, Forest, and Plains" → [Mountain, Forest, Plains].
+/// Also handles single types: "Island" → [Island].
+fn parse_basic_land_type_list(text: &str) -> Option<Vec<BasicLandType>> {
+    // Try single type first (most common case)
+    if let Some(single) = parse_basic_land_type_plural(text) {
+        return Some(vec![single]);
+    }
+    // Split on ", " and " and " for multi-type lists
+    let mut types = Vec::new();
+    for part in text.split(", ") {
+        let part = part.trim();
+        if let Some(rest) = part.strip_prefix("and ") {
+            types.push(parse_basic_land_type(rest.trim())?);
+        } else if let Some((before, after)) = part.split_once(" and ") {
+            types.push(parse_basic_land_type(before.trim())?);
+            types.push(parse_basic_land_type(after.trim())?);
+        } else {
+            types.push(parse_basic_land_type(part)?);
+        }
+    }
+    if types.len() >= 2 {
+        Some(types)
+    } else {
+        None
+    }
+}
+
+/// CR 205.1a: Parse "All permanents are [type] in addition to their other types."
+/// Handles global type-addition effects like Mycosynth Lattice ("artifacts") and
+/// Enchanted Evening ("enchantments").
+fn parse_all_permanents_are_type(tp: &TextPair<'_>, description: &str) -> Option<StaticDefinition> {
+    let rest_tp = nom_tag_tp(tp, "all permanents are ")?;
+    let rest = rest_tp.lower.trim_end_matches('.');
+    let type_part = rest.strip_suffix(" in addition to their other types")?;
+    // Map the type word to a CoreType
+    let core_type = match type_part.trim() {
+        "artifacts" => CoreType::Artifact,
+        "enchantments" => CoreType::Enchantment,
+        "creatures" => CoreType::Creature,
+        "lands" => CoreType::Land,
+        _ => return None,
+    };
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(TypedFilter::permanent()))
+            .modifications(vec![ContinuousModification::AddType { core_type }])
+            .description(description.to_string()),
+    )
+}
+
 /// CR 305.7: Parse "[Subject] lands are [type]" land type-changing static abilities.
 /// Handles replacement ("Nonbasic lands are Mountains"), additive ("Each land is a
 /// Swamp in addition to its other land types"), and all-basic-types ("Lands you control
@@ -4190,7 +4325,9 @@ fn parse_basic_land_type_plural(name: &str) -> Option<BasicLandType> {
 fn parse_land_type_change(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
     let (subject_tp, rest_tp) = tp
         .split_around(" are ")
-        .or_else(|| tp.split_around(" is a "))?;
+        .or_else(|| tp.split_around(" is a "))
+        .or_else(|| tp.split_around(" is an "))
+        .or_else(|| tp.split_around(" is "))?;
     let subject = subject_tp.original;
     let rest = rest_tp.original.trim().trim_end_matches('.');
 
@@ -4224,15 +4361,37 @@ fn parse_land_type_change(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinit
     }
 
     // CR 305.7: Replacement semantics — "[Type]" or "[Types]" → SetBasicLandType
-    let basic_type = parse_basic_land_type_plural(rest.trim())?;
-    Some(
-        StaticDefinition::continuous()
-            .affected(affected)
-            .modifications(vec![ContinuousModification::SetBasicLandType {
-                land_type: basic_type,
-            }])
-            .description(text.to_string()),
-    )
+    // Try multi-type list first: "Mountain, Forest, and Plains"
+    if let Some(types) = parse_basic_land_type_list(rest.trim()) {
+        if types.len() == 1 {
+            return Some(
+                StaticDefinition::continuous()
+                    .affected(affected)
+                    .modifications(vec![ContinuousModification::SetBasicLandType {
+                        land_type: types[0],
+                    }])
+                    .description(text.to_string()),
+            );
+        }
+        // CR 305.7: Multiple types — first SetBasicLandType clears old subtypes,
+        // subsequent AddSubtype entries add the remaining types.
+        let mut mods = vec![ContinuousModification::SetBasicLandType {
+            land_type: types[0],
+        }];
+        for &lt in &types[1..] {
+            mods.push(ContinuousModification::AddSubtype {
+                subtype: lt.as_subtype_str().to_string(),
+            });
+        }
+        return Some(
+            StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(mods)
+                .description(text.to_string()),
+        );
+    }
+
+    None
 }
 
 /// Parse the subject of a land type-change line into a TargetFilter.
@@ -4247,6 +4406,10 @@ fn parse_land_type_change_subject(subject: &str) -> Option<TargetFilter> {
             TypedFilter::land().controller(ControllerRef::You),
         )),
         "each land" | "all lands" => Some(TargetFilter::Typed(TypedFilter::land())),
+        // CR 305.7: Aura enchantments that change the enchanted land's type.
+        "enchanted land" => Some(TargetFilter::Typed(
+            TypedFilter::land().properties(vec![FilterProp::EnchantedBy]),
+        )),
         _ => None,
     }
 }
@@ -8077,6 +8240,192 @@ mod tests {
             StaticMode::CantBeCast {
                 who: CastingProhibitionScope::Opponents,
             }
+        );
+    }
+
+    // --- Group A: Enchanted land type changes ---
+
+    #[test]
+    fn enchanted_land_is_island() {
+        // CR 305.7: "Enchanted land is an Island." — replacement semantics via "is an"
+        let def = parse_static_line("Enchanted land is an Island.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Land),
+                "Expected Land type filter"
+            );
+            assert!(
+                tf.properties.contains(&FilterProp::EnchantedBy),
+                "Expected EnchantedBy property"
+            );
+        } else {
+            panic!(
+                "Expected Typed filter with Land + EnchantedBy, got {:?}",
+                def.affected
+            );
+        }
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::SetBasicLandType {
+                    land_type: BasicLandType::Island,
+                }),
+            "Expected SetBasicLandType Island, got {:?}",
+            def.modifications
+        );
+    }
+
+    #[test]
+    fn enchanted_land_every_basic_land_type() {
+        // CR 305.7: "Enchanted land is every basic land type in addition to its other types."
+        let def = parse_static_line(
+            "Enchanted land is every basic land type in addition to its other types.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+        } else {
+            panic!("Expected Typed filter with EnchantedBy");
+        }
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::AddAllBasicLandTypes),
+            "Expected AddAllBasicLandTypes, got {:?}",
+            def.modifications
+        );
+    }
+
+    #[test]
+    fn enchanted_land_multiple_types() {
+        // CR 305.7: "Enchanted land is a Mountain, Forest, and Plains." — multi-type replacement
+        let def = parse_static_line("Enchanted land is a Mountain, Forest, and Plains.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+        } else {
+            panic!("Expected Typed filter with EnchantedBy");
+        }
+        // First type is SetBasicLandType (clears old subtypes), rest are AddSubtype
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::SetBasicLandType {
+                    land_type: BasicLandType::Mountain,
+                }),
+            "Expected SetBasicLandType Mountain"
+        );
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::AddSubtype {
+                    subtype: "Forest".to_string(),
+                }),
+            "Expected AddSubtype Forest"
+        );
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::AddSubtype {
+                    subtype: "Plains".to_string(),
+                }),
+            "Expected AddSubtype Plains"
+        );
+    }
+
+    // --- Group B: Colorless/Multicolored/Snow lord pump ---
+
+    #[test]
+    fn static_other_colorless_creatures_get_plus() {
+        // CR 105.2b: "Other colorless creatures you control get +1/+1."
+        let def = parse_static_line("Other colorless creatures you control get +1/+1.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            assert!(tf.properties.contains(&FilterProp::Colorless));
+            assert!(tf.properties.contains(&FilterProp::Another));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        } else {
+            panic!("Expected Typed filter, got {:?}", def.affected);
+        }
+    }
+
+    #[test]
+    fn static_other_multicolored_creatures_get_plus() {
+        // CR 105.2: "Other multicolored creatures you control get +1/+0."
+        let def = parse_static_line("Other multicolored creatures you control get +1/+0.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            assert!(tf.properties.contains(&FilterProp::Multicolored));
+            assert!(tf.properties.contains(&FilterProp::Another));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
+        } else {
+            panic!("Expected Typed filter, got {:?}", def.affected);
+        }
+    }
+
+    #[test]
+    fn static_other_snow_zombie_creatures_get_plus() {
+        // CR 205.4a: "Other snow and Zombie creatures you control get +1/+1."
+        let def =
+            parse_static_line("Other snow and Zombie creatures you control get +1/+1.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            assert!(
+                tf.properties.contains(&FilterProp::HasSupertype {
+                    value: Supertype::Snow,
+                }),
+                "Expected HasSupertype Snow, got {:?}",
+                tf.properties
+            );
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype("Zombie".to_string())),
+                "Expected Zombie subtype, got {:?}",
+                tf.type_filters
+            );
+            assert!(tf.properties.contains(&FilterProp::Another));
+        } else {
+            panic!("Expected Typed filter, got {:?}", def.affected);
+        }
+    }
+
+    // --- Group C: All permanents are [type] ---
+
+    #[test]
+    fn static_all_permanents_are_artifacts() {
+        // CR 205.1a: "All permanents are artifacts in addition to their other types."
+        let def =
+            parse_static_line("All permanents are artifacts in addition to their other types.")
+                .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Permanent),
+                "Expected Permanent type filter"
+            );
+        } else {
+            panic!("Expected Typed filter with Permanent");
+        }
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::AddType {
+                    core_type: crate::types::card_type::CoreType::Artifact,
+                }),
+            "Expected AddType Artifact, got {:?}",
+            def.modifications
+        );
+    }
+
+    #[test]
+    fn static_all_permanents_are_enchantments() {
+        // CR 205.1a: "All permanents are enchantments in addition to their other types."
+        let def =
+            parse_static_line("All permanents are enchantments in addition to their other types.")
+                .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::AddType {
+                    core_type: crate::types::card_type::CoreType::Enchantment,
+                }),
+            "Expected AddType Enchantment"
         );
     }
 }
