@@ -440,7 +440,7 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
         {
             let rem = &rem[" during that player's next turn".len()..];
             let rem_lower = rem.to_ascii_lowercase();
-            let (rem, grant_extra_turn_after) = if let Ok((rest, _)) = alt((
+            let (_rem, grant_extra_turn_after) = if let Ok((rest, _)) = alt((
                 tag::<_, _, VerboseError<&str>>(
                     ". after that turn, that player takes an extra turn",
                 ),
@@ -454,7 +454,7 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
                 (rem, false)
             };
             #[cfg(debug_assertions)]
-            super::types::assert_no_compound_remainder(rem, text);
+            super::types::assert_no_compound_remainder(_rem, text);
             return Some(TargetedImperativeAst::ControlNextTurn {
                 target,
                 grant_extra_turn_after,
