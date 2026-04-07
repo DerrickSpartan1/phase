@@ -3071,6 +3071,16 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             continue;
         }
 
+        // "Starting with you, " — multiplayer ordering modifier that's irrelevant
+        // for 1v1. Strip the prefix so the remaining effect text is parsed normally.
+        let normalized_text = {
+            let temp_lower = normalized_text.to_lowercase();
+            nom_on_lower(normalized_text, &temp_lower, |i| {
+                value((), tag("starting with you, ")).parse(i)
+            })
+            .map_or(normalized_text, |((), rest)| rest)
+        };
+
         // CR 608.2c: "Otherwise, [effect]" — attach as else_ability on the
         // most recent conditional def in the chain.
         let lower_check = normalized_text.to_lowercase();
@@ -3109,6 +3119,26 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
                 ));
                 defs.push(else_def);
             }
+            continue;
+        }
+
+        // "Repeat this process" — recognized directive that doesn't produce an
+        // independent effect. Repetition semantics are handled by the specific card
+        // effects (cascade, explore, etc.); the parser recognizes these to avoid
+        // Unimplemented gaps. The trailing qualifier ("once", "any number of times",
+        // "for the next card", "until ...") is consumed with the prefix.
+        // Also handles "you may repeat this process" and "if you do, repeat this process".
+        if nom_on_lower(normalized_text, &lower_check, |i| {
+            let (i, _) = nom::combinator::opt(alt((
+                tag::<_, _, VerboseError<&str>>("you may "),
+                tag("if you do, "),
+                tag("if you do "),
+            )))
+            .parse(i)?;
+            value((), tag("repeat this process")).parse(i)
+        })
+        .is_some()
+        {
             continue;
         }
 
@@ -9212,10 +9242,23 @@ mod tests {
     }
 
     #[test]
-    fn bridge_unmapped_returns_none() {
-        // SourceIsTapped has no AbilityCondition equivalent.
+    fn bridge_source_tapped_maps_to_ability_condition() {
+        // CR 611.2b: SourceIsTapped bridges to AbilityCondition::SourceIsTapped.
         let result = try_nom_condition_as_ability_condition("~ is tapped");
-        assert!(result.is_none());
+        assert_eq!(
+            result,
+            Some(AbilityCondition::SourceIsTapped { negated: false })
+        );
+    }
+
+    #[test]
+    fn bridge_source_untapped_maps_to_negated_condition() {
+        // CR 611.2b: Not(SourceIsTapped) bridges to SourceIsTapped { negated: true }.
+        let result = try_nom_condition_as_ability_condition("~ is untapped");
+        assert_eq!(
+            result,
+            Some(AbilityCondition::SourceIsTapped { negated: true })
+        );
     }
 
     #[test]

@@ -766,6 +766,10 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
                     rhs: QuantityExpr::Fixed { value: 0 },
                 })
             }
+            // CR 611.2b: Not(SourceIsTapped) → source is untapped.
+            StaticCondition::SourceIsTapped => {
+                Some(AbilityCondition::SourceIsTapped { negated: true })
+            }
             _ => None,
         },
         StaticCondition::SourceMatchesFilter { filter } => {
@@ -773,13 +777,15 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
                 filter: filter.clone(),
             })
         }
+        StaticCondition::SourceIsTapped => {
+            Some(AbilityCondition::SourceIsTapped { negated: false })
+        }
         StaticCondition::DevotionGE { .. }
         | StaticCondition::ChosenColorIs { .. }
         | StaticCondition::SpeedGE { .. }
         | StaticCondition::HasCounters { .. }
         | StaticCondition::ClassLevelGE { .. }
         | StaticCondition::IsRingBearer
-        | StaticCondition::SourceIsTapped
         | StaticCondition::SourceInZone { .. }
         | StaticCondition::DefendingPlayerControls { .. }
         | StaticCondition::SourceAttackingAlone

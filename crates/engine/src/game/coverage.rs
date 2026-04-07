@@ -1673,6 +1673,11 @@ fn build_ability_item(def: &AbilityDefinition) -> ParsedItem {
         children.push(build_ability_item(sub));
     }
 
+    // Else-ability chain (CR 608.2c: "Otherwise" branches)
+    if let Some(else_ab) = &def.else_ability {
+        children.push(build_ability_item(else_ab));
+    }
+
     // Modal abilities
     for mode_ability in &def.mode_abilities {
         children.push(build_ability_item(mode_ability));
@@ -3193,6 +3198,7 @@ fn condition_variant_name(cond: &AbilityCondition) -> &'static str {
         AbilityCondition::SourceMatchesFilter { .. } => "SourceMatchesFilter",
         AbilityCondition::IsYourTurn { .. } => "IsYourTurn",
         AbilityCondition::ZoneChangedThisWay { .. } => "ZoneChangedThisWay",
+        AbilityCondition::SourceIsTapped { .. } => "SourceIsTapped",
         AbilityCondition::ConditionInstead { .. } => "ConditionInstead",
     }
 }

@@ -1417,10 +1417,13 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::IsMonarch => state.monarch == Some(controller),
         // CR 702.131a: True when the controller has the city's blessing.
         TriggerCondition::HasCityBlessing => state.city_blessing.contains(&controller),
-        // CR 611.2b: True when the trigger source is tapped.
-        TriggerCondition::SourceIsTapped => source_id
-            .and_then(|id| state.objects.get(&id))
-            .is_some_and(|obj| obj.tapped),
+        // CR 611.2b: True when the trigger source is tapped (or untapped when negated).
+        TriggerCondition::SourceIsTapped { negated } => {
+            let is_tapped = source_id
+                .and_then(|id| state.objects.get(&id))
+                .is_some_and(|obj| obj.tapped);
+            is_tapped != *negated
+        }
         // CR 113.6b: True when the trigger source is in the specified zone.
         TriggerCondition::SourceInZone { zone } => source_id
             .and_then(|id| state.objects.get(&id))

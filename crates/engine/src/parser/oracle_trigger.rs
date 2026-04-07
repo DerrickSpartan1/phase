@@ -382,6 +382,10 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
                     rhs: QuantityExpr::Fixed { value: 0 },
                 })
             }
+            // CR 611.2b: Not(SourceIsTapped) → source is untapped.
+            StaticCondition::SourceIsTapped => {
+                Some(TriggerCondition::SourceIsTapped { negated: true })
+            }
             _ => None,
         },
 
@@ -412,7 +416,9 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         StaticCondition::HasCityBlessing => Some(TriggerCondition::HasCityBlessing),
         // CR 611.2b: Source tapped state bridges for trigger conditions like
         // "At the beginning of your upkeep, if this land is tapped, ..."
-        StaticCondition::SourceIsTapped => Some(TriggerCondition::SourceIsTapped),
+        StaticCondition::SourceIsTapped => {
+            Some(TriggerCondition::SourceIsTapped { negated: false })
+        }
         // CR 113.6b: Source zone bridges for trigger conditions like
         // "At the beginning of your upkeep, if this card is in your graveyard, ..."
         StaticCondition::SourceInZone { zone } => {
@@ -6361,7 +6367,7 @@ mod tests {
     fn bridge_source_is_tapped() {
         assert_eq!(
             static_condition_to_trigger_condition(&StaticCondition::SourceIsTapped),
-            Some(TriggerCondition::SourceIsTapped),
+            Some(TriggerCondition::SourceIsTapped { negated: false }),
         );
     }
 
@@ -6534,7 +6540,10 @@ mod tests {
         let (cleaned, cond) =
             extract_if_condition("put a storage counter on it if this land is tapped");
         assert!(cleaned.contains("put a storage counter"));
-        assert_eq!(cond.unwrap(), TriggerCondition::SourceIsTapped);
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::SourceIsTapped { negated: false }
+        );
     }
 
     #[test]

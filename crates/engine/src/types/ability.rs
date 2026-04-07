@@ -3909,6 +3909,12 @@ pub enum AbilityCondition {
     /// Handles both optional-targeting parents (empty targets → empty IDs → false)
     /// and mandatory parents (type filter check on moved objects).
     ZoneChangedThisWay { filter: TargetFilter },
+    /// CR 611.2b: "if this [permanent] is tapped/untapped" — checks the source's tapped status.
+    /// When `negated` is true, condition is met when the source is *untapped*.
+    SourceIsTapped {
+        #[serde(default)]
+        negated: bool,
+    },
     /// CR 608.2c: General "instead" replacement — wraps any `AbilityCondition` with
     /// replacement semantics. When the inner condition is met at resolution, the sub's
     /// effect chain replaces the parent's entire effect chain. When not met, the base
@@ -4050,8 +4056,9 @@ pub enum TriggerCondition {
     NotCompletedDungeon {
         dungeon: crate::game::dungeon::DungeonId,
     },
-    /// CR 611.2b: "if this [permanent] is tapped" — true when the trigger source is tapped.
-    SourceIsTapped,
+    /// CR 611.2b: "if this [permanent] is tapped/untapped" — checks the source's tapped status.
+    /// When `negated` is true, condition is met when the source is *untapped*.
+    SourceIsTapped { negated: bool },
     /// CR 113.6b: "if this card is in [zone]" — true when the trigger source is in the given zone.
     SourceInZone { zone: crate::types::zones::Zone },
     /// CR 122.1: "if you put a counter on a permanent this turn" — true when the controller

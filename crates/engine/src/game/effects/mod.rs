@@ -1272,6 +1272,14 @@ fn evaluate_condition(
                 )
             })
         }
+        // CR 611.2b: "if this creature/permanent is tapped/untapped" — check source object.
+        AbilityCondition::SourceIsTapped { negated } => {
+            let is_tapped = state
+                .objects
+                .get(&ability.source_id)
+                .is_some_and(|obj| obj.tapped);
+            is_tapped != *negated
+        }
         // CR 608.2c: General "instead" — delegate to the wrapped inner condition.
         // The "instead" semantics are handled by the swap/guard in resolve_ability_chain.
         AbilityCondition::ConditionInstead { inner } => evaluate_condition(inner, state, ability),
