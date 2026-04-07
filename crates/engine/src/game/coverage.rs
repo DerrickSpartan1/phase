@@ -1218,6 +1218,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ExtraTurn { target } => {
             d.push(("player".into(), fmt_target(target)));
         }
+        Effect::SkipNextTurn { target } => {
+            d.push(("player".into(), fmt_target(target)));
+        }
         Effect::ControlNextTurn {
             target,
             grant_extra_turn_after,

@@ -675,6 +675,18 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         return Some(def);
     }
 
+    // --- "its activated abilities can't be activated" / "activated abilities can't be activated" ---
+    // CR 602.5: Prevents activated abilities of the affected permanent from being activated.
+    if tp.lower.contains("activated abilities can't be activated") {
+        let mut def = StaticDefinition::new(StaticMode::CantBeActivated)
+            .affected(TargetFilter::SelfRef)
+            .description(text.to_string());
+        if let Some(condition) = parse_unless_static_condition(&tp) {
+            def.condition = Some(condition);
+        }
+        return Some(def);
+    }
+
     // --- "can't be countered" ---
     // CR 101.2: "Can't" effects override "can" effects.
     if tp.lower.contains("can't be countered") {
@@ -997,6 +1009,33 @@ pub fn parse_static_line_multi(text: &str) -> Vec<StaticDefinition> {
     if let Some(defs) = try_parse_scoped_must_attack_block(&lower, &stripped) {
         return defs;
     }
+
+    // CR 602.5: Compound "can't attack/block" + "activated abilities can't be activated"
+    // produces two static definitions (e.g., CantAttackOrBlock + CantBeActivated).
+    if lower.contains("activated abilities can't be activated")
+        && (lower.contains("can't attack") || lower.contains("can't block"))
+    {
+        let mut defs = Vec::new();
+        let combat_mode = if lower.contains("can't attack or block") {
+            StaticMode::CantAttackOrBlock
+        } else if lower.contains("can't attack") {
+            StaticMode::CantAttack
+        } else {
+            StaticMode::CantBlock
+        };
+        defs.push(
+            StaticDefinition::new(combat_mode)
+                .affected(TargetFilter::SelfRef)
+                .description(stripped.to_string()),
+        );
+        defs.push(
+            StaticDefinition::new(StaticMode::CantBeActivated)
+                .affected(TargetFilter::SelfRef)
+                .description(stripped.to_string()),
+        );
+        return defs;
+    }
+
     // Fall back to the single-return parser.
     parse_static_line(text).into_iter().collect()
 }
@@ -3574,15 +3613,10 @@ fn try_parse_max_hand_size(tp: &TextPair<'_>, text: &str) -> Option<StaticDefini
         HandSizeModification::AdjustedBy(-(n as i32))
     } else if let Ok((qty_rest, _)) = tag::<_, _, NomErr>("equal to ").parse(rest) {
         // "equal to the number of hour counters on ~" → dynamic quantity
-        let (_, qty_ref) = nom_primitives::parse_number(qty_rest)
+        let qty_ref = nom_primitives::parse_number(qty_rest)
             .ok()
-            .map(|(r, n)| (r, QuantityExpr::Fixed { value: n as i32 }))
-            .or_else(|| {
-                use super::oracle_nom::quantity::parse_quantity_ref;
-                parse_quantity_ref(qty_rest)
-                    .ok()
-                    .map(|(r, qr)| (r, QuantityExpr::Ref { qty: qr }))
-            })?;
+            .map(|(_, n)| QuantityExpr::Fixed { value: n as i32 })
+            .or_else(|| parse_quantity_ref(qty_rest).map(|qr| QuantityExpr::Ref { qty: qr }))?;
         HandSizeModification::EqualTo(qty_ref)
     } else {
         // Plain "is [N]" → SetTo

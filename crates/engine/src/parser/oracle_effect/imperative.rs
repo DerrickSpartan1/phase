@@ -2048,14 +2048,23 @@ pub(super) fn parse_imperative_family_ast(
         // CR 509.1b / CR 508.1d: "can't be blocked [this turn]", "can't attack", etc.
         // These appear as subjectless clauses in compound effects (e.g., "gets +2/+0 and can't be blocked this turn").
         "can't" | "cannot" => try_parse_subjectless_cant(lower),
-        // CR 705: "flip a coin"
-        "flip" | "flips" => {
-            if lower == "flip a coin" || lower == "flips a coin" {
-                Some(ImperativeFamilyAst::FlipCoin)
-            } else {
-                None
-            }
-        }
+        // CR 705: "flip a coin" / "flip a coin until you lose a flip" / "flip it" (Kamigawa)
+        "flip" | "flips" => alt((
+            value(
+                ImperativeFamilyAst::FlipCoinUntilLose,
+                alt((
+                    tag::<_, _, VerboseError<&str>>("flip a coin until you lose a flip"),
+                    tag("flips a coin until they lose a flip"),
+                )),
+            ),
+            value(
+                ImperativeFamilyAst::FlipCoin,
+                alt((tag("flip a coin"), tag("flips a coin"))),
+            ),
+        ))
+        .parse(lower)
+        .ok()
+        .map(|(_, ast)| ast),
         // CR 706: "roll a d20"
         "roll" | "rolls" => {
             try_parse_roll_die_sides(lower).map(|sides| ImperativeFamilyAst::RollDie { sides })
@@ -2510,6 +2519,17 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         ImperativeFamilyAst::FlipCoin => Effect::FlipCoin {
             win_effect: None,
             lose_effect: None,
+        },
+        ImperativeFamilyAst::FlipCoinUntilLose => Effect::FlipCoinUntilLose {
+            // Stub — subsequent "For each flip you won, ..." clauses are
+            // consolidated into this by consolidate_die_and_coin_defs.
+            win_effect: Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "flip_coin_until_lose_stub".to_string(),
+                    description: Some("pending consolidation".to_string()),
+                },
+            )),
         },
         ImperativeFamilyAst::Put(ast) => lower_put_ast(ast),
         ImperativeFamilyAst::YouMay { text } => super::parse_effect(&text),
