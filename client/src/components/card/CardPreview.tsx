@@ -551,7 +551,7 @@ function ParsedAbilitiesPanel({ name, cardTypes, parseDetails, maxHeight }: Pars
 
 function CardInfoPanel({ obj }: { obj: GameObject }) {
   const ptDisplay = computePTDisplay(obj);
-  const counters = Object.entries(obj.counters).filter(([type]) => type !== "Loyalty");
+  const counters = Object.entries(obj.counters).filter(([type]) => type !== "loyalty");
   const keywords = sortKeywords(obj.keywords);
   const colorsChanged =
     obj.color.length !== obj.base_color.length ||

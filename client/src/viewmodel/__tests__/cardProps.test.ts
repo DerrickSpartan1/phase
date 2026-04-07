@@ -116,12 +116,12 @@ describe("toCardProps", () => {
   });
 
   it("extracts counters as typed array", () => {
-    const obj = makeGameObject({ counters: { Plus1Plus1: 2, Loyalty: 3 } });
+    const obj = makeGameObject({ counters: { P1P1: 2, loyalty: 3 } });
     const props = toCardProps(obj);
 
     expect(props.counters).toEqual([
-      { type: "Plus1Plus1", count: 2 },
-      { type: "Loyalty", count: 3 },
+      { type: "P1P1", count: 2 },
+      { type: "loyalty", count: 3 },
     ]);
   });
 

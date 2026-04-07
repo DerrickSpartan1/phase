@@ -143,13 +143,17 @@ export interface CardType {
 
 // ── Counter Types ────────────────────────────────────────────────────────
 
+/**
+ * Counter type keys matching the Rust CounterType serde output.
+ * These are the exact strings used as keys in `obj.counters`.
+ */
 export type CounterType =
-  | "Plus1Plus1"
-  | "Minus1Minus1"
-  | "Loyalty"
-  | "Lore"
-  | "Stun"
-  | { Generic: string };
+  | "P1P1"
+  | "M1M1"
+  | "loyalty"
+  | "lore"
+  | "stun"
+  | (string & {});
 
 // ── Keywords ─────────────────────────────────────────────────────────────
 
@@ -221,7 +225,7 @@ export interface GameObject {
   dealt_deathtouch_damage: boolean;
   attached_to: ObjectId | null;
   attachments: ObjectId[];
-  counters: Record<string, number>;
+  counters: Record<CounterType, number>;
   name: string;
   power: number | null;
   toughness: number | null;

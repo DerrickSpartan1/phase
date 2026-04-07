@@ -46,8 +46,8 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   if (!obj) return null;
 
   const hasDfc = obj.back_face != null;
-  // Filter out Loyalty counters — shown separately as the loyalty badge
-  const counters = Object.entries(obj.counters).filter(([type]) => type !== "Loyalty");
+  // Filter out loyalty counters — shown separately as the loyalty badge
+  const counters = Object.entries(obj.counters).filter(([type]) => type !== "loyalty");
   const devotionValue = obj.devotion ?? null;
 
   // --- Dynamic Text Sizing Logic ---

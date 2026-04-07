@@ -83,8 +83,8 @@ describe("getKeywordDetail", () => {
   });
 
   it("formats EtbCounter", () => {
-    expect(getKeywordDetail({ EtbCounter: { counter_type: "Plus1Plus1", count: 3 } })).toBe("enters with 3 +1/+1 counters");
-    expect(getKeywordDetail({ EtbCounter: { counter_type: "Lore", count: 1 } })).toBe("enters with 1 lore counter");
+    expect(getKeywordDetail({ EtbCounter: { counter_type: "P1P1", count: 3 } })).toBe("enters with 3 +1/+1 counters");
+    expect(getKeywordDetail({ EtbCounter: { counter_type: "lore", count: 1 } })).toBe("enters with 1 lore counter");
   });
 
   it("formats Partner", () => {

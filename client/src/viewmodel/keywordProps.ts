@@ -158,8 +158,8 @@ function formatWard(val: unknown): string {
 }
 
 function formatCounterName(type: string): string {
-  if (type === "Plus1Plus1") return "+1/+1";
-  if (type === "Minus1Minus1") return "-1/-1";
+  if (type === "P1P1") return "+1/+1";
+  if (type === "M1M1") return "-1/-1";
   return type.toLowerCase();
 }
 

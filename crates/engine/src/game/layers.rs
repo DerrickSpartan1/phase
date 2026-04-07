@@ -411,6 +411,12 @@ pub fn evaluate_layers(state: &mut GameState) {
                     *t += delta;
                 }
             }
+
+            // CR 306.5b: Loyalty is tracked via loyalty counters. After the layer reset
+            // reverts obj.loyalty to base_loyalty, re-derive it from the actual counter.
+            if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
+                obj.loyalty = Some(loyalty_counters);
+            }
         }
     }
 
