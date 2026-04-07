@@ -406,6 +406,7 @@ fn fmt_duration(d: &Duration) -> String {
         Duration::UntilEndOfCombat => "until end of combat",
         Duration::UntilYourNextTurn => "until your next turn",
         Duration::UntilHostLeavesPlay => "while on battlefield",
+        Duration::UntilControllerNextUntapStep => "until controller's next untap step",
         Duration::ForAsLongAs { .. } => "for as long as condition",
         Duration::Permanent => "permanent",
     }
@@ -1270,6 +1271,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         } => {
             d.push(("target".into(), fmt_target(target)));
             d.push(("to".into(), fmt_target(recipient)));
+        }
+        Effect::RemoveFromCombat { target } => {
+            d.push(("target".into(), fmt_target(target)));
         }
         Effect::CopyTokenOf {
             target,

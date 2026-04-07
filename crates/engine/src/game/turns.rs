@@ -4,6 +4,7 @@ use crate::game::replacement::{self, ReplacementResult};
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
+use crate::types::identifiers::ObjectId;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -203,6 +204,56 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
             GameRestriction::DamagePreventionDisabled { .. } => true,
         }
     });
+
+    // CR 502.3: Collect object IDs that have a CantUntap transient effect
+    // (e.g., "doesn't untap during its controller's next untap step").
+    // These permanents skip untapping this step.
+    let cant_untap_ids: HashSet<ObjectId> = state
+        .transient_continuous_effects
+        .iter()
+        .filter(|e| {
+            e.modifications.iter().any(|m| {
+                matches!(
+                    m,
+                    crate::types::ability::ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantUntap,
+                    }
+                )
+            })
+        })
+        .filter_map(|e| {
+            if let crate::types::ability::TargetFilter::SpecificObject { id } = &e.affected {
+                Some(*id)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // CR 302.6: Also check intrinsic CantUntap statics on objects
+    // (permanent "doesn't untap" from auras/enchantments).
+    let intrinsic_cant_untap: HashSet<ObjectId> = state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|id| {
+            state.objects.get(id).is_some_and(|obj| {
+                obj.controller == active
+                    && obj.static_definitions.iter().any(|sd| {
+                        sd.mode == StaticMode::CantUntap
+                            && super::static_abilities::check_static_ability(
+                                state,
+                                StaticMode::CantUntap,
+                                &super::static_abilities::StaticCheckContext {
+                                    target_id: Some(*id),
+                                    ..Default::default()
+                                },
+                            )
+                    })
+            })
+        })
+        .collect();
+
     let to_untap: Vec<_> = state
         .battlefield
         .iter()
@@ -217,6 +268,11 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
         .collect();
 
     for id in to_untap {
+        // CR 502.3: Skip permanents that have CantUntap (transient or intrinsic).
+        if cant_untap_ids.contains(&id) || intrinsic_cant_untap.contains(&id) {
+            continue;
+        }
+
         let proposed = ProposedEvent::Untap {
             object_id: id,
             applied: HashSet::new(),
@@ -253,6 +309,10 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
             }
         }
     }
+
+    // CR 502.3: Prune "until controller's next untap step" effects AFTER the untap
+    // step has been processed, so the permanent skips exactly one untap.
+    super::layers::prune_controller_untap_step_effects(state, active);
 }
 
 /// CR 504.1: During the draw step, the active player draws a card.

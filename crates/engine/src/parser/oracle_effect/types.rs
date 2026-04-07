@@ -241,6 +241,8 @@ pub(super) enum ImperativeFamilyAst {
     },
     /// CR 705: Flip a coin.
     FlipCoin,
+    /// CR 506.4: Remove a creature from combat.
+    RemoveFromCombat(TargetFilter),
     Shuffle(ShuffleImperativeAst),
     Put(PutImperativeAst),
     YouMay {

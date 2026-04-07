@@ -349,14 +349,7 @@ fn destroy_applier(
     }
 
     // CR 701.19c: Remove it from combat if it's attacking or blocking.
-    if let Some(ref mut combat) = state.combat {
-        combat.attackers.retain(|a| a.object_id != oid);
-        combat.blocker_assignments.retain(|_, blockers| {
-            blockers.retain(|b| *b != oid);
-            true
-        });
-        combat.blocker_to_attacker.remove(&oid);
-    }
+    super::effects::remove_from_combat::remove_object_from_combat(state, oid);
 
     // Mark the shield as consumed (one-shot).
     if let Some(obj) = state.objects.get_mut(&rid.source) {

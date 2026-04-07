@@ -597,6 +597,10 @@ pub enum Duration {
     UntilEndOfCombat,
     UntilYourNextTurn,
     UntilHostLeavesPlay,
+    /// CR 502.3: Effect expires at the beginning of the affected permanent's
+    /// controller's next untap step. Used for "doesn't untap during its
+    /// controller's next untap step" effects.
+    UntilControllerNextUntapStep,
     /// CR 611.2b: "for as long as [condition]" — effect persists while condition holds.
     ForAsLongAs {
         condition: StaticCondition,
@@ -2764,6 +2768,12 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         recipient: TargetFilter,
     },
+    /// CR 506.4: Remove a creature from combat — it stops being an attacking,
+    /// blocking, blocked, and/or unblocked creature.
+    RemoveFromCombat {
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
+    },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -2953,7 +2963,8 @@ impl Effect {
             | Effect::Double { target, .. }
             | Effect::BlightEffect { target, .. }
             | Effect::SetLifeTotal { target, .. }
-            | Effect::GiveControl { target, .. } => Some(target),
+            | Effect::GiveControl { target, .. }
+            | Effect::RemoveFromCombat { target, .. } => Some(target),
 
             Effect::ExileTop { player, .. } => Some(player),
 
@@ -3158,6 +3169,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::SetLifeTotal { .. } => "SetLifeTotal",
         Effect::SetDayNight { .. } => "SetDayNight",
         Effect::GiveControl { .. } => "GiveControl",
+        Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -3288,6 +3300,7 @@ pub enum EffectKind {
     SetLifeTotal,
     SetDayNight,
     GiveControl,
+    RemoveFromCombat,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -3421,6 +3434,7 @@ impl From<&Effect> for EffectKind {
             Effect::SetLifeTotal { .. } => EffectKind::SetLifeTotal,
             Effect::SetDayNight { .. } => EffectKind::SetDayNight,
             Effect::GiveControl { .. } => EffectKind::GiveControl,
+            Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }

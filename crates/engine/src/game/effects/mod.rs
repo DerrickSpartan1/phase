@@ -78,6 +78,7 @@ pub mod pump;
 pub mod put_on_top;
 pub mod put_on_top_or_bottom;
 pub mod regenerate;
+pub mod remove_from_combat;
 pub mod reveal_hand;
 pub mod reveal_top;
 pub mod reveal_until;
@@ -317,6 +318,7 @@ pub fn resolve_effect(
             Ok(())
         }
         Effect::GiveControl { .. } => gain_control::resolve_give(state, ability, events),
+        Effect::RemoveFromCombat { .. } => remove_from_combat::resolve(state, ability, events),
         Effect::VentureIntoDungeon => venture::resolve(state, ability, events),
         Effect::VentureInto { dungeon } => {
             venture::resolve_venture_into(state, ability, *dungeon, events)

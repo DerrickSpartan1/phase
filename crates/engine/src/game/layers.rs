@@ -63,6 +63,34 @@ pub fn prune_until_next_turn_effects(state: &mut GameState, active_player: Playe
     }
 }
 
+/// CR 502.3: Prune "until controller's next untap step" transient effects
+/// for permanents controlled by the active player. Called during the untap step
+/// AFTER enforcing the CantUntap restriction (so the permanent skips exactly one untap).
+pub fn prune_controller_untap_step_effects(state: &mut GameState, active_player: PlayerId) {
+    let before = state.transient_continuous_effects.len();
+    state.transient_continuous_effects.retain(|e| {
+        if e.duration != Duration::UntilControllerNextUntapStep {
+            return true;
+        }
+        // The effect applies to specific objects — check if the affected object
+        // is controlled by the active player (whose untap step is happening).
+        match &e.affected {
+            TargetFilter::SpecificObject { id } => {
+                let is_active_controlled = state
+                    .objects
+                    .get(id)
+                    .is_some_and(|obj| obj.controller == active_player);
+                // Keep the effect if NOT controlled by active player (not their untap step yet)
+                !is_active_controlled
+            }
+            _ => true,
+        }
+    });
+    if state.transient_continuous_effects.len() != before {
+        state.layers_dirty = true;
+    }
+}
+
 /// Remove transient effects whose source has left the battlefield.
 /// Called when an object leaves the battlefield.
 pub fn prune_host_left_effects(state: &mut GameState, departed_id: ObjectId) {

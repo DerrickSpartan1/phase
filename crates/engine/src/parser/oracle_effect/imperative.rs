@@ -1259,8 +1259,40 @@ fn try_parse_that_many_counters(lower: &str, ctx: &ParseContext) -> Option<Effec
     })
 }
 
+/// CR 506.4: Parse "remove [target] from combat" patterns.
+/// Matches: "remove it from combat", "remove ~ from combat",
+/// "remove target [creature] from combat", "remove that creature from combat".
+fn parse_remove_from_combat_ast(lower: &str) -> Option<TargetFilter> {
+    // Strip the "remove " prefix
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("remove ")
+        .parse(lower)
+        .ok()?;
+    // Check that "from combat" appears in the remainder
+    let from_combat_pos = rest.find("from combat")?;
+    let subject = rest[..from_combat_pos].trim();
+    // Resolve the subject to a target filter
+    let target = match subject {
+        "it" | "that creature" | "that land" | "that permanent" => TargetFilter::ParentTarget,
+        "" => TargetFilter::SelfRef,
+        _ => {
+            // Try parsing as a target phrase (e.g., "target attacking creature you control")
+            let (tf, _rest) = parse_target(subject);
+            if matches!(tf, TargetFilter::Any) && !subject.starts_with("target") {
+                // parse_target returns Any when it doesn't recognize the phrase —
+                // bail out to avoid false matches.
+                return None;
+            }
+            tf
+        }
+    };
+    Some(target)
+}
+
 pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImperativeAst> {
-    if matches!(lower, "shuffle" | "then shuffle") {
+    if matches!(
+        lower,
+        "shuffle" | "shuffles" | "then shuffle" | "then shuffles"
+    ) {
         return Some(ShuffleImperativeAst::ShuffleLibrary {
             target: TargetFilter::Controller,
         });
@@ -2030,8 +2062,12 @@ pub(super) fn parse_imperative_family_ast(
             .map(ImperativeFamilyAst::ZoneCounter)
             .or_else(|| parse_put_ast(text, lower).map(ImperativeFamilyAst::Put)),
 
-        // "remove" → counter removal (step 2)
-        "remove" => parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter),
+        // "remove" → "remove from combat" (CR 506.4) → counter removal (step 2)
+        "remove" => parse_remove_from_combat_ast(lower)
+            .map(ImperativeFamilyAst::RemoveFromCombat)
+            .or_else(|| {
+                parse_zone_counter_ast(text, lower, ctx).map(ImperativeFamilyAst::ZoneCounter)
+            }),
 
         // "add" → mana/cost-resource (step 1)
         "add" => parse_cost_resource_ast(text, lower).map(ImperativeFamilyAst::CostResource),
@@ -2344,6 +2380,8 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
             count,
             target: TargetFilter::Controller,
         },
+        // CR 506.4: Remove from combat.
+        ImperativeFamilyAst::RemoveFromCombat(target) => Effect::RemoveFromCombat { target },
         // Shuffle is handled in `lower_imperative_family_ast` directly.
         ImperativeFamilyAst::Shuffle(_) => unreachable!(),
     }

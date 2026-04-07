@@ -292,6 +292,12 @@ pub(super) fn parse_subject_application(
             inherits_parent: false,
         });
     }
+    // "those creatures" / "those lands" — anaphoric reference to previous targets.
+    // Maps to ParentTarget so the restriction applies to the same objects.
+    if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>("those ").parse(lower.as_str()) {
+        return subject_filter_application(TargetFilter::ParentTarget, false);
+    }
+
     // Bare plural noun phrase subjects ("creatures you control", "other creatures you control")
     // are implicit "all X" forms — strip any "other " prefix and route through parse_target.
     let (had_other, noun_subject) =
@@ -854,12 +860,32 @@ fn build_restriction_clause(
     // Compound restrictions ("can't attack or block") produce multiple StaticDefinition entries.
     let modes = parse_restriction_modes(&lower)?;
 
+    // CR 502.3: "doesn't untap during its controller's next untap step" —
+    // override duration to UntilControllerNextUntapStep when the predicate
+    // contains "next untap step". Also inject AddStaticMode modification so
+    // the transient continuous effect system can enforce it.
+    let has_next_untap = normalized.to_lowercase().contains("next untap step")
+        || predicate.to_lowercase().contains("next untap step");
+    let duration = if has_next_untap && modes.iter().any(|m| matches!(m, StaticMode::CantUntap)) {
+        Some(Duration::UntilControllerNextUntapStep)
+    } else {
+        duration
+    };
+
     let static_abilities = modes
         .into_iter()
         .map(|mode| {
-            StaticDefinition::new(mode)
+            let mut def = StaticDefinition::new(mode.clone())
                 .affected(application.affected.clone())
-                .description(predicate.to_string())
+                .description(predicate.to_string());
+            // For CantUntap with a duration, inject the modification so the
+            // transient effect system can propagate it through layers.
+            if matches!(mode, StaticMode::CantUntap) && duration.is_some() {
+                def = def.modifications(vec![ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantUntap,
+                }]);
+            }
+            def
         })
         .collect();
 
