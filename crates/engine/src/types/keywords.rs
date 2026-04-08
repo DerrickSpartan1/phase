@@ -1173,6 +1173,10 @@ impl FromStr for Keyword {
             "forestwalk" => Ok(Keyword::Landwalk("Forest".to_string())),
             "mountainwalk" => Ok(Keyword::Landwalk("Mountain".to_string())),
             "plainswalk" => Ok(Keyword::Landwalk("Plains".to_string())),
+            // CR 702.14: Non-basic landwalk variants using supertypes/properties.
+            "legendarylandwalk" => Ok(Keyword::Landwalk("Legendary".to_string())),
+            "nonbasiclandwalk" => Ok(Keyword::Landwalk("Nonbasic".to_string())),
+            "snowlandwalk" => Ok(Keyword::Landwalk("Snow".to_string())),
             _ => Ok(Keyword::Unknown(s.to_string())),
         }
     }
