@@ -32,6 +32,7 @@ pub mod choose_from_zone;
 pub mod clash;
 pub mod cleanup;
 pub mod collect_evidence;
+pub mod conjure;
 pub mod connive;
 pub mod control_next_turn;
 pub mod copy_spell;
@@ -338,6 +339,7 @@ pub fn resolve_effect(
             venture::resolve_venture_into(state, ability, *dungeon, events)
         }
         Effect::TakeTheInitiative => venture::resolve_take_initiative(state, ability, events),
+        Effect::Conjure { .. } => conjure::resolve(state, ability, events),
         Effect::Unimplemented { name, .. } => {
             // Log warning and return Ok (no-op) for unimplemented effects
             eprintln!("Warning: Unimplemented effect: {}", name);

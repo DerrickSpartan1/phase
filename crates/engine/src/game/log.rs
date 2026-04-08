@@ -144,7 +144,7 @@ fn categorize(event: &GameEvent) -> LogCategory {
 
         GameEvent::SpeedChanged { .. } => LogCategory::Special,
 
-        GameEvent::TokenCreated { .. } => LogCategory::Token,
+        GameEvent::TokenCreated { .. } | GameEvent::ObjectConjured { .. } => LogCategory::Token,
 
         GameEvent::EffectResolved { .. }
         | GameEvent::BecomesTarget { .. }
@@ -496,6 +496,14 @@ fn format_segments(event: &GameEvent, state: &GameState) -> Vec<LogSegment> {
 
         GameEvent::TokenCreated { object_id, name } => vec![
             text("Token created: "),
+            LogSegment::CardName {
+                name: name.clone(),
+                object_id: *object_id,
+            },
+        ],
+
+        GameEvent::ObjectConjured { object_id, name } => vec![
+            text("Conjured: "),
             LogSegment::CardName {
                 name: name.clone(),
                 object_id: *object_id,

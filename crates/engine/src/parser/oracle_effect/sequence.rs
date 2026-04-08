@@ -322,6 +322,7 @@ fn starts_clause_text_lower(s: &str) -> bool {
         value((), tag("they ")),
     )))
     .or(alt((
+        value((), tag("conjure ")),
         value((), tag("target ")),
         value((), tag("transform ")),
         value((), tag("untap ")),

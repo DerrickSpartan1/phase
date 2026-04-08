@@ -29,8 +29,8 @@ use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
-    ContinuousModification, DamageSource, DelayedTriggerCondition, Duration, Effect, FilterProp,
-    GameRestriction, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
+    ConjureCard, ContinuousModification, DamageSource, DelayedTriggerCondition, Duration, Effect,
+    FilterProp, GameRestriction, MultiTargetSpec, PlayerFilter, PtValue, QuantityExpr, QuantityRef,
     RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
     TargetFilter, TypeFilter, TypedFilter, UnlessCost, ZoneRef,
 };
@@ -934,8 +934,145 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
         return redirected;
     }
 
+    // Digital-only: "conjure a card named X into/onto zone" — Conjure keyword action.
+    if let Some(effect) = try_parse_conjure(tp) {
+        return parsed_clause(effect);
+    }
+
     let ast = parse_clause_ast(text, ctx);
     lower_clause_ast(ast, ctx)
+}
+
+/// Digital-only keyword action: Parse "conjure [quantity] card(s) named {Name} into/onto {zone}"
+/// patterns. Handles:
+/// - "conjure a card named X onto the battlefield"
+/// - "conjure a card named X into your hand"
+/// - "conjure three cards named X into your graveyard"
+/// - "conjure a card named X onto the battlefield tapped"
+/// - "conjure a card named X and a card named Y into your hand"
+/// - "conjure X cards named Y onto the battlefield"
+///
+/// Uses nom combinators exclusively for dispatch and structure recognition.
+fn try_parse_conjure(tp: TextPair) -> Option<Effect> {
+    // Gate: must start with "conjure " (nom tag dispatch).
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("conjure ")
+        .parse(tp.lower)
+        .ok()?;
+    let rest_orig = &tp.original[tp.original.len() - rest.len()..];
+
+    // Parse the first "a card named X" / "N cards named X" entry.
+    let mut cards = Vec::new();
+    let (count, after_count, _) = parse_conjure_quantity(rest, rest_orig)?;
+
+    // Expect "named " after the quantity phrase.
+    let (after_named, _) = tag::<_, _, VerboseError<&str>>("named ")
+        .parse(after_count)
+        .ok()?;
+    let after_named_orig = &rest_orig[rest_orig.len() - after_named.len()..];
+
+    // Extract card name: take until " onto ", " into ", or " and a card" separator.
+    let (card_name_lower, zone_rest) = parse_conjure_card_name(after_named)?;
+    let card_name = &after_named_orig[..card_name_lower.len()];
+
+    cards.push(ConjureCard {
+        name: card_name.to_string(),
+        count,
+    });
+
+    // Check for " and a card named " continuation (multi-card pattern).
+    // e.g., "conjure a card named X and a card named Y into your hand"
+    let zone_rest = if let Ok((after_and, _)) =
+        tag::<_, _, VerboseError<&str>>(" and a card named ").parse(zone_rest)
+    {
+        let after_and_orig = &rest_orig[rest_orig.len() - after_and.len()..];
+        let (next_name_lower, next_zone_rest) = parse_conjure_card_name(after_and)?;
+        let next_name = &after_and_orig[..next_name_lower.len()];
+        cards.push(ConjureCard {
+            name: next_name.to_string(),
+            count: QuantityExpr::Fixed { value: 1 },
+        });
+        next_zone_rest
+    } else {
+        zone_rest
+    };
+
+    // Parse destination zone.
+    let (destination, zone_rest) = parse_conjure_zone(zone_rest)?;
+
+    // Parse optional "tapped" suffix.
+    let tapped = tag::<_, _, VerboseError<&str>>(" tapped")
+        .parse(zone_rest)
+        .is_ok();
+
+    Some(Effect::Conjure {
+        cards,
+        destination,
+        tapped,
+    })
+}
+
+/// Parse the quantity portion of a conjure clause.
+/// Consumes the quantity and "card(s) " but NOT "named " — the caller handles "named ".
+/// Returns (QuantityExpr, remaining_lower, remaining_orig).
+fn parse_conjure_quantity<'a>(
+    lower: &'a str,
+    orig: &'a str,
+) -> Option<(QuantityExpr, &'a str, &'a str)> {
+    // "a card " → quantity 1
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("a card ").parse(lower) {
+        let rest_orig = &orig[orig.len() - rest.len()..];
+        return Some((QuantityExpr::Fixed { value: 1 }, rest, rest_orig));
+    }
+
+    // Try numeric: "three cards ", "four cards ", "X cards "
+    // First try nom parse_number for English words and digits.
+    if let Ok((after_num, n)) = nom_primitives::parse_number.parse(lower) {
+        let after_num = after_num.trim_start();
+        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("cards ").parse(after_num) {
+            let rest_orig = &orig[orig.len() - rest.len()..];
+            return Some((QuantityExpr::Fixed { value: n as i32 }, rest, rest_orig));
+        }
+    }
+
+    None
+}
+
+/// Extract the card name from conjure text. The name extends until we hit
+/// a zone destination (" onto " or " into ") or an " and a card" separator.
+/// Uses nom `take_until` combinators for structured extraction.
+///
+/// " and a card" is checked first because multi-card patterns like
+/// "X and a card named Y into your hand" contain both " and a card" and " into ",
+/// and we want the shortest (first occurring) separator.
+fn parse_conjure_card_name(lower: &str) -> Option<(&str, &str)> {
+    alt((
+        take_until::<_, _, VerboseError<&str>>(" and a card"),
+        take_until(" onto "),
+        take_until(" into "),
+    ))
+    .parse(lower)
+    .ok()
+    .map(|(rest, name)| (name, rest))
+}
+
+/// Parse the destination zone from conjure text using nom combinators.
+fn parse_conjure_zone(lower: &str) -> Option<(Zone, &str)> {
+    alt((
+        value(
+            Zone::Battlefield,
+            tag::<_, _, VerboseError<&str>>(" onto the battlefield"),
+        ),
+        value(Zone::Hand, tag(" into your hand")),
+        value(Zone::Graveyard, tag(" into your graveyard")),
+        value(Zone::Library, tag(" into your library")),
+        // Third-person variants: "into their hand/graveyard/library"
+        value(Zone::Hand, tag(" into their hand")),
+        value(Zone::Graveyard, tag(" into their graveyard")),
+        value(Zone::Library, tag(" into their library")),
+    ))
+    .parse(lower)
+    .ok()
+    .map(|(rest, zone)| (zone, rest))
 }
 
 /// CR 611.2b: Parse "have [subject] [predicate]" subject redirection.
@@ -10252,5 +10389,125 @@ mod tests {
             "expected Pump with SelfRef target, got: {:?}",
             clause.effect
         );
+    }
+
+    // ── Conjure tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn conjure_basic_battlefield() {
+        let e = parse_effect("Conjure a card named Regal Force onto the battlefield");
+        match e {
+            Effect::Conjure {
+                cards,
+                destination,
+                tapped,
+            } => {
+                assert_eq!(cards.len(), 1);
+                assert_eq!(cards[0].name, "Regal Force");
+                assert_eq!(cards[0].count, QuantityExpr::Fixed { value: 1 });
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(!tapped);
+            }
+            other => panic!("expected Conjure, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conjure_quantity_graveyard() {
+        let e = parse_effect("conjure three cards named Reassembling Skeleton into your graveyard");
+        match e {
+            Effect::Conjure {
+                cards,
+                destination,
+                tapped,
+            } => {
+                assert_eq!(cards.len(), 1);
+                assert_eq!(cards[0].name, "Reassembling Skeleton");
+                assert_eq!(cards[0].count, QuantityExpr::Fixed { value: 3 });
+                assert_eq!(destination, Zone::Graveyard);
+                assert!(!tapped);
+            }
+            other => panic!("expected Conjure, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conjure_battlefield_tapped() {
+        let e = parse_effect("conjure a card named Forest onto the battlefield tapped");
+        match e {
+            Effect::Conjure {
+                cards,
+                destination,
+                tapped,
+            } => {
+                assert_eq!(cards.len(), 1);
+                assert_eq!(cards[0].name, "Forest");
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(tapped);
+            }
+            other => panic!("expected Conjure, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conjure_multi_card_hand() {
+        let e = parse_effect(
+            "conjure a card named Darksteel Ingot and a card named Darksteel Plate into your hand",
+        );
+        match e {
+            Effect::Conjure {
+                cards,
+                destination,
+                tapped,
+            } => {
+                assert_eq!(cards.len(), 2);
+                assert_eq!(cards[0].name, "Darksteel Ingot");
+                assert_eq!(cards[0].count, QuantityExpr::Fixed { value: 1 });
+                assert_eq!(cards[1].name, "Darksteel Plate");
+                assert_eq!(cards[1].count, QuantityExpr::Fixed { value: 1 });
+                assert_eq!(destination, Zone::Hand);
+                assert!(!tapped);
+            }
+            other => panic!("expected Conjure, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conjure_into_library() {
+        let e = parse_effect("conjure four cards named Lightning Bolt into your library");
+        match e {
+            Effect::Conjure {
+                cards,
+                destination,
+                tapped,
+            } => {
+                assert_eq!(cards.len(), 1);
+                assert_eq!(cards[0].name, "Lightning Bolt");
+                assert_eq!(cards[0].count, QuantityExpr::Fixed { value: 4 });
+                assert_eq!(destination, Zone::Library);
+                assert!(!tapped);
+            }
+            other => panic!("expected Conjure, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conjure_two_battlefield_tapped() {
+        let e =
+            parse_effect("conjure two cards named Mishra's Foundry onto the battlefield tapped");
+        match e {
+            Effect::Conjure {
+                cards,
+                destination,
+                tapped,
+            } => {
+                assert_eq!(cards.len(), 1);
+                assert_eq!(cards[0].name, "Mishra's Foundry");
+                assert_eq!(cards[0].count, QuantityExpr::Fixed { value: 2 });
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(tapped);
+            }
+            other => panic!("expected Conjure, got: {other:?}"),
+        }
     }
 }

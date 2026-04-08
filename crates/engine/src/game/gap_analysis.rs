@@ -61,7 +61,6 @@ const PRE_DISPATCH_VERBS: &[&str] = &[
 
 /// Keywords/mechanics known to be unimplemented in the engine.
 const NEW_MECHANIC_KEYWORDS: &[&str] = &[
-    "conjure",
     "specialize",
     "specializes",
     "perpetually",
@@ -562,11 +561,7 @@ mod tests {
 
     #[test]
     fn classify_new_mechanic() {
-        let (cat, _, _) = classify_gap(
-            "Effect:conjure",
-            Some("conjure a duplicate of target creature"),
-            &[],
-        );
+        let (cat, _, _) = classify_gap("Effect:specialize", Some("specialize into a color"), &[]);
         assert_eq!(cat, GapCategory::NewMechanic);
     }
 

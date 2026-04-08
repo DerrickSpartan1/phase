@@ -1337,7 +1337,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::TakeTheInitiative
         | Effect::Clash
         | Effect::Incubate { .. }
-        | Effect::TimeTravel => {}
+        | Effect::TimeTravel
+        | Effect::Conjure { .. } => {}
     }
     d
 }
