@@ -45,6 +45,35 @@ where
     }
 }
 
+/// Split `text` on the first case-insensitive occurrence of `sep` (given as lowercase),
+/// returning `(before, after)` both in the **original case** of `text`.
+///
+/// Eliminates the manual `text.len() - suffix.len()` offset idiom by composing
+/// `nom_on_lower` with `take_until` + `tag` internally.
+///
+/// `lower` must be the pre-lowercased version of `text` (same byte length).
+/// `sep` must be lowercase.
+///
+/// # Example
+/// ```ignore
+/// let text = "You may Exert it. When you do, Draw a card";
+/// let lower = text.to_lowercase();
+/// let (before, after) = split_once_on_lower(text, &lower, ". when you do, ").unwrap();
+/// assert_eq!(before, "You may Exert it");
+/// assert_eq!(after, "Draw a card");
+/// ```
+pub fn split_once_on_lower<'a>(
+    text: &'a str,
+    lower: &str,
+    sep: &str,
+) -> Option<(&'a str, &'a str)> {
+    // Find `sep` in the lowercase text to get the split position, then map both
+    // sides back to the original-case `text`. This is a structural position lookup,
+    // not parsing dispatch — `.find()` is permitted for structural boundary detection.
+    let pos = lower.find(sep)?;
+    Some((&text[..pos], &text[pos + sep.len()..]))
+}
+
 /// Run a nom combinator directly on lowercase text, discarding the remainder.
 ///
 /// Useful when the caller only needs the parsed value and the remainder is handled

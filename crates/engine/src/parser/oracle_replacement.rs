@@ -64,9 +64,9 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
 
     // --- "~ enters the battlefield tapped" (unconditional) ---
     // Guard: reject text with " unless " — all conditional patterns must be handled above.
-    if (norm_lower.contains("enters the battlefield tapped")
-        || norm_lower.contains("enters tapped"))
-        && !norm_lower.contains(" unless ")
+    if (nom_primitives::scan_contains(&norm_lower, "enters the battlefield tapped")
+        || nom_primitives::scan_contains(&norm_lower, "enters tapped"))
+        && !nom_primitives::scan_contains(&norm_lower, "unless")
     {
         return Some(
             ReplacementDefinition::new(ReplacementEvent::Moved)
@@ -87,7 +87,9 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
     }
 
     // --- "If ~ would die, {effect}" ---
-    if norm_lower.contains("~ would die") || norm_lower.contains("~ would be destroyed") {
+    if nom_primitives::scan_contains(&norm_lower, "~ would die")
+        || nom_primitives::scan_contains(&norm_lower, "~ would be destroyed")
+    {
         let effect_text = extract_replacement_effect(&normalized);
         let mut def = ReplacementDefinition::new(ReplacementEvent::Destroy)
             .valid_card(TargetFilter::SelfRef)
@@ -116,7 +118,7 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
     // not replacement parsing. See oracle_effect.rs damage prevention disabled handler.
 
     // --- "If you would draw a card, {effect}" ---
-    if lower.contains("you would draw") {
+    if nom_primitives::scan_contains(&lower, "you would draw") {
         let effect_text = extract_replacement_effect(&normalized);
         let mut def =
             ReplacementDefinition::new(ReplacementEvent::Draw).description(text.to_string());
@@ -128,7 +130,7 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
 
     // --- "If [player] would gain life, {effect}" ---
     // CR 614.1a: Widened from "you would gain life" to handle opponent/player scope.
-    if lower.contains("would gain life") {
+    if nom_primitives::scan_contains(&lower, "would gain life") {
         let effect_text = extract_replacement_effect(&normalized);
         let mut def =
             ReplacementDefinition::new(ReplacementEvent::GainLife).description(text.to_string());
@@ -136,11 +138,11 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
             def = def.execute(parse_effect_chain(&e, AbilityKind::Spell));
         }
         // Parse the subject to determine player scope
-        if lower.contains("an opponent would gain life")
-            || lower.contains("opponent would gain life")
+        if nom_primitives::scan_contains(&lower, "an opponent would gain life")
+            || nom_primitives::scan_contains(&lower, "opponent would gain life")
         {
             def.valid_player = Some(ControllerRef::Opponent);
-        } else if lower.contains("a player would gain life") {
+        } else if nom_primitives::scan_contains(&lower, "a player would gain life") {
             // "a player" applies to all players — None means controller-only,
             // so we need a way to express "all". Use a sentinel: leave valid_player
             // as None and let the matcher check. Actually, for "a player", the
@@ -155,7 +157,7 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
     }
 
     // --- "If [someone] would lose life, they lose twice that much life instead" ---
-    if lower.contains("would lose life") {
+    if nom_primitives::scan_contains(&lower, "would lose life") {
         return Some(
             ReplacementDefinition::new(ReplacementEvent::LoseLife).description(text.to_string()),
         );
@@ -163,7 +165,10 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
 
     // --- "If [source] would deal [noncombat] damage ... it deals that much damage plus N instead" ---
     // CR 614.1a: Damage boost/reduction replacement effects.
-    if lower.contains("would deal") && lower.contains("damage") && lower.contains("instead") {
+    if nom_primitives::scan_contains(&lower, "would deal")
+        && nom_primitives::scan_contains(&lower, "damage")
+        && nom_primitives::scan_contains(&lower, "instead")
+    {
         if let Some(def) = parse_damage_modification_replacement(&norm_lower, &text) {
             return Some(def);
         }
@@ -176,21 +181,28 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
     // --- "[Subject] enters/escapes with N [type] counter(s)" ---
     // CR 614.1c: Handles "enters with", "escapes with" (CR 702.138), and
     // kicker-conditional "if was kicked, it enters with" (CR 702.33d).
-    if (lower.contains("enters") || lower.contains("escapes")) && lower.contains("counter") {
+    if (nom_primitives::scan_contains(&lower, "enters")
+        || nom_primitives::scan_contains(&lower, "escapes"))
+        && nom_primitives::scan_contains(&lower, "counter")
+    {
         if let Some(def) = parse_enters_with_counters(&norm_lower, &text) {
             return Some(def);
         }
     }
 
     // --- Token creation replacement: "if one or more tokens would be created..." ---
-    if lower.contains("tokens would be created") || lower.contains("token would be created") {
+    if nom_primitives::scan_contains(&lower, "tokens would be created")
+        || nom_primitives::scan_contains(&lower, "token would be created")
+    {
         if let Some(def) = parse_token_replacement(&lower, &text) {
             return Some(def);
         }
     }
 
     // --- Counter addition replacement: "if one or more ... counters would be put on..." ---
-    if lower.contains("counters would be put on") || lower.contains("counter would be put on") {
+    if nom_primitives::scan_contains(&lower, "counters would be put on")
+        || nom_primitives::scan_contains(&lower, "counter would be put on")
+    {
         if let Some(def) = parse_counter_replacement(&lower, &text) {
             return Some(def);
         }
@@ -226,11 +238,13 @@ fn replace_self_refs(text: &str, card_name: &str) -> String {
 /// Returns Optional ReplacementDefinition with execute=LoseLife (accept) and decline=Tap (decline).
 fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     // Match: "you may pay N life" + "enters tapped" (in either sentence order)
-    if !norm_lower.contains("you may pay") || !norm_lower.contains("life") {
+    if !nom_primitives::scan_contains(norm_lower, "you may pay")
+        || !nom_primitives::scan_contains(norm_lower, "life")
+    {
         return None;
     }
-    if !norm_lower.contains("enters tapped")
-        && !norm_lower.contains("enters the battlefield tapped")
+    if !nom_primitives::scan_contains(norm_lower, "enters tapped")
+        && !nom_primitives::scan_contains(norm_lower, "enters the battlefield tapped")
     {
         return None;
     }
@@ -253,7 +267,8 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
         },
     );
 
-    let has_basic_land_type_choice = norm_lower.contains("choose a basic land type");
+    let has_basic_land_type_choice =
+        nom_primitives::scan_contains(norm_lower, "choose a basic land type");
     let execute = if has_basic_land_type_choice {
         AbilityDefinition::new(
             AbilityKind::Spell,
@@ -295,18 +310,23 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
 /// Skips lines that also contain shock land markers (handled by parse_shock_land).
 fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     // Must have "as" + "enters" framing
-    if !norm_lower.contains("as ") || !norm_lower.contains("enters") {
+    if !nom_primitives::scan_contains(norm_lower, "as")
+        || !nom_primitives::scan_contains(norm_lower, "enters")
+    {
         return None;
     }
 
     // Don't match shock lands — they have their own handler
-    if norm_lower.contains("you may pay") && norm_lower.contains("life") {
+    if nom_primitives::scan_contains(norm_lower, "you may pay")
+        && nom_primitives::scan_contains(norm_lower, "life")
+    {
         return None;
     }
 
-    // Extract the "choose a ..." clause
-    let choose_idx = norm_lower.find("choose ")?;
-    let choose_text = &norm_lower[choose_idx..];
+    // Extract the "choose a ..." clause — scan_split_at_phrase returns (prefix, rest_starting_at_match)
+    let (_, choose_text) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
+        tag::<_, _, VerboseError<&str>>("choose ").parse(i)
+    })?;
     let choice_type = try_parse_named_choice(choose_text)?;
 
     Some(
@@ -329,13 +349,15 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
 /// The player chooses a valid permanent to copy as part of the replacement.
 fn parse_clone_replacement(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     // Must contain "enter as a copy of" (after self-ref normalization)
-    let copy_idx = norm_lower.find("enter as a copy of ")?;
+    let (before_copy, copy_match) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
+        tag::<_, _, VerboseError<&str>>("enter as a copy of ").parse(i)
+    })?;
     // Must be preceded by "you may have" for the optional framing
-    if !norm_lower[..copy_idx].contains("you may have") {
+    if !nom_primitives::scan_contains(before_copy, "you may have") {
         return None;
     }
 
-    let after_copy = &norm_lower[copy_idx + "enter as a copy of ".len()..];
+    let after_copy = &copy_match["enter as a copy of ".len()..];
     // Strip "any " / "a " / "an " article before the type phrase
     let type_text = alt((
         tag::<_, _, VerboseError<&str>>("any "),
@@ -384,8 +406,8 @@ fn parse_enters_tapped_unless(
     norm_lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
-    if !norm_lower.contains("enters tapped")
-        && !norm_lower.contains("enters the battlefield tapped")
+    if !nom_primitives::scan_contains(norm_lower, "enters tapped")
+        && !nom_primitives::scan_contains(norm_lower, "enters the battlefield tapped")
     {
         return None;
     }
@@ -554,9 +576,8 @@ fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
 /// Extract life payment amount from "pay N life" pattern.
 fn extract_life_payment(text: &str) -> Option<i32> {
     let after_pay = strip_after(text, "pay ")?;
-    let end = after_pay.find(' ').unwrap_or(after_pay.len());
-    let num_str = &after_pay[..end];
-    num_str.parse().ok()
+    let (_rem, value) = nom_primitives::parse_number.parse(after_pay).ok()?;
+    Some(value as i32)
 }
 
 /// Parse "enters/escapes with N [type] counter(s)" patterns into a Moved replacement.
@@ -597,8 +618,8 @@ fn parse_enters_with_counters(
     // for X-cost cards like Endless One, Walking Ballista, Hangarback Walker, etc.
     let (count, rest) = parse_number(after_prefix).unwrap_or((1, after_prefix));
     // Next word(s) before "counter" are the counter type
-    let counter_pos = rest.find("counter")?;
-    let counter_type_raw = rest[..counter_pos].trim();
+    let (_, (counter_type_raw, _)) = nom_primitives::split_once_on(rest, "counter").ok()?;
+    let counter_type_raw = counter_type_raw.trim();
     let counter_type = match counter_type_raw {
         "+1/+1" => "P1P1".to_string(),
         "-1/-1" => "M1M1".to_string(),
@@ -640,7 +661,10 @@ fn parse_enters_with_counters(
     .parse(work_text)
     .ok()
     .map(|(rest, _)| rest)
-    .filter(|s| s.contains("creature") || s.contains("permanent"));
+    .filter(|s| {
+        nom_primitives::scan_contains(s, "creature")
+            || nom_primitives::scan_contains(s, "permanent")
+    });
     let valid_card = if let Some(subject_text) = subject {
         let (filter, _) = parse_type_phrase(subject_text);
         // Inject Another since we stripped "other" above
@@ -784,8 +808,11 @@ fn parse_creature_die_exile_replacement(
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     // Must contain "would die" and "instead" (exile-instead pattern).
-    let would_die_pos = norm_lower.find("would die")?;
-    if !norm_lower.contains("instead") {
+    let (before_die, _) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
+        tag::<_, _, VerboseError<&str>>("would die").parse(i)
+    })?;
+    let would_die_pos = before_die.len();
+    if !nom_primitives::scan_contains(norm_lower, "instead") {
         return None;
     }
 
@@ -837,12 +864,12 @@ fn parse_creature_die_exile_replacement(
         )
     } else {
         // Generic effect text — parse as effect chain from the original-case text
-        let comma_pos = original_text.find(", ").unwrap_or(0);
-        let orig_effect = if comma_pos > 0 {
-            original_text[comma_pos + 2..].trim()
-        } else {
-            effect_text_trimmed
-        };
+        let orig_effect =
+            if let Ok((_, (_, after))) = nom_primitives::split_once_on(original_text, ", ") {
+                after.trim()
+            } else {
+                effect_text_trimmed
+            };
         parse_effect_chain(orig_effect, AbilityKind::Spell)
     };
 
@@ -860,13 +887,13 @@ fn parse_graveyard_exile_replacement(
     norm_lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
-    if !norm_lower.contains("would be put into") {
+    if !nom_primitives::scan_contains(norm_lower, "would be put into") {
         return None;
     }
-    if !norm_lower.contains("graveyard") {
+    if !nom_primitives::scan_contains(norm_lower, "graveyard") {
         return None;
     }
-    if !norm_lower.contains("exile") {
+    if !nom_primitives::scan_contains(norm_lower, "exile") {
         return None;
     }
 
@@ -874,8 +901,8 @@ fn parse_graveyard_exile_replacement(
     // "an opponent's graveyard" → opponent-owned cards
     // CR 400.3 + CR 108.3: Cards go to owner's graveyard, so "opponent's graveyard"
     // means cards owned by an opponent.
-    let valid_card = if norm_lower.contains("an opponent's graveyard")
-        || norm_lower.contains("opponent's graveyard")
+    let valid_card = if nom_primitives::scan_contains(norm_lower, "an opponent's graveyard")
+        || nom_primitives::scan_contains(norm_lower, "opponent's graveyard")
     {
         Some(TargetFilter::Typed(TypedFilter::default().properties(
             vec![FilterProp::Owned {
@@ -947,11 +974,22 @@ fn parse_damage_modification_replacement(
 
 /// Parse the damage source filter from the subject clause before "would deal".
 fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
-    let subject = norm_lower.split("would deal").next()?.trim();
+    let (_, (subject, _)) = nom_primitives::split_once_on(norm_lower, "would deal").ok()?;
+    let subject = subject.trim();
 
     // Handle ability word prefixes ("Revolt — ..., if a source you control")
     // by finding the last "if " clause, which contains the actual replacement condition.
-    let subject = subject.rsplit("if ").next().unwrap_or(subject).trim();
+    // Use split_once_on to extract the last "if " clause (for ability word prefixes).
+    // rsplit equivalent: take everything after the last "if " occurrence.
+    let subject = {
+        let mut last = subject;
+        let mut remaining = subject;
+        while let Ok((_, (_, after))) = nom_primitives::split_once_on(remaining, "if ") {
+            last = after;
+            remaining = after;
+        }
+        last.trim()
+    };
 
     // Self-reference: "~" after stripping "if"
     if subject == "~" {
@@ -1038,7 +1076,7 @@ fn parse_damage_target_filter(norm_lower: &str) -> Option<DamageTargetFilter> {
             // Guard: opponent-only and player-only exclude "permanent" from the full text
             match filter {
                 DamageTargetFilter::OpponentOnly | DamageTargetFilter::PlayerOnly
-                    if norm_lower.contains("permanent") =>
+                    if nom_primitives::scan_contains(norm_lower, "permanent") =>
                 {
                     // Skip — "permanent" present means this is OpponentOrTheirPermanents (already tried)
                 }
@@ -1163,9 +1201,9 @@ fn extract_replacement_effect(text: &str) -> Option<String> {
 fn parse_token_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
 
-    let modification = if lower.contains("twice that many") {
+    let modification = if nom_primitives::scan_contains(lower, "twice that many") {
         Some(QuantityModification::Double)
-    } else if lower.contains("those tokens plus") {
+    } else if nom_primitives::scan_contains(lower, "those tokens plus") {
         // "those tokens plus a [Name] token" — recognized as CreateToken replacement.
         // Extra token creation requires ExtraTokenSpec infrastructure (future work).
         None
@@ -1181,7 +1219,7 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
     }
 
     // Scope: "under your control" → restrict to controller's tokens
-    if lower.contains("under your control") {
+    if nom_primitives::scan_contains(lower, "under your control") {
         def = def.token_owner_scope(ControllerRef::You);
     }
 
@@ -1194,7 +1232,7 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
 fn parse_counter_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
 
-    let modification = if lower.contains("twice that many") {
+    let modification = if nom_primitives::scan_contains(lower, "twice that many") {
         QuantityModification::Double
     } else if let Some(rest) = strip_after(lower, "that many plus ") {
         // "that many plus one ... counters are put on it instead"
@@ -1226,8 +1264,10 @@ fn parse_damage_redirection_replacement(
     // Pattern 1: "all damage that would be dealt to [X] is dealt to ~ instead" (Pariah)
     // Pattern 2: "damage that would be dealt to [X] is dealt to ~ instead" (Palisade Giant)
     // CR 615.1a: Redirect = prevent original + deal to new target
-    if norm_lower.contains("would be dealt to") && norm_lower.contains("is dealt to") {
-        let target_filter = if norm_lower.contains("would be dealt to you") {
+    if nom_primitives::scan_contains(norm_lower, "would be dealt to")
+        && nom_primitives::scan_contains(norm_lower, "is dealt to")
+    {
+        let target_filter = if nom_primitives::scan_contains(norm_lower, "would be dealt to you") {
             Some(DamageTargetFilter::PlayerOnly)
         } else {
             // "would be dealt to ~" or other targets — no specific filter
@@ -1235,7 +1275,7 @@ fn parse_damage_redirection_replacement(
         };
 
         // Determine redirect destination
-        let redirect = if norm_lower.contains("is dealt to ~ instead") {
+        let redirect = if nom_primitives::scan_contains(norm_lower, "is dealt to ~ instead") {
             // Redirect to self (the permanent with this ability)
             Some(TargetFilter::SelfRef)
         } else {
@@ -1257,7 +1297,8 @@ fn parse_damage_redirection_replacement(
     // Pattern 3: "if a source would deal damage to you, prevent that damage"
     // followed by "~ deals that much damage to any target" (Pariah's Shield)
     // CR 615.1a: Prevention + redirect combination
-    if norm_lower.contains("would deal damage to you") && norm_lower.contains("prevent that damage")
+    if nom_primitives::scan_contains(norm_lower, "would deal damage to you")
+        && nom_primitives::scan_contains(norm_lower, "prevent that damage")
     {
         return Some(
             ReplacementDefinition::new(ReplacementEvent::DamageDone)
@@ -1282,42 +1323,48 @@ fn parse_damage_prevention_replacement(
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     // Must contain "prevent" and "damage" to be a prevention pattern
-    if !norm_lower.contains("prevent") || !norm_lower.contains("damage") {
+    if !nom_primitives::scan_contains(norm_lower, "prevent")
+        || !nom_primitives::scan_contains(norm_lower, "damage")
+    {
         return None;
     }
 
     // "damage can't be prevented" is NOT a prevention replacement -- it's a restriction.
-    if norm_lower.contains("can't be prevented") {
+    if nom_primitives::scan_contains(norm_lower, "can't be prevented") {
         return None;
     }
 
     // CR 615: "sources of the color of your choice" requires interactive color choice —
     // handled as a Choose → PreventDamage spell effect chain, not a passive replacement.
-    if norm_lower.contains("color of your choice") {
+    if nom_primitives::scan_contains(norm_lower, "color of your choice") {
         return None;
     }
 
     // Redirection patterns ("prevent that damage. ~ deals that much damage to") are handled
     // by parse_damage_redirection_replacement — don't intercept them here.
-    if norm_lower.contains("prevent that damage") && norm_lower.contains("deals that much damage") {
+    if nom_primitives::scan_contains(norm_lower, "prevent that damage")
+        && nom_primitives::scan_contains(norm_lower, "deals that much damage")
+    {
         return None;
     }
     // "is dealt to ~ instead" patterns are also redirections, not pure prevention
-    if norm_lower.contains("is dealt to") && norm_lower.contains("instead") {
+    if nom_primitives::scan_contains(norm_lower, "is dealt to")
+        && nom_primitives::scan_contains(norm_lower, "instead")
+    {
         return None;
     }
 
     // --- 1. Extract prevention amount ---
     // CR 615.7: "prevent the next N damage" → specific shield amount
     // CR 615.1a: "prevent all damage" → prevent everything
-    let amount = if norm_lower.contains("prevent all") {
+    let amount = if nom_primitives::scan_contains(norm_lower, "prevent all") {
         PreventionAmount::All
     } else if let Some(rest) = strip_after(norm_lower, "prevent the next ") {
         // Uses oracle_util::parse_number (not nom directly) because it handles "X" → 0
         // for cards like Temper, Acolyte's Reward, etc.
         let (n, _) = parse_number(rest)?;
         PreventionAmount::Next(n)
-    } else if norm_lower.contains("prevent that damage") {
+    } else if nom_primitives::scan_contains(norm_lower, "prevent that damage") {
         // "prevent that damage" in redirection context — redirect handled separately
         PreventionAmount::All
     } else {
@@ -1328,9 +1375,9 @@ fn parse_damage_prevention_replacement(
     // CR 615: "combat damage" restricts to combat damage only.
     // Longest-match-first: "noncombat damage" before "combat damage" because
     // "noncombat" contains the substring "combat".
-    let combat_scope = if norm_lower.contains("noncombat damage") {
+    let combat_scope = if nom_primitives::scan_contains(norm_lower, "noncombat damage") {
         Some(CombatDamageScope::NoncombatOnly)
-    } else if norm_lower.contains("combat damage") {
+    } else if nom_primitives::scan_contains(norm_lower, "combat damage") {
         Some(CombatDamageScope::CombatOnly)
     } else {
         None
@@ -1338,18 +1385,19 @@ fn parse_damage_prevention_replacement(
 
     // --- 3. Extract damage target filter ---
     // "to you" → player only, "to target creature" → creature only
-    let damage_target_filter =
-        if norm_lower.contains("dealt to you") || norm_lower.contains("deal to you") {
-            Some(DamageTargetFilter::PlayerOnly)
-        } else if norm_lower.contains("dealt to target creature")
-            || norm_lower.contains("dealt to ~")
-            || norm_lower.contains("dealt to and dealt by ~")
-        {
-            Some(DamageTargetFilter::CreatureOnly)
-        } else {
-            // "prevent all combat damage" with no target → any target
-            None
-        };
+    let damage_target_filter = if nom_primitives::scan_contains(norm_lower, "dealt to you")
+        || nom_primitives::scan_contains(norm_lower, "deal to you")
+    {
+        Some(DamageTargetFilter::PlayerOnly)
+    } else if nom_primitives::scan_contains(norm_lower, "dealt to target creature")
+        || nom_primitives::scan_contains(norm_lower, "dealt to ~")
+        || nom_primitives::scan_contains(norm_lower, "dealt to and dealt by ~")
+    {
+        Some(DamageTargetFilter::CreatureOnly)
+    } else {
+        // "prevent all combat damage" with no target → any target
+        None
+    };
 
     // --- 4. Extract damage source filter ---
     let damage_source_filter = parse_damage_source_filter(norm_lower);
@@ -1382,8 +1430,8 @@ fn parse_event_substitution_replacement(
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     // "would begin an extra turn" / "would take an extra turn"
-    if norm_lower.contains("would begin an extra turn")
-        || norm_lower.contains("would take an extra turn")
+    if nom_primitives::scan_contains(norm_lower, "would begin an extra turn")
+        || nom_primitives::scan_contains(norm_lower, "would take an extra turn")
     {
         return Some(
             ReplacementDefinition::new(ReplacementEvent::BeginTurn)
@@ -1392,7 +1440,7 @@ fn parse_event_substitution_replacement(
     }
 
     // "would lose the game" — Platinum Angel, Lich's Mastery
-    if norm_lower.contains("would lose the game") {
+    if nom_primitives::scan_contains(norm_lower, "would lose the game") {
         return Some(
             ReplacementDefinition::new(ReplacementEvent::GameLoss)
                 .description(original_text.to_string()),
@@ -1400,7 +1448,7 @@ fn parse_event_substitution_replacement(
     }
 
     // "would win the game" — Angel's Grace interaction
-    if norm_lower.contains("would win the game") {
+    if nom_primitives::scan_contains(norm_lower, "would win the game") {
         return Some(
             ReplacementDefinition::new(ReplacementEvent::GameWin)
                 .description(original_text.to_string()),
@@ -1415,7 +1463,9 @@ fn parse_event_substitution_replacement(
 /// (Chromatic Lantern, Dryad of the Ilysian Grove, Blood Moon color override).
 fn parse_mana_replacement(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     // "would produce mana" / "is tapped for mana"
-    if norm_lower.contains("would produce mana") || norm_lower.contains("tapped for mana") {
+    if nom_primitives::scan_contains(norm_lower, "would produce mana")
+        || nom_primitives::scan_contains(norm_lower, "tapped for mana")
+    {
         return Some(
             ReplacementDefinition::new(ReplacementEvent::ProduceMana)
                 .description(original_text.to_string()),
@@ -1449,7 +1499,7 @@ fn parse_player_life_condition(norm_lower: &str) -> Option<ReplacementCondition>
 /// Extract "unless you have two or more opponents" condition (battlebond lands).
 /// CR 614.1d
 fn parse_multiple_opponents_condition(norm_lower: &str) -> Option<ReplacementCondition> {
-    if !norm_lower.contains("unless you have two or more opponents") {
+    if !nom_primitives::scan_contains(norm_lower, "unless you have two or more opponents") {
         return None;
     }
     Some(ReplacementCondition::UnlessMultipleOpponents)
@@ -1459,7 +1509,8 @@ fn parse_multiple_opponents_condition(norm_lower: &str) -> Option<ReplacementCon
 /// Both phrasings are semantically identical: the permanent enters tapped on the opponent's turn.
 /// CR 614.1d + CR 500
 fn parse_your_turn_condition(norm_lower: &str) -> Option<ReplacementCondition> {
-    if norm_lower.contains("unless it's your turn") || norm_lower.contains("if it's not your turn")
+    if nom_primitives::scan_contains(norm_lower, "unless it's your turn")
+        || nom_primitives::scan_contains(norm_lower, "if it's not your turn")
     {
         Some(ReplacementCondition::UnlessYourTurn)
     } else {

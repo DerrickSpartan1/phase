@@ -580,6 +580,40 @@ pub fn scan_contains(text: &str, phrase: &str) -> bool {
     false
 }
 
+/// Scan `text` at word boundaries using `combinator`. Returns `(prefix, matched_start)` where
+/// `prefix` is the text before the first match and `matched_start` is the slice beginning at
+/// the matched position (combinator input pointer). Returns `None` if no match is found.
+///
+/// Unlike `scan_at_word_boundaries` which discards positional information, this variant
+/// preserves it — use when you need to split text at a phrase boundary to extract a subject
+/// prefix (e.g. `text[..prefix.len()]`).
+///
+/// # Example
+/// ```ignore
+/// let (prefix, rest) = scan_split_at_phrase("the creature dies", |i| tag("dies").parse(i)).unwrap();
+/// assert_eq!(prefix, "the creature ");
+/// assert_eq!(rest, "dies");
+/// ```
+pub fn scan_split_at_phrase<'a, O, F>(
+    text: &'a str,
+    mut combinator: F,
+) -> Option<(&'a str, &'a str)>
+where
+    F: FnMut(&'a str) -> nom::IResult<&'a str, O, nom_language::error::VerboseError<&'a str>>,
+{
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        if combinator(remaining).is_ok() {
+            let offset = text.len() - remaining.len();
+            return Some((&text[..offset], remaining));
+        }
+        remaining = remaining
+            .find(' ')
+            .map_or("", |i| remaining[i + 1..].trim_start());
+    }
+    None
+}
+
 /// Split `input` on the first occurrence of `separator`, returning `(before, after)`.
 ///
 /// Equivalent to `str::split_once(separator)` but as a nom combinator — uses
@@ -604,6 +638,40 @@ pub fn split_once_on<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nom::bytes::complete::tag;
+
+    #[test]
+    fn test_scan_split_at_phrase_at_start() {
+        let result = scan_split_at_phrase("dies to removal", |i| {
+            tag::<_, _, nom_language::error::VerboseError<&str>>("dies").parse(i)
+        });
+        assert_eq!(result, Some(("", "dies to removal")));
+    }
+
+    #[test]
+    fn test_scan_split_at_phrase_mid_string() {
+        let result = scan_split_at_phrase("the creature dies", |i| {
+            tag::<_, _, nom_language::error::VerboseError<&str>>("dies").parse(i)
+        });
+        assert_eq!(result, Some(("the creature ", "dies")));
+    }
+
+    #[test]
+    fn test_scan_split_at_phrase_not_found() {
+        let result = scan_split_at_phrase("the creature enters", |i| {
+            tag::<_, _, nom_language::error::VerboseError<&str>>("dies").parse(i)
+        });
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_scan_split_at_phrase_word_boundary_safe() {
+        // "studies" must NOT match "dies" mid-word
+        let result = scan_split_at_phrase("studies hard", |i| {
+            tag::<_, _, nom_language::error::VerboseError<&str>>("dies").parse(i)
+        });
+        assert!(result.is_none());
+    }
 
     #[test]
     fn test_parse_number_digits() {

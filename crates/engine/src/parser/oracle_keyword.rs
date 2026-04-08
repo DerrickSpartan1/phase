@@ -7,6 +7,7 @@ use nom::Parser;
 use nom_language::error::VerboseError;
 
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_target::parse_type_phrase;
 use crate::types::ability::AbilityCost;
 use crate::types::keywords::{FlashbackCost, Keyword, WardCost};
@@ -18,7 +19,7 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
     // Fast path: skip allocation when no expansion is needed
     if !parts.iter().any(|p| {
         let l = p.to_ascii_lowercase();
-        l.contains(" and from ")
+        scan_contains(&l, "and from ")
             || tag::<_, _, VerboseError<&str>>("from ")
                 .parse(l.as_str())
                 .is_ok()
@@ -53,9 +54,12 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
             // Strip "protection from " or "hexproof from " (prefix + space)
             let after = &lower[prefix.len() + 1..]; // +1 for the trailing space
                                                     // CR 702.11f / CR 702.16: split on " and from "
-            for frag in after.split(" and from ") {
-                expanded.push(Cow::Owned(format!("{prefix} {}", frag.trim())));
+            let mut remainder = after;
+            while let Ok((_, (before, rest))) = split_once_on(remainder, " and from ") {
+                expanded.push(Cow::Owned(format!("{prefix} {}", before.trim())));
+                remainder = rest;
             }
+            expanded.push(Cow::Owned(format!("{prefix} {}", remainder.trim())));
             active_prefix = Some(prefix);
         } else if let Some(pfx) = active_prefix {
             if let Ok((rest, _)) = alt((tag::<_, _, VerboseError<&str>>("and from "), tag("from ")))
@@ -326,17 +330,14 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
 
     // CR 702.29: Typecycling — "{subtype}cycling {cost}" e.g. "plainscycling {2}"
     // Guard: subtype prefix must be a single word (no spaces) to avoid false positives.
-    if let Some(cycling_pos) = text.find("cycling") {
-        if cycling_pos > 0 {
-            let subtype = &text[..cycling_pos];
-            if !subtype.contains(' ') {
-                let cost_str = text[cycling_pos + "cycling".len()..].trim();
-                if !cost_str.is_empty() {
-                    let colon_form = format!("typecycling:{subtype}:{cost_str}");
-                    let parsed: Keyword = colon_form.parse().unwrap();
-                    if !matches!(parsed, Keyword::Unknown(_)) {
-                        return Some(parsed);
-                    }
+    if let Ok((_, (subtype, after_cycling))) = split_once_on(text, "cycling") {
+        if !subtype.is_empty() && !subtype.contains(' ') {
+            let cost_str = after_cycling.trim();
+            if !cost_str.is_empty() {
+                let colon_form = format!("typecycling:{subtype}:{cost_str}");
+                let parsed: Keyword = colon_form.parse().unwrap();
+                if !matches!(parsed, Keyword::Unknown(_)) {
+                    return Some(parsed);
                 }
             }
         }
@@ -415,9 +416,8 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // For parameterized keywords, find the first space to split name from parameter.
     // Oracle format: "protection from multicolored" → name="protection", rest="from multicolored"
     // Oracle format: "ward {2}" → name="ward", rest="{2}"
-    let space_idx = text.find(' ')?;
-    let name = &text[..space_idx];
-    let rest = text[space_idx + 1..].trim();
+    let (_, (name, rest)) = split_once_on(text, " ").ok()?;
+    let rest = rest.trim();
 
     // Strip "from" preposition (used by protection keywords)
     let param = tag::<_, _, VerboseError<&str>>("from ")

@@ -1555,7 +1555,7 @@ fn parse_clause_ast(text: &str, ctx: &ParseContext) -> ClauseAst {
     // Parse as a bare shuffle to avoid Unimplemented.
     {
         let lower = text.to_lowercase();
-        if lower.contains("who searched") && lower.ends_with("shuffles") {
+        if nom_primitives::scan_contains(&lower, "who searched") && lower.ends_with("shuffles") {
             return ClauseAst::Imperative {
                 text: "shuffle".to_string(),
             };
@@ -1647,8 +1647,8 @@ fn lower_imperative_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause
     // Variants: "spend colorless mana as though..." / "mana of any color to cast..."
     {
         let lower = text.to_lowercase();
-        if lower.contains("as though it were mana of any color")
-            || lower.contains("mana of any type can be spent to cast")
+        if nom_primitives::scan_contains(&lower, "as though it were mana of any color")
+            || nom_primitives::scan_contains(&lower, "mana of any type can be spent to cast")
         {
             return parsed_clause(Effect::GenericEffect {
                 static_abilities: vec![StaticDefinition::new(StaticMode::SpendManaAsAnyColor)

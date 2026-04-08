@@ -9,7 +9,7 @@ use nom_language::error::VerboseError;
 use super::oracle_effect::{parse_effect_chain_with_context, ParseContext};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::OracleResult;
-use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::primitives::{self as nom_primitives, scan_contains, scan_split_at_phrase};
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_target::{parse_type_phrase, starts_with_type_word};
 use super::oracle_util::{
@@ -146,7 +146,7 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     };
 
     // Parse the effect
-    let has_up_to = effect_for_parse.contains("up to one");
+    let has_up_to = scan_contains(&effect_for_parse, "up to one");
     let execute = if !effect_for_parse.is_empty() {
         let mut ability =
             parse_effect_chain_with_context(&effect_for_parse, AbilityKind::Spell, &effect_ctx);
@@ -194,24 +194,25 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
 
 /// Parse trigger constraint from the full trigger text.
 fn parse_trigger_constraint(lower: &str) -> Option<TriggerConstraint> {
-    if lower.contains("this ability triggers only once each turn")
-        || lower.contains("triggers only once each turn")
+    // Order is load-bearing: longer/more-specific matches must precede shorter ones
+    // ("only once each turn" before "only once", etc.).
+    if scan_contains(lower, "this ability triggers only once each turn")
+        || scan_contains(lower, "triggers only once each turn")
         // CR 603.12: "Do this only once each turn" is functionally equivalent.
-        || lower.contains("do this only once each turn")
+        || scan_contains(lower, "do this only once each turn")
     {
         return Some(TriggerConstraint::OncePerTurn);
     }
-    if lower.contains("this ability triggers only once") {
+    if scan_contains(lower, "this ability triggers only once") {
         return Some(TriggerConstraint::OncePerGame);
     }
-    if lower.contains("only during your turn") {
+    if scan_contains(lower, "only during your turn") {
         return Some(TriggerConstraint::OnlyDuringYourTurn);
     }
     // CR 603.4: "this ability triggers only the first N times each turn"
     // Delegates to nom_primitives::parse_number for the count (input already lowercase).
     if let Some(rest) = strip_after(lower, "triggers only the first ") {
-        if let Some(times_pos) = rest.find(" time") {
-            let n_text = &rest[..times_pos];
+        if let Ok((_, (n_text, _))) = nom_primitives::split_once_on(rest, " time") {
             if let Ok((_rem, n)) = nom_primitives::parse_number.parse(n_text) {
                 return Some(TriggerConstraint::MaxTimesPerTurn { max: n });
             }
@@ -240,11 +241,20 @@ fn strip_constraint_sentences(text: &str) -> String {
         result = result.replace(pattern, "");
     }
     // Dynamic pattern: "this ability triggers only the first N time(s) each turn."
+    // Uses scan_split_at_phrase + split_once_on instead of raw .find() for dispatch.
     let lower = result.to_lowercase();
-    if let Some(start) = lower.find("this ability triggers only the first ") {
-        if let Some(end) = lower[start..].find("each turn") {
-            let end_pos = start + end + "each turn".len();
-            let end_pos = if lower[end_pos..].starts_with('.') {
+    if let Some((prefix_text, matched_start)) = scan_split_at_phrase(&lower, |i| {
+        tag::<_, _, VerboseError<&str>>("this ability triggers only the first ").parse(i)
+    }) {
+        let start = prefix_text.len();
+        if let Ok((_, (_, after_each_turn))) =
+            nom_primitives::split_once_on(matched_start, "each turn")
+        {
+            let end_pos = lower.len() - after_each_turn.len();
+            let end_pos = if tag::<_, _, VerboseError<&str>>(".")
+                .parse(after_each_turn)
+                .is_ok()
+            {
                 end_pos + 1
             } else {
                 end_pos
@@ -367,11 +377,11 @@ fn parse_where_x_is_trigger(text: &str) -> Option<QuantityExpr> {
         return Some(QuantityExpr::Ref { qty });
     }
     // Fall through to keyword-based matching for less common patterns
-    if rest_lower.contains("power") {
+    if scan_contains(&rest_lower, "power") {
         Some(QuantityExpr::Ref {
             qty: QuantityRef::SelfPower,
         })
-    } else if rest_lower.contains("toughness") {
+    } else if scan_contains(&rest_lower, "toughness") {
         Some(QuantityExpr::Ref {
             qty: QuantityRef::SelfToughness,
         })
@@ -667,7 +677,7 @@ fn try_extract_ninjutsu_condition(
         ("sneak cost was paid", NinjutsuVariant::Sneak),
         ("ninjutsu cost was paid", NinjutsuVariant::Ninjutsu),
     ] {
-        if lower.contains(keyword) && !lower.contains("instead") {
+        if scan_contains(lower, keyword) && !scan_contains(lower, "instead") {
             let pos = tp.find("if ").unwrap_or(0);
             let kw_pos = tp.find(keyword)?;
             let after = &lower[kw_pos + keyword.len()..];
@@ -843,9 +853,11 @@ fn normalize_self_refs(text: &str, card_name: &str) -> String {
 /// - "When you cycle ~ and when ~ dies" → ["When you cycle ~", "When ~ dies"]
 /// - "When ~ enters and whenever you cast an Elemental spell" → ["When ~ enters", "Whenever you cast an Elemental spell"]
 fn split_and_when_compound(cond_lower: &str, condition: &str) -> Option<Vec<String>> {
-    // Use nom to detect " and when " or " and whenever " at word boundaries.
+    // Use nom split_once_on to detect " and when " or " and whenever " conjunctions.
     // Try " and whenever " first (longer match) to avoid " and when " matching the "when" prefix.
-    if let Some(pos) = cond_lower.find(" and whenever ") {
+    use super::oracle_nom::primitives::split_once_on;
+    if let Ok((_, (before, _))) = split_once_on(cond_lower, " and whenever ") {
+        let pos = before.len();
         let first = condition[..pos].trim().to_string();
         let second_start = pos + " and ".len();
         // Capitalize: the second half already starts with "whenever"
@@ -853,7 +865,8 @@ fn split_and_when_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
             normalize_compound_pronouns(&capitalize_first(condition[second_start..].trim()));
         return Some(vec![first, second]);
     }
-    if let Some(pos) = cond_lower.find(" and when ") {
+    if let Ok((_, (before, _))) = split_once_on(cond_lower, " and when ") {
+        let pos = before.len();
         let first = condition[..pos].trim().to_string();
         let second_start = pos + " and ".len();
         let second =
@@ -922,20 +935,20 @@ fn split_or_event_compound(cond_lower: &str, condition: &str) -> Option<Vec<Stri
     // Patterns already handled as dedicated compound TriggerMode variants
     // (EntersOrAttacks, AttacksOrBlocks) — do not split these.
     fn is_existing_compound_mode(cond_lower: &str) -> bool {
-        cond_lower.contains("enters or attacks")
-            || cond_lower.contains("enters the battlefield or attacks")
-            || cond_lower.contains("attacks or blocks")
+        scan_contains(cond_lower, "enters or attacks")
+            || scan_contains(cond_lower, "enters the battlefield or attacks")
+            || scan_contains(cond_lower, "attacks or blocks")
     }
     if is_existing_compound_mode(cond_lower) {
         return None;
     }
 
-    // Scan for " or " occurrences in the condition and check if what follows is an event verb.
+    // Scan for " or " occurrences using split_once_on, checking if what follows is an event verb.
+    use super::oracle_nom::primitives::split_once_on;
     let mut search_start = 0;
-    while let Some(rel_pos) = cond_lower[search_start..].find(" or ") {
-        let pos = search_start + rel_pos;
-        let after_or = &cond_lower[pos + 4..];
-        if is_event_verb_start(after_or) {
+    while let Ok((_, (before, after))) = split_once_on(&cond_lower[search_start..], " or ") {
+        let pos = search_start + before.len();
+        if is_event_verb_start(after) {
             // Found a compound event "or". Extract the trigger keyword and subject
             // from the first half to reconstruct the second trigger line.
             let first = condition[..pos].trim().to_string();
@@ -981,30 +994,32 @@ fn extract_keyword_and_subject(cond_lower: &str) -> String {
 /// Extract the subject text span from the beginning of condition text (after keyword).
 /// Returns the text up to the first recognized event verb.
 fn extract_subject_text(text: &str) -> &str {
-    // Known event verb starts that end the subject span
-    let event_prefixes = [
-        "enters",
-        "enter ",
-        "dies",
-        "die ",
-        "deals ",
-        "deal ",
-        "attacks",
-        "attack ",
-        "blocks",
-        "block ",
-        "is sacrificed",
-        "are sacrificed",
-        "is exiled",
-        "are exiled",
-        "leaves",
-        "is put into",
-    ];
-    for prefix in &event_prefixes {
-        if let Some(pos) = text.find(prefix) {
-            if pos > 0 {
-                return text[..pos].trim_end();
-            }
+    // Known event verb starts that end the subject span.
+    // scan_split_at_phrase tries the combinator at each word boundary,
+    // returning (prefix, matched_start) on the first hit.
+    if let Some((prefix, _)) = scan_split_at_phrase(text, |i| {
+        alt((
+            tag("enters"),
+            tag("enter "),
+            tag("dies"),
+            tag("die "),
+            tag("deals "),
+            tag("deal "),
+            tag("attacks"),
+            tag("attack "),
+            tag("blocks"),
+            tag("block "),
+            tag("is sacrificed"),
+            tag("are sacrificed"),
+            tag("is exiled"),
+            tag("are exiled"),
+            tag("leaves"),
+            tag("is put into"),
+        ))
+        .parse(i)
+    }) {
+        if !prefix.is_empty() {
+            return prefix.trim_end();
         }
     }
     // Fallback: return the entire text as subject
@@ -1031,10 +1046,10 @@ fn split_trigger(tp: TextPair<'_>) -> (String, String) {
 }
 
 fn find_effect_boundary(lower: &str) -> Option<usize> {
+    use super::oracle_nom::primitives::split_once_on;
     let mut search_start = 0;
-    while let Some(rel_pos) = lower[search_start..].find(", ") {
-        let comma_pos = search_start + rel_pos;
-        let after = &lower[comma_pos + 2..];
+    while let Ok((_, (before, after))) = split_once_on(&lower[search_start..], ", ") {
+        let comma_pos = search_start + before.len();
         if !continues_player_action_list(after) {
             return Some(comma_pos);
         }
@@ -1416,7 +1431,7 @@ fn try_parse_event(
 
         // CR 702.49c: "enters from your hand" — set origin zone.
         let rest_lower = rest.to_lowercase();
-        if rest_lower.contains("from your hand") {
+        if scan_contains(&rest_lower, "from your hand") {
             def.origin = Some(Zone::Hand);
         }
 
@@ -1477,7 +1492,7 @@ fn try_parse_event(
     ))
     .parse(rest)
     {
-        if after_and.contains("attack") {
+        if scan_contains(after_and, "attack") {
             if let Some((n, _rest_after_n)) = parse_number(after_and) {
                 let mut def = make_base();
                 def.mode = TriggerMode::Attacks;
@@ -2004,7 +2019,7 @@ fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, Tr
             None
         } else if let Some(type_text) = subject_text.strip_suffix(" cards") {
             // Handle "artifact and/or creature" → OR filter
-            if type_text.contains(" and/or ") {
+            if scan_contains(type_text, "and/or") {
                 let parts: Vec<&str> = type_text.split(" and/or ").collect();
                 let filters: Vec<TargetFilter> = parts
                     .iter()
@@ -2090,7 +2105,7 @@ fn try_parse_one_or_more_combat_damage_to_player(
 /// Parses the full right-side phrase ("rogue creatures you control") as a complete type phrase,
 /// then applies the shared card_type and controller to the left-side bare subtype.
 fn try_split_or_compound_type_phrase(text: &str) -> Option<TargetFilter> {
-    let (left, right) = text.split_once(" or ")?;
+    let (_, (left, right)) = nom_primitives::split_once_on(text, " or ").ok()?;
     let left_trimmed = left.trim();
     // Parse the full right side as a type phrase — "rogue creatures you control" is a complete phrase
     // that parse_type_phrase handles as subtype-only + trailing text. Instead, parse the whole
@@ -2399,7 +2414,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some(result);
     }
 
-    if lower.contains("you gain life") {
+    if scan_contains(lower, "you gain life") {
         let mut def = make_base();
         def.mode = TriggerMode::LifeGained;
         return Some((TriggerMode::LifeGained, def));
@@ -2615,13 +2630,12 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     }
 
     // "an opponent casts a [quality] spell" / "a player casts a spell from a graveyard"
-    if let Some(casts_pos) = lower.find(" casts a") {
-        let who = &lower[..casts_pos];
+    if let Ok((_, (who, _))) = nom_primitives::split_once_on(lower, " casts a") {
         let mut def = make_base();
         def.mode = TriggerMode::SpellCast;
 
         // Determine the caster filter
-        if who.contains("opponent") {
+        if scan_contains(who, "opponent") {
             def.valid_target = Some(TargetFilter::Typed(
                 TypedFilter::default().controller(ControllerRef::Opponent),
             ));
@@ -2631,15 +2645,14 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         // using the same parse_type_phrase building block as the "you cast" branch above.
         // Truncate at ", " to avoid passing the effect clause (e.g., ", you gain 1 life")
         // into parse_type_phrase where it would cause infinite recursion.
-        let after_casts = &lower[casts_pos + " casts a".len()..].trim_start();
+        let after_casts = &lower[who.len() + " casts a".len()..].trim_start();
         let after_article = value((), tag::<_, _, VerboseError<&str>>("n ")) // "an" → strip the trailing "n "
             .parse(after_casts)
             .map(|(rest, _)| rest)
             .unwrap_or(after_casts)
             .trim_start();
-        let spell_clause = after_article
-            .split_once(", ")
-            .map(|(before, _)| before)
+        let spell_clause = nom_primitives::split_once_on(after_article, ", ")
+            .map(|(_, (before, _))| before)
             .unwrap_or(after_article);
         // Handle "with mana value equal to the chosen number" (Talion, the Kindly Lord)
         // CR 202.3: Mana value comparison against a dynamic reference quantity.
@@ -2667,7 +2680,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
             return Some((TriggerMode::SpellCast, def));
         }
         // Handle "multicolored" as a spell property (not a type phrase)
-        if spell_clause.contains("multicolored") {
+        if scan_contains(spell_clause, "multicolored") {
             def.valid_card = Some(TargetFilter::Typed(
                 TypedFilter::default().properties(vec![FilterProp::Multicolored]),
             ));
@@ -2686,14 +2699,14 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         return Some((TriggerMode::SpellCast, def));
     }
 
-    if lower.contains("you draw a card") {
+    if scan_contains(lower, "you draw a card") {
         let mut def = make_base();
         def.mode = TriggerMode::Drawn;
         return Some((TriggerMode::Drawn, def));
     }
 
     // "whenever you attack" — player-centric attack trigger
-    if lower.contains("whenever you attack") || lower.contains("when you attack") {
+    if scan_contains(lower, "whenever you attack") || scan_contains(lower, "when you attack") {
         let mut def = make_base();
         def.mode = TriggerMode::YouAttack;
         return Some((TriggerMode::YouAttack, def));
@@ -2708,7 +2721,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     }
 
     // "when you cast this spell" — self-cast trigger (fires from stack)
-    if lower.contains("when you cast this spell") || lower.contains("when ~ is cast") {
+    if scan_contains(lower, "when you cast this spell") || scan_contains(lower, "when ~ is cast") {
         let mut def = make_base();
         def.mode = TriggerMode::SpellCast;
         def.valid_card = Some(TargetFilter::SelfRef);
@@ -2719,7 +2732,7 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
 
     // "when you cycle this card" / "when you cycle ~" — cycling self-trigger
     // The card is in the graveyard by the time this trigger is checked.
-    if lower.contains("you cycle this card") || lower.contains("you cycle ~") {
+    if scan_contains(lower, "you cycle this card") || scan_contains(lower, "you cycle ~") {
         let mut def = make_base();
         def.mode = TriggerMode::Cycled;
         def.valid_card = Some(TargetFilter::SelfRef);
@@ -3058,9 +3071,12 @@ fn try_parse_nth_draw_any_player(lower: &str) -> Option<(TriggerMode, TriggerDef
 
 /// Skip past words before a target word, returning the text from that word onward.
 /// If the target word is not found, returns the original text.
-fn skip_to_word<'a>(text: &'a str, word: &str) -> &'a str {
-    if let Some(pos) = text.find(word) {
-        &text[pos..]
+/// Uses `scan_split_at_phrase` for word-boundary-aware matching.
+fn skip_to_word<'a>(text: &'a str, word: &'a str) -> &'a str {
+    if let Some((_, matched_start)) =
+        scan_split_at_phrase(text, |i| tag::<_, _, VerboseError<&str>>(word).parse(i))
+    {
+        matched_start
     } else {
         text
     }
@@ -3070,7 +3086,7 @@ fn skip_to_word<'a>(text: &'a str, word: &str) -> &'a str {
 /// Handles all patterns: passive ("a counter is put on ~"), active ("you put counters on ~"),
 /// and with arbitrary subjects ("counters are put on another creature you control").
 fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
-    if !lower.contains("counter") {
+    if !scan_contains(lower, "counter") {
         return None;
     }
 
@@ -3081,22 +3097,29 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     }
 
     // Must mention both a counter and a placement verb
-    if !lower.contains("put") && !lower.contains("placed") {
+    if !scan_contains(lower, "put") && !scan_contains(lower, "placed") {
         return None;
     }
 
-    // Find "counter(s) ... on SUBJECT" — locate " on " after the counter mention
-    let counter_pos = lower.find("counter")?;
-    let after_counter = &lower[counter_pos..];
-    let on_offset = after_counter.find(" on ")?;
-    let subject_start = counter_pos + on_offset + " on ".len();
-    let subject_text = lower[subject_start..].trim();
+    // Find "counter(s) ... on SUBJECT" — locate "counter" then " on " after it.
+    // Uses scan_split_at_phrase for word-boundary-aware "counter" match,
+    // then split_once_on for the positional " on " split.
+    let (_, counter_start) = scan_split_at_phrase(lower, |i| {
+        tag::<_, _, VerboseError<&str>>("counter").parse(i)
+    })?;
+    let Ok((_, (_, subject_text))) = nom_primitives::split_once_on(counter_start, " on ") else {
+        return None;
+    };
+    let subject_text = subject_text.trim();
 
     let mut def = make_base();
     def.mode = TriggerMode::CounterAdded;
 
     // Parse the subject after "on "
-    if subject_text.starts_with('~') {
+    if tag::<_, _, VerboseError<&str>>("~")
+        .parse(subject_text)
+        .is_ok()
+    {
         def.valid_card = Some(TargetFilter::SelfRef);
     } else {
         let (filter, _) = parse_single_subject(subject_text);
@@ -3117,10 +3140,10 @@ fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinit
     .parse(lower)
     .ok()?;
 
-    let counter_pos = after_a.find(" counter is removed from ")?;
-    let counter_type = after_a[..counter_pos].trim();
-    let subject_start = counter_pos + " counter is removed from ".len();
-    let subject_rest = after_a[subject_start..].trim();
+    let (_, (counter_type, subject_rest)) =
+        nom_primitives::split_once_on(after_a, " counter is removed from ").ok()?;
+    let counter_type = counter_type.trim();
+    let subject_rest = subject_rest.trim();
 
     let mut def = make_base();
     def.mode = TriggerMode::CounterRemoved;
@@ -3243,17 +3266,17 @@ fn try_parse_one_or_more_put_into_graveyard(
             continue;
         };
 
-        // Find "are put into" / "is put into" to split subject from destination
-        let put_into_pos = rest
-            .find(" are put into ")
-            .or_else(|| rest.find(" is put into "))?;
-        let subject_text = &rest[..put_into_pos];
-        let after_put =
-            if let Some(p) = rest.strip_prefix(&rest[..put_into_pos + " are put into ".len()]) {
-                p
-            } else {
-                &rest[put_into_pos + " is put into ".len()..]
-            };
+        // Find "are put into" / "is put into" to split subject from destination.
+        // Uses split_once_on with each separator variant.
+        let (subject_text, after_put) = if let Ok((_, (subj, aft))) =
+            nom_primitives::split_once_on(rest, " are put into ")
+        {
+            (subj, aft)
+        } else if let Ok((_, (subj, aft))) = nom_primitives::split_once_on(rest, " is put into ") {
+            (subj, aft)
+        } else {
+            return None;
+        };
 
         // Parse the graveyard possessive using nom alt()
         // Reuse the same combinator as try_parse_put_into_graveyard

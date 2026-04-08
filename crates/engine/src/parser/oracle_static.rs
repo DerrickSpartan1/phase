@@ -110,7 +110,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     }
 
     if nom_tag_tp(&tp, "you may choose not to untap ").is_some()
-        && tp.lower.contains(" during your untap step")
+        && nom_primitives::scan_contains(tp.lower, "during your untap step")
     {
         return Some(
             StaticDefinition::new(StaticMode::MayChooseNotToUntap)
@@ -121,15 +121,15 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- "Play with the top card of your library revealed" ---
     // CR 400.2: Continuous effect making top card public information.
-    if tp.lower.contains("play with the top card") {
+    if nom_primitives::scan_contains(tp.lower, "play with the top card") {
         if has_unconsumed_conditional(tp.lower) {
             tracing::warn!(
                 text = text,
                 "Unconsumed conditional in 'play with the top card' catch-all — parser may need extension"
             );
         } else {
-            let all_players =
-                tp.lower.contains("their libraries") || tp.lower.contains("each player");
+            let all_players = nom_primitives::scan_contains(tp.lower, "their libraries")
+                || nom_primitives::scan_contains(tp.lower, "each player");
             return Some(
                 StaticDefinition::new(StaticMode::RevealTopOfLibrary { all_players })
                     .affected(TargetFilter::SelfRef)
@@ -278,9 +278,13 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // CR 702.3b: "[subject] can attack as though they/it didn't have defender"
     // Static grant of CanAttackWithDefender to a class of creatures.
-    if lower.contains("can attack as though") && lower.contains("didn't have defender") {
-        if let Some(pos) = lower.find(" can attack") {
-            let subject = text[..pos].trim();
+    if nom_primitives::scan_contains(&lower, "can attack as though")
+        && nom_primitives::scan_contains(&lower, "didn't have defender")
+    {
+        if let Some((prefix, _)) =
+            nom_primitives::scan_split_at_phrase(&lower, |i| tag(" can attack").parse(i))
+        {
+            let subject = text[..prefix.len()].trim();
             let (affected, _) = super::oracle_target::parse_type_phrase(subject);
             return Some(
                 StaticDefinition::new(StaticMode::CanAttackWithDefender)
@@ -517,9 +521,9 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- "~ is the chosen type in addition to its other types" ---
     // Distinguish creature type (Metallic Mimic) vs basic land type (Multiversal Passage)
-    if tp.lower.contains("is the chosen type") {
+    if nom_primitives::scan_contains(tp.lower, "is the chosen type") {
         let kind = if nom_tag_tp(&tp, "this creature").is_some()
-            || tp.lower.contains("creature is the chosen")
+            || nom_primitives::scan_contains(tp.lower, "creature is the chosen")
         {
             ChosenSubtypeKind::CreatureType
         } else {
@@ -587,9 +591,9 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         };
         let subject = &tp.lower[..pos];
         // Only match if the subject doesn't look like a known prefix we handle elsewhere
-        if !subject.contains("creature")
-            && !subject.contains("permanent")
-            && !subject.contains("land")
+        if !nom_primitives::scan_contains(subject, "creature")
+            && !nom_primitives::scan_contains(subject, "permanent")
+            && !nom_primitives::scan_contains(subject, "land")
             && nom_tag_lower(subject, subject, "all ").is_none()
             && nom_tag_lower(subject, subject, "other ").is_none()
         {
@@ -615,7 +619,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- "~ isn't a [type]" (type removal) ---
     // e.g. "Erebos isn't a creature" from god-of-the-dead conditional
-    if let Some(type_rest) = tp.lower.split("isn't a ").nth(1) {
+    if let Ok((_, (_, type_rest))) = nom_primitives::split_once_on(tp.lower, "isn't a ") {
         use crate::types::card_type::CoreType;
         let type_name = type_rest.trim().trim_end_matches('.');
         let core_type = match type_name {
@@ -639,10 +643,14 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     // --- "~ can't be blocked [as long as condition]" ---
     // CR 509.1a: Handles both unconditional and conditional "can't be blocked".
     // "except by" patterns are handled separately by CantBeBlockedExceptBy.
-    if tp.lower.contains("can't be blocked") && !tp.lower.contains("except by") {
+    if nom_primitives::scan_contains(tp.lower, "can't be blocked")
+        && !nom_primitives::scan_contains(tp.lower, "except by")
+    {
         // Find text after "can't be blocked" and try to parse a condition
-        if let Some(blocked_pos) = tp.lower.find("can't be blocked") {
-            let after_blocked = tp.lower[blocked_pos + "can't be blocked".len()..]
+        if let Some((_, blocked_rest)) =
+            nom_primitives::scan_split_at_phrase(tp.lower, |i| tag("can't be blocked").parse(i))
+        {
+            let after_blocked = blocked_rest["can't be blocked".len()..]
                 .trim()
                 .trim_end_matches('.');
             let condition = if after_blocked.is_empty() {
@@ -669,7 +677,9 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     }
 
     // --- "~ can't block" ---
-    if tp.lower.contains("can't block") && !tp.lower.contains("can't be blocked") {
+    if nom_primitives::scan_contains(tp.lower, "can't block")
+        && !nom_primitives::scan_contains(tp.lower, "can't be blocked")
+    {
         let mut def = StaticDefinition::new(StaticMode::CantBlock)
             .affected(TargetFilter::SelfRef)
             .description(text.to_string());
@@ -680,8 +690,8 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     }
 
     // --- "~ can't attack" ---
-    if tp.lower.contains("can't attack") {
-        let mode = if tp.lower.contains("can't attack or block") {
+    if nom_primitives::scan_contains(tp.lower, "can't attack") {
+        let mode = if nom_primitives::scan_contains(tp.lower, "can't attack or block") {
             StaticMode::CantAttackOrBlock
         } else {
             StaticMode::CantAttack
@@ -697,7 +707,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- "its activated abilities can't be activated" / "activated abilities can't be activated" ---
     // CR 602.5: Prevents activated abilities of the affected permanent from being activated.
-    if tp.lower.contains("activated abilities can't be activated") {
+    if nom_primitives::scan_contains(tp.lower, "activated abilities can't be activated") {
         let mut def = StaticDefinition::new(StaticMode::CantBeActivated)
             .affected(TargetFilter::SelfRef)
             .description(text.to_string());
@@ -709,7 +719,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- "can't be countered" ---
     // CR 101.2: "Can't" effects override "can" effects.
-    if tp.lower.contains("can't be countered") {
+    if nom_primitives::scan_contains(tp.lower, "can't be countered") {
         if has_unconsumed_conditional(tp.lower) {
             tracing::warn!(
                 text = text,
@@ -726,7 +736,9 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     }
 
     // --- "~ can't be the target" or "~ can't be targeted" ---
-    if tp.lower.contains("can't be the target") || tp.lower.contains("can't be targeted") {
+    if nom_primitives::scan_contains(tp.lower, "can't be the target")
+        || nom_primitives::scan_contains(tp.lower, "can't be targeted")
+    {
         return Some(
             StaticDefinition::new(StaticMode::CantBeTargeted)
                 .affected(TargetFilter::SelfRef)
@@ -735,7 +747,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     }
 
     // --- "~ can't be sacrificed" ---
-    if tp.lower.contains("can't be sacrificed") {
+    if nom_primitives::scan_contains(tp.lower, "can't be sacrificed") {
         return Some(
             StaticDefinition::continuous()
                 .affected(TargetFilter::SelfRef)
@@ -745,7 +757,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- CR 604.3: "[type] cards in [zones] can't enter the battlefield" ---
     // e.g., Grafdigger's Cage: "Creature cards in graveyards and libraries can't enter the battlefield."
-    if tp.lower.contains("can't enter the battlefield") {
+    if nom_primitives::scan_contains(tp.lower, "can't enter the battlefield") {
         let affected = parse_cant_enter_battlefield_subject(&tp);
         return Some(
             StaticDefinition::new(StaticMode::CantEnterBattlefieldFrom)
@@ -769,7 +781,8 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     // and BEFORE the generic CantCastDuring block (which matches "can't cast spells during").
     // Guard: exclude compound lines containing "each turn" — those are split at the oracle.rs level
     // so both CantCastDuring and PerTurnCastLimit are emitted independently.
-    if tp.lower.contains("can cast spells only during your turn") && !tp.lower.contains("each turn")
+    if nom_primitives::scan_contains(tp.lower, "can cast spells only during your turn")
+        && !nom_primitives::scan_contains(tp.lower, "each turn")
     {
         let who = strip_casting_prohibition_subject(tp.lower)
             .map(|(scope, _)| scope)
@@ -795,13 +808,13 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     // e.g., Teferi, Time Raveler: "Your opponents can't cast spells during your turn."
     // e.g., "Players can't cast spells during combat."
     // Must be checked before CantCastFrom to avoid false matches on "can't cast spells".
-    if tp.lower.contains("can't cast spells during") {
+    if nom_primitives::scan_contains(tp.lower, "can't cast spells during") {
         let who = strip_casting_prohibition_subject(tp.lower)
             .map(|(scope, _)| scope)
             .unwrap_or(CastingProhibitionScope::AllPlayers);
-        let when = if tp.lower.contains("during your turn") {
+        let when = if nom_primitives::scan_contains(tp.lower, "during your turn") {
             CastingProhibitionCondition::DuringYourTurn
-        } else if tp.lower.contains("during combat") {
+        } else if nom_primitives::scan_contains(tp.lower, "during combat") {
             CastingProhibitionCondition::DuringCombat
         } else {
             // Fallback: treat unknown conditions as combat-scoped
@@ -815,7 +828,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- CR 604.3: "Players can't cast spells from [zones]" ---
     // e.g., Grafdigger's Cage: "Players can't cast spells from graveyards or libraries."
-    if tp.lower.contains("can't cast spells from") {
+    if nom_primitives::scan_contains(tp.lower, "can't cast spells from") {
         let zones = parse_zone_names_from_tp(&tp);
         let affected = if zones.is_empty() {
             TargetFilter::Any
@@ -850,7 +863,8 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- "~ doesn't untap during your untap step [as long as / if condition]" ---
     // CR 502.3: Effects can keep permanents from untapping during the untap step.
-    if tp.lower.contains("doesn't untap during") || tp.lower.contains("doesn\u{2019}t untap during")
+    if nom_primitives::scan_contains(tp.lower, "doesn't untap during")
+        || nom_primitives::scan_contains(tp.lower, "doesn\u{2019}t untap during")
     {
         // Check for trailing condition after the untap-step phrase
         let condition = extract_cant_untap_condition(tp.lower);
@@ -879,47 +893,40 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- "{Ability} abilities you activate cost {N} less to activate" ---
     // CR 601.2f: Ability-type-specific cost reduction (e.g., Silver-Fur Master, Fluctuator).
-    if tp.lower.contains("abilities you activate cost") && tp.lower.contains("less to activate") {
-        // Extract keyword name: text before " abilities you activate"
-        let keyword = tp
-            .lower
-            .split(" abilities you activate")
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        // Extract reduction amount from mana symbols between "cost " and " less"
-        let amount = tp
-            .lower
-            .split("cost ")
-            .nth(1)
-            .and_then(|rest| rest.split(" less").next())
-            .and_then(|mana_str| {
-                // Parse {N} — extract the number from braces
-                let stripped = mana_str.trim().trim_matches('{').trim_matches('}');
-                stripped.parse::<u32>().ok()
-            })
-            .unwrap_or(1);
-        return Some(
-            StaticDefinition::new(StaticMode::ReduceAbilityCost { keyword, amount })
-                .affected(TargetFilter::Typed(
-                    TypedFilter::card().controller(ControllerRef::You),
-                ))
-                .description(text.to_string()),
-        );
+    if nom_primitives::scan_contains(tp.lower, "abilities you activate cost")
+        && nom_primitives::scan_contains(tp.lower, "less to activate")
+    {
+        // Extract keyword name and amount via nom combinators
+        if let Some(((keyword, amount), _)) = nom_on_lower(tp.original, tp.lower, |i| {
+            let (i, kw) = terminated(
+                nom::bytes::complete::take_until(" abilities you activate cost "),
+                tag(" abilities you activate cost "),
+            )
+            .parse(i)?;
+            let (i, amt) =
+                nom::sequence::delimited(tag("{"), nom_primitives::parse_number, tag("}"))
+                    .parse(i)?;
+            let (i, _) = tag(" less to activate").parse(i)?;
+            Ok((i, (kw.to_string(), amt)))
+        }) {
+            return Some(
+                StaticDefinition::new(StaticMode::ReduceAbilityCost { keyword, amount })
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::card().controller(ControllerRef::You),
+                    ))
+                    .description(text.to_string()),
+            );
+        }
     }
 
     // --- "Activated abilities of [filter] cost {N} less to activate" ---
     // CR 602.1 + CR 601.2f: Generic activated ability cost reduction (e.g., Training Grounds).
     if let Some(rest) = nom_tag_lower(tp.lower, tp.lower, "activated abilities of ") {
-        if let Some(cost_pos) = rest.find(" cost ") {
-            let filter_part = &rest[..cost_pos];
-            let after_cost = &rest[cost_pos + " cost ".len()..];
-            if after_cost.contains("less to activate") {
-                let amount = after_cost
-                    .split(" less")
-                    .next()
-                    .and_then(|mana_str| {
+        if let Ok((_, (filter_part, after_cost))) = nom_primitives::split_once_on(rest, " cost ") {
+            if nom_primitives::scan_contains(after_cost, "less to activate") {
+                let amount = nom_primitives::split_once_on(after_cost, " less")
+                    .ok()
+                    .and_then(|(_, (mana_str, _))| {
                         let stripped = mana_str.trim().trim_matches('{').trim_matches('}');
                         stripped.parse::<u32>().ok()
                     })
@@ -943,9 +950,10 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     // --- CR 601.2f: Cost modification statics ---
     // Patterns: "[Type] spells [you/your opponents] cast cost {N} less/more to cast"
     // Also: "Noncreature spells cost {1} more to cast" (Thalia, no "you cast")
-    if tp.lower.contains("cost")
-        && tp.lower.contains("spell")
-        && (tp.lower.contains("less") || tp.lower.contains("more"))
+    if nom_primitives::scan_contains(tp.lower, "cost")
+        && nom_primitives::scan_contains(tp.lower, "spell")
+        && (nom_primitives::scan_contains(tp.lower, "less")
+            || nom_primitives::scan_contains(tp.lower, "more"))
     {
         if let Some(def) = try_parse_cost_modification(&text, &lower) {
             return Some(def);
@@ -953,7 +961,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     }
 
     // --- "must be blocked if able" (CR 509.1b) ---
-    if tp.lower.contains("must be blocked") {
+    if nom_primitives::scan_contains(tp.lower, "must be blocked") {
         return Some(
             StaticDefinition::new(StaticMode::MustBeBlocked)
                 .affected(TargetFilter::SelfRef)
@@ -962,7 +970,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     }
 
     // --- "can't gain life" (CR 119.7) ---
-    if tp.lower.contains("can't gain life") {
+    if nom_primitives::scan_contains(tp.lower, "can't gain life") {
         let affected = parse_player_scope_filter(&tp);
         return Some(
             StaticDefinition::new(StaticMode::CantGainLife)
@@ -972,7 +980,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     }
 
     // --- "can't win the game" / "can't lose the game" (CR 104.3a/b) ---
-    if tp.lower.contains("can't win the game") {
+    if nom_primitives::scan_contains(tp.lower, "can't win the game") {
         let affected = parse_player_scope_filter(&tp);
         return Some(
             StaticDefinition::new(StaticMode::CantWinTheGame)
@@ -980,7 +988,9 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
                 .description(text.to_string()),
         );
     }
-    if tp.lower.contains("can't lose the game") || tp.lower.contains("don't lose the game") {
+    if nom_primitives::scan_contains(tp.lower, "can't lose the game")
+        || nom_primitives::scan_contains(tp.lower, "don't lose the game")
+    {
         let affected = parse_player_scope_filter(&tp);
         return Some(
             StaticDefinition::new(StaticMode::CantLoseTheGame)
@@ -990,7 +1000,8 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     }
 
     // --- "as though it/they had flash" (CR 702.8a) ---
-    if tp.lower.contains("as though it had flash") || tp.lower.contains("as though they had flash")
+    if nom_primitives::scan_contains(tp.lower, "as though it had flash")
+        || nom_primitives::scan_contains(tp.lower, "as though they had flash")
     {
         return Some(
             StaticDefinition::new(StaticMode::CastWithFlash).description(text.to_string()),
@@ -1005,14 +1016,14 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     }
 
     // --- "can block an additional creature" / "can block any number" (CR 509.1b) ---
-    if tp.lower.contains("can block any number") {
+    if nom_primitives::scan_contains(tp.lower, "can block any number") {
         return Some(
             StaticDefinition::new(StaticMode::ExtraBlockers { count: None })
                 .affected(TargetFilter::SelfRef)
                 .description(text.to_string()),
         );
     }
-    if tp.lower.contains("can block an additional") {
+    if nom_primitives::scan_contains(tp.lower, "can block an additional") {
         return Some(
             StaticDefinition::new(StaticMode::ExtraBlockers { count: Some(1) })
                 .affected(TargetFilter::SelfRef)
@@ -1022,13 +1033,13 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
 
     // --- "play an additional land" / "play two additional lands" ---
     // CR 305.2: Determine the count at parse time and carry it as typed data.
-    if tp.lower.contains("play two additional lands") {
+    if nom_primitives::scan_contains(tp.lower, "play two additional lands") {
         return Some(
             StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 2 })
                 .description(text.to_string()),
         );
     }
-    if tp.lower.contains("play an additional land") {
+    if nom_primitives::scan_contains(tp.lower, "play an additional land") {
         return Some(
             StaticDefinition::new(StaticMode::AdditionalLandDrop { count: 1 })
                 .description(text.to_string()),
@@ -1053,7 +1064,7 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
     //   of a permanent you control to trigger, that ability triggers an additional time."
     // Roaming Throne: "If a triggered ability of another creature you control of the chosen
     //   type triggers, it triggers an additional time."
-    if tp.lower.contains("triggers an additional time") {
+    if nom_primitives::scan_contains(tp.lower, "triggers an additional time") {
         return Some(
             StaticDefinition::new(StaticMode::Panharmonicon).description(text.to_string()),
         );
@@ -1078,13 +1089,14 @@ pub fn parse_static_line_multi(text: &str) -> Vec<StaticDefinition> {
 
     // CR 602.5: Compound "can't attack/block" + "activated abilities can't be activated"
     // produces two static definitions (e.g., CantAttackOrBlock + CantBeActivated).
-    if lower.contains("activated abilities can't be activated")
-        && (lower.contains("can't attack") || lower.contains("can't block"))
+    if nom_primitives::scan_contains(&lower, "activated abilities can't be activated")
+        && (nom_primitives::scan_contains(&lower, "can't attack")
+            || nom_primitives::scan_contains(&lower, "can't block"))
     {
         let mut defs = Vec::new();
-        let combat_mode = if lower.contains("can't attack or block") {
+        let combat_mode = if nom_primitives::scan_contains(&lower, "can't attack or block") {
             StaticMode::CantAttackOrBlock
-        } else if lower.contains("can't attack") {
+        } else if nom_primitives::scan_contains(&lower, "can't attack") {
             StaticMode::CantAttack
         } else {
             StaticMode::CantBlock
@@ -1418,7 +1430,8 @@ fn parse_assigns_damage_from_toughness(lower: &str, text: &str) -> Option<Static
 
     // CR 510.1c: Self-referential variant — "This creature assigns..."
     if let Some(rest) = nom_tag_lower(lower, lower, "this creature ") {
-        if rest.trim_end_matches('.').trim() == suffix {
+        let cleaned = rest.trim_end_matches('.').trim();
+        if nom_tag_lower(cleaned, cleaned, suffix).is_some_and(|r| r.is_empty()) {
             return Some(
                 StaticDefinition::continuous()
                     .affected(TargetFilter::SelfRef)
@@ -1439,13 +1452,14 @@ fn parse_assigns_damage_from_toughness(lower: &str, text: &str) -> Option<Static
             return None;
         };
 
-    let (condition_text, _) = if let Some(pos) = rest.find(suffix) {
-        (&rest[..pos], &rest[pos + suffix.len()..])
-    } else if let Some(pos) = rest.find(suffix_alt) {
-        (&rest[..pos], &rest[pos + suffix_alt.len()..])
-    } else {
-        return None;
-    };
+    let (condition_text, _) =
+        if let Ok((_, (before, _))) = nom_primitives::split_once_on(rest, suffix) {
+            (before, "")
+        } else if let Ok((_, (before, _))) = nom_primitives::split_once_on(rest, suffix_alt) {
+            (before, "")
+        } else {
+            return None;
+        };
 
     let condition_text = condition_text.trim();
 
@@ -1509,7 +1523,9 @@ fn parse_subject_continuous_static(text: &str) -> Option<StaticDefinition> {
     // CR 613.4c / CR 611.3a: Route "for each" and "as long as" predicates through
     // parse_continuous_gets_has which handles dynamic P/T and condition splitting.
     let pred_lower = predicate.to_lowercase();
-    if pred_lower.contains("for each ") || pred_lower.contains(" as long as ") {
+    if nom_primitives::scan_contains(&pred_lower, "for each")
+        || nom_primitives::scan_contains(&pred_lower, "as long as")
+    {
         return parse_continuous_gets_has(predicate, affected, text);
     }
 
@@ -1957,8 +1973,9 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
 
     // Pattern 2: "Creature cards you own that aren't on the battlefield have flash"
     // This grants flash to cards in non-battlefield zones.
-    if subject.contains("cards you own that aren't on the battlefield") {
-        let type_end = subject.find(" cards")?;
+    if nom_primitives::scan_contains(subject, "cards you own that aren't on the battlefield") {
+        let (prefix, _) = nom_primitives::scan_split_at_phrase(subject, |i| tag("cards").parse(i))?;
+        let type_end = prefix.len();
         let type_part = &tp.original[..type_end];
         let (base_filter, _) = parse_type_phrase(type_part);
         let affected = match base_filter {
@@ -2008,14 +2025,16 @@ fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<TargetFilter> {
     let before_chosen: &str;
     let after_chosen: &str;
 
-    if let Some(pos) = rest.find("of the chosen color") {
+    if let Ok((_, (before, after))) = nom_primitives::split_once_on(rest, "of the chosen color") {
         chosen_prop = FilterProp::IsChosenColor;
-        before_chosen = rest[..pos].trim();
-        after_chosen = rest[pos + "of the chosen color".len()..].trim();
-    } else if let Some(pos) = rest.find("of the chosen type") {
+        before_chosen = before.trim();
+        after_chosen = after.trim();
+    } else if let Ok((_, (before, after))) =
+        nom_primitives::split_once_on(rest, "of the chosen type")
+    {
         chosen_prop = FilterProp::IsChosenCreatureType;
-        before_chosen = rest[..pos].trim();
-        after_chosen = rest[pos + "of the chosen type".len()..].trim();
+        before_chosen = before.trim();
+        after_chosen = after.trim();
     } else {
         return None;
     };
@@ -2033,14 +2052,14 @@ fn parse_chosen_qualifier_subject(tp: &TextPair<'_>) -> Option<TargetFilter> {
 
     // Check controller/qualifiers after the qualifier
     let remaining = after_chosen;
-    if remaining.starts_with("your opponents control") {
+    if nom_tag_lower(remaining, remaining, "your opponents control").is_some() {
         controller = Some(ControllerRef::Opponent);
-    } else if remaining.starts_with("you control") {
+    } else if nom_tag_lower(remaining, remaining, "you control").is_some() {
         controller = Some(ControllerRef::You);
     }
 
     // Check for "other than" suffix (e.g., "other than this Vehicle")
-    if remaining.contains("other than") {
+    if nom_primitives::scan_contains(remaining, "other than") {
         extra_props.push(FilterProp::Another);
     }
 
@@ -2371,7 +2390,8 @@ fn parse_rule_static_predicate(text: &str) -> Option<RuleStaticPredicate> {
     }
 
     if nom_tag_tp(&tp, "may play an additional land").is_some()
-        || (nom_tag_tp(&tp, "may play up to ").is_some() && tp.lower.contains("additional land"))
+        || (nom_tag_tp(&tp, "may play up to ").is_some()
+            && nom_primitives::scan_contains(tp.lower, "additional land"))
     {
         return Some(RuleStaticPredicate::MayPlayAdditionalLand);
     }
@@ -2427,9 +2447,13 @@ fn lower_rule_static(
 /// Determine player scope for "can't [verb]" patterns based on subject phrasing.
 /// Handles "your opponents can't ...", "you can't ...", and "players can't ..." subjects.
 fn parse_player_scope_filter(tp: &TextPair<'_>) -> TargetFilter {
-    if tp.lower.contains("your opponents") || nom_tag_tp(tp, "opponents").is_some() {
+    if nom_primitives::scan_contains(tp.lower, "your opponents")
+        || nom_tag_tp(tp, "opponents").is_some()
+    {
         TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
-    } else if nom_tag_tp(tp, "you ").is_some() || tp.lower.contains("you can't") {
+    } else if nom_tag_tp(tp, "you ").is_some()
+        || nom_primitives::scan_contains(tp.lower, "you can't")
+    {
         TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::You))
     } else {
         TargetFilter::Typed(TypedFilter::default())
@@ -2584,10 +2608,10 @@ fn parse_per_turn_cast_limit(tp: &str, text: &str) -> Option<StaticDefinition> {
 /// - "Enchanted creature's controller can't cast [type] spells" (Brand of Ill Omen)
 fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition> {
     // Exclude patterns handled by other parsers
-    if tp.contains("can't cast more than")
-        || tp.contains("can't cast spells during")
-        || tp.contains("can't cast spells from")
-        || tp.contains("can cast spells only")
+    if nom_primitives::scan_contains(tp, "can't cast more than")
+        || nom_primitives::scan_contains(tp, "can't cast spells during")
+        || nom_primitives::scan_contains(tp, "can't cast spells from")
+        || nom_primitives::scan_contains(tp, "can cast spells only")
     {
         return None;
     }
@@ -2608,7 +2632,7 @@ fn parse_cant_cast_type_spells(tp: &str, text: &str) -> Option<StaticDefinition>
     // CR 101.2: Conditional subject with turn-scoped attack condition — approximate
     // as opponent-scoped prohibition since the condition is game-state dependent.
     if nom_tag_lower(tp, tp, "each opponent who attacked").is_some()
-        && tp.contains("can't cast spells")
+        && nom_primitives::scan_contains(tp, "can't cast spells")
     {
         return Some(
             StaticDefinition::new(StaticMode::CantBeCast {
@@ -2984,13 +3008,13 @@ fn parse_cant_enter_battlefield_subject(tp: &TextPair) -> TargetFilter {
 /// Handles "graveyards", "libraries", "exile" and their singular/plural forms.
 fn parse_zone_names_from_tp(tp: &TextPair) -> Vec<Zone> {
     let mut zones = Vec::new();
-    if tp.lower.contains("graveyard") {
+    if nom_primitives::scan_contains(tp.lower, "graveyard") {
         zones.push(Zone::Graveyard);
     }
-    if tp.lower.contains("librar") {
+    if nom_primitives::scan_contains(tp.lower, "librar") {
         zones.push(Zone::Library);
     }
-    if tp.lower.contains("exile") {
+    if nom_primitives::scan_contains(tp.lower, "exile") {
         zones.push(Zone::Exile);
     }
     zones
@@ -3090,7 +3114,7 @@ fn parse_enchanted_is_type(tp: &TextPair, description: &str) -> Option<StaticDef
     } else {
         (type_part, None)
     };
-    let is_colorless = is_rest_lower.contains("colorless");
+    let is_colorless = nom_primitives::scan_contains(is_rest_lower, "colorless");
 
     // Parse the target type(s) — use parse_type_filter_word for the main type.
     // Handle "[Subtype] [type]" patterns (e.g., "insect creature") by trying the
@@ -3277,7 +3301,7 @@ fn parse_enchanted_equipped_predicate(
     // --- Non-standard keyword phrasings (check before continuous grants) ---
 
     // CR 702.10: "can attack as though it had haste" → AddKeyword(Haste)
-    if pred_lower.contains("can attack as though it had haste") {
+    if nom_primitives::scan_contains(&pred_lower, "can attack as though it had haste") {
         return Some(
             StaticDefinition::continuous()
                 .affected(affected)
@@ -3289,7 +3313,7 @@ fn parse_enchanted_equipped_predicate(
     }
 
     // CR 702.3b: "can attack as though it didn't have defender" → CanAttackWithDefender
-    if pred_lower.contains("can attack as though it didn't have defender") {
+    if nom_primitives::scan_contains(&pred_lower, "can attack as though it didn't have defender") {
         return Some(
             StaticDefinition::new(StaticMode::CanAttackWithDefender)
                 .affected(affected)
@@ -3469,7 +3493,7 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     let lower = tp.lower;
     let mut modifications = Vec::new();
 
-    if tp.lower.contains("lose all abilities") {
+    if nom_primitives::scan_contains(tp.lower, "lose all abilities") {
         modifications.push(ContinuousModification::RemoveAllAbilities);
     }
 
@@ -3504,21 +3528,21 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
 
     // CR 702: Guard "can't have or gain [keyword]" from extract_keyword_clause —
     // "have" inside "can't have" must NOT produce AddKeyword.
-    if lower.contains("can't have") || lower.contains("can't have or gain") {
+    if nom_primitives::scan_contains(lower, "can't have")
+        || nom_primitives::scan_contains(lower, "can't have or gain")
+    {
         // Parse the keyword from "can't have or gain [keyword]" / "can't have [keyword]"
-        let cant_text = if let Some(rest) = lower
-            .strip_suffix('.')
-            .unwrap_or(lower)
-            .split("can't have or gain ")
-            .nth(1)
+        let stripped_lower = lower.strip_suffix('.').unwrap_or(lower);
+        let cant_text = if let Ok((_, (_, after))) =
+            nom_primitives::split_once_on(stripped_lower, "can't have or gain ")
         {
-            Some(rest)
+            Some(after)
+        } else if let Ok((_, (_, after))) =
+            nom_primitives::split_once_on(stripped_lower, "can't have ")
+        {
+            Some(after)
         } else {
-            lower
-                .strip_suffix('.')
-                .unwrap_or(lower)
-                .split("can't have ")
-                .nth(1)
+            None
         };
         if let Some(kw_text) = cant_text {
             if let Some(kw) = map_keyword(kw_text.trim().trim_end_matches('.')) {
@@ -3670,7 +3694,7 @@ fn parse_base_pt_mod(text: &str) -> Option<(i32, i32)> {
 fn parse_base_power_mod(text: &str) -> Option<i32> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
-    if tp.lower.contains("base power and toughness ") {
+    if nom_primitives::scan_contains(tp.lower, "base power and toughness") {
         return None;
     }
     let power_text = tp.strip_after("base power ")?.original.trim();
@@ -3680,7 +3704,7 @@ fn parse_base_power_mod(text: &str) -> Option<i32> {
 fn parse_base_toughness_mod(text: &str) -> Option<i32> {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
-    if tp.lower.contains("base power and toughness ") {
+    if nom_primitives::scan_contains(tp.lower, "base power and toughness") {
         return None;
     }
     let toughness_text = tp.strip_after("base toughness ")?.original.trim();
@@ -3992,9 +4016,10 @@ fn parse_landwalk_keyword(text: &str) -> Option<Keyword> {
 /// - "~'s toughness is equal to the number of cards in your hand."
 fn parse_cda_pt_equality(lower: &str, text: &str) -> Option<StaticDefinition> {
     // Detect framing
-    let both = lower.contains("power and toughness are each equal to");
-    let power_only = !both && lower.contains("power is equal to");
-    let toughness_only = !both && !power_only && lower.contains("toughness is equal to");
+    let both = nom_primitives::scan_contains(lower, "power and toughness are each equal to");
+    let power_only = !both && nom_primitives::scan_contains(lower, "power is equal to");
+    let toughness_only =
+        !both && !power_only && nom_primitives::scan_contains(lower, "toughness is equal to");
 
     if !both && !power_only && !toughness_only {
         return None;
@@ -4141,7 +4166,7 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
         (r, false, CardPlayMode::Play)
     } else if let Some(r) = nom_tag_lower(lower, lower, "you may cast ") {
         // Only match if "from your graveyard" follows — avoid catching other "you may cast" statics
-        if r.contains("from your graveyard") {
+        if nom_primitives::scan_contains(r, "from your graveyard") {
             (r, false, CardPlayMode::Cast)
         } else {
             return None;
@@ -4150,8 +4175,9 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
         return None;
     };
 
-    let gy_idx = rest.find(" from your graveyard")?;
-    let filter_text = &rest[..gy_idx];
+    let (filter_text, _) = nom_primitives::split_once_on(rest, " from your graveyard")
+        .ok()
+        .map(|(_, pair)| pair)?;
 
     // Strip leading article via nom tag ("a ", "an ")
     let filter_text = nom_tag_lower(filter_text, filter_text, "a ")
@@ -4160,9 +4186,9 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
 
     // Remove " spell"/" spells" — parse_type_phrase expects bare type words.
     // "lands" is already a valid type phrase, so no stripping needed for Play mode.
-    let cleaned: Cow<str> = if filter_text.contains(" spells") {
+    let cleaned: Cow<str> = if nom_primitives::scan_contains(filter_text, "spells") {
         Cow::Owned(filter_text.replacen(" spells", "", 1))
-    } else if filter_text.contains(" spell") {
+    } else if nom_primitives::scan_contains(filter_text, "spell") {
         Cow::Owned(filter_text.replacen(" spell", "", 1))
     } else {
         Cow::Borrowed(filter_text)
@@ -4185,13 +4211,13 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
 fn try_parse_hand_cast_free_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
     let rest = nom_tag_lower(lower, lower, "you may cast ")?;
     // Must contain "from your hand" and "without paying"
-    let hand_idx = rest.find(" from your hand")?;
+    let (filter_text, hand_rest) = nom_primitives::split_once_on(rest, " from your hand")
+        .ok()
+        .map(|(_, pair)| pair)?;
     // "without paying" must follow "from your hand" — reject unusual word orders
-    if !rest[hand_idx..].contains("without paying") {
+    if !nom_primitives::scan_contains(hand_rest, "without paying") {
         return None;
     }
-
-    let filter_text = &rest[..hand_idx];
 
     // "spells" with no qualifier → Any filter (Omniscience)
     if filter_text == "spells" {
@@ -4207,9 +4233,9 @@ fn try_parse_hand_cast_free_permission(text: &str, lower: &str) -> Option<Static
         .or_else(|| nom_tag_lower(filter_text, filter_text, "an "))
         .unwrap_or(filter_text);
 
-    let cleaned: Cow<str> = if filter_text.contains(" spells") {
+    let cleaned: Cow<str> = if nom_primitives::scan_contains(filter_text, "spells") {
         Cow::Owned(filter_text.replacen(" spells", "", 1))
-    } else if filter_text.contains(" spell") {
+    } else if nom_primitives::scan_contains(filter_text, "spell") {
         Cow::Owned(filter_text.replacen(" spell", "", 1))
     } else {
         Cow::Borrowed(filter_text)
@@ -4266,13 +4292,15 @@ fn first_qualified_spell_condition(filter: &TargetFilter) -> StaticCondition {
 ///
 /// Dynamic "for each" counts are extracted when present.
 fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefinition> {
-    let is_raise = lower.contains("more to cast") || lower.contains("more to activate");
-    let is_reduce = lower.contains("less to cast") || lower.contains("less to activate");
+    let is_raise = nom_primitives::scan_contains(lower, "more to cast")
+        || nom_primitives::scan_contains(lower, "more to activate");
+    let is_reduce = nom_primitives::scan_contains(lower, "less to cast")
+        || nom_primitives::scan_contains(lower, "less to activate");
     if !is_raise && !is_reduce {
         return None;
     }
 
-    let amount_is_variable_x = lower.contains("{x}");
+    let amount_is_variable_x = nom_primitives::scan_contains(lower, "{x}");
 
     // Extract the mana amount from the text (look for {N} pattern)
     let amount = if let Some(brace_start) = text.find('{') {
@@ -4285,9 +4313,11 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
     };
 
     // Determine player scope from "you cast", "your opponents cast", or bare
-    let controller = if lower.contains("your opponents cast") || lower.contains("opponents cast") {
+    let controller = if nom_primitives::scan_contains(lower, "your opponents cast")
+        || nom_primitives::scan_contains(lower, "opponents cast")
+    {
         Some(ControllerRef::Opponent)
-    } else if lower.contains("you cast") {
+    } else if nom_primitives::scan_contains(lower, "you cast") {
         Some(ControllerRef::You)
     } else {
         // Bare "spells cost more/less" — affects all players' spells.
@@ -4535,7 +4565,7 @@ fn parse_land_type_change(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinit
 
     // "every basic land type in addition to their other types"
     if nom_tag_lower(&lower_rest, &lower_rest, "every basic land type").is_some()
-        && lower_rest.contains("in addition to")
+        && nom_primitives::scan_contains(&lower_rest, "in addition to")
     {
         return Some(
             StaticDefinition::continuous()

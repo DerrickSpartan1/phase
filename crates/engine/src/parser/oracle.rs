@@ -16,7 +16,8 @@ use crate::types::mana::ManaCost;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
-use super::oracle_nom::bridge::nom_on_lower;
+use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
+use super::oracle_nom::primitives::scan_contains;
 
 use super::oracle_casting::{
     parse_additional_cost_line, parse_casting_restriction_line, parse_spell_casting_option_line,
@@ -777,11 +778,10 @@ pub fn parse_oracle_text(
         }
         // CR 701.43d: Variant with card name — "You may exert {Name} as {he/she/it/they} attacks"
         if nom_on_lower(&line, &lower, |i| value((), tag("you may exert ")).parse(i)).is_some()
-            && lower.contains(" as ")
-            && lower.contains(" attacks")
+            && scan_contains(&lower, "as ")
+            && scan_contains(&lower, "attacks")
         {
-            if let Some(when_pos) = lower.find(". when you do, ") {
-                let effect_text = &line[when_pos + ". When you do, ".len()..];
+            if let Some((_, effect_text)) = split_once_on_lower(&line, &lower, ". when you do, ") {
                 let effect_def = parse_effect_chain(effect_text.trim(), AbilityKind::Spell);
                 let trigger = TriggerDefinition::new(TriggerMode::Exerted)
                     .valid_card(TargetFilter::SelfRef)
@@ -794,10 +794,11 @@ pub fn parse_oracle_text(
             continue;
         }
         // CR 701.43d: Conditional exert — "If [creature] hasn't been exerted this turn, you may exert it"
-        if lower.starts_with("if ") && lower.contains("you may exert") && lower.contains("attacks")
+        if nom_on_lower(&line, &lower, |i| value((), tag("if ")).parse(i)).is_some()
+            && scan_contains(&lower, "you may exert")
+            && scan_contains(&lower, "attacks")
         {
-            if let Some(when_pos) = lower.find(". when you do, ") {
-                let effect_text = &line[when_pos + ". When you do, ".len()..];
+            if let Some((_, effect_text)) = split_once_on_lower(&line, &lower, ". when you do, ") {
                 let effect_def = parse_effect_chain(effect_text.trim(), AbilityKind::Spell);
                 let trigger = TriggerDefinition::new(TriggerMode::Exerted)
                     .valid_card(TargetFilter::SelfRef)
@@ -918,9 +919,9 @@ pub fn parse_oracle_text(
         // would deal this turn." → Choose(Color) → PreventDamage chain.
         // Must run before Priority 8 (replacement) to avoid being caught as a passive shield.
         if is_spell
-            && lower.contains("prevent")
-            && lower.contains("damage")
-            && lower.contains("color of your choice")
+            && scan_contains(&lower, "prevent")
+            && scan_contains(&lower, "damage")
+            && scan_contains(&lower, "color of your choice")
         {
             use crate::types::ability::{
                 ChoiceType, FilterProp, PreventionAmount, PreventionScope,

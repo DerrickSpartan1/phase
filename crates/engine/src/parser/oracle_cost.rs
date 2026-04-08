@@ -6,6 +6,7 @@ use nom::Parser;
 use super::oracle_modal::split_short_label_prefix;
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::primitives::{scan_contains, split_once_on};
 use super::oracle_quantity::parse_for_each_clause;
 use super::oracle_target::{parse_target, parse_type_phrase};
 use super::oracle_util::parse_mana_symbols;
@@ -142,7 +143,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     // "Pay N life" / "N life"
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("pay ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
-        if rest_lower.contains("life") {
+        if scan_contains(&rest_lower, "life") {
             if let Some((n, _)) = parse_number(&rest_lower) {
                 return AbilityCost::PayLife { amount: n };
             }
@@ -255,7 +256,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     // "Remove N {type} counter(s) from ~" or "Remove all {type} counters from ~"
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("remove ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
-        if rest_lower.contains("counter") {
+        if scan_contains(&rest_lower, "counter") {
             // CR 122.1: "remove all" uses u32::MAX as sentinel, resolved at runtime.
             if let Some(((), all_rest)) =
                 nom_on_lower(rest, &rest_lower, |i| value((), tag("all ")).parse(i))
@@ -383,8 +384,8 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     // "Reveal a [Type] card from your hand" — reveal from hand with type filter.
     if let Some(((), rest)) = nom_on_lower(text, &lower, |i| value((), tag("reveal ")).parse(i)) {
         let rest_lower = rest.to_lowercase();
-        if let Some(idx) = rest_lower.find("from your hand") {
-            let filter_raw = rest_lower[..idx].trim();
+        if let Ok((_, (before, _))) = split_once_on(&rest_lower, "from your hand") {
+            let filter_raw = before.trim();
             let filter_raw = strip_article(filter_raw, filter_raw);
             let filter_raw = filter_raw
                 .strip_suffix(" card")
@@ -442,7 +443,7 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     }
 
     // Vehicle tier costs: "12+ | {3}{W}" — skip the tier prefix and parse the actual cost
-    if lower.contains(" | ") {
+    if scan_contains(&lower, "| ") {
         let tp = TextPair::new(text, &lower);
         if let Some((before, after)) = tp.split_around(" | ") {
             let prefix = before.lower.trim();
@@ -620,7 +621,7 @@ fn try_parse_energy_cost(lower: &str) -> Option<u32> {
         .unwrap_or(lower)
         .trim();
     // Count {e} symbols
-    if text.contains("{e}") {
+    if scan_contains(text, "{e}") {
         let count = text.matches("{e}").count() as u32;
         // Verify the text is ONLY {E} symbols (no other text)
         let cleaned = text.replace("{e}", "").replace(' ', "");
@@ -641,14 +642,16 @@ fn try_parse_energy_cost(lower: &str) -> Option<u32> {
 /// Parse "return a land you control to its owner's hand" style bounce costs.
 fn try_parse_return_to_hand_cost(rest_lower: &str, _rest_original: &str) -> Option<AbilityCost> {
     // Must end with "to its owner's hand" or "to your hand"
-    if !rest_lower.contains("to its owner's hand") && !rest_lower.contains("to your hand") {
+    if !scan_contains(rest_lower, "to its owner's hand")
+        && !scan_contains(rest_lower, "to your hand")
+    {
         return None;
     }
     // Strip the destination
-    let filter_text = rest_lower
-        .split(" to its owner's hand")
-        .next()
-        .or_else(|| rest_lower.split(" to your hand").next())?;
+    let filter_text = split_once_on(rest_lower, " to its owner's hand")
+        .map(|(_, (before, _))| before)
+        .or_else(|_| split_once_on(rest_lower, " to your hand").map(|(_, (before, _))| before))
+        .ok()?;
     // Strip article using nom
     let filter_text = nom_on_lower(filter_text, filter_text, nom_primitives::parse_article)
         .map(|((), rest)| rest)
@@ -677,13 +680,11 @@ fn try_strip_ability_word_cost(text: &str) -> Option<AbilityCost> {
     }
     // Ticket costs: "{TK}{TK} — {T}", "{TK}{TK}{TK} — {3}"
     if nom_on_lower(text, &lower, |i| value((), tag("{tk}")).parse(i)).is_some() {
-        if let Some(dash_pos) = text
-            .find(" — ")
-            .or_else(|| text.find(" — "))
-            .or_else(|| text.find(" - "))
-        {
-            let rest = &text[dash_pos..];
-            let rest = strip_em_dash(rest)?;
+        // Try splitting on em-dash, en-dash, or hyphen separator
+        let dash_split = split_once_on(text, " \u{2014} ")
+            .or_else(|_| split_once_on(text, " \u{2013} "))
+            .or_else(|_| split_once_on(text, " - "));
+        if let Ok((_, (_, rest))) = dash_split {
             let cost = parse_single_cost(rest.trim());
             if !matches!(cost, AbilityCost::Unimplemented { .. }) {
                 return Some(cost);
@@ -691,14 +692,6 @@ fn try_strip_ability_word_cost(text: &str) -> Option<AbilityCost> {
         }
     }
     None
-}
-
-/// Strip em-dash/en-dash separator: " — " (U+2014), " - "
-fn strip_em_dash(text: &str) -> Option<&str> {
-    nom_on_lower(text, text, |i| {
-        value((), alt((tag(" \u{2014} "), tag(" - ")))).parse(i)
-    })
-    .map(|((), rest)| rest)
 }
 
 fn extract_filter_zone(filter: &TargetFilter) -> Option<Zone> {

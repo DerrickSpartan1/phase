@@ -3,15 +3,19 @@ use nom::bytes::complete::tag;
 use nom::Parser;
 use nom_language::error::VerboseError;
 
+use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::primitives::scan_contains;
 use crate::parser::oracle_effect::split_leading_conditional;
 
 pub(crate) fn is_cant_win_lose_compound(lower: &str) -> bool {
-    lower.contains("can't win the game") && lower.contains("can't lose the game")
+    scan_contains(lower, "can't win the game") && scan_contains(lower, "can't lose the game")
 }
 
 pub(crate) fn has_roll_die_pattern(lower: &str) -> bool {
     // CR 706: Detect both "roll a dN" and word-form "roll a six-sided die" patterns.
-    lower.contains("roll a d") || lower.contains("rolls a d") || lower.contains("-sided die")
+    scan_contains(lower, "roll a d")
+        || scan_contains(lower, "rolls a d")
+        || scan_contains(lower, "-sided die")
 }
 
 pub(crate) fn is_instead_replacement_line(text: &str) -> bool {
@@ -36,39 +40,42 @@ pub(crate) fn lower_starts_with(lower: &str, prefix: &str) -> bool {
 }
 
 pub(crate) fn is_flashback_equal_mana_cost(lower: &str) -> bool {
-    lower.contains("flashback cost") && lower.contains("equal to") && lower.contains("mana cost")
+    scan_contains(lower, "flashback cost")
+        && scan_contains(lower, "equal to")
+        && scan_contains(lower, "mana cost")
 }
 
 pub(crate) fn is_defiler_cost_pattern(lower: &str) -> bool {
     lower_starts_with(lower, "as an additional cost to cast ")
-        && !lower.contains("this spell")
-        && lower.contains("you may pay")
-        && lower.contains(" life")
+        && !scan_contains(lower, "this spell")
+        && scan_contains(lower, "you may pay")
+        && scan_contains(lower, "life")
 }
 
 pub(crate) fn is_compound_turn_limit(lower: &str) -> bool {
-    lower.contains("only during your turn")
-        && lower.contains(" and ")
-        && lower.contains("each turn")
+    scan_contains(lower, "only during your turn")
+        && scan_contains(lower, "and ")
+        && scan_contains(lower, "each turn")
 }
 
 pub(crate) fn is_opening_hand_begin_game(lower: &str) -> bool {
-    lower.contains("opening hand") && lower.contains("begin the game")
+    scan_contains(lower, "opening hand") && scan_contains(lower, "begin the game")
 }
 
 pub(crate) fn is_ability_activate_cost_static(lower: &str) -> bool {
-    lower.contains("abilities you activate cost") && lower.contains("less")
+    scan_contains(lower, "abilities you activate cost") && scan_contains(lower, "less")
 }
 
 pub(crate) fn is_damage_prevention_pattern(lower: &str) -> bool {
-    lower.contains("damage") && lower.contains("can't be prevented")
+    scan_contains(lower, "damage") && scan_contains(lower, "can't be prevented")
 }
 
 pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
-    ((lower.contains(" deals ") || lower.contains(" deal ")) && lower.contains(" damage"))
-        || lower.contains("until end of turn")
-        || lower.contains("until your next turn")
-        || lower.contains("this turn")
+    ((scan_contains(lower, "deals ") || scan_contains(lower, "deal "))
+        && scan_contains(lower, "damage"))
+        || scan_contains(lower, "until end of turn")
+        || scan_contains(lower, "until your next turn")
+        || scan_contains(lower, "this turn")
 }
 
 const STATIC_CONTAINS_PATTERNS: &[&str] = &[
@@ -168,7 +175,7 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
 
     if STATIC_CONTAINS_PATTERNS
         .iter()
-        .any(|pattern| lower.contains(pattern))
+        .any(|pattern| scan_contains(lower, pattern))
     {
         return true;
     }
@@ -184,10 +191,10 @@ pub(crate) fn is_static_pattern(lower: &str) -> bool {
 }
 
 fn is_static_compound_pattern(lower: &str) -> bool {
-    if lower.contains("as though it had flash") && !lower_starts_with(lower, "you may cast") {
+    if scan_contains(lower, "as though it had flash") && !lower_starts_with(lower, "you may cast") {
         return true;
     }
-    if lower.contains("enters with ") && !lower.contains("counter") {
+    if scan_contains(lower, "enters with ") && !scan_contains(lower, "counter") {
         return true;
     }
     if lower_starts_with(lower, "creatures your opponents control ")
@@ -201,19 +208,22 @@ fn is_static_compound_pattern(lower: &str) -> bool {
     ))
     .parse(lower)
     .is_ok()
-        && (lower.contains("from your graveyard")
-            || (lower.contains("from your hand") && lower.contains("without paying")))
+        && (scan_contains(lower, "from your graveyard")
+            || (scan_contains(lower, "from your hand") && scan_contains(lower, "without paying")))
     {
         return true;
     }
-    if lower.contains("can't cast") && lower.contains("spells") {
+    if scan_contains(lower, "can't cast") && scan_contains(lower, "spells") {
         return true;
     }
     // Passive voice: "Creature spells can't be cast."
-    if lower.contains("spells can't be cast") {
+    if scan_contains(lower, "spells can't be cast") {
         return true;
     }
-    if lower.contains("no more than") && lower.contains("spells") && lower.contains("each turn") {
+    if scan_contains(lower, "no more than")
+        && scan_contains(lower, "spells")
+        && scan_contains(lower, "each turn")
+    {
         return true;
     }
     false
@@ -231,18 +241,20 @@ const GRANTED_STATIC_PREFIXES: &[&str] = &[
     "each player ",
 ];
 
-const GRANTED_STATIC_VERBS: &[&str] = &[" has \"", " have \"", " gains \"", " gain \""];
+const GRANTED_STATIC_VERBS: &[&str] = &["has \"", "have \"", "gains \"", "gain \""];
 
 pub(crate) fn is_granted_static_line(lower: &str) -> bool {
     GRANTED_STATIC_PREFIXES
         .iter()
         .any(|prefix| lower.starts_with(prefix))
-        && GRANTED_STATIC_VERBS.iter().any(|verb| lower.contains(verb))
+        && GRANTED_STATIC_VERBS
+            .iter()
+            .any(|verb| scan_contains(lower, verb))
 }
 
 pub(crate) fn is_vehicle_tier_line(lower: &str) -> bool {
-    if let Some(pipe_pos) = lower.find(" | ") {
-        let prefix = lower[..pipe_pos].trim();
+    if let Ok((_, (before, _))) = nom_primitives::split_once_on(lower, " | ") {
+        let prefix = before.trim();
         if let Some(num_part) = prefix.strip_suffix('+') {
             return !num_part.is_empty() && num_part.chars().all(|c| c.is_ascii_digit());
         }
@@ -261,7 +273,7 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
 pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
     if REPLACEMENT_CONTAINS_PATTERNS
         .iter()
-        .any(|pattern| lower.contains(pattern))
+        .any(|pattern| scan_contains(lower, pattern))
     {
         return true;
     }
@@ -274,13 +286,18 @@ pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
 }
 
 fn is_replacement_compound_pattern(lower: &str) -> bool {
-    if lower.contains("as ") && lower.contains("enters") && lower.contains("choose a") {
+    if scan_contains(lower, "as ")
+        && scan_contains(lower, "enters")
+        && scan_contains(lower, "choose a")
+    {
         return true;
     }
-    if (lower.contains("enters") || lower.contains("escapes")) && lower.contains("counter") {
+    if (scan_contains(lower, "enters") || scan_contains(lower, "escapes"))
+        && scan_contains(lower, "counter")
+    {
         return true;
     }
-    if lower.contains("tapped for mana") && lower.contains("instead") {
+    if scan_contains(lower, "tapped for mana") && scan_contains(lower, "instead") {
         return true;
     }
     false
