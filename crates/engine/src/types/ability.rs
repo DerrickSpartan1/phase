@@ -1,6 +1,5 @@
 use std::fmt;
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -23,7 +22,7 @@ use crate::types::events::PlayerActionKind;
 // ---------------------------------------------------------------------------
 
 /// CR 700.2: Who makes a choice during an effect's resolution.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Chooser {
     /// The controller of the spell/ability makes the choice.
     #[default]
@@ -35,14 +34,14 @@ pub enum Chooser {
 
 /// CR 608.2d: Who may choose to perform an optional effect during resolution.
 /// Used with `AbilityDefinition::optional_for` to route the "you may" prompt to opponents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum OpponentMayScope {
     /// "any opponent may" — each opponent in APNAP order gets the chance; first accept wins.
     AnyOpponent,
 }
 
 /// What kind of named choice the player must make at resolution time.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ChoiceType {
     CreatureType,
     Color,
@@ -70,7 +69,7 @@ pub enum ChoiceType {
 }
 
 /// The five basic land types (CR 305.6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BasicLandType {
     Plains,
     Island,
@@ -129,7 +128,7 @@ impl std::str::FromStr for BasicLandType {
 }
 
 /// Odd or even — used by cards like "choose odd or even."
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Parity {
     Odd,
     Even,
@@ -137,7 +136,7 @@ pub enum Parity {
 
 /// A branch in a d20/d6/d4 result table (CR 706.2).
 /// Each branch covers a contiguous range of die results and maps to an effect.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DieResultBranch {
     pub min: u8,
     pub max: u8,
@@ -156,7 +155,7 @@ impl std::str::FromStr for Parity {
 }
 
 /// CR 615: Damage prevention scope.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PreventionScope {
     /// Prevent all damage (combat + noncombat).
     #[default]
@@ -166,7 +165,7 @@ pub enum PreventionScope {
 }
 
 /// CR 615: How much damage to prevent.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PreventionAmount {
     /// "Prevent the next N damage"
     Next(u32),
@@ -175,7 +174,7 @@ pub enum PreventionAmount {
 }
 
 /// Shield type for one-shot replacement effects that expire at cleanup.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ShieldKind {
     #[default]
     None,
@@ -196,7 +195,7 @@ impl ShieldKind {
 }
 
 /// CR 601.2 vs CR 305.1: Distinguishes "cast" (spells only) from "play" (spells + lands).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CardPlayMode {
     /// CR 601.2: Cast a spell (cannot play lands this way).
     #[default]
@@ -227,7 +226,7 @@ impl std::str::FromStr for CardPlayMode {
 
 /// A typed choice stored on a permanent (e.g., "choose a color" → Color(Red)).
 /// The variant discriminant serves as the category key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 pub enum ChosenAttribute {
     Color(ManaColor),
@@ -280,7 +279,7 @@ impl ChosenAttribute {
 }
 
 /// A typed value chosen at resolution time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 pub enum ChoiceValue {
     Color(ManaColor),
@@ -328,14 +327,14 @@ impl ChoiceValue {
 /// How to specify a damage amount -- either a fixed integer or a variable reference.
 /// Which category of chosen attribute to read as a subtype.
 /// Used by `ContinuousModification::AddChosenSubtype` in layer evaluation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChosenSubtypeKind {
     CreatureType,
     BasicLandType,
 }
 
 /// Which players' zones to count across for zone-based quantity references.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CountScope {
     Controller,
     All,
@@ -343,7 +342,7 @@ pub enum CountScope {
 }
 
 /// Which zone to count cards in (for `QuantityRef::ZoneCardCount`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ZoneRef {
     Graveyard,
     Exile,
@@ -352,7 +351,7 @@ pub enum ZoneRef {
 }
 
 /// Who gains life from a GainLife effect.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GainLifePlayer {
     /// The ability's controller (default).
@@ -363,7 +362,7 @@ pub enum GainLifePlayer {
 }
 
 /// How much life is gained — a fixed amount or derived from the targeted permanent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 pub enum LifeAmount {
     /// Gain a specific number of life.
@@ -375,7 +374,7 @@ pub enum LifeAmount {
 /// CR 701.10d-f: What aspect to double (counters, life total, or mana pool).
 /// Used by `Effect::Double` per locked decision D-05.
 /// DoublePT/DoublePTAll handle CR 701.10a-c (power/toughness) separately.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum DoubleTarget {
     /// CR 701.10e: Double the number of a kind of counter on a permanent.
@@ -389,7 +388,7 @@ pub enum DoubleTarget {
 }
 
 /// CR 701.10a: Which P/T characteristics to double.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DoublePTMode {
     Power,
     Toughness,
@@ -400,7 +399,7 @@ pub enum DoublePTMode {
 ///
 /// Custom Deserialize: accepts both the tagged format `{"type":"Fixed","value":2}` (new)
 /// and plain strings like `"2"` or `"*"` (legacy card-data.json).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type", content = "value")]
 pub enum PtValue {
     Fixed(i32),
@@ -451,7 +450,7 @@ impl<'de> serde::Deserialize<'de> for PtValue {
 ///
 /// Custom Deserialize: accepts both the tagged format `{"type":"Fixed","colors":["White"]}` (new)
 /// and a plain array of `ManaColor` like `["White","Green"]` (legacy, pre-ManaProduction refactor).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "type")]
 pub enum ManaProduction {
     /// Produce an explicit fixed sequence of colored mana symbols (e.g. `{W}{U}`).
@@ -566,7 +565,7 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
 /// Unlike [`ManaRestriction`](super::mana::ManaRestriction) which carries concrete values
 /// on a `ManaUnit`, this enum is stored on `Effect::Mana` and resolved at production time
 /// by reading runtime state (e.g., chosen creature type from the source object).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaSpendRestriction {
     /// "Spend this mana only to cast creature spells."
     SpellType(String),
@@ -590,7 +589,7 @@ pub enum ManaSpendRestriction {
 }
 
 /// Duration for temporary effects.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Duration {
     UntilEndOfTurn,
     /// CR 514.2: Effect expires at end of combat phase.
@@ -614,7 +613,7 @@ pub enum Duration {
 
 /// A game-level restriction that modifies how rules are applied.
 /// Stored in `GameState::restrictions` and evaluated by relevant game systems.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum GameRestriction {
     /// CR 614.16: Damage prevention effects are suppressed.
@@ -635,7 +634,7 @@ pub enum GameRestriction {
 }
 
 /// When a game restriction expires.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum RestrictionExpiry {
     EndOfTurn,
@@ -644,7 +643,7 @@ pub enum RestrictionExpiry {
 }
 
 /// Limits the scope of a game restriction to specific sources or targets.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum RestrictionScope {
     SourcesControlledBy(PlayerId),
@@ -653,7 +652,7 @@ pub enum RestrictionScope {
 }
 
 /// Identifies which players are affected by a temporary game restriction.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum RestrictionPlayerScope {
     AllPlayers,
@@ -667,7 +666,7 @@ pub enum RestrictionPlayerScope {
 
 /// A permission granted to a `GameObject` allowing it to be cast under specific conditions.
 /// Stored in `GameObject::casting_permissions`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CastingPermission {
     /// CR 715.5: After Adventure resolves to exile, creature face castable from exile.
@@ -687,7 +686,7 @@ pub enum CastingPermission {
 }
 
 /// When a delayed triggered ability fires (CR 603.7).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DelayedTriggerCondition {
     /// "at the beginning of the next [phase]"
@@ -725,7 +724,7 @@ pub enum DelayedTriggerCondition {
 /// Specifies variable-count targeting for "any number of" effects.
 /// CR 601.2c: Player chooses targets during resolution.
 /// CR 115.1d: "Any number" means zero or more.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MultiTargetSpec {
     pub min: usize,
     /// `None` means "any number" (unlimited). CR 115.1d.
@@ -737,7 +736,7 @@ pub struct MultiTargetSpec {
 // ---------------------------------------------------------------------------
 
 /// Type filter for card type matching in filters.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypeFilter {
     Creature,
     Land,
@@ -764,7 +763,7 @@ pub enum TypeFilter {
 
 /// Filter for damage type on trigger definitions.
 /// CR 120.3: Combat damage is dealt during the combat damage step; all other damage is noncombat.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DamageKindFilter {
     /// Matches both combat and noncombat damage.
     #[default]
@@ -776,7 +775,7 @@ pub enum DamageKindFilter {
 }
 
 /// Controller reference for filter matching.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ControllerRef {
     You,
     Opponent,
@@ -784,7 +783,7 @@ pub enum ControllerRef {
 
 /// CR 700.5: Qualities that can be shared across multi-target selections.
 /// Used by `FilterProp::SharesQuality` for group constraint validation at resolution time.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SharedQuality {
     CreatureType,
     Color,
@@ -792,7 +791,7 @@ pub enum SharedQuality {
 }
 
 /// Individual filter properties that can be combined in a Typed filter.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum FilterProp {
     Token,
@@ -965,7 +964,7 @@ impl FilterProp {
 
 /// Named fields for the `TargetFilter::Typed` variant, extracted for builder ergonomics.
 /// CR 205: `type_filters` holds all type constraints in conjunction (all must match).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TypedFilter {
     /// CR 205: All type constraints that must match (conjunction).
     /// e.g. "noncreature, nonland permanent" → `[Permanent, Non(Creature), Non(Land)]`
@@ -1046,7 +1045,7 @@ impl From<TypedFilter> for TargetFilter {
 }
 
 /// Typed target filter replacing all Forge filter strings and TargetSpec.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum TargetFilter {
     None,
@@ -1121,7 +1120,7 @@ pub enum TargetFilter {
 }
 
 /// A dynamic game quantity — a runtime lookup into the game state.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum QuantityRef {
     /// Number of cards in the controller's hand.
@@ -1257,14 +1256,14 @@ pub enum QuantityRef {
 }
 
 /// CR 107.2: Rounding direction for "half X" expressions in Magic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum RoundingMode {
     Up,
     Down,
 }
 
 /// CR 107.3e: Aggregate function applied over a set of objects.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AggregateFunction {
     Max,
     Min,
@@ -1272,7 +1271,7 @@ pub enum AggregateFunction {
 }
 
 /// A measurable property of a game object for aggregate queries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ObjectProperty {
     Power,
     Toughness,
@@ -1280,7 +1279,7 @@ pub enum ObjectProperty {
 }
 
 /// A filter matching players by game-state conditions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PlayerFilter {
     /// The controller of the effect or quantity.
@@ -1302,7 +1301,7 @@ pub enum PlayerFilter {
 
 /// An expression that produces an integer for quantity comparisons.
 /// Either a dynamic game-state lookup or a literal constant.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum QuantityExpr {
     /// A dynamic quantity looked up from the current game state.
@@ -1328,7 +1327,7 @@ pub enum QuantityExpr {
 }
 
 /// Comparison operator used in static conditions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Comparator {
     GT,
     LT,
@@ -1366,7 +1365,7 @@ impl Comparator {
 
 /// CR 719.1: Condition that must be met for a Case to become solved.
 /// Evaluated by the auto-solve trigger at end step (CR 719.2).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum SolveCondition {
     /// "You control no suspected Skeletons" → count matching objects == 0
@@ -1380,7 +1379,7 @@ pub enum SolveCondition {
 }
 
 /// Condition for static ability applicability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum StaticCondition {
     DevotionGE {
@@ -1507,7 +1506,7 @@ pub enum StaticCondition {
 /// Parsed at Oracle parse time to eliminate runtime reparsing.
 /// `Option<ParsedCondition>` is used at storage sites — `None` means the parser
 /// could not decompose the condition (permissive fallback: evaluates to `true`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ParsedCondition {
     SourceInZone {
@@ -1649,7 +1648,7 @@ pub enum ParsedCondition {
 
 /// CR 118.1: A cost paid as part of an effect's resolution.
 /// Distinct from AbilityCost (which gates activation before the colon).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum PaymentCost {
     Mana {
@@ -1674,7 +1673,7 @@ pub enum PaymentCost {
 // ---------------------------------------------------------------------------
 
 /// CR 702.49: Ninjutsu-family keyword variants that share the "swap creature in combat" pattern.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NinjutsuVariant {
     /// CR 702.49a: Return unblocked attacker, declare blockers or later.
     Ninjutsu,
@@ -1687,14 +1686,14 @@ pub enum NinjutsuVariant {
 }
 
 /// CR 702.49: Identifies which dedicated engine path handles a RuntimeHandled ability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RuntimeHandler {
     /// Handled by GameAction::ActivateNinjutsu path.
     NinjutsuFamily,
 }
 
 /// Cost to activate an ability.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AbilityCost {
     Mana {
@@ -1817,7 +1816,7 @@ pub enum AdditionalCost {
 /// Structured spell-casting options parsed from Oracle text.
 /// These describe alternate ways a spell may be cast; runtime enforcement can
 /// be added independently of parsing/export support.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpellCastingOption {
     pub kind: SpellCastingOptionKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1862,7 +1861,7 @@ impl SpellCastingOption {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpellCastingOptionKind {
     AlternativeCost,
     CastWithoutManaCost,
@@ -1878,7 +1877,7 @@ pub enum SpellCastingOptionKind {
 /// CR 118.12: Cost that may be static or resolved dynamically at payment time.
 /// Used by counter-unless-pays, tax triggers (Esper Sentinel, Rhystic Study),
 /// and ward costs (CR 702.21a).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum UnlessCost {
     /// Fixed mana cost (e.g., "unless that player pays {1}")
@@ -1895,7 +1894,7 @@ pub enum UnlessCost {
 
 /// CR 118.12: "Effect unless [player] pays {cost}"
 /// Wraps any effect with an opponent payment choice.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UnlessPayModifier {
     pub cost: UnlessCost,
     /// Who must pay — resolved via TargetFilter at trigger resolution time.
@@ -1909,7 +1908,7 @@ pub struct UnlessPayModifier {
 
 /// CR 701.24g: Specific position within a library for placement effects.
 /// Top and Bottom use move_to_library_position; NthFromTop inserts at index n-1.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum LibraryPosition {
     Top,
@@ -1924,15 +1923,25 @@ pub enum LibraryPosition {
 /// By default, the source is the ability's source object (`ability.source_id`).
 /// `Target` means the first resolved target is the damage source (e.g.,
 /// "Target creature deals damage to itself" — the creature, not the spell).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DamageSource {
     /// The first resolved object target is the damage source.
     Target,
 }
 
+/// A single conjured card entry: card name + quantity.
+/// Used by `Effect::Conjure` to support multi-card conjure patterns
+/// (e.g., "conjure a card named X and a card named Y into your hand").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConjureCard {
+    pub name: String,
+    #[serde(default = "default_quantity_one")]
+    pub count: QuantityExpr,
+}
+
 /// The typed effect enum. Each variant corresponds to an effect handler.
 /// Zero HashMap<String, String> fields.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, strum::IntoStaticStr)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, strum::IntoStaticStr)]
 #[serde(tag = "type")]
 pub enum Effect {
     /// CR 702.179a: A player starts their engines, setting speed to 1 if they have no speed.
@@ -2833,6 +2842,16 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// Digital-only keyword action (no CR entry): Conjure creates a card from outside
+    /// the game and places it into a specified zone. Unlike tokens, conjured cards are
+    /// "real" cards with full characteristics (mana value, types, abilities, etc.).
+    Conjure {
+        /// One or more (card_name, count) pairs for multi-card conjure patterns.
+        cards: Vec<ConjureCard>,
+        destination: Zone,
+        #[serde(default)]
+        tapped: bool,
+    },
     /// Semantic marker for effects the engine has not yet implemented a handler for.
     /// Carries zero HashMap -- architecturally distinct from the removed Effect::Other.
     Unimplemented {
@@ -3105,6 +3124,7 @@ impl Effect {
             | Effect::SetDayNight { .. }
             | Effect::TimeTravel
             | Effect::RuntimeHandled { .. }
+            | Effect::Conjure { .. }
             | Effect::Unimplemented { .. } => None,
         }
     }
@@ -3241,6 +3261,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::SetDayNight { .. } => "SetDayNight",
         Effect::GiveControl { .. } => "GiveControl",
         Effect::RemoveFromCombat { .. } => "RemoveFromCombat",
+        Effect::Conjure { .. } => "Conjure",
         Effect::Unimplemented { name, .. } => name,
     }
 }
@@ -3253,7 +3274,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
 /// Replaces the former `api_type: String` field with a compile-time-checked enum.
 /// Variants mirror `Effect` variants 1:1, plus a few engine-level emits (Equip)
 /// and trigger-condition placeholders (Reveal, Transform, TurnFaceUp, DayTimeChange).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EffectKind {
     StartYourEngines,
     IncreaseSpeed,
@@ -3378,6 +3399,7 @@ pub enum EffectKind {
     SetDayNight,
     GiveControl,
     RemoveFromCombat,
+    Conjure,
     Unimplemented,
     /// Engine-level equip action (not via an Effect handler).
     Equip,
@@ -3518,6 +3540,7 @@ impl From<&Effect> for EffectKind {
             Effect::SetDayNight { .. } => EffectKind::SetDayNight,
             Effect::GiveControl { .. } => EffectKind::GiveControl,
             Effect::RemoveFromCombat { .. } => EffectKind::RemoveFromCombat,
+            Effect::Conjure { .. } => EffectKind::Conjure,
             Effect::Unimplemented { .. } => EffectKind::Unimplemented,
         }
     }
@@ -3527,7 +3550,7 @@ impl From<&Effect> for EffectKind {
 // Ability kinds
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum AbilityKind {
     #[default]
     Spell,
@@ -3548,7 +3571,7 @@ pub enum AbilityKind {
 /// modes the player must choose. The `mode_count` field records the total
 /// number of modes available; each mode corresponds to one `AbilityDefinition`
 /// in the card's abilities array.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModalChoice {
     /// Minimum number of modes the player must choose.
     pub min_choices: usize,
@@ -3575,7 +3598,7 @@ pub struct ModalChoice {
 }
 
 /// Selection constraints attached to a modal choice header.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ModalSelectionConstraint {
     DifferentTargetPlayers,
@@ -3590,7 +3613,7 @@ pub enum ModalSelectionConstraint {
 /// Structured activation-time restrictions parsed from Oracle text.
 /// These describe when an activated ability may be activated; runtime
 /// enforcement can be added independently of parsing/export support.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ActivationRestriction {
     AsSorcery,
@@ -3626,7 +3649,7 @@ pub enum ActivationRestriction {
 /// Structured spell-casting restrictions parsed from Oracle text.
 /// These describe when a spell may be cast. Runtime enforcement can
 /// be added independently of parsing/export support.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum CastingRestriction {
     AsSorcery,
@@ -3649,7 +3672,7 @@ pub enum CastingRestriction {
 
 /// CR 601.2f: Self-referential cost reduction on an activated ability.
 /// "This ability costs {N} less to activate for each [condition]"
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CostReduction {
     /// Generic mana reduced per counted object (the {N} value).
     pub amount_per: u32,
@@ -3662,7 +3685,7 @@ pub struct CostReduction {
 // ---------------------------------------------------------------------------
 
 /// Parsed ability definition with typed effect. Zero remaining_params.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AbilityDefinition {
     pub kind: AbilityKind,
     pub effect: Box<Effect>,
@@ -3869,7 +3892,7 @@ impl AbilityDefinition {
 /// Checked during resolve_ability_chain before executing the ability.
 /// The condition is a pure predicate — it describes WHAT to check, not the outcome.
 /// Casting-time facts needed for evaluation are stored in `SpellContext`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum AbilityCondition {
     /// CR 702.33d: Kicker — optional additional cost; paid/unpaid state stored in SpellContext.
@@ -3963,7 +3986,7 @@ pub enum AbilityCondition {
 
 /// Casting-time facts that flow with a spell from casting through resolution.
 /// Conditions in the sub_ability chain are evaluated against this context.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpellContext {
     /// Whether the spell's optional additional cost was paid during casting.
     #[serde(default)]
@@ -3994,7 +4017,7 @@ pub struct SpellContext {
 /// 2. Add a match arm in `check_trigger_condition` (game/triggers.rs)
 /// 3. Add parser support in `extract_if_condition` (parser/oracle_trigger.rs)
 /// 4. Add any per-turn tracking fields to `Player` / `GameState` if needed
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum TriggerCondition {
     // -- Predicates (leaf conditions) --
@@ -4142,7 +4165,7 @@ pub enum TriggerCondition {
 
 /// Condition that gates whether a replacement effect applies.
 /// Checked when determining if the replacement is a candidate for an event.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ReplacementCondition {
     /// "unless you control a [subtype] or a [subtype]"
@@ -4207,7 +4230,7 @@ pub enum ReplacementCondition {
 }
 
 /// Rate-limiting constraint for triggered abilities.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum TriggerConstraint {
     /// "This ability triggers only once each turn."
@@ -4240,7 +4263,7 @@ pub enum TriggerConstraint {
 /// Filter for counter-related trigger modes (CounterAdded, CounterRemoved).
 /// When set, the trigger only matches events for the specified counter type,
 /// optionally requiring that the count crosses a threshold.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CounterTriggerFilter {
     /// Only match events for this counter type.
     pub counter_type: crate::types::counter::CounterType,
@@ -4252,7 +4275,7 @@ pub struct CounterTriggerFilter {
 }
 
 /// Trigger definition with typed fields. Zero params HashMap.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerDefinition {
     pub mode: TriggerMode,
     #[serde(default)]
@@ -4413,7 +4436,7 @@ impl TriggerDefinition {
 }
 
 /// Static ability definition with typed fields. Zero params HashMap.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StaticDefinition {
     pub mode: StaticMode,
     #[serde(default)]
@@ -4487,7 +4510,7 @@ impl StaticDefinition {
 }
 
 /// CR 614.1a: Damage modification formula for replacement effects.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum DamageModification {
     /// amount * 2 (e.g. Furnace of Rath)
@@ -4506,7 +4529,7 @@ pub enum DamageModification {
 
 /// CR 614.1a: Quantity modification for replacement effects (tokens, counters).
 /// Modeled after DamageModification but for non-damage quantities.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum QuantityModification {
     /// count * 2 — Primal Vigor, Doubling Season, Parallel Lives, Anointed Procession
@@ -4519,7 +4542,7 @@ pub enum QuantityModification {
 
 /// CR 614.1a: Restricts which damage targets a replacement applies to.
 /// Dedicated enum because `TargetRef` can be `Player` (not handled by `matches_target_filter`).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DamageTargetFilter {
     /// "to an opponent or a permanent an opponent controls"
     OpponentOrTheirPermanents,
@@ -4532,14 +4555,14 @@ pub enum DamageTargetFilter {
 }
 
 /// CR 614.1a: Restricts whether a damage replacement applies to combat, noncombat, or all damage.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CombatDamageScope {
     CombatOnly,
     NoncombatOnly,
 }
 
 /// Whether a replacement effect is mandatory or offers the affected player a choice.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ReplacementMode {
     /// Always applies (default). Used for "enters tapped", "prevent damage", etc.
@@ -4553,7 +4576,7 @@ pub enum ReplacementMode {
 }
 
 /// Replacement effect definition with typed fields. Zero params HashMap.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplacementDefinition {
     pub event: ReplacementEvent,
     #[serde(default)]
@@ -4723,7 +4746,7 @@ impl ReplacementDefinition {
 
 /// What modification a continuous effect applies to an object.
 /// Each variant knows its own layer implicitly.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CopiableValues {
     pub name: String,
     pub mana_cost: ManaCost,
@@ -4741,7 +4764,7 @@ pub struct CopiableValues {
 
 /// What modification a continuous effect applies to an object.
 /// Each variant knows its own layer implicitly.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContinuousModification {
     CopyValues {
@@ -4857,7 +4880,7 @@ pub enum ContinuousModification {
 // ---------------------------------------------------------------------------
 
 /// Unified target reference for creatures and players.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TargetRef {
     Object(ObjectId),
     Player(PlayerId),

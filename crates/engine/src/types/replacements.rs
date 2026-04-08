@@ -1,7 +1,6 @@
 use std::fmt;
 use std::str::FromStr;
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// All replacement event types from Forge's replacement effect registry (CR 614).
@@ -13,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// original event never happens, the replacement has no effect (CR 614.7).
 ///
 /// Matched case-sensitively against Forge event strings.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ReplacementEvent {
     // --- First-class variants with active matchers/appliers ---
     /// CR 614.1a + CR 614.2: Replaces damage being dealt from a source.

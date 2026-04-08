@@ -1,7 +1,6 @@
 use std::convert::Infallible;
 use std::str::FromStr;
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
@@ -11,7 +10,7 @@ use super::mana::{ManaColor, ManaCost};
 
 /// CR 702.34a: Flashback cost — either a mana cost or a non-mana cost
 /// (e.g., "Tap three untapped white creatures you control").
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum FlashbackCost {
     Mana(ManaCost),
@@ -20,7 +19,7 @@ pub enum FlashbackCost {
 
 /// Discriminant-level keyword identity used when the Oracle text refers to a keyword class
 /// without caring about its parameter payload.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KeywordKind {
     Flying,
     FirstStrike,
@@ -138,7 +137,7 @@ pub enum KeywordKind {
 
 /// Keywords that accept a dynamic numeric parameter via "where X is [quantity]".
 /// Used by `ContinuousModification::AddDynamicKeyword` to construct the runtime keyword.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DynamicKeywordKind {
     Annihilator,
     Modular,
@@ -165,7 +164,7 @@ impl DynamicKeywordKind {
 
 /// CR 702.124: Partner variant keywords for co-commander deckbuilding.
 /// Each variant specifies which other partner types it can legally pair with.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum PartnerType {
     /// CR 702.124a: Generic "Partner" — pairs with any other generic Partner.
@@ -184,7 +183,7 @@ pub enum PartnerType {
 
 /// CR 702.139: Companion deckbuilding conditions.
 /// Each of the 10 companion cards has a unique condition the starting deck must satisfy.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum CompanionCondition {
     /// Gyruda: Each nonland card in your starting deck has an even mana value.
@@ -210,7 +209,7 @@ pub enum CompanionCondition {
 }
 
 /// The type of gift promised by the Gift keyword.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum GiftKind {
     /// Opponent draws a card.
@@ -225,7 +224,7 @@ pub enum GiftKind {
 
 /// CR 702.11d: What a hexproof-from keyword protects against.
 /// Mirrors ProtectionTarget but only applies to targeting (not DEBT).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum HexproofFilter {
     Color(ManaColor),
@@ -236,7 +235,7 @@ pub enum HexproofFilter {
 }
 
 /// What a Protection keyword protects from (CR 702.16).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProtectionTarget {
     Color(ManaColor),
     CardType(String),
@@ -248,7 +247,7 @@ pub enum ProtectionTarget {
 }
 
 /// CR 702.21a: Ward cost — what the targeting player must pay.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WardCost {
     Mana(ManaCost),
@@ -274,7 +273,7 @@ pub enum WardCost {
 ///
 /// Custom Deserialize: accepts both the typed externally-tagged format (new)
 /// and plain "Name:Param" strings (legacy card-data.json).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum Keyword {
     // Evasion / Combat
     Flying,

@@ -2,7 +2,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{
@@ -10,6 +9,7 @@ use super::ability::{
     ContinuousModification, DelayedTriggerCondition, Duration, GameRestriction, ModalChoice,
     ResolvedAbility, StaticCondition, TargetFilter, TargetRef, TriggerCondition, UnlessCost,
 };
+use super::card::CardFace;
 use super::card_type::{CoreType, Supertype};
 use super::counter::CounterType;
 use super::events::GameEvent;
@@ -101,7 +101,7 @@ mod tuple_key_map {
 }
 
 /// Tracks whether the game is in day or night state (CR 730).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DayNight {
     Day,
     Night,
@@ -137,7 +137,7 @@ pub struct LKISnapshot {
 }
 
 /// Snapshot of a spell's characteristics at cast time for per-turn history queries.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpellCastRecord {
     pub core_types: Vec<CoreType>,
     pub supertypes: Vec<Supertype>,
@@ -150,7 +150,7 @@ pub struct SpellCastRecord {
 /// CR 601.2f: A pending one-shot cost reduction for the next spell a player casts.
 /// Created by effects like "the next spell you cast this turn costs {N} less to cast."
 /// Consumed (removed) when the player casts their next spell.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingSpellCostReduction {
     pub player: PlayerId,
     /// Generic mana reduction amount.
@@ -162,7 +162,7 @@ pub struct PendingSpellCostReduction {
 
 /// CR 400.7: Snapshot of an object's properties at the time of a zone change,
 /// enabling data-driven filtered counting at resolution time.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZoneChangeRecord {
     pub object_id: ObjectId,
     pub name: String,
@@ -177,7 +177,7 @@ pub struct ZoneChangeRecord {
 
 /// CR 403.3: Snapshot of an object's properties at the time it enters the battlefield,
 /// enabling data-driven ETB condition queries.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BattlefieldEntryRecord {
     pub object_id: ObjectId,
     pub name: String,
@@ -188,7 +188,7 @@ pub struct BattlefieldEntryRecord {
 }
 
 /// CR 120.1: Snapshot of a damage event for "was dealt damage by" queries.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DamageRecord {
     pub source_id: ObjectId,
     pub target: TargetRef,
@@ -933,7 +933,7 @@ pub struct DamageSlot {
 }
 
 /// CR 601.2d: What is being distributed (damage, counters, life).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum DistributionUnit {
     Damage,
@@ -945,7 +945,7 @@ pub enum DistributionUnit {
 }
 
 /// CR 115.7: Scope of retargeting — single target, all targets, or forced.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum RetargetScope {
     Single,
@@ -1436,6 +1436,12 @@ pub struct GameState {
     #[serde(skip)]
     pub all_card_names: Vec<String>,
 
+    /// Card face data from the loaded card database, keyed by lowercase name.
+    /// Used by the Conjure effect handler to create full cards at runtime.
+    /// Skipped in serialization — repopulated by `rehydrate_game_from_card_db`.
+    #[serde(skip)]
+    pub card_face_registry: HashMap<String, CardFace>,
+
     /// Display names for log resolution. Set by server; WASM leaves empty (defaults to "Player N").
     /// Skipped in serialization — runtime context only.
     #[serde(skip)]
@@ -1555,7 +1561,7 @@ pub struct PendingReplacement {
     pub is_optional: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledTurnControl {
     pub target_player: PlayerId,
     pub controller: PlayerId,
@@ -1664,6 +1670,7 @@ impl GameState {
             last_named_choice: None,
             all_creature_types: Vec::new(),
             all_card_names: Vec::new(),
+            card_face_registry: HashMap::new(),
             log_player_names: Vec::new(),
             last_created_token_ids: Vec::new(),
             last_revealed_ids: Vec::new(),

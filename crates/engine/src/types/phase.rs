@@ -1,4 +1,3 @@
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// Represents the phases and steps of a turn (CR 500.1).
@@ -6,7 +5,7 @@ use serde::{Deserialize, Serialize};
 /// A turn consists of five phases: beginning, precombat main, combat,
 /// postcombat main, and ending. The beginning, combat, and ending phases
 /// are further broken down into steps.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Phase {
     // --- Beginning phase (CR 501.1): untap, upkeep, draw ---
     /// CR 502: Untap step. No player receives priority (CR 502.4).

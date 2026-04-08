@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::events::BendingType;
@@ -13,7 +12,7 @@ use crate::game::deck_loading::DeckEntry;
 /// CR 122.1b: Named player counter types tracked by the engine.
 /// Poison counters route to the dedicated `poison_counters` field due to SBA rules (CR 704.5c).
 /// Energy counters are excluded — they use the dedicated `energy` field and `GainEnergy` effect.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlayerCounterKind {
     Poison,
     Experience,
@@ -43,18 +42,7 @@ pub struct CompanionInfo {
 }
 
 #[derive(
-    Debug,
-    Clone,
-    Copy,
-    Default,
-    PartialEq,
-    Eq,
-    PartialOrd,
-    Ord,
-    Hash,
-    Serialize,
-    Deserialize,
-    JsonSchema,
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
 #[serde(transparent)]
 pub struct PlayerId(pub u8);

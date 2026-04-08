@@ -2,7 +2,6 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::ability::{CardPlayMode, QuantityExpr, QuantityRef, TargetFilter};
@@ -11,7 +10,7 @@ use super::mana::{ManaColor, ManaCost};
 use super::phase::Phase;
 
 /// CR 101.2: Who is prohibited from casting spells.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CastingProhibitionScope {
     /// "your opponents" — only the controller's opponents are prohibited.
     Opponents,
@@ -54,7 +53,7 @@ impl FromStr for CastingProhibitionScope {
 }
 
 /// CR 101.2: When the casting prohibition applies.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CastingProhibitionCondition {
     /// "during your turn" — prohibition active on controller's turn.
     DuringYourTurn,
@@ -90,7 +89,7 @@ impl FromStr for CastingProhibitionCondition {
 }
 
 /// CR 402.2: How a static ability modifies the maximum hand size.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HandSizeModification {
     /// "Your maximum hand size is N." — overrides the base hand size.
     SetTo(u32),
@@ -112,7 +111,7 @@ impl fmt::Display for HandSizeModification {
 
 /// All static ability modes from Forge's static ability registry.
 /// Matched case-sensitively against Forge mode strings.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StaticMode {
     Continuous,
     CantAttack,

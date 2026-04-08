@@ -1,12 +1,11 @@
 use std::str::FromStr;
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::identifiers::ObjectId;
 use super::keywords::KeywordKind;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManaColor {
     White,
     Blue,
@@ -155,7 +154,7 @@ impl ManaRestriction {
 }
 
 /// When mana expires — controls lifecycle beyond the normal CR 500.4 phase drain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ManaExpiry {
     /// Mana persists through combat steps but drains at EndCombat → PostCombatMain.
     /// Used by Firebending and similar "mana lasts within combat" mechanics.
@@ -192,7 +191,7 @@ impl ManaUnit {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ManaCostShard {
     // Basic colored
     White,
@@ -423,7 +422,7 @@ impl FromStr for ManaCostShard {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ManaCost {
     NoCost,

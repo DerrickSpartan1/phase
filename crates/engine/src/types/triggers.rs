@@ -2,11 +2,10 @@ use std::convert::Infallible;
 use std::fmt;
 use std::str::FromStr;
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// CR 508.3a: Filter for attack target type in "attacks [a target]" triggers.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum AttackTargetFilter {
     Player,
     Planeswalker,
@@ -21,7 +20,7 @@ pub enum AttackTargetFilter {
 /// placed on the stack the next time a player would receive priority (CR 603.3).
 ///
 /// Matched case-sensitively against Forge trigger mode strings.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TriggerMode {
     // Zone changes — CR 603.6: zone-change triggers look for objects in their new zone.
     /// CR 603.6a: Enters-the-battlefield and other zone-change triggers.

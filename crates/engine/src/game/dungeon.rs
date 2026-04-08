@@ -2,7 +2,6 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::types::player::PlayerId;
@@ -10,9 +9,7 @@ use crate::types::player::PlayerId;
 // ─── Dungeon Identity ────────────────────────────────────────────────────────
 
 /// CR 309: The five dungeon cards across D&D crossover sets.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum DungeonId {
     LostMineOfPhandelver,
     DungeonOfTheMadMage,

@@ -1,7 +1,7 @@
 /// Counter types serialize as flat strings so they can be used as JSON map keys
 /// in `HashMap<CounterType, u32>`. Without this, `Generic("quest")` would serialize
 /// as `{"Generic":"quest"}` which serde_json rejects as a map key.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, schemars::JsonSchema)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CounterType {
     Plus1Plus1,
     Minus1Minus1,

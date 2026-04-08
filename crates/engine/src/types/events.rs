@@ -1,4 +1,3 @@
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use super::counter::CounterType;
@@ -19,7 +18,7 @@ pub enum BendingType {
     Water,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PlayerActionKind {
     SearchedLibrary,
     Scry,
@@ -150,6 +149,11 @@ pub enum GameEvent {
         count: u32,
     },
     TokenCreated {
+        object_id: ObjectId,
+        name: String,
+    },
+    /// Digital-only: A card was conjured from outside the game into a zone.
+    ObjectConjured {
         object_id: ObjectId,
         name: String,
     },

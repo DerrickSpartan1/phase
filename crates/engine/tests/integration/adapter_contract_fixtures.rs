@@ -5,7 +5,7 @@ use engine::types::game_state::WaitingFor;
 #[test]
 fn game_action_fixture_matches_curated_client_contract() {
     let parsed: GameAction = serde_json::from_str(include_str!(
-        "../../../fixtures/adapter-contract/game_action.json"
+        "../../../../fixtures/adapter-contract/game_action.json"
     ))
     .unwrap();
     match parsed {
@@ -17,7 +17,7 @@ fn game_action_fixture_matches_curated_client_contract() {
 #[test]
 fn waiting_for_fixture_matches_curated_client_contract() {
     let parsed: WaitingFor = serde_json::from_str(include_str!(
-        "../../../fixtures/adapter-contract/waiting_for.json"
+        "../../../../fixtures/adapter-contract/waiting_for.json"
     ))
     .unwrap();
     match parsed {
@@ -40,7 +40,7 @@ fn waiting_for_fixture_matches_curated_client_contract() {
 #[test]
 fn game_object_fixture_matches_curated_client_contract() {
     let parsed: GameObject = serde_json::from_str(include_str!(
-        "../../../fixtures/adapter-contract/game_object.json"
+        "../../../../fixtures/adapter-contract/game_object.json"
     ))
     .unwrap();
     assert_eq!(parsed.name, "Fixture Bear");

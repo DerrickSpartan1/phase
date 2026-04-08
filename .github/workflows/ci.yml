@@ -45,7 +45,7 @@ jobs:
         run: cargo clippy --workspace --exclude phase-tauri --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo nextest run --workspace --exclude phase-tauri
+        run: cargo nextest run --workspace --exclude phase-tauri --features engine/proptest
 
       - name: Download MTGJSON data
         run: |

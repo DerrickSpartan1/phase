@@ -1,11 +1,10 @@
 use std::fmt;
 use std::str::FromStr;
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// CR 205.4: Supertypes — Legendary, Basic, Snow, World, Ongoing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Supertype {
     Legendary,
     Basic,
@@ -42,7 +41,7 @@ impl fmt::Display for Supertype {
 }
 
 /// CR 205.2a: Card types — the seven main types plus additional types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum CoreType {
     /// CR 301: Artifacts — permanents cast at sorcery speed, with subtypes Equipment, Vehicle, etc.
     Artifact,
@@ -103,7 +102,7 @@ impl fmt::Display for CoreType {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CardType {
     pub supertypes: Vec<Supertype>,
     pub core_types: Vec<CoreType>,
