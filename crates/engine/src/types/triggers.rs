@@ -183,6 +183,8 @@ pub enum TriggerMode {
     Saddled,
     /// CR 702.29: Triggers when a card is cycled.
     Cycled,
+    /// CR 702.49a: Triggers when a player activates a ninjutsu-family ability.
+    NinjutsuActivated,
     /// CR 702.100: Evolve trigger — when a creature enters with greater power/toughness.
     Evolved,
     /// CR 701.44: Triggers when a creature explores.
@@ -430,6 +432,7 @@ impl FromStr for TriggerMode {
             "MilledAll" => TriggerMode::MilledAll,
             "Mutates" => TriggerMode::Mutates,
             "NewGame" => TriggerMode::NewGame,
+            "NinjutsuActivated" => TriggerMode::NinjutsuActivated,
             "PayCumulativeUpkeep" => TriggerMode::PayCumulativeUpkeep,
             "PayEcho" => TriggerMode::PayEcho,
             "PayLife" => TriggerMode::PayLife,
@@ -685,6 +688,7 @@ mod tests {
             "MilledAll",
             "Mutates",
             "NewGame",
+            "NinjutsuActivated",
             "PayCumulativeUpkeep",
             "PayEcho",
             "PayLife",
@@ -746,8 +750,8 @@ mod tests {
             }
         }
         assert!(
-            known_count >= 144,
-            "Expected 144+ known trigger modes, got {known_count}"
+            known_count >= 145,
+            "Expected 145+ known trigger modes, got {known_count}"
         );
     }
 }

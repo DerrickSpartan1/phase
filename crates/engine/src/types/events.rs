@@ -307,6 +307,14 @@ pub enum GameEvent {
         player: PlayerId,
         card_name: String,
     },
+    /// CR 702.49a: A ninjutsu-family ability was activated (ninjutsu, commander ninjutsu, sneak).
+    /// This is a special action, not an activated ability on the stack, so it does not fire
+    /// AbilityActivated. Enables "whenever you activate a ninjutsu ability" triggers.
+    NinjutsuActivated {
+        player_id: PlayerId,
+        source_id: ObjectId,
+    },
+
     /// CR 702.110: A creature exploited another creature (sacrificed via exploit ETB).
     CreatureExploited {
         exploiter: ObjectId,

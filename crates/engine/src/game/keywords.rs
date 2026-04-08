@@ -399,6 +399,12 @@ pub fn activate_ninjutsu(
         ));
     }
 
+    // CR 702.49a: Emit event for "whenever you activate a ninjutsu ability" triggers.
+    events.push(GameEvent::NinjutsuActivated {
+        player_id: player,
+        source_id: ninjutsu_obj_id,
+    });
+
     state.layers_dirty = true;
 
     Ok(())

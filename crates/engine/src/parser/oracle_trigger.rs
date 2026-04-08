@@ -666,6 +666,26 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     (text.to_string(), None)
 }
 
+/// CR 702.49a: Parse "whenever you activate a ninjutsu ability" trigger.
+/// Matches all ninjutsu-family activation patterns.
+fn try_parse_ninjutsu_activation_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
+    for prefix in ["whenever you activate ", "when you activate "] {
+        let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
+            continue;
+        };
+        // CR 702.49a: Match "a ninjutsu ability" — covers the ninjutsu-family keyword
+        if tag::<_, _, VerboseError<&str>>("a ninjutsu ability")
+            .parse(rest)
+            .is_ok()
+        {
+            let mut def = make_base();
+            def.mode = TriggerMode::NinjutsuActivated;
+            return Some((TriggerMode::NinjutsuActivated, def));
+        }
+    }
+    None
+}
+
 /// CR 702.49: Extract ninjutsu/sneak cost-paid conditions.
 /// Guard: "instead" after the condition means conditional override, not intervening-if.
 fn try_extract_ninjutsu_condition(
@@ -2411,6 +2431,12 @@ fn try_parse_phase_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
 /// Parse player-centric triggers: "you gain life", "you cast a/an ...", "you draw a card"
 fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     if let Some(result) = try_parse_player_action_trigger(lower) {
+        return Some(result);
+    }
+
+    // CR 702.49a: "whenever you activate a ninjutsu ability" — ninjutsu-family activation trigger.
+    // Covers all ninjutsu variants (ninjutsu, commander ninjutsu, sneak).
+    if let Some(result) = try_parse_ninjutsu_activation_trigger(lower) {
         return Some(result);
     }
 
@@ -5540,6 +5566,28 @@ mod tests {
                 variant: NinjutsuVariant::Ninjutsu,
             })
         );
+    }
+
+    #[test]
+    fn ninjutsu_activation_trigger() {
+        // CR 702.49a: "Whenever you activate a ninjutsu ability" → NinjutsuActivated
+        let def = parse_trigger_line(
+            "Whenever you activate a ninjutsu ability, look at the top three cards of your library.",
+            "Satoru Umezawa",
+        );
+        assert_eq!(def.mode, TriggerMode::NinjutsuActivated);
+    }
+
+    #[test]
+    fn ninjutsu_activation_trigger_with_once_per_turn() {
+        // CR 702.49a: Ninjutsu activation with once-per-turn constraint
+        let triggers = parse_trigger_lines(
+            "Whenever you activate a ninjutsu ability, look at the top three cards of your library. Put one of them into your hand and the rest on the bottom of your library in any order. This ability triggers only once each turn.",
+            "Satoru Umezawa",
+        );
+        assert_eq!(triggers.len(), 1);
+        assert_eq!(triggers[0].mode, TriggerMode::NinjutsuActivated);
+        assert_eq!(triggers[0].constraint, Some(TriggerConstraint::OncePerTurn));
     }
 
     // --- CR 115.9c: "that targets only [X]" trigger tests ---

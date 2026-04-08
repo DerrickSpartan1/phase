@@ -100,6 +100,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::EntersOrAttacks => match_enters_or_attacks,
         TriggerMode::AttacksOrBlocks => match_attacks_or_blocks,
         TriggerMode::Crewed | TriggerMode::BecomesCrewed => match_vehicle_crewed,
+        TriggerMode::NinjutsuActivated => match_ninjutsu_activated,
         TriggerMode::Firebend => match_firebend,
         TriggerMode::Airbend => match_airbend,
         TriggerMode::Earthbend => match_earthbend,
@@ -395,6 +396,9 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
     // CR 702.122d: Crew trigger matchers
     r.insert(TriggerMode::Crewed, match_vehicle_crewed);
     r.insert(TriggerMode::BecomesCrewed, match_vehicle_crewed);
+
+    // CR 702.49a: Ninjutsu activation trigger
+    r.insert(TriggerMode::NinjutsuActivated, match_ninjutsu_activated);
 
     // Avatar crossover: bending trigger matchers
     r.insert(TriggerMode::Firebend, match_firebend);
@@ -1797,6 +1801,27 @@ pub(super) fn match_takes_initiative(
 ) -> bool {
     if let GameEvent::InitiativeTaken { player_id } = event {
         valid_player_matches(trigger, state, *player_id, source_id)
+    } else {
+        false
+    }
+}
+
+/// CR 702.49a: Matches when a player activates a ninjutsu-family ability.
+/// The trigger fires for the controller of the trigger source when they activate
+/// any ninjutsu variant (ninjutsu, commander ninjutsu, sneak).
+pub(super) fn match_ninjutsu_activated(
+    event: &GameEvent,
+    _trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    if let GameEvent::NinjutsuActivated { player_id, .. } = event {
+        // Fire when the ninjutsu was activated by the trigger source's controller
+        state
+            .objects
+            .get(&source_id)
+            .map(|obj| obj.controller == *player_id)
+            .unwrap_or(false)
     } else {
         false
     }
