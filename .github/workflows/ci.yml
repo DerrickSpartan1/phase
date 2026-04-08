@@ -3,6 +3,14 @@ name: CI
 on:
   push:
     branches: [main]
+    paths:
+      - 'crates/**'
+      - 'client/**'
+      - 'scripts/**'
+      - 'Cargo.*'
+      - '.cargo/**'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/deploy.yml'
   pull_request:
     branches: [main]
 

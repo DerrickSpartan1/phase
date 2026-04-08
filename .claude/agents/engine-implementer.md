@@ -3,7 +3,6 @@ name: engine-implementer
 description: Orchestrates plan → implement → review pipeline for parser enhancements/fixes and engine mechanic enhancements/fixes. Spawns an opus planner sub-agent, implements the reviewed plan, then runs implementation review.
 tools: Read, Write, Edit, Bash, Grep, Glob, Agent, Skill
 model: opus
-maxTurns: 200
 ---
 
 # Engine Implementer
