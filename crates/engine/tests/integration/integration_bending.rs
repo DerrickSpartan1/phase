@@ -23,13 +23,8 @@ use engine::types::zones::Zone;
 fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usize) {
     let p = state.players.iter_mut().find(|p| p.id == player).unwrap();
     for _ in 0..count {
-        p.mana_pool.add(ManaUnit {
-            color,
-            source_id: ObjectId(0),
-            snow: false,
-            restrictions: Vec::new(),
-            expiry: None,
-        });
+        p.mana_pool
+            .add(ManaUnit::new(color, ObjectId(0), false, Vec::new()));
     }
 }
 

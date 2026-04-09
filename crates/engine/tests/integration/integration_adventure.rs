@@ -33,13 +33,9 @@ fn add_mana(runner: &mut GameRunner, player: PlayerId, color: ManaType, count: u
     let state = runner.state_mut();
     let player_data = state.players.iter_mut().find(|p| p.id == player).unwrap();
     for _ in 0..count {
-        player_data.mana_pool.add(ManaUnit {
-            color,
-            source_id: ObjectId(0),
-            snow: false,
-            restrictions: Vec::new(),
-            expiry: None,
-        });
+        player_data
+            .mana_pool
+            .add(ManaUnit::new(color, ObjectId(0), false, Vec::new()));
     }
 }
 

@@ -157,13 +157,7 @@ fn test_smoke_game_cast_spell() {
         .find(|p| p.id == P0)
         .unwrap()
         .mana_pool
-        .add(ManaUnit {
-            color: ManaType::Red,
-            source_id: forest_id,
-            snow: false,
-            restrictions: vec![],
-            expiry: None,
-        });
+        .add(ManaUnit::new(ManaType::Red, forest_id, false, vec![]));
 
     // Cast Lightning Bolt
     let result = runner

@@ -491,6 +491,7 @@ mod tests {
                         colors: vec![ManaColor::Red],
                     },
                     restrictions: vec![],
+                    grants: vec![],
                     expiry: None,
                 },
             )
@@ -560,6 +561,7 @@ mod tests {
                         count: QuantityExpr::Fixed { value: 1 },
                     },
                     restrictions: vec![],
+                    grants: vec![],
                     expiry: None,
                 },
             )

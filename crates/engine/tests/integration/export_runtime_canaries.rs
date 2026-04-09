@@ -47,13 +47,7 @@ fn export_backed_lightning_bolt_canary() {
         .find(|player| player.id == P0)
         .expect("player should exist")
         .mana_pool
-        .add(ManaUnit {
-            color: ManaType::Red,
-            source_id: forest_id,
-            snow: false,
-            restrictions: vec![],
-            expiry: None,
-        });
+        .add(ManaUnit::new(ManaType::Red, forest_id, false, vec![]));
 
     let card_id = runner.state().objects[&bolt_id].card_id;
     let result = runner

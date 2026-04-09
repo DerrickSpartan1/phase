@@ -595,6 +595,14 @@ mod tests {
         ManaUnit::new(color, ObjectId(1), false, Vec::new())
     }
 
+    fn make_restricted_unit(
+        color: ManaType,
+        source: ObjectId,
+        restrictions: Vec<ManaRestriction>,
+    ) -> ManaUnit {
+        ManaUnit::new(color, source, false, restrictions)
+    }
+
     #[test]
     fn mana_color_serializes_as_string() {
         let color = ManaColor::White;
@@ -702,14 +710,12 @@ mod tests {
 
     #[test]
     fn mana_unit_tracks_source_and_snow() {
-        let unit = ManaUnit {
-            color: ManaType::Green,
-            source_id: ObjectId(42),
-            snow: true,
-            restrictions: vec![ManaRestriction::OnlyForSpellType("Creature".to_string())],
-            grants: vec![],
-            expiry: None,
-        };
+        let unit = ManaUnit::new(
+            ManaType::Green,
+            ObjectId(42),
+            true,
+            vec![ManaRestriction::OnlyForSpellType("Creature".to_string())],
+        );
         assert_eq!(unit.source_id, ObjectId(42));
         assert!(unit.snow);
         assert_eq!(unit.restrictions.len(), 1);
@@ -773,13 +779,11 @@ mod tests {
     fn spend_for_prefers_unrestricted_mana() {
         let mut pool = ManaPool::default();
         // Add restricted green, then unrestricted green
-        pool.add(ManaUnit {
-            color: ManaType::Green,
-            source_id: ObjectId(1),
-            snow: false,
-            restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
-            expiry: None,
-        });
+        pool.add(make_restricted_unit(
+            ManaType::Green,
+            ObjectId(1),
+            vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
+        ));
         pool.add(make_unit(ManaType::Green));
 
         let spell = SpellMeta {
@@ -797,13 +801,11 @@ mod tests {
     #[test]
     fn spend_for_uses_restricted_mana_when_allowed() {
         let mut pool = ManaPool::default();
-        pool.add(ManaUnit {
-            color: ManaType::Green,
-            source_id: ObjectId(1),
-            snow: false,
-            restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
-            expiry: None,
-        });
+        pool.add(make_restricted_unit(
+            ManaType::Green,
+            ObjectId(1),
+            vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
+        ));
 
         let elf_spell = SpellMeta {
             types: vec!["Creature".to_string()],
@@ -817,27 +819,24 @@ mod tests {
     #[test]
     fn remove_from_source_removes_matching_units() {
         let mut pool = ManaPool::default();
-        pool.add(ManaUnit {
-            color: ManaType::Green,
-            source_id: ObjectId(10),
-            snow: false,
-            restrictions: Vec::new(),
-            expiry: None,
-        });
-        pool.add(ManaUnit {
-            color: ManaType::Red,
-            source_id: ObjectId(10),
-            snow: false,
-            restrictions: Vec::new(),
-            expiry: None,
-        });
-        pool.add(ManaUnit {
-            color: ManaType::Blue,
-            source_id: ObjectId(20),
-            snow: false,
-            restrictions: Vec::new(),
-            expiry: None,
-        });
+        pool.add(ManaUnit::new(
+            ManaType::Green,
+            ObjectId(10),
+            false,
+            Vec::new(),
+        ));
+        pool.add(ManaUnit::new(
+            ManaType::Red,
+            ObjectId(10),
+            false,
+            Vec::new(),
+        ));
+        pool.add(ManaUnit::new(
+            ManaType::Blue,
+            ObjectId(20),
+            false,
+            Vec::new(),
+        ));
 
         let removed = pool.remove_from_source(ObjectId(10));
         assert_eq!(removed, 2);
@@ -857,13 +856,11 @@ mod tests {
     #[test]
     fn spend_for_skips_restricted_mana_when_not_allowed() {
         let mut pool = ManaPool::default();
-        pool.add(ManaUnit {
-            color: ManaType::Green,
-            source_id: ObjectId(1),
-            snow: false,
-            restrictions: vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
-            expiry: None,
-        });
+        pool.add(make_restricted_unit(
+            ManaType::Green,
+            ObjectId(1),
+            vec![ManaRestriction::OnlyForCreatureType("Elf".to_string())],
+        ));
 
         let goblin_spell = SpellMeta {
             types: vec!["Creature".to_string()],
