@@ -59,21 +59,23 @@ export function createAIController(config: AIControllerConfig): AIController {
       );
       // Instead of freezing the game, dispatch a safe escape action.
       // CancelCast during casting flow, PassPriority otherwise.
-      const hasPendingCast =
-        waitingFor.type === "ManaPayment" ||
-        waitingFor.type === "TargetSelection" ||
-        waitingFor.type === "ModeChoice" ||
-        waitingFor.type === "OptionalCostChoice";
-      const fallback: GameAction = hasPendingCast
+      // has_pending_cast is computed by the engine — no parallel list needed.
+      const fallback: GameAction = state.has_pending_cast
         ? { type: "CancelCast" }
         : { type: "PassPriority" };
-      consecutiveFailures = 0;
-      dispatchAction(fallback).catch((e) => {
-        debugLog(
-          `AI fallback also failed: ${e instanceof Error ? e.message : String(e)}`,
-          "warn",
-        );
-      });
+      // Only reset failures after the fallback succeeds — if it fails too,
+      // keep the counter elevated so we don't spin.
+      dispatchAction(fallback)
+        .then(() => {
+          consecutiveFailures = 0;
+          if (active) checkAndSchedule();
+        })
+        .catch((e) => {
+          debugLog(
+            `AI fallback also failed: ${e instanceof Error ? e.message : String(e)}`,
+            "warn",
+          );
+        });
       return;
     }
 

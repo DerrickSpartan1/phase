@@ -29,6 +29,7 @@ function createGameState(overrides: Partial<GameState> = {}): GameState {
     rng_seed: 1,
     combat: null,
     waiting_for: { type: "Priority", data: { player: 2 } },
+    has_pending_cast: false,
     lands_played_this_turn: 0,
     max_lands_per_turn: 1,
     priority_pass_count: 0,

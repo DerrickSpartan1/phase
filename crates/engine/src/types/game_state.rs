@@ -1209,6 +1209,11 @@ pub struct GameState {
 
     // Game flow
     pub waiting_for: WaitingFor,
+    /// Derived: true when waiting_for is part of the casting flow and can be
+    /// backed out with CancelCast. Computed during derive_display_state so the
+    /// frontend doesn't need to maintain a parallel list of casting states.
+    #[serde(skip_deserializing, default)]
+    pub has_pending_cast: bool,
     pub lands_played_this_turn: u8,
     pub max_lands_per_turn: u8,
     pub priority_pass_count: u8,
@@ -1219,6 +1224,12 @@ pub struct GameState {
     /// Set by `continue_replacement` for Optional replacements, consumed by the caller.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_replacement_effect: Option<Box<crate::types::ability::AbilityDefinition>>,
+
+    /// Transient: post-resolution context for a permanent spell whose ETB replacement
+    /// needs a player choice (NeedsChoice). Consumed by `handle_replacement_choice`
+    /// after the zone change completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_spell_resolution: Option<PendingSpellResolution>,
 
     // Layer system
     pub layers_dirty: bool,
@@ -1578,6 +1589,18 @@ pub struct PendingReplacement {
     pub is_optional: bool,
 }
 
+/// Context stored when a permanent spell's ETB replacement needs a player choice
+/// (e.g., Clone choosing a copy target). After the replacement resolves, the
+/// post-resolution work (aura attachment, warp triggers, etc.) uses this context.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PendingSpellResolution {
+    pub object_id: ObjectId,
+    pub controller: PlayerId,
+    pub casting_variant: CastingVariant,
+    pub cast_from_zone: Option<crate::types::zones::Zone>,
+    pub spell_targets: Vec<crate::types::ability::TargetRef>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScheduledTurnControl {
     pub target_player: PlayerId,
@@ -1617,11 +1640,13 @@ impl GameState {
             waiting_for: WaitingFor::Priority {
                 player: PlayerId(0),
             },
+            has_pending_cast: false,
             lands_played_this_turn: 0,
             max_lands_per_turn: 1,
             priority_pass_count: 0,
             pending_replacement: None,
             post_replacement_effect: None,
+            pending_spell_resolution: None,
             layers_dirty: true,
             next_timestamp: 1,
             public_state_dirty: PublicStateDirty::all_dirty(),
@@ -1779,6 +1804,7 @@ impl PartialEq for GameState {
             && self.max_lands_per_turn == other.max_lands_per_turn
             && self.priority_pass_count == other.priority_pass_count
             && self.pending_replacement == other.pending_replacement
+            && self.pending_spell_resolution == other.pending_spell_resolution
             && self.layers_dirty == other.layers_dirty
             && self.next_timestamp == other.next_timestamp
             && self.public_state_dirty == other.public_state_dirty

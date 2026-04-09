@@ -659,6 +659,7 @@ export interface GameState {
   rng_seed: number;
   combat: CombatState | null;
   waiting_for: WaitingFor;
+  has_pending_cast: boolean;
   lands_played_this_turn: number;
   max_lands_per_turn: number;
   priority_pass_count: number;

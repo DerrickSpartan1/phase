@@ -173,6 +173,10 @@ pub fn derive_display_state(state: &mut GameState) {
             }
         }
     }
+
+    // Derive has_pending_cast so the frontend can read it directly
+    // without maintaining a parallel list of casting-flow WaitingFor states.
+    state.has_pending_cast = state.waiting_for.has_pending_cast();
 }
 
 #[cfg(test)]

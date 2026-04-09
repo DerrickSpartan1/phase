@@ -33,6 +33,7 @@ function createGameState(overrides: Partial<GameState> = {}): GameState {
       type: "Priority",
       data: { player: 0 },
     },
+    has_pending_cast: false,
     lands_played_this_turn: 0,
     max_lands_per_turn: 1,
     priority_pass_count: 0,

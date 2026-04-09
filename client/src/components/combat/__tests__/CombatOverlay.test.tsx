@@ -57,6 +57,7 @@ function createGameState(overrides: Partial<GameState> = {}): GameState {
     rng_seed: 42,
     combat: null,
     waiting_for: { type: "DeclareAttackers", data: { player: 0, valid_attacker_ids: [100, 101] } },
+    has_pending_cast: false,
     lands_played_this_turn: 0,
     max_lands_per_turn: 1,
     priority_pass_count: 0,
