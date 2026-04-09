@@ -385,6 +385,11 @@ function CardImagePreview({
     ? "max-h-[75vh] w-[40vw] max-w-[300px]"
     : "max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] md:max-w-[45vw]";
 
+  // Use effective spell cost from engine if available (reflects alt costs, reductions),
+  // otherwise fall back to printed mana cost.
+  const effectiveCost = useGameStore((s) => obj ? s.spellCosts[String(obj.id)] : undefined);
+  const displayCost = effectiveCost ?? obj?.mana_cost;
+
   if (isLoading || !src) {
     return (
       <div className={`${sizeClass} aspect-[5/7] rounded-[4%] border border-gray-600 bg-gray-700 shadow-2xl animate-pulse`} />
@@ -400,8 +405,8 @@ function CardImagePreview({
           className={`${sizeClass} object-cover`}
           draggable={false}
         />
-        {obj?.mana_cost && (
-          <ManaCostPips cost={obj.mana_cost} size="lg" className="absolute right-[7.00%] top-[5.25%] z-10" />
+        {displayCost && (
+          <ManaCostPips cost={displayCost} size="lg" className="absolute right-[7.00%] top-[5.25%] z-10" />
         )}
         {classLevel != null && (
           <div className="absolute bottom-3 left-3 z-10">
