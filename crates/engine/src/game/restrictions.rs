@@ -21,7 +21,7 @@ pub fn check_spell_timing(
     state: &crate::types::game_state::GameState,
     player: PlayerId,
     obj: &GameObject,
-    ability_def: &AbilityDefinition,
+    ability_def: Option<&AbilityDefinition>,
     allow_flash_timing: bool,
 ) -> Result<(), EngineError> {
     // CR 601.3b: If an effect allows a player to cast a spell as though it had flash,
@@ -32,7 +32,11 @@ pub fn check_spell_timing(
         || obj.has_keyword(&Keyword::Flash);
 
     // CR 307.1 / CR 116.1: Sorcery-speed spells can only be cast during controller's main phase with empty stack.
-    if !is_instant_speed && ability_def.kind == crate::types::ability::AbilityKind::Spell {
+    // Permanent spells with no spell ability (ability_def is None) are still sorcery-speed.
+    let is_spell_kind = ability_def
+        .map(|a| a.kind == crate::types::ability::AbilityKind::Spell)
+        .unwrap_or(true);
+    if !is_instant_speed && is_spell_kind {
         match state.phase {
             Phase::PreCombatMain | Phase::PostCombatMain => {}
             _ => {

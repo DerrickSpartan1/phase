@@ -1096,20 +1096,22 @@ pub struct StackEntry {
 
 impl StackEntry {
     /// Access the resolved ability for this stack entry (immutable).
-    pub fn ability(&self) -> &ResolvedAbility {
+    /// Returns `None` for permanent spells with no spell-level effect.
+    pub fn ability(&self) -> Option<&ResolvedAbility> {
         match &self.kind {
-            StackEntryKind::Spell { ability, .. }
-            | StackEntryKind::ActivatedAbility { ability, .. }
-            | StackEntryKind::TriggeredAbility { ability, .. } => ability,
+            StackEntryKind::Spell { ability, .. } => ability.as_ref(),
+            StackEntryKind::ActivatedAbility { ability, .. }
+            | StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
         }
     }
 
-    /// Access the resolved ability for this stack entry, regardless of kind.
-    pub fn ability_mut(&mut self) -> &mut ResolvedAbility {
+    /// Access the resolved ability for this stack entry (mutable).
+    /// Returns `None` for permanent spells with no spell-level effect.
+    pub fn ability_mut(&mut self) -> Option<&mut ResolvedAbility> {
         match &mut self.kind {
-            StackEntryKind::Spell { ability, .. }
-            | StackEntryKind::ActivatedAbility { ability, .. }
-            | StackEntryKind::TriggeredAbility { ability, .. } => ability,
+            StackEntryKind::Spell { ability, .. } => ability.as_mut(),
+            StackEntryKind::ActivatedAbility { ability, .. }
+            | StackEntryKind::TriggeredAbility { ability, .. } => Some(ability),
         }
     }
 }
@@ -1152,7 +1154,11 @@ pub enum CastingVariant {
 pub enum StackEntryKind {
     Spell {
         card_id: CardId,
-        ability: ResolvedAbility,
+        /// The spell's on-resolution ability. `None` for permanent spells with no
+        /// spell-level effect (creatures, artifacts, etc.) — they simply enter the
+        /// battlefield on resolution.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ability: Option<ResolvedAbility>,
         /// How this spell was cast — determines resolution behavior (zone routing,
         /// exile permissions, delayed triggers).
         #[serde(default)]
@@ -2185,27 +2191,19 @@ mod tests {
 
     #[test]
     fn stack_entry_kind_spell() {
-        use crate::types::ability::ResolvedAbility;
         let entry = StackEntry {
             id: ObjectId(1),
             source_id: ObjectId(2),
             controller: PlayerId(0),
             kind: StackEntryKind::Spell {
                 card_id: CardId(100),
-                ability: ResolvedAbility::new(
-                    crate::types::ability::Effect::Unimplemented {
-                        name: "Dummy".to_string(),
-                        description: None,
-                    },
-                    vec![],
-                    ObjectId(2),
-                    PlayerId(0),
-                ),
+                ability: None,
                 casting_variant: CastingVariant::Normal,
             },
         };
         assert_eq!(entry.id, ObjectId(1));
         assert_eq!(entry.source_id, ObjectId(2));
+        assert!(entry.ability().is_none());
     }
 
     #[test]

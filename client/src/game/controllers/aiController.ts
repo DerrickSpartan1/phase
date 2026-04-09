@@ -25,11 +25,17 @@ export function createAIController(config: AIControllerConfig): AIController {
   // Track consecutive failures on the same WaitingFor state to break infinite loops.
   // When the AI returns null or the engine rejects the action, the WaitingFor doesn't
   // change — without a cap, checkAndSchedule would retry forever.
-  let lastWaitingForType: string | null = null;
+  let lastWaitingForKey: string | null = null;
   let consecutiveFailures = 0;
   const MAX_CONSECUTIVE_FAILURES = 3;
 
   const aiPlayerIds = new Set(config.playerIds);
+
+  /** Stable identity key for a WaitingFor — type + player so Priority{0} ≠ Priority{1}. */
+  function waitingForKey(wf: { type: string; data?: { player?: number } }): string {
+    const player = wf.data?.player ?? -1;
+    return `${wf.type}:${player}`;
+  }
 
   function checkAndSchedule() {
     if (!active || pending) return;
@@ -46,9 +52,10 @@ export function createAIController(config: AIControllerConfig): AIController {
     if (!("data" in waitingFor) || !waitingFor.data || !("player" in waitingFor.data)) return;
     if (!aiPlayerIds.has(waitingFor.data.player)) return;
 
-    // Reset failure counter when the WaitingFor state changes
-    if (waitingFor.type !== lastWaitingForType) {
-      lastWaitingForType = waitingFor.type;
+    // Reset failure counter when the WaitingFor state changes (type or player)
+    const key = waitingForKey(waitingFor);
+    if (key !== lastWaitingForKey) {
+      lastWaitingForKey = key;
       consecutiveFailures = 0;
     }
 
@@ -63,18 +70,24 @@ export function createAIController(config: AIControllerConfig): AIController {
       const fallback: GameAction = state.has_pending_cast
         ? { type: "CancelCast" }
         : { type: "PassPriority" };
-      // Only reset failures after the fallback succeeds — if it fails too,
-      // keep the counter elevated so we don't spin.
+      // Guard against re-entry: set pending so subscription callbacks during
+      // the fallback dispatch don't trigger another fallback cascade.
+      pending = true;
       dispatchAction(fallback)
         .then(() => {
           consecutiveFailures = 0;
-          if (active) checkAndSchedule();
         })
         .catch((e) => {
+          // Increment to prevent infinite fallback retry on persistent errors
+          consecutiveFailures++;
           debugLog(
-            `AI fallback also failed: ${e instanceof Error ? e.message : String(e)}`,
+            `AI fallback also failed (${consecutiveFailures}): ${e instanceof Error ? e.message : String(e)}`,
             "warn",
           );
+        })
+        .finally(() => {
+          pending = false;
+          if (active) checkAndSchedule();
         });
       return;
     }

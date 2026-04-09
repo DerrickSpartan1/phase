@@ -116,21 +116,14 @@ pub(crate) fn emit_targeting_events(
 struct PreparedSpellCast {
     object_id: ObjectId,
     card_id: CardId,
-    ability_def: AbilityDefinition,
+    /// The spell's ability definition. `None` for permanent spells with no
+    /// spell-level effect (creatures, artifacts, etc.).
+    ability_def: Option<AbilityDefinition>,
     mana_cost: crate::types::mana::ManaCost,
     modal: Option<crate::types::ability::ModalChoice>,
     casting_variant: CastingVariant,
 }
 
-fn default_spell_ability_def() -> AbilityDefinition {
-    AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::Unimplemented {
-            name: "PermanentNoncreature".to_string(),
-            description: None,
-        },
-    )
-}
 
 /// CR 101.2 + CR 601.2a: Temporary restrictions can limit which zones affected
 /// players may cast spells from.
@@ -706,8 +699,7 @@ fn prepare_spell_cast(
         .abilities
         .iter()
         .find(|a| a.kind == AbilityKind::Spell)
-        .cloned()
-        .unwrap_or_else(default_spell_ability_def);
+        .cloned();
 
     let flash_cost = restrictions::flash_timing_cost(state, player, obj);
     // ExileWithAltCost: override mana cost when casting from exile with this permission.
@@ -820,13 +812,13 @@ fn prepare_spell_cast(
     // CR 304.1: Instants can be cast any time a player has priority.
     // CR 301.1 / CR 306.1: Artifacts and planeswalkers are cast at sorcery speed.
     if let Err(base_timing_error) =
-        restrictions::check_spell_timing(state, player, obj, &ability_def, has_granted_flash)
+        restrictions::check_spell_timing(state, player, obj, ability_def.as_ref(), has_granted_flash)
     {
         // CR 702.8a: Flash permits instant-speed casting.
         let Some(flash_cost) = flash_cost else {
             return Err(base_timing_error);
         };
-        restrictions::check_spell_timing(state, player, obj, &ability_def, true)?;
+        restrictions::check_spell_timing(state, player, obj, ability_def.as_ref(), true)?;
         mana_cost = restrictions::add_mana_cost(&mana_cost, &flash_cost);
     }
     restrictions::check_casting_restrictions(state, player, object_id, &obj.casting_restrictions)?;
@@ -2024,6 +2016,14 @@ fn can_pay_ability_cost_now(
     // non-self Sacrifice arm is a no-op (it's handled interactively).
     if let Some(sac_filter) = find_non_self_sacrifice(cost) {
         if find_eligible_sacrifice_targets(state, player, source_id, sac_filter).is_empty() {
+            return false;
+        }
+    }
+    // Waterbend mana cost is paid interactively via ManaPayment, so
+    // pay_ability_cost treats it as a no-op. Pre-check affordability here
+    // to avoid listing unpayable Waterbend abilities as legal actions.
+    if let Some(wb_cost) = find_waterbend_cost(cost) {
+        if !can_pay_cost_after_auto_tap(state, player, source_id, wb_cost) {
             return false;
         }
     }
