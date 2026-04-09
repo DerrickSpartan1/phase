@@ -20,7 +20,7 @@ describe("HostSetup", () => {
     expect(screen.getByRole("heading", { name: "Host Direct Match" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Host P2P Game" })).toBeInTheDocument();
     expect(screen.queryByText("List in lobby")).not.toBeInTheDocument();
-    expect(screen.getByText("P2P currently supports 2-player Standard.")).toBeInTheDocument();
+    expect(screen.queryByText("P2P currently supports 2-player Standard.")).not.toBeInTheDocument();
   });
 
   it("keeps server labeling and lobby listing in server mode", () => {

@@ -172,11 +172,6 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
               );
             })}
           </div>
-          {isP2P && (
-            <p className="mt-1.5 text-xs text-cyan-300/80">
-              P2P currently supports 2-player Standard.
-            </p>
-          )}
         </div>
 
         {/* Format-specific settings */}
