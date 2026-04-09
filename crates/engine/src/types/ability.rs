@@ -864,6 +864,9 @@ pub enum FilterProp {
     PowerGE {
         value: i32,
     },
+    /// CR 509.1b: Matches objects whose power is strictly greater than the source object's power.
+    /// Used for "creatures with greater power" blocking restrictions (relative comparison).
+    PowerGTSource,
     /// Matches multicolored objects (2+ colors).
     Multicolored,
     /// CR 105.2c: Matches colorless objects (0 colors).

@@ -42,6 +42,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CastFromHandFree
             | StaticMode::CastWithKeyword { .. }
             | StaticMode::MaximumHandSize { .. }
+            | StaticMode::CantBeBlockedBy { .. }
     )
 }
 
@@ -303,6 +304,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Named { name } => parts.push(format!("named \"{name}\"")),
             FilterProp::Colorless => parts.push("colorless".into()),
             FilterProp::IsChosenColor => parts.push("chosen color".into()),
+            FilterProp::PowerGTSource => parts.push("power > source".into()),
         }
     }
     if let Some(ctrl) = &tf.controller {
@@ -4356,6 +4358,7 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
             StaticMode::CantBeBlockedExceptBy { .. } => {
                 effective_lower.contains("can't be blocked")
             }
+            StaticMode::CantBeBlockedBy { .. } => effective_lower.contains("can't be blocked"),
             StaticMode::CanAttackWithDefender => {
                 effective_lower.contains("as though it didn't have defender")
             }

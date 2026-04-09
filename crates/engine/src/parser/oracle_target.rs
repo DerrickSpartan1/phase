@@ -1040,10 +1040,19 @@ pub(crate) fn parse_combat_status_prefix(text: &str) -> Option<(FilterProp, usiz
     None
 }
 
-/// Parse "with power N or less" / "with power N or greater" suffix.
+/// Parse "with power N or less" / "with power N or greater" / "with greater power" suffix.
 /// Returns (FilterProp, bytes consumed from the original text).
+/// CR 509.1b: "with greater power" is relative to the source object's power.
 fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
+
+    // CR 509.1b: "with greater power" — relative to the source object.
+    if let Ok((after, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("with greater power").parse(trimmed)
+    {
+        return Some((FilterProp::PowerGTSource, text.len() - after.len()));
+    }
+
     let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("with power ")
         .parse(trimmed)
         .ok()?;
@@ -3667,6 +3676,25 @@ mod tests {
                     .iter()
                     .any(|p| matches!(p, FilterProp::PowerGE { value: 3 })),
                 "Expected PowerGE(3) in {:?}",
+                tf.properties
+            );
+        } else {
+            panic!("Expected Typed filter, got {filter:?}");
+        }
+    }
+
+    #[test]
+    fn parse_type_phrase_creature_with_greater_power() {
+        // CR 509.1b: "creatures with greater power" — relative to source
+        let (filter, rest) = parse_type_phrase("creatures with greater power");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        if let TargetFilter::Typed(tf) = &filter {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert!(
+                tf.properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::PowerGTSource)),
+                "Expected PowerGTSource in {:?}",
                 tf.properties
             );
         } else {

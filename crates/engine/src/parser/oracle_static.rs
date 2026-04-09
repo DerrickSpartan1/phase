@@ -640,19 +640,43 @@ pub fn parse_static_line(text: &str) -> Option<StaticDefinition> {
         }
     }
 
-    // --- "~ can't be blocked [as long as condition]" ---
-    // CR 509.1a: Handles both unconditional and conditional "can't be blocked".
+    // --- "~ can't be blocked [by filter] [as long as condition]" ---
+    // CR 509.1b: Handles unconditional, conditional, and filter-based "can't be blocked".
     // "except by" patterns are handled separately by CantBeBlockedExceptBy.
     if nom_primitives::scan_contains(tp.lower, "can't be blocked")
         && !nom_primitives::scan_contains(tp.lower, "except by")
     {
-        // Find text after "can't be blocked" and try to parse a condition
+        // Find text after "can't be blocked" and try to parse a condition or filter
         if let Some((_, blocked_rest)) =
             nom_primitives::scan_split_at_phrase(tp.lower, |i| tag("can't be blocked").parse(i))
         {
             let after_blocked = blocked_rest["can't be blocked".len()..]
                 .trim()
                 .trim_end_matches('.');
+
+            // CR 509.1b: "can't be blocked by <filter>" — extract blocker restriction filter.
+            if let Ok((by_rest, _)) =
+                tag::<_, _, nom_language::error::VerboseError<&str>>("by ").parse(after_blocked)
+            {
+                let (filter, remainder) = parse_type_phrase(by_rest);
+                if !matches!(filter, TargetFilter::Any) {
+                    let mut def = StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
+                        .affected(TargetFilter::SelfRef)
+                        .description(text.to_string());
+                    // Check for trailing condition after the filter (e.g., "as long as...")
+                    let trailing = remainder.trim().trim_end_matches('.');
+                    if !trailing.is_empty() {
+                        if let Some(condition) = nom_condition::parse_condition(trailing)
+                            .ok()
+                            .and_then(|(r, c)| r.trim().is_empty().then_some(c))
+                        {
+                            def.condition = Some(condition);
+                        }
+                    }
+                    return Some(def);
+                }
+            }
+
             let condition = if after_blocked.is_empty() {
                 None
             } else {
@@ -3334,6 +3358,18 @@ fn parse_enchanted_equipped_predicate(
                 .description(description.to_string()),
             );
         }
+        // CR 509.1b: "can't be blocked by <filter>" → CantBeBlockedBy
+        if let Some(rest) = nom_tag_lower(&pred_lower, &pred_lower, "can't be blocked by ") {
+            let filter_text = rest.trim_end_matches('.');
+            let (filter, _) = parse_type_phrase(filter_text);
+            if !matches!(filter, TargetFilter::Any) {
+                return Some(
+                    StaticDefinition::new(StaticMode::CantBeBlockedBy { filter })
+                        .affected(affected)
+                        .description(description.to_string()),
+                );
+            }
+        }
         return Some(
             StaticDefinition::new(StaticMode::CantBeBlocked)
                 .affected(affected)
@@ -4797,11 +4833,55 @@ mod tests {
     }
 
     #[test]
-    fn static_cant_be_blocked() {
+    fn static_cant_be_blocked_by_power_le() {
+        // CR 509.1b: Questing Beast — can't be blocked by creatures with power 2 or less
         let def =
             parse_static_line("Questing Beast can't be blocked by creatures with power 2 or less.")
                 .unwrap();
-        assert_eq!(def.mode, StaticMode::CantBeBlocked);
+        assert!(
+            matches!(
+                &def.mode,
+                StaticMode::CantBeBlockedBy { filter }
+                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PowerLE { value: 2 }))
+            ),
+            "Expected CantBeBlockedBy with PowerLE(2), got {:?}",
+            def.mode
+        );
+    }
+
+    #[test]
+    fn static_cant_be_blocked_by_power_ge() {
+        // CR 509.1b: April O'Neil — can't be blocked by creatures with power 3 or greater
+        let def = parse_static_line(
+            "April O'Neil can't be blocked by creatures with power 3 or greater.",
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                &def.mode,
+                StaticMode::CantBeBlockedBy { filter }
+                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PowerGE { value: 3 }))
+            ),
+            "Expected CantBeBlockedBy with PowerGE(3), got {:?}",
+            def.mode
+        );
+    }
+
+    #[test]
+    fn static_cant_be_blocked_by_greater_power() {
+        // CR 509.1b: Prehistoric Pet — can't be blocked by creatures with greater power
+        let def =
+            parse_static_line("This creature can't be blocked by creatures with greater power.")
+                .unwrap();
+        assert!(
+            matches!(
+                &def.mode,
+                StaticMode::CantBeBlockedBy { filter }
+                if matches!(filter, TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::PowerGTSource))
+            ),
+            "Expected CantBeBlockedBy with PowerGTSource, got {:?}",
+            def.mode
+        );
     }
 
     #[test]

@@ -1024,6 +1024,19 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
             filter: except_text.to_string(),
         }]);
     }
+    // CR 509.1b: "can't be blocked by <filter>" — blocker restriction
+    if let Ok((by_rest, _)) = alt((
+        tag::<_, _, VerboseError<&str>>("can't be blocked by "),
+        tag("cannot be blocked by "),
+    ))
+    .parse(lower)
+    {
+        let filter_text = by_rest.trim_end_matches('.').trim_end_matches(" this turn");
+        let (filter, _) = parse_type_phrase(filter_text);
+        if !matches!(filter, TargetFilter::Any) {
+            return Some(vec![StaticMode::CantBeBlockedBy { filter }]);
+        }
+    }
     // CR 115.4: "can't be the target of ..." — hexproof variant
     if alt((
         tag::<_, _, VerboseError<&str>>("can't be the target of "),

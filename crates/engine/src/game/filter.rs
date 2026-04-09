@@ -410,6 +410,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Another
         | FilterProp::PowerLE { .. }
         | FilterProp::PowerGE { .. }
+        | FilterProp::PowerGTSource
         | FilterProp::IsChosenCreatureType
         | FilterProp::IsChosenColor
         | FilterProp::IsChosenCardType
@@ -524,6 +525,15 @@ fn matches_filter_prop(
         FilterProp::HasColor { color } => obj.color.contains(color),
         FilterProp::PowerLE { value } => obj.power.unwrap_or(0) <= *value,
         FilterProp::PowerGE { value } => obj.power.unwrap_or(0) >= *value,
+        // CR 509.1b: Object's power is strictly greater than the source object's power.
+        FilterProp::PowerGTSource => {
+            let source_power = state
+                .objects
+                .get(&source.id)
+                .and_then(|o| o.power)
+                .unwrap_or(0);
+            obj.power.unwrap_or(0) > source_power
+        }
         FilterProp::Multicolored => obj.color.len() > 1,
         // CR 105.2c: Colorless objects have no color.
         FilterProp::Colorless => obj.color.is_empty(),

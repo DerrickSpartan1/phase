@@ -383,6 +383,18 @@ pub fn validate_blockers(
             }
         }
 
+        // CR 509.1b: "can't be blocked by X" — blocker matching the filter is prohibited.
+        for sd in &attacker.static_definitions {
+            if let StaticMode::CantBeBlockedBy { filter } = &sd.mode {
+                if matches_target_filter(state, blocker_id, filter, attacker_id) {
+                    return Err(format!(
+                        "{:?} cannot block {:?} (can't be blocked by {filter:?})",
+                        blocker_id, attacker_id
+                    ));
+                }
+            }
+        }
+
         // CR 702.16e: Protection — a creature with protection can't be blocked by
         // creatures with the specified quality.
         for kw in &attacker.keywords {
@@ -1066,6 +1078,14 @@ fn can_block_pair(state: &GameState, blocker_id: ObjectId, attacker_id: ObjectId
         if let StaticMode::CantBeBlockedExceptBy { filter } = &sd.mode {
             let (target_filter, _) = parse_target(filter);
             if !matches_target_filter(state, blocker_id, &target_filter, attacker_id) {
+                return false;
+            }
+        }
+    }
+    // CR 509.1b: "can't be blocked by X" — blocker matching the filter is prohibited.
+    for sd in &attacker.static_definitions {
+        if let StaticMode::CantBeBlockedBy { filter } = &sd.mode {
+            if matches_target_filter(state, blocker_id, filter, attacker_id) {
                 return false;
             }
         }

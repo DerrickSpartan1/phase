@@ -219,6 +219,11 @@ pub enum StaticMode {
     CantBeBlockedExceptBy {
         filter: String,
     },
+    /// CR 509.1b: This creature can't be blocked by creatures matching filter.
+    /// Inverse of CantBeBlockedExceptBy — blockers matching the filter are prohibited.
+    CantBeBlockedBy {
+        filter: TargetFilter,
+    },
     /// CR 702.16: Protection prevents targeting, blocking, damage, and attachment.
     Protection,
     /// CR 702.12: Indestructible — prevents destruction by lethal damage and destroy effects.
@@ -329,6 +334,7 @@ impl Hash for StaticMode {
             StaticMode::ExtraBlockers { count } => count.hash(state),
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
             StaticMode::CantBeBlockedExceptBy { filter } => filter.hash(state),
+            StaticMode::CantBeBlockedBy { .. } => {} // TargetFilter does not implement Hash; discriminant only
             StaticMode::AdditionalLandDrop { count } => count.hash(state),
             StaticMode::Other(s) => s.hash(state),
             StaticMode::GraveyardCastPermission {
@@ -412,6 +418,9 @@ impl fmt::Display for StaticMode {
             StaticMode::CantBeBlocked => write!(f, "CantBeBlocked"),
             StaticMode::CantBeBlockedExceptBy { filter } => {
                 write!(f, "CantBeBlockedExceptBy:{filter}")
+            }
+            StaticMode::CantBeBlockedBy { filter } => {
+                write!(f, "CantBeBlockedBy({filter:?})")
             }
             StaticMode::Protection => write!(f, "Protection"),
             StaticMode::Indestructible => write!(f, "Indestructible"),
