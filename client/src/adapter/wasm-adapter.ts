@@ -251,6 +251,7 @@ export class WasmAdapter implements EngineAdapter {
     formatConfig?: FormatConfig,
     playerCount?: number,
     matchConfig?: MatchConfig,
+    firstPlayer?: number,
   ): Promise<SubmitResult> {
     this.assertInitialized();
     if (deckData) {
@@ -264,6 +265,7 @@ export class WasmAdapter implements EngineAdapter {
         formatConfig ?? null,
         matchConfig ?? null,
         playerCount,
+        firstPlayer,
       );
     }
     return this.fallback!.initializeGame(
@@ -272,6 +274,7 @@ export class WasmAdapter implements EngineAdapter {
       formatConfig ?? null,
       matchConfig ?? null,
       playerCount,
+      firstPlayer,
     );
   }
 
@@ -309,6 +312,7 @@ interface MainThreadFallback {
     formatConfig: FormatConfig | null,
     matchConfig: MatchConfig | null,
     playerCount?: number,
+    firstPlayer?: number,
   ): Promise<SubmitResult>;
 }
 
@@ -374,6 +378,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
       formatConfig: FormatConfig | null,
       matchConfig: MatchConfig | null,
       playerCount?: number,
+      firstPlayer?: number,
     ) =>
       enqueue(() => {
         const r = wasm.initialize_game(
@@ -382,6 +387,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
           formatConfig,
           matchConfig,
           playerCount ?? undefined,
+          firstPlayer ?? undefined,
         );
         if (r && typeof r === "object" && "error" in r && r.error) {
           const reasons = (r as { reasons?: string[] }).reasons ?? [];

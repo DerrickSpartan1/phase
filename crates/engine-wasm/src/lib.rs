@@ -11,7 +11,7 @@ use engine::game::engine::apply;
 use engine::game::{
     evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
     load_deck_into_state, rehydrate_game_from_card_db, resolve_deck_list, start_game,
-    validate_deck_for_format, DeckCompatibilityRequest, DeckList,
+    start_game_with_starting_player, validate_deck_for_format, DeckCompatibilityRequest, DeckList,
 };
 use engine::types::format::FormatConfig;
 use engine::types::identifiers::ObjectId;
@@ -187,6 +187,7 @@ pub fn evaluate_deck_compatibility_js(request: JsValue) -> Result<JsValue, JsVal
 /// format_config_js: optional FormatConfig JSON — defaults to Standard if null/undefined.
 /// match_config_js: optional MatchConfig JSON — defaults to BO1 if null/undefined.
 /// player_count: number of players — defaults to 2 if not provided.
+/// first_player: 0 = human plays first (CR 103.1), 1 = opponent plays first, None = random.
 /// Names are resolved against the card database loaded via load_card_database().
 /// Returns the initial ActionResult (events + waiting_for).
 #[wasm_bindgen]
@@ -196,6 +197,7 @@ pub fn initialize_game(
     format_config_js: JsValue,
     match_config_js: JsValue,
     player_count: Option<u8>,
+    first_player: Option<u8>,
 ) -> JsValue {
     let seed = seed.map(|s| s as u64).unwrap_or(42);
 
@@ -260,8 +262,12 @@ pub fn initialize_game(
         }
     }
 
-    // Start the game (auto-detects libraries for mulligan vs skip)
-    let result = start_game(&mut state);
+    // CR 103.1: Start the game with the chosen starting player.
+    let result = match first_player {
+        Some(0) => start_game_with_starting_player(&mut state, PlayerId(0)),
+        Some(1) => start_game_with_starting_player(&mut state, PlayerId(1)),
+        _ => start_game(&mut state),
+    };
 
     GAME_STATE.with(|cell| cell.set(Some(state)));
 

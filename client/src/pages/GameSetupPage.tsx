@@ -65,6 +65,7 @@ export function GameSetupPage() {
   const [matchType, setMatchType] = useState<MatchType>("Bo1");
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
   const [compatibilities, setCompatibilities] = useState<Record<string, DeckCompatibilityResult>>({});
+  const [firstPlayer, setFirstPlayer] = useState<"random" | "play" | "draw">("random");
 
   // Preferences (persisted)
   const difficulty = usePreferencesStore((s) => s.aiDifficulty);
@@ -122,8 +123,9 @@ export function GameSetupPage() {
     const gameId = crypto.randomUUID();
     saveActiveGame({ id: gameId, mode: "ai", difficulty });
     useGameStore.setState({ gameId });
+    const firstParam = firstPlayer !== "random" ? `&first=${firstPlayer}` : "";
     navigate(
-      `/game/${gameId}?mode=ai&difficulty=${difficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}`,
+      `/game/${gameId}?mode=ai&difficulty=${difficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${firstParam}`,
     );
   };
 
@@ -319,6 +321,26 @@ export function GameSetupPage() {
                       BO3
                     </button>
                   </div>
+
+                  <label className="flex flex-col gap-1">
+                    <span className="text-xs text-slate-400">Who Goes First</span>
+                    <div className="flex overflow-hidden rounded-lg border border-gray-700">
+                      {(["random", "play", "draw"] as const).map((opt) => (
+                        <button
+                          key={opt}
+                          type="button"
+                          onClick={() => setFirstPlayer(opt)}
+                          className={`flex-1 px-3 py-1.5 text-xs font-medium capitalize transition-colors ${
+                            firstPlayer === opt
+                              ? "bg-indigo-600 text-white"
+                              : "bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200"
+                          }`}
+                        >
+                          {opt}
+                        </button>
+                      ))}
+                    </div>
+                  </label>
 
                   {formatConfig.command_zone && (
                     <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">

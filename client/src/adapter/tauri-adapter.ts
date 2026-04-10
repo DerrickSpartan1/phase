@@ -33,6 +33,7 @@ export class TauriAdapter implements EngineAdapter {
     _formatConfig?: unknown,
     _playerCount?: number,
     matchConfig?: MatchConfig,
+    _firstPlayer?: number,
   ): Promise<SubmitResult> {
     this.assertInitialized();
     const seed = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);

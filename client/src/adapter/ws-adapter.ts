@@ -107,6 +107,7 @@ export class WebSocketAdapter implements EngineAdapter {
     _formatConfig?: unknown,
     _playerCount?: number,
     _matchConfig?: unknown,
+    _firstPlayer?: number,
   ): Promise<SubmitResult> {
     // Server handles deck data via WebSocket protocol during initialize()
     return { events: [] };

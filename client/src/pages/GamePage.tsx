@@ -84,8 +84,11 @@ export function GamePage() {
   const formatParam = searchParams.get("format") as GameFormat | null;
   const playersParam = searchParams.get("players");
   const matchParam = searchParams.get("match");
+  const firstParam = searchParams.get("first");
   const playerCount = playersParam ? Number(playersParam) : undefined;
   const formatConfig = formatParam ? FORMAT_DEFAULTS[formatParam] : undefined;
+  // CR 103.1: 0 = play first, 1 = draw first, undefined = random
+  const firstPlayer = firstParam === "play" ? 0 : firstParam === "draw" ? 1 : undefined;
   const matchConfig = useMemo<MatchConfig>(
     () => ({
       match_type: matchParam?.toLowerCase() === "bo3" ? "Bo3" : "Bo1",
@@ -287,6 +290,7 @@ export function GamePage() {
       formatConfig={formatConfig}
       playerCount={playerCount}
       matchConfig={matchConfig}
+      firstPlayer={firstPlayer}
       onWsEvent={mode === "online" ? handleWsEvent : undefined}
       onP2PEvent={
         mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined

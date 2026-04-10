@@ -753,6 +753,7 @@ export interface EngineAdapter {
     formatConfig?: FormatConfig,
     playerCount?: number,
     matchConfig?: MatchConfig,
+    firstPlayer?: number,
   ): Promise<SubmitResult> | SubmitResult;
   submitAction(action: GameAction): Promise<SubmitResult>;
   getState(): Promise<GameState>;

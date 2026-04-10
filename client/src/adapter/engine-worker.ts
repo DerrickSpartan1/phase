@@ -36,6 +36,7 @@ type EngineRequest =
       formatConfig: unknown | null;
       matchConfig: unknown | null;
       playerCount?: number;
+      firstPlayer?: number;
     }
   | { type: "submitAction"; id: number; action: GameAction }
   | { type: "getState"; id: number }
@@ -130,6 +131,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           msg.formatConfig ?? null,
           msg.matchConfig ?? null,
           msg.playerCount ?? undefined,
+          msg.firstPlayer ?? undefined,
         );
         // Engine returns { error: true, reasons: [...] } when deck validation fails
         if (

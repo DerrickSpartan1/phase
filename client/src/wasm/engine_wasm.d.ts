@@ -89,10 +89,11 @@ export function init_panic_hook(): void;
  * format_config_js: optional FormatConfig JSON — defaults to Standard if null/undefined.
  * match_config_js: optional MatchConfig JSON — defaults to BO1 if null/undefined.
  * player_count: number of players — defaults to 2 if not provided.
+ * first_player: 0 = human plays first (CR 103.1), 1 = opponent plays first, None = random.
  * Names are resolved against the card database loaded via load_card_database().
  * Returns the initial ActionResult (events + waiting_for).
  */
-export function initialize_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count?: number | null): any;
+export function initialize_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count?: number | null, first_player?: number | null): any;
 
 /**
  * Load the card database from a JSON string (card-data.json contents).
@@ -138,7 +139,7 @@ export interface InitOutput {
     readonly get_card_face_data: (a: number, b: number) => any;
     readonly get_card_parse_details: (a: number, b: number) => any;
     readonly get_filtered_game_state: (a: number) => any;
-    readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number) => any;
+    readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly ping: () => [number, number];
     readonly restore_game_state: (a: number, b: number) => [number, number];

@@ -96,6 +96,7 @@ export class P2PHostAdapter implements EngineAdapter {
     _formatConfig?: unknown,
     _playerCount?: number,
     matchConfig?: MatchConfig,
+    _firstPlayer?: number,
   ): Promise<SubmitResult> {
     // Await the eagerly-created promise — resolves immediately if
     // guest_deck arrived during initialize(), otherwise waits.
@@ -269,6 +270,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     _formatConfig?: unknown,
     _playerCount?: number,
     _matchConfig?: MatchConfig,
+    _firstPlayer?: number,
   ): Promise<SubmitResult> {
     this.emit({ type: "playerIdentity", playerId: 1 });
 

@@ -105,6 +105,7 @@ export class EngineWorkerClient {
     formatConfig: FormatConfig | null,
     matchConfig: MatchConfig | null,
     playerCount?: number,
+    firstPlayer?: number,
   ): Promise<SubmitResult> {
     return this.request<SubmitResult>({
       type: "initializeGame",
@@ -113,6 +114,7 @@ export class EngineWorkerClient {
       formatConfig,
       matchConfig,
       playerCount,
+      firstPlayer,
     });
   }
 
