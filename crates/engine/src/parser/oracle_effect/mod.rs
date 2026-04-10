@@ -3048,8 +3048,11 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         }
         // Object-targeting effects: inject subject filter only when the sentinel
         // is `TargetFilter::Any` (not Controller — these target objects, not players).
+        // Note: DealDamage is intentionally excluded — the damage parser always parses
+        // its own target from the "to [target]" clause. Injecting the subject into
+        // DealDamage would overwrite explicitly-parsed "any target" with SelfRef,
+        // causing "It deals 5 damage to any target" to target itself instead of the opponent.
         Effect::Pump { target, .. }
-        | Effect::DealDamage { target, .. }
         | Effect::Destroy { target, .. }
         | Effect::Regenerate { target, .. }
         | Effect::Counter { target, .. }
@@ -3608,7 +3611,13 @@ fn parse_choose_filter_from_sentence(lower: &str) -> TargetFilter {
         .ok()
     {
         Some((_, before)) => before,
-        None => return TargetFilter::Any,
+        None => {
+            push_warning(format!(
+                "target-fallback: choose-from-sentence missing 'card from' in '{}'",
+                lower.trim()
+            ));
+            return TargetFilter::Any;
+        }
     };
     // The word immediately before "card from" is the type descriptor
     let word = before_card.trim().rsplit(' ').next().unwrap_or("");
@@ -3621,7 +3630,13 @@ fn parse_choose_filter_from_sentence(lower: &str) -> TargetFilter {
             }
         }
     }
-    type_str_to_target_filter(word).unwrap_or(TargetFilter::Any)
+    type_str_to_target_filter(word).unwrap_or_else(|| {
+        push_warning(format!(
+            "target-fallback: unrecognized choose-from-sentence type '{}'",
+            word
+        ));
+        TargetFilter::Any
+    })
 }
 
 /// Check if an effect exiles objects (candidate for tracked set recording).
@@ -8722,6 +8737,43 @@ mod tests {
             ),
             "Expected GrantCastingPermission(PlayFromExile), got {:?}",
             sub2.effect
+        );
+    }
+
+    #[test]
+    fn exile_top_x_cards_of_your_library() {
+        let def = parse_effect_chain("Exile the top X cards of your library.", AbilityKind::Spell);
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::Controller,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { ref name }
+                    },
+                } if name == "X"
+            ),
+            "Expected ExileTop(controller, X), got {:?}",
+            def.effect
+        );
+    }
+
+    #[test]
+    fn exile_top_card_of_that_players_library_uses_parent_target() {
+        let def = parse_effect_chain(
+            "Exile the top card of that player's library. Until end of turn, you may cast that card.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::ParentTarget,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }
+            ),
+            "Expected ExileTop(parent target, 1), got {:?}",
+            def.effect
         );
     }
 
