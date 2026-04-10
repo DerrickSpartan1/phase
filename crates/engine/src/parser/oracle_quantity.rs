@@ -16,7 +16,7 @@ use nom_language::error::VerboseError;
 
 use super::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
-use crate::parser::oracle_target::{parse_target, parse_type_phrase};
+use crate::parser::oracle_target::parse_type_phrase;
 use crate::parser::oracle_util::parse_number;
 use crate::types::ability::{
     AggregateFunction, CountScope, ObjectProperty, PlayerFilter, QuantityExpr, QuantityRef,
@@ -458,7 +458,7 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     }
 
     // "spell you've cast this turn" / "spells you've cast this turn"
-    // Direct dispatch before parse_target to handle spell-casting quantity patterns.
+    // Direct dispatch before type-phrase fallback to handle spell-casting quantity patterns.
     if let Some(spell_part) = clause
         .strip_suffix(" you've cast this turn")
         .or_else(|| clause.strip_suffix(" you cast this turn"))
@@ -489,8 +489,10 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     }
 
     // "creature you control", "artifact you control", etc.
-    let (filter, _) = parse_target(clause);
-    if !matches!(filter, TargetFilter::Any) {
+    // Use parse_type_phrase (not parse_target) to avoid generating spurious
+    // target-fallback warnings for quantity text that isn't a target clause.
+    let (filter, remainder) = parse_type_phrase(clause);
+    if !matches!(filter, TargetFilter::Any) && remainder.trim().is_empty() {
         return Some(QuantityRef::ObjectCount { filter });
     }
 

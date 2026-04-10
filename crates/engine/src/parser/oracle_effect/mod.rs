@@ -5541,6 +5541,19 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
         ));
     }
 
+    // No "to [target]" clause — the damage target is inherited from the parent effect
+    // (e.g., "it deals 4 damage instead" reuses the original target).
+    if after_to.is_empty() {
+        return Some((
+            Effect::DealDamage {
+                amount,
+                target: TargetFilter::ParentTarget,
+                damage_source: None,
+            },
+            "",
+        ));
+    }
+
     let (target, rem) = parse_target(after_to);
     Some((
         Effect::DealDamage {

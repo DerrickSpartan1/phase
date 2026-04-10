@@ -232,6 +232,20 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         );
     }
 
+    // "any other target" — matches any legal target different from previously chosen targets
+    if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
+        value(
+            (),
+            tag::<_, _, nom_language::error::VerboseError<&str>>("any other target"),
+        )
+        .parse(input)
+    }) {
+        return (
+            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Another])),
+            rest,
+        );
+    }
+
     // "any target" — matches any legal target
     if let Some((_, rest)) = nom_on_lower(text, &lower, |input| {
         value(
