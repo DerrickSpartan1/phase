@@ -47,7 +47,7 @@ pub(crate) fn disruption_window_score(
     ai_player: PlayerId,
     facts: &CastFacts<'_>,
 ) -> Option<DisruptionWindow> {
-    if !facts.has_reveal_hand_or_discard {
+    if !facts.has_reveal_hand_or_discard() {
         return None;
     }
 

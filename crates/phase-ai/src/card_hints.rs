@@ -62,7 +62,7 @@ pub(crate) fn should_play_now_with_facts(
 
             // Removal: higher priority when opponents have high-value creatures.
             // In multiplayer, prefer targeting highest-threat opponent's best creature.
-            if has_destroy || has_damage || (facts.has_direct_removal_text && has_etb_value) {
+            if has_destroy || has_damage || (facts.has_direct_removal_text() && has_etb_value) {
                 let opponents = players::opponents(state, player);
                 let max_threat = state
                     .battlefield
@@ -107,7 +107,7 @@ pub(crate) fn should_play_now_with_facts(
                 };
             }
 
-            if facts.has_search_library {
+            if facts.has_search_library() {
                 let proactive = if matches!(state.phase, Phase::PreCombatMain) {
                     0.72
                 } else {
@@ -116,13 +116,13 @@ pub(crate) fn should_play_now_with_facts(
                 return if is_own_turn { proactive } else { 0.45 };
             }
 
-            if facts.has_reveal_hand_or_discard {
+            if facts.has_reveal_hand_or_discard() {
                 return disruption_window_score(state, player, facts)
                     .map(|window| window.hint_priority)
                     .unwrap_or(0.18);
             }
 
-            if facts.has_draw && facts.mana_value >= 3 {
+            if facts.has_draw() && facts.mana_value >= 3 {
                 return if matches!(state.phase, Phase::PreCombatMain) {
                     0.68
                 } else {
@@ -142,7 +142,7 @@ pub(crate) fn should_play_now_with_facts(
                 };
             }
 
-            if facts.is_planeswalker() || facts.is_enchantment() || facts.has_token_creation {
+            if facts.is_planeswalker() || facts.is_enchantment() || facts.has_token_creation() {
                 return if matches!(state.phase, Phase::PreCombatMain) {
                     0.66
                 } else {

@@ -1,6 +1,7 @@
+use engine::game::filter::matches_target_filter;
 use engine::game::game_object::GameObject;
 use engine::game::players;
-use engine::types::ability::Effect;
+use engine::types::ability::{Effect, TargetFilter};
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
@@ -61,13 +62,13 @@ pub(crate) fn best_proactive_cast_score(ctx: &PolicyContext<'_>) -> f64 {
             {
                 score += 0.16;
             }
-            if facts.has_search_library {
+            if facts.has_search_library() {
                 score += 0.24;
             }
-            if facts.has_draw {
+            if facts.has_draw() {
                 score += 0.1;
             }
-            if facts.has_direct_removal_text {
+            if facts.has_direct_removal_text() {
                 score += 0.14;
             }
             score
@@ -89,6 +90,60 @@ pub(crate) fn visible_opponent_creature_value(state: &GameState, ai_player: Play
                     evaluate_creature(state, *object_id)
                         * (threat_level(state, ai_player, object.controller) + 0.5),
                 )
+            } else {
+                None
+            }
+        })
+        .fold(0.0, f64::max)
+}
+
+/// Max value among untapped opponent creatures that could actually block.
+/// Use this instead of `visible_opponent_creature_value` when evaluating whether
+/// pre-combat removal "opens combat lanes" — tapped creatures can't block.
+pub(crate) fn untapped_opponent_blocker_value(state: &GameState, ai_player: PlayerId) -> f64 {
+    let opponents = players::opponents(state, ai_player);
+    state
+        .battlefield
+        .iter()
+        .filter_map(|object_id| {
+            let object = state.objects.get(object_id)?;
+            if opponents.contains(&object.controller)
+                && object.card_types.core_types.contains(&CoreType::Creature)
+                && !object.tapped
+            {
+                Some(
+                    evaluate_creature(state, *object_id)
+                        * (threat_level(state, ai_player, object.controller) + 0.5),
+                )
+            } else {
+                None
+            }
+        })
+        .fold(0.0, f64::max)
+}
+
+/// Max threat value among opponent creatures that match the given target filter.
+/// Returns 0.0 if no creatures match (the spell can't hit anything worthwhile).
+/// `source_id` is needed for `matches_target_filter` controller-relative checks.
+pub(crate) fn targetable_threat_value(
+    state: &GameState,
+    ai_player: PlayerId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+) -> f64 {
+    let opponents = players::opponents(state, ai_player);
+    state
+        .battlefield
+        .iter()
+        .filter_map(|&id| {
+            let object = state.objects.get(&id)?;
+            if opponents.contains(&object.controller)
+                && object.card_types.core_types.contains(&CoreType::Creature)
+                && matches_target_filter(state, id, filter, source_id)
+            {
+                let creature_value = evaluate_creature(state, id);
+                let threat_weight = threat_level(state, ai_player, object.controller) + 0.5;
+                Some(creature_value * threat_weight)
             } else {
                 None
             }

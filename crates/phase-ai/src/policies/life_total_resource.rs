@@ -89,7 +89,7 @@ fn score_defensive_play(
     }
 
     // Removal is valuable when under lethal pressure
-    if facts.has_direct_removal_text {
+    if facts.has_direct_removal_text() {
         score += 0.4;
     }
 
@@ -114,7 +114,7 @@ fn score_aggressive_close(
     }
 
     // Burn can close the game (but don't bonus if lethal_burn_bonus already handles it)
-    if facts.has_direct_removal_text
+    if facts.has_direct_removal_text()
         && facts.primary_effects.iter().any(|a| {
             matches!(
                 &*a.effect,

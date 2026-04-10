@@ -25,7 +25,7 @@ impl TacticalPolicy for TutorPolicy {
         let Some(facts) = ctx.cast_facts() else {
             return 0.0;
         };
-        if !facts.has_search_library {
+        if !facts.has_search_library() {
             return 0.0;
         }
 

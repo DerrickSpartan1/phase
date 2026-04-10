@@ -87,6 +87,27 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
             Zone::Battlefield => EffectPolarity::Beneficial,
             _ => EffectPolarity::Contextual,
         },
+        // GenericEffect: inspect the static abilities it grants to determine polarity.
+        // e.g. CantBeBlocked → Beneficial, CantAttack → Harmful.
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => {
+            for sd in static_abilities {
+                match static_mode_polarity(&sd.mode) {
+                    EffectPolarity::Contextual => {
+                        // Check modifications within this static definition
+                        for m in &sd.modifications {
+                            match modification_polarity(m) {
+                                EffectPolarity::Contextual => continue,
+                                polarity => return polarity,
+                            }
+                        }
+                    }
+                    polarity => return polarity,
+                }
+            }
+            EffectPolarity::Contextual
+        }
         // Contextual: depends on usage context
         Effect::GainControl { .. }
         | Effect::GiftDelivery { .. }
@@ -129,6 +150,10 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::GivePlayerCounter { target, .. }
         | Effect::BecomeCopy { target, .. }
         | Effect::ExtraTurn { target, .. } => Some(target),
+        // GenericEffect and LoseLife have Option<TargetFilter>
+        Effect::GenericEffect { target, .. } | Effect::LoseLife { target, .. } => {
+            target.as_ref()
+        }
         // NOTE: ExchangeControl is a unit variant — no target field.
         // NOTE: GiftDelivery { kind } has no target field.
         // NOTE: SearchLibrary uses `filter`, not `target`.

@@ -10,13 +10,10 @@ use engine::types::replacements::ReplacementEvent;
 use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
-#[derive(Debug, Clone)]
-pub struct CastFacts<'a> {
-    pub object: &'a GameObject,
-    pub primary_effects: Vec<&'a AbilityDefinition>,
-    pub immediate_etb_triggers: Vec<&'a TriggerDefinition>,
-    pub immediate_replacements: Vec<&'a ReplacementDefinition>,
-    pub mana_value: u32,
+/// Effect-level classification flags shared across spells and activated abilities.
+/// Built from any ability's effect chain — no card-level assumptions.
+#[derive(Debug, Clone, Default)]
+pub struct EffectProfile {
     pub has_search_library: bool,
     pub has_reveal_hand_or_discard: bool,
     pub has_draw: bool,
@@ -24,11 +21,67 @@ pub struct CastFacts<'a> {
     pub has_counter_spell: bool,
     pub has_direct_removal_text: bool,
     pub has_mass_damage_or_mass_shrink_text: bool,
+}
+
+impl EffectProfile {
+    /// Build an EffectProfile by scanning a flat list of effects.
+    pub fn from_effects(effects: &[&Effect]) -> Self {
+        Self {
+            has_search_library: effects
+                .iter()
+                .any(|e| matches!(e, Effect::SearchLibrary { .. })),
+            has_reveal_hand_or_discard: effects
+                .iter()
+                .any(|e| matches!(e, Effect::RevealHand { .. } | Effect::DiscardCard { .. })),
+            has_draw: effects.iter().any(|e| matches!(e, Effect::Draw { .. })),
+            has_token_creation: effects.iter().any(|e| matches!(e, Effect::Token { .. })),
+            has_counter_spell: effects.iter().any(|e| matches!(e, Effect::Counter { .. })),
+            has_direct_removal_text: effects.iter().any(|e| is_direct_removal(e)),
+            has_mass_damage_or_mass_shrink_text: effects
+                .iter()
+                .any(|e| is_mass_damage_or_shrink(e)),
+        }
+    }
+}
+
+/// Card-level facts for spells: wraps EffectProfile with card-specific data
+/// (mana value, ETB triggers, replacements). Only available for CastSpell actions.
+#[derive(Debug, Clone)]
+pub struct CastFacts<'a> {
+    pub object: &'a GameObject,
+    pub primary_effects: Vec<&'a AbilityDefinition>,
+    pub immediate_etb_triggers: Vec<&'a TriggerDefinition>,
+    pub immediate_replacements: Vec<&'a ReplacementDefinition>,
+    pub mana_value: u32,
+    pub profile: EffectProfile,
     pub requires_targets_in_spell_text: bool,
     pub requires_targets_in_immediate_etb: bool,
 }
 
 impl<'a> CastFacts<'a> {
+    // Delegate EffectProfile fields for backward compatibility with existing call sites.
+    pub fn has_search_library(&self) -> bool {
+        self.profile.has_search_library
+    }
+    pub fn has_reveal_hand_or_discard(&self) -> bool {
+        self.profile.has_reveal_hand_or_discard
+    }
+    pub fn has_draw(&self) -> bool {
+        self.profile.has_draw
+    }
+    pub fn has_token_creation(&self) -> bool {
+        self.profile.has_token_creation
+    }
+    pub fn has_counter_spell(&self) -> bool {
+        self.profile.has_counter_spell
+    }
+    pub fn has_direct_removal_text(&self) -> bool {
+        self.profile.has_direct_removal_text
+    }
+    pub fn has_mass_damage_or_mass_shrink_text(&self) -> bool {
+        self.profile.has_mass_damage_or_mass_shrink_text
+    }
+
     pub fn immediate_effects(&self) -> Vec<&'a Effect> {
         let mut effects = Vec::new();
         for ability in collect_unique_immediate_abilities_from_parts(
@@ -94,6 +147,32 @@ pub fn cast_facts_for_action<'a>(
     cast_object_for_action(state, action, player).map(cast_facts_for_object)
 }
 
+/// Build an EffectProfile for any action — spells, activated abilities, or target
+/// selection contexts. For spells, this delegates to CastFacts (which includes ETB
+/// triggers and replacements). For activated abilities, it scans the specific
+/// ability's effect chain directly.
+pub fn effect_profile_for_action(
+    state: &GameState,
+    action: &GameAction,
+    player: PlayerId,
+) -> Option<EffectProfile> {
+    match action {
+        GameAction::CastSpell { .. } => {
+            cast_facts_for_action(state, action, player).map(|facts| facts.profile)
+        }
+        GameAction::ActivateAbility {
+            source_id,
+            ability_index,
+        } => {
+            let object = state.objects.get(source_id)?;
+            let ability = object.abilities.get(*ability_index)?;
+            let effects: Vec<_> = collect_definition_effects(ability);
+            Some(EffectProfile::from_effects(&effects))
+        }
+        _ => None,
+    }
+}
+
 pub fn cast_facts_for_object(object: &GameObject) -> CastFacts<'_> {
     let primary_effects: Vec<_> = object
         .abilities
@@ -133,34 +212,15 @@ pub fn cast_facts_for_object(object: &GameObject) -> CastFacts<'_> {
         })
     });
 
+    let profile = EffectProfile::from_effects(&all_effects);
+
     CastFacts {
         object,
         primary_effects,
         immediate_etb_triggers,
         immediate_replacements,
         mana_value: object.mana_cost.mana_value(),
-        has_search_library: all_effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::SearchLibrary { .. })),
-        has_reveal_hand_or_discard: all_effects.iter().any(|effect| {
-            matches!(
-                effect,
-                Effect::RevealHand { .. } | Effect::DiscardCard { .. }
-            )
-        }),
-        has_draw: all_effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::Draw { .. })),
-        has_token_creation: all_effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::Token { .. })),
-        has_counter_spell: all_effects
-            .iter()
-            .any(|effect| matches!(effect, Effect::Counter { .. })),
-        has_direct_removal_text: all_effects.iter().any(|effect| is_direct_removal(effect)),
-        has_mass_damage_or_mass_shrink_text: all_effects
-            .iter()
-            .any(|effect| is_mass_damage_or_shrink(effect)),
+        profile,
         requires_targets_in_spell_text,
         requires_targets_in_immediate_etb,
     }
@@ -363,7 +423,7 @@ mod tests {
 
         let facts = cast_facts_for_object(&object);
         assert_eq!(facts.immediate_etb_triggers.len(), 1);
-        assert!(facts.has_draw);
+        assert!(facts.has_draw());
     }
 
     #[test]

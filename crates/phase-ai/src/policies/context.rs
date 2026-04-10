@@ -5,7 +5,9 @@ use engine::types::actions::GameAction;
 use engine::types::game_state::{GameState, WaitingFor};
 use engine::types::player::PlayerId;
 
-use crate::cast_facts::{cast_facts_for_action, CastFacts};
+use crate::cast_facts::{
+    cast_facts_for_action, effect_profile_for_action, CastFacts, EffectProfile,
+};
 use crate::config::{AiConfig, PolicyPenalties};
 use crate::eval::{strategic_intent, StrategicIntent};
 
@@ -107,6 +109,16 @@ impl<'a> PolicyContext<'a> {
                 }
                 _ => None,
             })
+    }
+
+    /// Effect-level profile for both spells and activated abilities.
+    /// For spells, delegates to CastFacts (includes ETB/replacement effects).
+    /// For activated abilities, scans the specific ability's effect chain.
+    pub fn effect_profile(&self) -> Option<EffectProfile> {
+        if let Some(facts) = &self.cast_facts {
+            return Some(facts.profile.clone());
+        }
+        effect_profile_for_action(self.state, &self.candidate.action, self.ai_player)
     }
 }
 
@@ -389,6 +401,6 @@ mod tests {
         assert_eq!(ctx.effects().len(), 1);
         let facts = ctx.cast_facts().expect("cast facts");
         assert_eq!(facts.immediate_etb_triggers.len(), 1);
-        assert!(facts.has_direct_removal_text);
+        assert!(facts.has_direct_removal_text());
     }
 }

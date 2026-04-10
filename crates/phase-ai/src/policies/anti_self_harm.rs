@@ -1,5 +1,6 @@
 use engine::game::combat;
 use engine::game::filter::matches_target_filter;
+use engine::game::keywords;
 use engine::game::mana_abilities;
 use engine::game::turn_control;
 use engine::types::ability::{
@@ -357,9 +358,13 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                 if let Some(toughness) = object.toughness {
                     let remaining = toughness - object.damage_marked as i32;
                     // Penalize targeting creatures that won't die to this damage.
-                    // Wasting burn on a creature that survives is worse than going face.
+                    // Graduated: almost-lethal burn (leaves 1 toughness) is less
+                    // wasteful than burn that barely scratches a large creature.
                     if damage < remaining {
-                        score -= 4.0;
+                        let survival_ratio = (remaining - damage) as f64 / remaining as f64;
+                        // Full penalty (-8.0) when damage is negligible relative to toughness,
+                        // reduced penalty (-4.0) when damage is almost lethal.
+                        score -= 4.0 + 4.0 * survival_ratio;
                     }
                     // Penalize massive overkill (wasting damage capacity)
                     if remaining > 0 && damage >= remaining && damage > remaining * 2 {
@@ -374,6 +379,15 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
             let is_destroy = effects.iter().any(|e| matches!(e, Effect::Destroy { .. }));
             if is_destroy && object.has_keyword(&Keyword::Indestructible) {
                 score += ctx.penalties().indestructible_destroy_penalty;
+            }
+
+            // CR 702.16b + CR 702.16e: Protection prevents targeting and damage
+            // from sources with the protected quality. Targeting a creature with
+            // protection from the spell's qualities wastes the spell entirely.
+            if let Some(source) = ctx.source_object() {
+                if keywords::protection_prevents_from(object, source) {
+                    score -= 100.0;
+                }
             }
 
             // Penalize targeting creatures with ward (must pay additional cost)
@@ -413,6 +427,24 @@ fn score_target_object(ctx: &PolicyContext<'_>, object_id: ObjectId, beneficial:
                 if spell_mv >= 4 && target_value < 4.0 {
                     score += ctx.penalties().removal_quality_mismatch
                         * (1.0 - target_value / 4.0).max(0.0);
+                }
+            }
+
+            // Penalize non-lethal removal on a tapped opponent creature pre-combat.
+            // A tapped creature can't block — there's no combat lane to open, so
+            // non-lethal removal has no urgency advantage over casting post-combat.
+            // Lethal removal is exempt: killing a tapped creature still removes a
+            // future threat (it untaps next turn and can attack/block).
+            if object.tapped
+                && object.controller != ctx.ai_player
+                && matches!(ctx.state.phase, Phase::PreCombatMain)
+            {
+                let is_lethal_burn = extract_damage_amount(&effects)
+                    .zip(object.toughness)
+                    .is_some_and(|(dmg, t)| dmg >= t - object.damage_marked as i32);
+                let is_destroy = effects.iter().any(|e| matches!(e, Effect::Destroy { .. }));
+                if !is_lethal_burn && !is_destroy {
+                    score -= 5.0;
                 }
             }
         }
@@ -2544,6 +2576,180 @@ mod tests {
         assert!(
             score_player > score_self,
             "Opponent player should score higher than sacrificed source: player={score_player}, self={score_self}"
+        );
+    }
+
+    /// Regression: Escape Tunnel's "target creature can't be blocked" is a GenericEffect
+    /// with CantBeBlocked static. The AI must recognise this as beneficial and prefer
+    /// its own creature, not grant unblockable to the opponent's creature.
+    #[test]
+    fn generic_effect_cant_be_blocked_prefers_own_creature() {
+        let mut state = make_state();
+        let own_id = add_creature(&mut state, PlayerId(0), "Bear", 2, 2);
+        let opp_id = add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+        let config = AiConfig::default();
+
+        let effect = Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::new(StaticMode::CantBeBlocked)
+                .affected(TargetFilter::Typed(TypedFilter::creature()))],
+            duration: Some(engine::types::ability::Duration::UntilEndOfTurn),
+            target: Some(TargetFilter::Typed(TypedFilter::creature())),
+        };
+
+        // Score targeting own creature
+        let (decision, candidate) = make_target_selection_ctx(
+            &state,
+            effect.clone(),
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(own_id)),
+        );
+        let ctx_own = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+        let score_own = AntiSelfHarmPolicy.score(&ctx_own);
+
+        // Score targeting opponent's creature
+        let (decision, candidate) = make_target_selection_ctx(
+            &state,
+            effect,
+            vec![TargetRef::Object(own_id), TargetRef::Object(opp_id)],
+            Some(TargetRef::Object(opp_id)),
+        );
+        let ctx_opp = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+        let score_opp = AntiSelfHarmPolicy.score(&ctx_opp);
+
+        assert!(
+            score_own > score_opp,
+            "GenericEffect CantBeBlocked should prefer own creature: own={score_own}, opp={score_opp}"
+        );
+        assert!(score_own > 0.0, "Own creature score should be positive");
+        assert!(
+            score_opp < 0.0,
+            "Opponent creature score should be negative"
+        );
+    }
+
+    /// Regression: AI burned an opponent's tapped creature pre-combat with non-lethal
+    /// damage. Two compounding mistakes:
+    /// 1. Tapped creature can't block — no combat lane to open
+    /// 2. Non-lethal burn wastes the card entirely
+    #[test]
+    fn penalizes_non_lethal_burn_on_tapped_creature_pre_combat() {
+        let mut state = make_state();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+
+        add_creature(&mut state, PlayerId(0), "Attacker", 3, 3);
+        let opp_id = add_creature(&mut state, PlayerId(1), "Defender", 4, 4);
+        // Opponent's creature is tapped — can't block
+        state.objects.get_mut(&opp_id).unwrap().tapped = true;
+        let config = AiConfig::default();
+
+        // 2 damage to a 4-toughness creature: non-lethal + tapped
+        let effect = Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 2 },
+            target: TargetFilter::Any,
+            damage_source: None,
+        };
+
+        let (decision, candidate) = make_target_selection_ctx(
+            &state,
+            effect.clone(),
+            vec![TargetRef::Object(opp_id), TargetRef::Player(PlayerId(1))],
+            Some(TargetRef::Object(opp_id)),
+        );
+        let ctx_creature = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+        let score_creature = AntiSelfHarmPolicy.score(&ctx_creature);
+
+        // Compare: burn to opponent's face
+        let (decision, candidate) = make_target_selection_ctx(
+            &state,
+            effect,
+            vec![TargetRef::Object(opp_id), TargetRef::Player(PlayerId(1))],
+            Some(TargetRef::Player(PlayerId(1))),
+        );
+        let ctx_face = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+        let score_face = AntiSelfHarmPolicy.score(&ctx_face);
+
+        assert!(
+            score_face > score_creature,
+            "Going face should beat non-lethal burn on tapped creature: face={score_face}, creature={score_creature}"
+        );
+        assert!(
+            score_creature < 0.0,
+            "Non-lethal burn on tapped creature pre-combat should be negative, got {score_creature}"
+        );
+    }
+
+    /// Lethal burn on a tapped creature should NOT be penalized — killing it
+    /// removes a future threat that untaps next turn.
+    #[test]
+    fn lethal_burn_on_tapped_creature_not_penalized() {
+        let mut state = make_state();
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+
+        let opp_id = add_creature(&mut state, PlayerId(1), "Goblin", 2, 2);
+        state.objects.get_mut(&opp_id).unwrap().tapped = true;
+        let config = AiConfig::default();
+
+        // 3 damage to a 2-toughness creature: lethal + tapped
+        let effect = Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Any,
+            damage_source: None,
+        };
+
+        let (decision, candidate) = make_target_selection_ctx(
+            &state,
+            effect,
+            vec![TargetRef::Object(opp_id), TargetRef::Player(PlayerId(1))],
+            Some(TargetRef::Object(opp_id)),
+        );
+        let ctx = PolicyContext {
+            state: &state,
+            decision: &decision,
+            candidate: &candidate,
+            ai_player: PlayerId(0),
+            config: &config,
+            context: &crate::context::AiContext::empty(&config.weights),
+            cast_facts: None,
+        };
+        let score = AntiSelfHarmPolicy.score(&ctx);
+
+        assert!(
+            score > 0.0,
+            "Lethal burn on tapped creature should be positive (removing a threat), got {score}"
         );
     }
 }

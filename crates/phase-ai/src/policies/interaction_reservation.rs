@@ -40,10 +40,10 @@ impl TacticalPolicy for InteractionReservationPolicy {
                 },
                 ctx.ai_player,
             ) {
-                if facts.has_counter_spell {
+                if facts.has_counter_spell() {
                     has_counter_interaction = true;
                 }
-                if facts.has_direct_removal_text || facts.has_reveal_hand_or_discard {
+                if facts.has_direct_removal_text() || facts.has_reveal_hand_or_discard() {
                     has_removal_interaction = true;
                 }
             }

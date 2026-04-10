@@ -18,7 +18,7 @@ impl TacticalPolicy for CardAdvantagePolicy {
         };
 
         // Only relevant for card-generating spells
-        if !facts.has_draw && !facts.has_token_creation {
+        if !facts.has_draw() && !facts.has_token_creation() {
             return 0.0;
         }
 

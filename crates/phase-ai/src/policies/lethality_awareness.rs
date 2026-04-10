@@ -36,7 +36,7 @@ impl TacticalPolicy for LethalityAwarenessPolicy {
 fn score_cast_under_lethal(ctx: &PolicyContext<'_>, _ai_life: i32, _lethal_damage: i32) -> f64 {
     // If this spell IS removal, it might address the lethal threat
     if let Some(facts) = ctx.cast_facts() {
-        if facts.has_direct_removal_text {
+        if facts.has_direct_removal_text() {
             return 0.5;
         }
 
