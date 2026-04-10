@@ -65,11 +65,19 @@ export function createAIController(config: AIControllerConfig): AIController {
         "warn",
       );
       // Instead of freezing the game, dispatch a safe escape action.
-      // CancelCast during casting flow, PassPriority otherwise.
+      // CancelCast during casting flow, empty combat submissions during combat,
+      // PassPriority otherwise.
       // has_pending_cast is computed by the engine — no parallel list needed.
-      const fallback: GameAction = state.has_pending_cast
-        ? { type: "CancelCast" }
-        : { type: "PassPriority" };
+      let fallback: GameAction;
+      if (state.has_pending_cast) {
+        fallback = { type: "CancelCast" };
+      } else if (waitingFor.type === "DeclareAttackers") {
+        fallback = { type: "DeclareAttackers", data: { attacks: [] } };
+      } else if (waitingFor.type === "DeclareBlockers") {
+        fallback = { type: "DeclareBlockers", data: { assignments: [] } };
+      } else {
+        fallback = { type: "PassPriority" };
+      }
       // Guard against re-entry: set pending so subscription callbacks during
       // the fallback dispatch don't trigger another fallback cascade.
       pending = true;

@@ -9,15 +9,15 @@ use engine::types::player::PlayerId;
 use crate::combat_ai::{choose_attackers_with_targets_with_profile, choose_blockers_with_profile};
 use crate::config::{AiConfig, ThreatAwareness};
 use crate::context::AiContext;
-use crate::threat_profile::{
-    build_threat_profile_multiplayer, ArchetypeBaseProbabilities, ThreatProfile,
-};
 use crate::planner::{
     apply_candidate, build_continuation_planner, rank_candidates, PlannerServices, SearchBudget,
 };
 use crate::policies::tutor::{score_search_choice_cards, score_search_choice_selection};
 use crate::policies::PolicyRegistry;
 use crate::tactical_gate::gate_candidates;
+use crate::threat_profile::{
+    build_threat_profile_multiplayer, ArchetypeBaseProbabilities, ThreatProfile,
+};
 
 /// Choose the best action for the AI player given the current game state.
 ///
@@ -44,16 +44,20 @@ pub fn choose_action(
 }
 
 /// Produce a safe action when the AI has no scored candidates.
-/// During casting-related states, cancel the cast. During active play, pass priority.
+/// During casting-related states, cancel the cast. During combat, submit empty
+/// declarations. During active play, pass priority.
 /// Returns None only for terminal states (GameOver) where no action is possible.
 fn fallback_action(state: &GameState) -> Option<GameAction> {
-    if matches!(state.waiting_for, WaitingFor::GameOver { .. }) {
-        return None;
-    }
-    if state.waiting_for.has_pending_cast() {
-        Some(GameAction::CancelCast)
-    } else {
-        Some(GameAction::PassPriority)
+    match &state.waiting_for {
+        WaitingFor::GameOver { .. } => None,
+        _ if state.waiting_for.has_pending_cast() => Some(GameAction::CancelCast),
+        WaitingFor::DeclareAttackers { .. } => Some(GameAction::DeclareAttackers {
+            attacks: Vec::new(),
+        }),
+        WaitingFor::DeclareBlockers { .. } => Some(GameAction::DeclareBlockers {
+            assignments: Vec::new(),
+        }),
+        _ => Some(GameAction::PassPriority),
     }
 }
 
