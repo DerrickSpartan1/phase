@@ -5,6 +5,7 @@ use thiserror::Error;
 
 use super::card_type::{CardType, CoreType, Supertype};
 use super::counter::CounterType;
+use super::events::BendingType;
 use super::game_state::{DistributionUnit, RetargetScope};
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
@@ -735,10 +736,8 @@ pub enum DelayedTriggerCondition {
     /// to battlefield.
     WhenEntersBattlefield { filter: TargetFilter },
     /// "when [object] dies or is exiled" — fires on zone change to graveyard OR exile.
-    /// Building block for Earthbending return trigger and similar mechanics.
-    WhenDiesOrExiled {
-        object_id: super::identifiers::ObjectId,
-    },
+    /// Filter-based variant resolved at trigger check time.
+    WhenDiesOrExiled { filter: TargetFilter },
     /// CR 603.7c: "Whenever [event] this turn" — fires each time the event occurs
     /// until end of turn. Reuses existing trigger matching infrastructure via embedded
     /// TriggerDefinition. The embedded trigger's `execute` field should be `None` —
@@ -2389,10 +2388,10 @@ pub enum Effect {
         /// Keywords to grant to the animated permanent (e.g., Haste for Earthbending).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         keywords: Vec<Keyword>,
-        /// Whether this animation is an earthbending effect (emits GameEvent::Earthbend).
-        /// Mirrors how grant_permission.rs uses ExileWithAltCost to detect airbending.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        is_earthbend: bool,
+    },
+    /// Records that a player bent an element this turn and emits the corresponding event.
+    RegisterBending {
+        kind: BendingType,
     },
     /// Generic continuous effect application at resolution.
     GenericEffect {
@@ -3167,6 +3166,7 @@ impl Effect {
             | Effect::CreateEmblem { .. }
             | Effect::PayCost { .. }
             | Effect::GrantCastingPermission { .. }
+            | Effect::RegisterBending { .. }
             | Effect::ChooseFromZone { .. }
             | Effect::ChooseAndSacrificeRest { .. }
             | Effect::GainEnergy { .. }
@@ -3267,6 +3267,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::DoublePTAll { .. } => "DoublePTAll",
         Effect::MoveCounters { .. } => "MoveCounters",
         Effect::Animate { .. } => "Animate",
+        Effect::RegisterBending { .. } => "RegisterBending",
         Effect::GenericEffect { .. } => "Effect",
         Effect::Cleanup { .. } => "Cleanup",
         Effect::Mana { .. } => "Mana",
@@ -3412,6 +3413,7 @@ pub enum EffectKind {
     DoublePTAll,
     MoveCounters,
     Animate,
+    RegisterBending,
     GenericEffect,
     Cleanup,
     Mana,
@@ -3554,6 +3556,7 @@ impl From<&Effect> for EffectKind {
             Effect::DoublePTAll { .. } => EffectKind::DoublePTAll,
             Effect::MoveCounters { .. } => EffectKind::MoveCounters,
             Effect::Animate { .. } => EffectKind::Animate,
+            Effect::RegisterBending { .. } => EffectKind::RegisterBending,
             Effect::GenericEffect { .. } => EffectKind::GenericEffect,
             Effect::Cleanup { .. } => EffectKind::Cleanup,
             Effect::Mana { .. } => EffectKind::Mana,

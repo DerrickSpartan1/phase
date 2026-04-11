@@ -1,4 +1,5 @@
 pub mod ability_utils;
+pub mod bending;
 pub mod casting;
 pub(crate) mod casting_costs;
 pub(crate) mod casting_targets;

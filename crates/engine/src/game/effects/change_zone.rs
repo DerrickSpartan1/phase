@@ -218,10 +218,21 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("Destination".to_string())),
     };
 
+    let mut origin = origin;
+
     let target_filter = match &ability.effect {
         Effect::ChangeZone { target, .. } => target,
         _ => &TargetFilter::Any,
     };
+    if origin.is_none() && matches!(target_filter, TargetFilter::TriggeringSource) {
+        origin = state
+            .current_trigger_event
+            .as_ref()
+            .and_then(|event| match event {
+                GameEvent::ZoneChanged { to, .. } => Some(*to),
+                _ => None,
+            });
+    }
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(ability, target_filter);
 

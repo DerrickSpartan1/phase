@@ -1,7 +1,7 @@
 use crate::types::ability::{
-    CastingPermission, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
-use crate::types::events::{BendingType, GameEvent};
+use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::TrackedSetId;
 
@@ -68,22 +68,6 @@ pub fn resolve(
     for obj_id in target_ids {
         if let Some(obj) = state.objects.get_mut(&obj_id) {
             obj.casting_permissions.push(permission.clone());
-        }
-    }
-
-    // Emit bending event if this is an airbending permission (generic {2} from exile)
-    if matches!(permission, CastingPermission::ExileWithAltCost { .. }) {
-        events.push(GameEvent::Airbend {
-            source_id: ability.source_id,
-            controller: ability.controller,
-        });
-        // Track bending type for Avatar Aang
-        if let Some(player) = state
-            .players
-            .iter_mut()
-            .find(|p| p.id == ability.controller)
-        {
-            player.bending_types_this_turn.insert(BendingType::Air);
         }
     }
 

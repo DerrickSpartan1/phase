@@ -5,7 +5,7 @@ use crate::types::ability::{
     TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
-use crate::types::events::{BendingType, GameEvent};
+use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 
 /// CR 613.1: Animation — apply type/subtype and P/T changes via the layer system.
@@ -16,37 +16,26 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (power, toughness, types_list, remove_types_list, kw_list, is_earthbend) =
-        match &ability.effect {
-            Effect::Animate {
-                power,
-                toughness,
-                types,
-                remove_types,
-                keywords,
-                is_earthbend,
-                ..
-            } => (
-                *power,
-                *toughness,
-                types.as_slice(),
-                remove_types.as_slice(),
-                keywords.as_slice(),
-                *is_earthbend,
-            ),
-            _ => (
-                None,
-                None,
-                [].as_slice(),
-                [].as_slice(),
-                [].as_slice(),
-                false,
-            ),
-        };
+    let (power, toughness, types_list, remove_types_list, kw_list) = match &ability.effect {
+        Effect::Animate {
+            power,
+            toughness,
+            types,
+            remove_types,
+            keywords,
+            ..
+        } => (
+            *power,
+            *toughness,
+            types.as_slice(),
+            remove_types.as_slice(),
+            keywords.as_slice(),
+        ),
+        _ => (None, None, [].as_slice(), [].as_slice(), [].as_slice()),
+    };
 
     let targets = resolve_animate_targets(ability);
 
-    // Determine duration from the ability definition's duration field.
     let duration = ability.duration.clone().unwrap_or(Duration::UntilEndOfTurn);
 
     // CR 613.1: Build layer-appropriate modifications instead of direct mutation.
@@ -100,21 +89,6 @@ pub fn resolve(
             modifications.clone(),
             None,
         );
-    }
-
-    // Emit earthbend event for bending trigger system (mirrors grant_permission.rs Airbend pattern)
-    if is_earthbend {
-        events.push(GameEvent::Earthbend {
-            source_id: ability.source_id,
-            controller: ability.controller,
-        });
-        if let Some(p) = state
-            .players
-            .iter_mut()
-            .find(|p| p.id == ability.controller)
-        {
-            p.bending_types_this_turn.insert(BendingType::Earth);
-        }
     }
 
     events.push(GameEvent::EffectResolved {
@@ -171,7 +145,6 @@ mod tests {
                 remove_types: vec![],
                 keywords: vec![],
                 target: TargetFilter::None,
-                is_earthbend: false,
             },
             vec![],
             obj_id,
@@ -222,7 +195,6 @@ mod tests {
                 remove_types: vec![],
                 keywords: vec![],
                 target: TargetFilter::None,
-                is_earthbend: false,
             },
             vec![],
             obj_id,
@@ -257,7 +229,6 @@ mod tests {
                 remove_types: vec![],
                 keywords: vec![],
                 target: TargetFilter::None,
-                is_earthbend: false,
             },
             vec![],
             obj_id,

@@ -909,10 +909,13 @@ pub fn declare_attackers(
                 .iter()
                 .any(|k| matches!(k, Keyword::Firebending(_)))
             {
-                events.push(GameEvent::Firebend {
-                    source_id: obj_id,
-                    controller: obj.controller,
-                });
+                super::bending::record_bending(
+                    state,
+                    events,
+                    crate::types::events::BendingType::Fire,
+                    obj_id,
+                    obj.controller,
+                );
             }
         }
     }

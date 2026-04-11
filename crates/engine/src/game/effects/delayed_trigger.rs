@@ -1,4 +1,7 @@
-use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
+use crate::types::ability::{
+    DelayedTriggerCondition, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter,
+    TargetRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
 use crate::types::identifiers::TrackedSetId;
@@ -10,7 +13,7 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (condition, effect_def, uses_tracked_set) = match &ability.effect {
+    let (mut condition, effect_def, uses_tracked_set) = match &ability.effect {
         Effect::CreateDelayedTrigger {
             condition,
             effect,
@@ -26,6 +29,8 @@ pub fn resolve(
             ))
         }
     };
+
+    bind_contextual_filter_to_condition(&mut condition, &ability.targets);
 
     // Build the delayed trigger's resolved ability from the definition
     let mut delayed_effect = *effect_def.effect.clone();
@@ -71,6 +76,38 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+fn bind_contextual_filter_to_condition(
+    condition: &mut DelayedTriggerCondition,
+    parent_targets: &[TargetRef],
+) {
+    if let DelayedTriggerCondition::WhenDiesOrExiled { filter } = condition {
+        if matches!(filter, TargetFilter::ParentTarget) {
+            // Positive ParentTarget → resolve to SpecificObject for the animated target.
+            // normalize_contextual_filter only handles Not(ParentTarget); bare ParentTarget
+            // needs direct rewriting here so the delayed trigger can match at check time.
+            let object_ids: Vec<_> = parent_targets
+                .iter()
+                .filter_map(|t| match t {
+                    TargetRef::Object(id) => Some(*id),
+                    TargetRef::Player(_) => None,
+                })
+                .collect();
+            *filter = match object_ids.as_slice() {
+                [] => TargetFilter::Any,
+                [id] => TargetFilter::SpecificObject { id: *id },
+                _ => TargetFilter::Or {
+                    filters: object_ids
+                        .into_iter()
+                        .map(|id| TargetFilter::SpecificObject { id })
+                        .collect(),
+                },
+            };
+        } else {
+            *filter = crate::game::filter::normalize_contextual_filter(filter, parent_targets);
+        }
+    }
 }
 
 /// Bind a tracked set to an effect's target filter, resolve origin zone,

@@ -820,20 +820,97 @@ fn try_parse_airbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         }
     };
 
+    let register_bending = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RegisterBending {
+            kind: crate::types::events::BendingType::Air,
+        },
+    );
+
     Some(ParsedEffectClause {
         effect,
         duration: None,
-        sub_ability: Some(Box::new(AbilityDefinition::new(
-            AbilityKind::Spell,
-            Effect::GrantCastingPermission {
-                permission: CastingPermission::ExileWithAltCost { cost },
-                target: TargetFilter::TrackedSet {
-                    id: TrackedSetId(0),
+        sub_ability: Some(Box::new(
+            AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::GrantCastingPermission {
+                    permission: CastingPermission::ExileWithAltCost { cost },
+                    target: TargetFilter::TrackedSet {
+                        id: TrackedSetId(0),
+                    },
                 },
-            },
-        ))),
+            )
+            .sub_ability(register_bending),
+        )),
         distribute: None,
         multi_target,
+        condition: None,
+    })
+}
+
+fn try_parse_earthbend_clause(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+    let (_, rest) = nom_on_lower(tp.original, tp.lower, |i| {
+        value((), tag("earthbend ")).parse(i)
+    })?;
+    let (target, counters, _) = imperative::parse_earthbend_params(tp.original, rest);
+
+    let register_bending = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::RegisterBending {
+            kind: crate::types::events::BendingType::Earth,
+        },
+    );
+
+    let return_effect = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::ChangeZone {
+            origin: None,
+            destination: Zone::Battlefield,
+            target: TargetFilter::TriggeringSource,
+            owner_library: false,
+            enter_transformed: false,
+            under_your_control: true,
+            enter_tapped: true,
+            enters_attacking: false,
+            up_to: false,
+        },
+    );
+
+    let delayed_return = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition: DelayedTriggerCondition::WhenDiesOrExiled {
+                filter: TargetFilter::ParentTarget,
+            },
+            effect: Box::new(return_effect),
+            uses_tracked_set: false,
+        },
+    )
+    .sub_ability(register_bending);
+
+    let put_counters = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::PutCounter {
+            counter_type: "P1P1".to_string(),
+            count: QuantityExpr::Fixed { value: counters },
+            target: TargetFilter::ParentTarget,
+        },
+    )
+    .sub_ability(delayed_return);
+
+    Some(ParsedEffectClause {
+        effect: Effect::Animate {
+            power: Some(0),
+            toughness: Some(0),
+            types: vec!["Creature".to_string()],
+            remove_types: vec![],
+            target,
+            keywords: vec![crate::types::keywords::Keyword::Haste],
+        },
+        duration: Some(Duration::Permanent),
+        sub_ability: Some(Box::new(put_counters)),
+        distribute: None,
+        multi_target: None,
         condition: None,
     })
 }
@@ -1061,6 +1138,10 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
     }
 
     if let Some(clause) = try_parse_cast_only_from_zones_restriction(tp) {
+        return clause;
+    }
+
+    if let Some(clause) = try_parse_earthbend_clause(tp) {
         return clause;
     }
 
@@ -2349,7 +2430,7 @@ fn try_parse_verb_and_target<'a>(
         }
         return Some((TargetedImperativeAst::GainControl { target }, rem));
     }
-    // Earthbend: "earthbend [N] [target <type>]" → Animate with haste + is_earthbend
+    // Earthbend: "earthbend [N] [target <type>]"
     if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("earthbend ").parse(lower) {
         let (target, power, toughness) = imperative::parse_earthbend_params(text, rest);
         return Some((
@@ -9730,7 +9811,11 @@ mod tests {
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
         };
-        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf
+            .type_filters
+            .iter()
+            .position(|type_filter| *type_filter == TypeFilter::Creature)
+            .is_some());
         assert!(tf.properties.iter().any(|p| matches!(
             p,
             FilterProp::CmcLE {
@@ -9745,13 +9830,67 @@ mod tests {
         let TargetFilter::Typed(tf) = filter else {
             panic!("Expected Typed filter, got {filter:?}");
         };
-        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf
+            .type_filters
+            .iter()
+            .position(|type_filter| *type_filter == TypeFilter::Creature)
+            .is_some());
         assert!(tf.properties.iter().any(|p| matches!(
             p,
             FilterProp::CmcEQ {
                 value: QuantityExpr::Fixed { value: 2 }
             }
         )));
+    }
+
+    #[test]
+    fn search_filter_artifact_creature_or_enchantment_with_mana_value_1_or_less() {
+        let filter = parse_search_filter(
+            "artifact, creature, and/or enchantment cards with mana value 1 or less",
+        );
+        let TargetFilter::Or { filters } = filter else {
+            panic!("Expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 3, "expected 3 branches, got {filters:?}");
+        for branch in filters {
+            let TargetFilter::Typed(tf) = branch else {
+                panic!("Expected Typed branch, got {branch:?}");
+            };
+            assert!(tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::CmcLE {
+                    value: QuantityExpr::Fixed { value: 1 }
+                }
+            )));
+        }
+    }
+
+    #[test]
+    fn search_filter_aura_preserves_enchantment_type_and_dynamic_mana_value() {
+        let filter = parse_search_filter(
+            "Aura card with mana value less than or equal to that Aura and with a different name than each Aura you control",
+        );
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("Expected Typed filter, got {filter:?}");
+        };
+        assert!(tf
+            .type_filters
+            .iter()
+            .position(|type_filter| *type_filter == TypeFilter::Enchantment)
+            .is_some());
+        assert_eq!(tf.get_subtype(), Some("Aura"));
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::CmcLE {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextSourceManaValue
+                }
+            }
+        )));
+        assert!(tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::DifferentNameFrom { .. })));
     }
 
     #[test]
@@ -9767,6 +9906,24 @@ mod tests {
     }
 
     #[test]
+    fn search_filter_basic_card_with_that_name() {
+        let filter = parse_search_filter("basic card with that name");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("Expected Typed filter with Basic + SameName, got {filter:?}");
+        };
+        assert!(tf.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::HasSupertype {
+                value: crate::types::card_type::Supertype::Basic
+            }
+        )));
+        assert!(tf
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::SameName)));
+    }
+
+    #[test]
     fn search_library_details_up_to_five() {
         let details =
             parse_search_library_details("search your library for up to five creature cards");
@@ -9774,7 +9931,44 @@ mod tests {
         let TargetFilter::Typed(tf) = &details.filter else {
             panic!("Expected Typed filter, got {:?}", details.filter);
         };
-        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf
+            .type_filters
+            .iter()
+            .position(|type_filter| *type_filter == TypeFilter::Creature)
+            .is_some());
+    }
+
+    #[test]
+    fn brightglass_gearhulk_search_filter_preserves_all_types_and_mana_value_limit() {
+        let effect = parse_effect(
+            "search your library for up to two artifact, creature, and/or enchantment cards with mana value 1 or less, reveal them, put them into your hand, then shuffle",
+        );
+        let Effect::SearchLibrary {
+            filter,
+            count,
+            reveal,
+            ..
+        } = effect
+        else {
+            panic!("Expected SearchLibrary, got {effect:?}");
+        };
+        assert_eq!(count, 2);
+        assert!(reveal);
+        let TargetFilter::Or { filters } = filter else {
+            panic!("Expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 3, "expected 3 branches, got {filters:?}");
+        for branch in filters {
+            let TargetFilter::Typed(tf) = branch else {
+                panic!("Expected Typed branch, got {branch:?}");
+            };
+            assert!(tf.properties.iter().any(|p| matches!(
+                p,
+                FilterProp::CmcLE {
+                    value: QuantityExpr::Fixed { value: 1 }
+                }
+            )));
+        }
     }
 
     #[test]

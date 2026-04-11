@@ -4312,12 +4312,11 @@ mod tests {
         // Single chunk: "Earthbend 3" — passes through imperative pipeline
         let simple = parse_effect_chain("Earthbend 3", crate::types::ability::AbilityKind::Spell);
         match &*simple.effect {
-            Effect::Animate {
-                is_earthbend,
-                target,
-                ..
-            } => {
-                assert!(is_earthbend);
+            Effect::Animate { target, .. } => {
+                assert_eq!(
+                    simple.duration,
+                    Some(crate::types::ability::Duration::Permanent)
+                );
                 assert!(
                     matches!(target, TargetFilter::Typed(tf) if tf.type_filters.contains(&crate::types::ability::TypeFilter::Land)),
                     "simple earthbend should target land, got {target:?}"
@@ -4333,12 +4332,11 @@ mod tests {
         );
         eprintln!("Full chain first effect: {:?}", full.effect);
         match &*full.effect {
-            Effect::Animate {
-                is_earthbend,
-                target,
-                ..
-            } => {
-                assert!(is_earthbend, "chain earthbend should be earthbend");
+            Effect::Animate { target, .. } => {
+                assert_eq!(
+                    full.duration,
+                    Some(crate::types::ability::Duration::Permanent)
+                );
                 assert!(
                     matches!(target, TargetFilter::Typed(tf) if tf.type_filters.contains(&crate::types::ability::TypeFilter::Land)),
                     "chain earthbend should target land, got {target:?}"
@@ -4391,8 +4389,17 @@ mod tests {
             "Earthbend 2. Then search your library for a basic land card, put it onto the battlefield tapped, then shuffle.",
             crate::types::ability::AbilityKind::Spell,
         );
-        // First effect is Animate (earthbend), walk to search via sub_ability
-        let search = def2.sub_ability.as_ref().expect("should chain to search");
+        // First effect is Animate (earthbend); the earthbend clause builds a deeper chain
+        // (PutCounter → CreateDelayedTrigger → RegisterBending) before the "Then" search.
+        // Walk the chain to find SearchLibrary.
+        let mut cursor = def2.sub_ability.as_deref();
+        while let Some(node) = cursor {
+            if matches!(&*node.effect, Effect::SearchLibrary { .. }) {
+                break;
+            }
+            cursor = node.sub_ability.as_deref();
+        }
+        let search = cursor.expect("should find SearchLibrary in earthbend chain");
         assert!(matches!(&*search.effect, Effect::SearchLibrary { .. }));
         let cz = search
             .sub_ability

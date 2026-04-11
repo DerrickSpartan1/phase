@@ -33,7 +33,7 @@ fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usi
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_earthbending_animate_and_event() {
+fn test_earthbending_registers_event_and_turn_tracking() {
     let mut state = GameState::new_two_player(42);
     let land_id = create_object(
         &mut state,
@@ -44,14 +44,8 @@ fn test_earthbending_animate_and_event() {
     );
 
     let ability = ResolvedAbility::new(
-        Effect::Animate {
-            power: Some(3),
-            toughness: Some(3),
-            types: vec!["Creature".to_string()],
-            remove_types: vec![],
-            target: TargetFilter::None,
-            keywords: vec![Keyword::Haste],
-            is_earthbend: true,
+        Effect::RegisterBending {
+            kind: BendingType::Earth,
         },
         vec![],
         land_id,
@@ -59,17 +53,7 @@ fn test_earthbending_animate_and_event() {
     );
 
     let mut events = Vec::new();
-    engine::game::effects::animate::resolve(&mut state, &ability, &mut events).unwrap();
-
-    // Layer system must evaluate to apply the TransientContinuousEffect modifications
-    engine::game::layers::evaluate_layers(&mut state);
-
-    // Verify the land became a 3/3 creature with haste
-    let obj = &state.objects[&land_id];
-    assert_eq!(obj.power, Some(3));
-    assert_eq!(obj.toughness, Some(3));
-    assert!(obj.card_types.core_types.contains(&CoreType::Creature));
-    assert!(obj.keywords.contains(&Keyword::Haste));
+    engine::game::effects::register_bending::resolve(&mut state, &ability, &mut events).unwrap();
 
     // Verify Earthbend event emitted
     assert!(
@@ -89,7 +73,7 @@ fn test_earthbending_animate_and_event() {
 }
 
 #[test]
-fn test_earthbending_non_earthbend_animate_no_event() {
+fn test_generic_animate_does_not_register_earthbend() {
     let mut state = GameState::new_two_player(42);
     let obj_id = create_object(
         &mut state,
@@ -107,7 +91,6 @@ fn test_earthbending_non_earthbend_animate_no_event() {
             remove_types: vec![],
             target: TargetFilter::None,
             keywords: vec![],
-            is_earthbend: false,
         },
         vec![],
         obj_id,
@@ -117,7 +100,7 @@ fn test_earthbending_non_earthbend_animate_no_event() {
     let mut events = Vec::new();
     engine::game::effects::animate::resolve(&mut state, &ability, &mut events).unwrap();
 
-    // No Earthbend event for non-earthbend animations
+    // Generic animate should not emit Earthbend or touch bending tracking.
     assert!(
         !events
             .iter()
@@ -1267,7 +1250,6 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                 properties: vec![],
             }),
             keywords: vec![Keyword::Haste],
-            is_earthbend: true,
         },
         targets: vec![engine::types::ability::TargetRef::Object(target_land_id)],
         sub_ability: Some(Box::new(search_ability)),
@@ -1283,7 +1265,6 @@ fn test_earthbender_ascension_etb_completes_with_landfall() {
                     properties: vec![],
                 }),
                 keywords: vec![Keyword::Haste],
-                is_earthbend: true,
             },
             vec![engine::types::ability::TargetRef::Object(target_land_id)],
             enchantment_id,

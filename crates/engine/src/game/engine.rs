@@ -1034,13 +1034,13 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             });
             // Only emit waterbend event for Waterbend mode
             if mode == ConvokeMode::Waterbend {
-                events.push(GameEvent::Waterbend {
-                    source_id: object_id,
-                    controller: *player,
-                });
-                if let Some(p) = state.players.iter_mut().find(|p| p.id == *player) {
-                    p.bending_types_this_turn.insert(BendingType::Water);
-                }
+                crate::game::bending::record_bending(
+                    state,
+                    &mut events,
+                    BendingType::Water,
+                    object_id,
+                    *player,
+                );
             }
             WaitingFor::ManaPayment {
                 player: *player,

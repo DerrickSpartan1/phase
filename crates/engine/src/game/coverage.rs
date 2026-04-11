@@ -1046,6 +1046,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             }
             d.push(("target".into(), fmt_target(target)));
         }
+        Effect::RegisterBending { kind } => {
+            d.push(("kind".into(), format!("{kind:?}").to_ascii_lowercase()));
+        }
         Effect::Choose {
             choice_type,
             persist,

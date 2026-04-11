@@ -472,7 +472,7 @@ pub(super) fn parse_targeted_action_ast(text: &str, lower: &str) -> Option<Targe
         super::types::assert_no_compound_remainder(rem, text);
         return Some(TargetedImperativeAst::GainControl { target });
     }
-    // Earthbend: "earthbend [N] [target <type>]" → Animate with haste + is_earthbend
+    // Earthbend: "earthbend [N] [target <type>]"
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
         value((), tag("earthbend ")).parse(input)
     }) {
@@ -586,7 +586,6 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             remove_types: vec![],
             target,
             keywords: vec![crate::types::keywords::Keyword::Haste],
-            is_earthbend: true,
         },
         TargetedImperativeAst::Airbend { target, cost } => Effect::GrantCastingPermission {
             permission: crate::types::ability::CastingPermission::ExileWithAltCost { cost },
@@ -3257,13 +3256,11 @@ mod tests {
             Effect::Animate {
                 power,
                 toughness,
-                is_earthbend,
                 keywords,
                 ..
             } => {
                 assert_eq!(power, Some(3));
                 assert_eq!(toughness, Some(3));
-                assert!(is_earthbend);
                 assert!(keywords.contains(&crate::types::keywords::Keyword::Haste));
             }
             other => panic!("Expected Effect::Animate, got {other:?}"),
@@ -3367,13 +3364,11 @@ mod tests {
             Effect::Animate {
                 power,
                 toughness,
-                is_earthbend,
                 target,
                 ..
             } => {
                 assert_eq!(power, Some(2));
                 assert_eq!(toughness, Some(2));
-                assert!(is_earthbend);
                 assert_eq!(
                     target,
                     default_earthbend_target(),

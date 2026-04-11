@@ -397,7 +397,6 @@ pub(super) fn try_parse_type_setting(text: &str) -> Option<AbilityDefinition> {
         remove_types,
         target: TargetFilter::None,
         keywords: vec![],
-        is_earthbend: false,
     };
 
     let mut def = AbilityDefinition::new(AbilityKind::Spell, effect);

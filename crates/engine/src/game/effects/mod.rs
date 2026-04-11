@@ -83,6 +83,7 @@ pub mod pump;
 pub mod put_on_top;
 pub mod put_on_top_or_bottom;
 pub mod regenerate;
+pub mod register_bending;
 pub mod remove_from_combat;
 pub mod reveal_hand;
 pub mod reveal_top;
@@ -263,6 +264,7 @@ pub fn resolve_effect(
         Effect::DoublePTAll { .. } => pump::resolve_double_pt_all(state, ability, events),
         Effect::MoveCounters { .. } => counters::resolve_move(state, ability, events),
         Effect::Animate { .. } => animate::resolve(state, ability, events),
+        Effect::RegisterBending { .. } => register_bending::resolve(state, ability, events),
         Effect::GenericEffect { .. } => effect::resolve(state, ability, events),
         Effect::Cleanup { .. } => cleanup::resolve(state, ability, events),
         Effect::Mana { .. } => mana::resolve(state, ability, events),

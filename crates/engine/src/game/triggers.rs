@@ -979,22 +979,29 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
 
     // Separate "abilities to fire" from "indices to remove".
     // One-shot triggers are removed; multi-fire triggers are cloned and left in place.
-    let mut to_fire: Vec<DelayedTrigger> = Vec::new();
-    let mut to_remove: Vec<usize> = Vec::new();
+    let mut to_fire: Vec<(DelayedTrigger, Option<GameEvent>)> = Vec::new();
+    let mut to_remove: Vec<(usize, GameEvent)> = Vec::new();
 
     for (idx, delayed) in state.delayed_triggers.iter().enumerate() {
-        if delayed_trigger_matches(&delayed.condition, events, state, delayed.source_id) {
+        if let Some(trigger_event) = delayed_trigger_event(
+            &delayed.condition,
+            events,
+            state,
+            delayed.source_id,
+            delayed.controller,
+        ) {
             if delayed.one_shot {
-                to_remove.push(idx);
+                to_remove.push((idx, trigger_event));
             } else {
-                to_fire.push(delayed.clone());
+                to_fire.push((delayed.clone(), Some(trigger_event)));
             }
         }
     }
 
     // Remove one-shot triggers in reverse order to preserve indices, collecting into to_fire
-    for &idx in to_remove.iter().rev() {
-        to_fire.push(state.delayed_triggers.remove(idx));
+    for (idx, trigger_event) in to_remove.into_iter().rev() {
+        let trigger = state.delayed_triggers.remove(idx);
+        to_fire.push((trigger, Some(trigger_event)));
     }
 
     if to_fire.is_empty() {
@@ -1005,8 +1012,8 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
 
     // CR 603.3b: APNAP ordering — active player's triggers go on stack last (resolve first).
     // Sort so NAP triggers come first (pushed to stack bottom), AP triggers last (stack top).
-    to_fire.sort_by_key(|t| {
-        let is_nap = if t.controller == state.active_player {
+    to_fire.sort_by_key(|(trigger, _)| {
+        let is_nap = if trigger.controller == state.active_player {
             0
         } else {
             1
@@ -1015,7 +1022,7 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
     });
     to_fire.reverse();
 
-    for trigger in to_fire {
+    for (trigger, trigger_event) in to_fire {
         let pending = PendingTrigger {
             source_id: trigger.source_id,
             controller: trigger.controller,
@@ -1023,7 +1030,7 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
             ability: trigger.ability,
             timestamp: state.turn_number,
             target_constraints: Vec::new(),
-            trigger_event: None,
+            trigger_event,
             modal: None,
             mode_abilities: vec![],
             description: None,
@@ -1035,83 +1042,112 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
 }
 
 /// CR 603.7: Check if a delayed trigger condition is met by recent events.
-fn delayed_trigger_matches(
+fn delayed_trigger_event(
     condition: &crate::types::ability::DelayedTriggerCondition,
     events: &[GameEvent],
     state: &GameState,
     source_id: ObjectId,
-) -> bool {
+    controller: PlayerId,
+) -> Option<GameEvent> {
     use crate::types::ability::DelayedTriggerCondition;
 
     match condition {
         DelayedTriggerCondition::AtNextPhase { phase } => events
             .iter()
-            .any(|e| matches!(e, GameEvent::PhaseChanged { phase: p } if p == phase)),
+            .find(|e| matches!(e, GameEvent::PhaseChanged { phase: p } if p == phase))
+            .cloned(),
         DelayedTriggerCondition::AtNextPhaseForPlayer { phase, player } => {
-            state.active_player == *player
-                && events
-                    .iter()
-                    .any(|e| matches!(e, GameEvent::PhaseChanged { phase: p } if p == phase))
+            if state.active_player != *player {
+                return None;
+            }
+            events
+                .iter()
+                .find(|e| matches!(e, GameEvent::PhaseChanged { phase: p } if p == phase))
+                .cloned()
         }
-        DelayedTriggerCondition::WhenLeavesPlay { object_id } => events.iter().any(|e| {
-            matches!(e,
-                GameEvent::ZoneChanged { object_id: id, from: Zone::Battlefield, .. }
-                if *id == *object_id
-            )
-        }),
+        DelayedTriggerCondition::WhenLeavesPlay { object_id } => events
+            .iter()
+            .find(|e| {
+                matches!(e,
+                    GameEvent::ZoneChanged { object_id: id, from: Zone::Battlefield, .. }
+                    if *id == *object_id
+                )
+            })
+            .cloned(),
         // CR 603.7c: "when [object] dies" — zone change to graveyard from battlefield
-        DelayedTriggerCondition::WhenDies { .. } => events.iter().any(|e| {
-            matches!(
-                e,
-                GameEvent::ZoneChanged {
-                    from: Zone::Battlefield,
-                    to: Zone::Graveyard,
-                    ..
-                }
-            )
-        }),
+        DelayedTriggerCondition::WhenDies { .. } => events
+            .iter()
+            .find(|e| {
+                matches!(
+                    e,
+                    GameEvent::ZoneChanged {
+                        from: Zone::Battlefield,
+                        to: Zone::Graveyard,
+                        ..
+                    }
+                )
+            })
+            .cloned(),
         // CR 603.7c: "when [object] leaves the battlefield" — any zone change from battlefield
-        DelayedTriggerCondition::WhenLeavesPlayFiltered { .. } => events.iter().any(|e| {
-            matches!(
-                e,
-                GameEvent::ZoneChanged {
-                    from: Zone::Battlefield,
-                    ..
-                }
-            )
-        }),
+        DelayedTriggerCondition::WhenLeavesPlayFiltered { .. } => events
+            .iter()
+            .find(|e| {
+                matches!(
+                    e,
+                    GameEvent::ZoneChanged {
+                        from: Zone::Battlefield,
+                        ..
+                    }
+                )
+            })
+            .cloned(),
         // CR 603.7c: "when [object] enters the battlefield" — zone change to battlefield
-        DelayedTriggerCondition::WhenEntersBattlefield { .. } => events.iter().any(|e| {
-            matches!(
-                e,
-                GameEvent::ZoneChanged {
-                    to: Zone::Battlefield,
-                    ..
-                }
-            )
-        }),
+        DelayedTriggerCondition::WhenEntersBattlefield { .. } => events
+            .iter()
+            .find(|e| {
+                matches!(
+                    e,
+                    GameEvent::ZoneChanged {
+                        to: Zone::Battlefield,
+                        ..
+                    }
+                )
+            })
+            .cloned(),
         // "when [object] dies or is exiled" — zone change to graveyard OR exile from battlefield.
-        // Building block for Earthbending return trigger.
-        DelayedTriggerCondition::WhenDiesOrExiled { object_id } => events.iter().any(|e| {
-            matches!(
-                e,
-                GameEvent::ZoneChanged {
-                    object_id: id,
-                    from: Zone::Battlefield,
-                    to: Zone::Graveyard | Zone::Exile,
-                }
-                if *id == *object_id
-            )
-        }),
+        DelayedTriggerCondition::WhenDiesOrExiled { filter } => events
+            .iter()
+            .find(|e| {
+                matches!(
+                    e,
+                    GameEvent::ZoneChanged {
+                        from: Zone::Battlefield,
+                        to: Zone::Graveyard | Zone::Exile,
+                        ..
+                    }
+                ) && matches!(
+                    e,
+                    GameEvent::ZoneChanged { object_id, .. }
+                        if crate::game::filter::matches_target_filter_controlled(
+                            state,
+                            *object_id,
+                            filter,
+                            source_id,
+                            controller,
+                        )
+                )
+            })
+            .cloned(),
         // CR 603.7c: "Whenever [event] this turn" — delegate to trigger matcher registry.
         DelayedTriggerCondition::WheneverEvent { trigger }
         | DelayedTriggerCondition::WhenNextEvent { trigger } => {
             if let Some(matcher) = super::trigger_matchers::trigger_matcher(trigger.mode.clone()) {
                 events
                     .iter()
-                    .any(|event| matcher(event, trigger, source_id, state))
+                    .find(|event| matcher(event, trigger, source_id, state))
+                    .cloned()
             } else {
-                false
+                None
             }
         }
     }
