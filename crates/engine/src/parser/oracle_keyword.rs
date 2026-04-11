@@ -413,6 +413,25 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
         }
     }
 
+    // CR 702.62a: Suspend N—{cost} — "suspend N—{cost}" with em-dash or ascii dash.
+    // Format: "suspend 4—{u}" or "suspend 1—{r}".
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("suspend ").parse(text) {
+        // Parse the count (digits before the em-dash)
+        if let Ok((after_count, count)) = nom_primitives::parse_number.parse(rest.trim()) {
+            // Strip em-dash (U+2014) or ASCII dash separators
+            let cost_str = after_count
+                .strip_prefix('\u{2014}')
+                .or_else(|| after_count.strip_prefix("—"))
+                .or_else(|| after_count.strip_prefix("--"))
+                .unwrap_or(after_count)
+                .trim();
+            if !cost_str.is_empty() {
+                let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
+                return Some(Keyword::Suspend { count, cost });
+            }
+        }
+    }
+
     // For parameterized keywords, find the first space to split name from parameter.
     // Oracle format: "protection from multicolored" → name="protection", rest="from multicolored"
     // Oracle format: "ward {2}" → name="ward", rest="{2}"
@@ -508,7 +527,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Ripple => "ripple".to_string(),
         Keyword::SplitSecond => "split second".to_string(),
         Keyword::Storm => "storm".to_string(),
-        Keyword::Suspend => "suspend".to_string(),
+        Keyword::Suspend { .. } => "suspend".to_string(),
         Keyword::Totem => "totem".to_string(),
         Keyword::Warp(_) => "warp".to_string(),
         Keyword::Sneak(_) => "sneak".to_string(),
@@ -1138,6 +1157,35 @@ mod tests {
         assert!(is_keyword_cost_line(
             "escape\u{2014}{w}, exile two other cards from your graveyard."
         ));
+    }
+
+    #[test]
+    fn parse_keyword_from_oracle_suspend() {
+        use crate::types::mana::ManaCost;
+
+        // CR 702.62a: Suspend N—{cost}
+        let kw = parse_keyword_from_oracle("suspend 4\u{2014}{u}").unwrap();
+        match kw {
+            Keyword::Suspend { count, cost } => {
+                assert_eq!(count, 4);
+                assert!(matches!(cost, ManaCost::Cost { generic: 0, shards } if shards.len() == 1));
+            }
+            other => panic!("Expected Suspend, got {other:?}"),
+        }
+
+        // Suspend 1—{R} (Rift Bolt)
+        let kw = parse_keyword_from_oracle("suspend 1\u{2014}{r}").unwrap();
+        match kw {
+            Keyword::Suspend { count, .. } => assert_eq!(count, 1),
+            other => panic!("Expected Suspend, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn is_keyword_cost_line_suspend() {
+        // CR 702.62a: Suspend lines must be recognized as keyword cost lines
+        assert!(is_keyword_cost_line("suspend 4\u{2014}{u}"));
+        assert!(is_keyword_cost_line("suspend 1\u{2014}{r}"));
     }
 
     #[test]

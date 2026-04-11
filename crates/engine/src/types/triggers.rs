@@ -183,6 +183,9 @@ pub enum TriggerMode {
     Saddled,
     /// CR 702.29: Triggers when a card is cycled.
     Cycled,
+    /// CR 702.29d: Triggers when a card is cycled or discarded.
+    /// Fires on either event but only once per cycling action.
+    CycledOrDiscarded,
     /// CR 702.49a: Triggers when a player activates a ninjutsu-family ability.
     NinjutsuActivated,
     /// CR 702.100: Evolve trigger — when a creature enters with greater power/toughness.
@@ -380,6 +383,7 @@ impl FromStr for TriggerMode {
             "CrankContraption" => TriggerMode::CrankContraption,
             "Crewed" => TriggerMode::Crewed,
             "Cycled" => TriggerMode::Cycled,
+            "CycledOrDiscarded" => TriggerMode::CycledOrDiscarded,
             "DamageAll" => TriggerMode::DamageAll,
             "DamageDealtOnce" => TriggerMode::DamageDealtOnce,
             "DamageDone" => TriggerMode::DamageDone,
@@ -637,6 +641,7 @@ mod tests {
             "CrankContraption",
             "Crewed",
             "Cycled",
+            "CycledOrDiscarded",
             "DamageAll",
             "DamageDealtOnce",
             "DamageDone",

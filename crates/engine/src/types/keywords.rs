@@ -465,7 +465,12 @@ pub enum Keyword {
     Ripple,
     SplitSecond,
     Storm,
-    Suspend,
+    /// CR 702.62a: Suspend N—{cost} — exile from hand with N time counters,
+    /// remove one each upkeep, cast without paying when last removed.
+    Suspend {
+        count: u32,
+        cost: ManaCost,
+    },
     Totem,
     /// Warp {cost}: alternative casting cost. Cast from hand for warp cost,
     /// exile at next end step, then may cast from exile later.
@@ -648,7 +653,7 @@ impl Keyword {
             Keyword::Escape { .. } => KeywordKind::Escape,
             Keyword::Morph(_) => KeywordKind::Morph,
             Keyword::Megamorph(_) => KeywordKind::Megamorph,
-            Keyword::Suspend => KeywordKind::Suspend,
+            Keyword::Suspend { .. } => KeywordKind::Suspend,
             Keyword::Blitz(_) => KeywordKind::Blitz,
             Keyword::Disturb(_) => KeywordKind::Disturb,
             Keyword::Foretell(_) => KeywordKind::Foretell,
@@ -1125,7 +1130,10 @@ impl FromStr for Keyword {
             "retrace" => Ok(Keyword::Retrace),
             "splitsecond" => Ok(Keyword::SplitSecond),
             "storm" => Ok(Keyword::Storm),
-            "suspend" => Ok(Keyword::Suspend),
+            "suspend" => Ok(Keyword::Suspend {
+                count: 0,
+                cost: ManaCost::default(),
+            }),
             "gift" => Ok(Keyword::Gift(GiftKind::Card)),
             s if s.starts_with("gift:") => {
                 let kind = match &s["gift:".len()..] {
@@ -1324,7 +1332,10 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Retrace" => Ok(Keyword::Retrace),
         "SplitSecond" => Ok(Keyword::SplitSecond),
         "Storm" => Ok(Keyword::Storm),
-        "Suspend" => Ok(Keyword::Suspend),
+        "Suspend" => Ok(Keyword::Suspend {
+            count: 0,
+            cost: ManaCost::default(),
+        }),
         "Gift" => Ok(Keyword::Gift(GiftKind::Card)),
         "Discover" => Ok(Keyword::Discover(0)),
         "Spree" => Ok(Keyword::Spree),

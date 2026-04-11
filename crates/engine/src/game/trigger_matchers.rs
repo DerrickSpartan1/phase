@@ -74,6 +74,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Attached => match_attached,
         TriggerMode::Unattach => match_unattach,
         TriggerMode::Cycled => match_cycled,
+        TriggerMode::CycledOrDiscarded => match_cycled_or_discarded,
         TriggerMode::Shuffled => match_shuffled,
         TriggerMode::Revealed => match_revealed,
         TriggerMode::TapsForMana => match_taps_for_mana,
@@ -266,6 +267,7 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
 
     // Promoted trigger matchers -- other Standard-relevant triggers
     r.insert(TriggerMode::Cycled, match_cycled);
+    r.insert(TriggerMode::CycledOrDiscarded, match_cycled_or_discarded);
     r.insert(TriggerMode::Shuffled, match_shuffled);
     r.insert(TriggerMode::Revealed, match_revealed);
     r.insert(TriggerMode::TapsForMana, match_taps_for_mana);
@@ -1362,6 +1364,22 @@ pub(super) fn match_cycled(
         valid_card_matches(trigger, state, *object_id, source_id)
     } else {
         false
+    }
+}
+
+/// CR 702.29d: CycledOrDiscarded — fires on either Cycled or Discarded events.
+/// Per CR 702.29d, triggers only once when a card is cycled (cycling is a form of discarding).
+pub(super) fn match_cycled_or_discarded(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    match event {
+        GameEvent::Cycled { object_id, .. } | GameEvent::Discarded { object_id, .. } => {
+            valid_card_matches(trigger, state, *object_id, source_id)
+        }
+        _ => false,
     }
 }
 

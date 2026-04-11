@@ -1583,8 +1583,11 @@ pub fn build_parse_details(
 
     // Triggers
     for trig in &face.triggers {
+        // CR 603.8: StateCondition triggers use the priority pipeline, not
+        // the event-based trigger registry — they are supported.
         let mode_supported = !matches!(&trig.mode, TriggerMode::Unknown(_))
-            && trigger_registry.contains_key(&trig.mode);
+            && (trigger_registry.contains_key(&trig.mode)
+                || matches!(&trig.mode, TriggerMode::StateCondition));
         let mut children = Vec::new();
         if let Some(execute) = &trig.execute {
             children.push(build_ability_item(execute));
@@ -1940,10 +1943,12 @@ pub fn unimplemented_mechanics(obj: &GameObject) -> Vec<String> {
     }
 
     // 3. Check trigger modes against trigger registry
+    // CR 603.8: StateCondition triggers use the priority pipeline, not the event registry.
     let trigger_registry = build_trigger_registry();
     for trig in &obj.trigger_definitions {
         if matches!(&trig.mode, TriggerMode::Unknown(_))
-            || !trigger_registry.contains_key(&trig.mode)
+            || (!trigger_registry.contains_key(&trig.mode)
+                && !matches!(&trig.mode, TriggerMode::StateCondition))
         {
             missing.push(format!("Trigger: {}", trig.mode));
         }
@@ -2342,7 +2347,11 @@ fn check_triggers(
         if let Some(execute) = &def.execute {
             collect_ability_missing_parts(execute, missing);
         }
-        if matches!(&def.mode, TriggerMode::Unknown(_)) || !trigger_registry.contains_key(&def.mode)
+        // CR 603.8: StateCondition triggers are handled by the priority pipeline
+        // (check_state_triggers), not the event-based trigger registry. They are supported.
+        if matches!(&def.mode, TriggerMode::Unknown(_))
+            || (!trigger_registry.contains_key(&def.mode)
+                && !matches!(&def.mode, TriggerMode::StateCondition))
         {
             let label = format!("Trigger:{}", def.mode);
             if !missing.contains(&label) {
@@ -2437,7 +2446,15 @@ fn check_parse_warnings(warnings: &[String], missing: &mut Vec<String>) {
             } else {
                 format!(
                     "ParseWarning:{}",
-                    warning.split(':').nth(1).unwrap_or("unknown").trim().split('\'').next().unwrap_or("unknown").trim()
+                    warning
+                        .split(':')
+                        .nth(1)
+                        .unwrap_or("unknown")
+                        .trim()
+                        .split('\'')
+                        .next()
+                        .unwrap_or("unknown")
+                        .trim()
                 )
             };
             if !missing.contains(&label) {

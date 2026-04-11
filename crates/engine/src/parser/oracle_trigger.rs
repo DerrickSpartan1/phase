@@ -1402,9 +1402,7 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
     if let Ok((after_put, ())) =
         value((), tag::<_, _, VerboseError<&str>>("you put one or more ")).parse(text)
     {
-        if let Ok((_, (_, subject_text))) =
-            nom_primitives::split_once_on(after_put, " on ")
-        {
+        if let Ok((_, (_, subject_text))) = nom_primitives::split_once_on(after_put, " on ") {
             let (filter, rest) = parse_single_subject(subject_text);
             return (filter, rest);
         }
@@ -2664,6 +2662,57 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
         def.mode = TriggerMode::Cycled;
         def.valid_target = Some(TargetFilter::Controller);
         return Some((TriggerMode::Cycled, def));
+    }
+
+    // CR 702.29: "whenever you cycle another card" — cycle trigger excluding source
+    if matches!(
+        lower,
+        "whenever you cycle another card" | "when you cycle another card"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::Cycled;
+        def.valid_target = Some(TargetFilter::Controller);
+        def.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::Another]),
+        ));
+        return Some((TriggerMode::Cycled, def));
+    }
+
+    // CR 702.29: "whenever you cycle another card for the first time each turn"
+    if lower == "whenever you cycle another card for the first time each turn" {
+        let mut def = make_base();
+        def.mode = TriggerMode::Cycled;
+        def.valid_target = Some(TargetFilter::Controller);
+        def.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::Another]),
+        ));
+        def.secondary = true;
+        return Some((TriggerMode::Cycled, def));
+    }
+
+    // CR 702.29d: "whenever you cycle or discard a card" — fires on either event, once per cycling
+    if matches!(
+        lower,
+        "whenever you cycle or discard a card" | "when you cycle or discard a card"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::CycledOrDiscarded;
+        def.valid_target = Some(TargetFilter::Controller);
+        return Some((TriggerMode::CycledOrDiscarded, def));
+    }
+
+    // CR 702.29d: "whenever you cycle or discard another card"
+    if matches!(
+        lower,
+        "whenever you cycle or discard another card" | "when you cycle or discard another card"
+    ) {
+        let mut def = make_base();
+        def.mode = TriggerMode::CycledOrDiscarded;
+        def.valid_target = Some(TargetFilter::Controller);
+        def.valid_card = Some(TargetFilter::Typed(
+            TypedFilter::default().properties(vec![FilterProp::Another]),
+        ));
+        return Some((TriggerMode::CycledOrDiscarded, def));
     }
 
     if matches!(
@@ -4701,6 +4750,47 @@ mod tests {
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert!(def.trigger_zones.contains(&Zone::Graveyard));
         assert!(def.optional);
+    }
+
+    #[test]
+    fn trigger_cycle_another_card() {
+        // CR 702.29: "Whenever you cycle another card" — Drannith Stinger
+        let def = parse_trigger_line(
+            "Whenever you cycle another card, this creature deals 1 damage to each opponent.",
+            "Drannith Stinger",
+        );
+        assert_eq!(def.mode, TriggerMode::Cycled);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert!(matches!(
+            &def.valid_card,
+            Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::Another)
+        ));
+    }
+
+    #[test]
+    fn trigger_cycle_or_discard_a_card() {
+        // CR 702.29d: "Whenever you cycle or discard a card" — Drake Haven
+        let def = parse_trigger_line(
+            "Whenever you cycle or discard a card, you may pay {1}. If you do, create a 2/2 blue Drake creature token with flying.",
+            "Drake Haven",
+        );
+        assert_eq!(def.mode, TriggerMode::CycledOrDiscarded);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_cycle_or_discard_another_card() {
+        // CR 702.29d: "Whenever you cycle or discard another card" — Horror of the Broken Lands
+        let def = parse_trigger_line(
+            "Whenever you cycle or discard another card, this creature gets +2/+1 until end of turn.",
+            "Horror of the Broken Lands",
+        );
+        assert_eq!(def.mode, TriggerMode::CycledOrDiscarded);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        assert!(matches!(
+            &def.valid_card,
+            Some(TargetFilter::Typed(tf)) if tf.properties.contains(&FilterProp::Another)
+        ));
     }
 
     #[test]

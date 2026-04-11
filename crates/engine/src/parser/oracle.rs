@@ -1182,6 +1182,19 @@ pub fn parse_oracle_text(
             continue;
         }
 
+        // CR 702.62a: Suspend N—{cost} — parse count and cost from Oracle text.
+        // Must run before the spell imperative catch-all (priority 9) so the line
+        // is intercepted as a keyword, not parsed as an Unimplemented ability.
+        // Spells (instants/sorceries) with Suspend would otherwise be caught by
+        // the is_spell branch and produce an Unimplemented effect.
+        if lower_starts_with(&lower, "suspend ") {
+            if let Some(kw) = parse_keyword_from_oracle(&lower) {
+                result.extracted_keywords.push(kw);
+                i += 1;
+                continue;
+            }
+        }
+
         // Harmonize {cost} — parse mana cost from Oracle text.
         // Must run before the spell imperative catch-all (priority 9) so the line
         // is intercepted as a keyword, not parsed as an effect.
@@ -2832,6 +2845,38 @@ mod tests {
             !has_unimplemented,
             "Toxic keyword line should not produce Unimplemented effects"
         );
+    }
+
+    #[test]
+    fn end_to_end_suspend_sorcery_no_unimplemented() {
+        // CR 702.62a: "Suspend N—{cost}" on a sorcery must not produce Unimplemented.
+        // Ancestral Vision: "Suspend 4—{U}\nTarget player draws three cards."
+        let r = parse_with_keyword_names(
+            "Suspend 4\u{2014}{U}\nTarget player draws three cards.",
+            "Ancestral Vision",
+            &["suspend"],
+            &["Sorcery"],
+            &[],
+        );
+        let has_unimplemented = r.abilities.iter().any(|a| {
+            matches!(
+                *a.effect,
+                crate::types::ability::Effect::Unimplemented { .. }
+            )
+        });
+        assert!(
+            !has_unimplemented,
+            "Suspend keyword line on sorcery should not produce Unimplemented"
+        );
+        // Should have extracted the parameterized Suspend keyword
+        let suspend_kw = r
+            .extracted_keywords
+            .iter()
+            .find(|k| matches!(k, Keyword::Suspend { .. }));
+        assert!(suspend_kw.is_some(), "Should extract Suspend keyword");
+        if let Some(Keyword::Suspend { count, .. }) = suspend_kw {
+            assert_eq!(*count, 4);
+        }
     }
 
     #[test]
