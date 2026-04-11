@@ -1717,7 +1717,7 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
 }
 
 /// Wrap an effect with a `Shuffle` sub_ability for compound "X into library" operations.
-fn with_shuffle_sub_ability(effect: Effect) -> ParsedEffectClause {
+pub(super) fn with_shuffle_sub_ability(effect: Effect) -> ParsedEffectClause {
     let shuffle = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Shuffle {

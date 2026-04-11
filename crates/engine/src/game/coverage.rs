@@ -1326,6 +1326,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Cleanup { .. }
         | Effect::AddRestriction { .. }
         | Effect::ReduceNextSpellCost { .. }
+        | Effect::GrantNextSpellAbility { .. }
         | Effect::CreateEmblem { .. }
         | Effect::PayCost { .. }
         | Effect::LoseTheGame
@@ -1348,7 +1349,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Incubate { .. }
         | Effect::TimeTravel
         | Effect::Conjure { .. }
-        | Effect::AddPendingETBCounters { .. } => {}
+        | Effect::AddPendingETBCounters { .. }
+        | Effect::ChooseAndSacrificeRest { .. } => {}
     }
     d
 }

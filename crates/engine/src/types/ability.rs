@@ -2570,6 +2570,13 @@ pub enum Effect {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         spell_filter: Option<TargetFilter>,
     },
+    /// CR 601.2f: "The next [type] spell you cast this turn [has keyword/can't be countered/etc.]."
+    /// Creates a one-shot modifier applied when the player casts their next qualifying spell.
+    GrantNextSpellAbility {
+        modifier: crate::types::game_state::NextSpellModifier,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        spell_filter: Option<TargetFilter>,
+    },
     /// CR 614.1c: Register pending ETB counters for the triggering spell.
     /// Reads `current_trigger_event` (SpellCast) to identify the object, then adds
     /// counters to `pending_etb_counters` so they are applied when the object enters
@@ -3155,6 +3162,7 @@ impl Effect {
             | Effect::CreateDelayedTrigger { .. }
             | Effect::AddRestriction { .. }
             | Effect::ReduceNextSpellCost { .. }
+            | Effect::GrantNextSpellAbility { .. }
             | Effect::AddPendingETBCounters { .. }
             | Effect::CreateEmblem { .. }
             | Effect::PayCost { .. }
@@ -3280,6 +3288,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::CreateDelayedTrigger { .. } => "CreateDelayedTrigger",
         Effect::AddRestriction { .. } => "AddRestriction",
         Effect::ReduceNextSpellCost { .. } => "ReduceNextSpellCost",
+        Effect::GrantNextSpellAbility { .. } => "GrantNextSpellAbility",
         Effect::AddPendingETBCounters { .. } => "AddPendingETBCounters",
         Effect::CreateEmblem { .. } => "CreateEmblem",
         Effect::PayCost { .. } => "PayCost",
@@ -3421,6 +3430,7 @@ pub enum EffectKind {
     CreateDelayedTrigger,
     AddRestriction,
     ReduceNextSpellCost,
+    GrantNextSpellAbility,
     AddPendingETBCounters,
     CreateEmblem,
     PayCost,
@@ -3565,6 +3575,7 @@ impl From<&Effect> for EffectKind {
             Effect::CreateDelayedTrigger { .. } => EffectKind::CreateDelayedTrigger,
             Effect::AddRestriction { .. } => EffectKind::AddRestriction,
             Effect::ReduceNextSpellCost { .. } => EffectKind::ReduceNextSpellCost,
+            Effect::GrantNextSpellAbility { .. } => EffectKind::GrantNextSpellAbility,
             Effect::AddPendingETBCounters { .. } => EffectKind::AddPendingETBCounters,
             Effect::CreateEmblem { .. } => EffectKind::CreateEmblem,
             Effect::PayCost { .. } => EffectKind::PayCost,
