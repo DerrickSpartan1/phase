@@ -2,6 +2,7 @@ import type {
   AdditionalCost,
   GameAction,
   GameObject,
+  ManaCost,
   SerializedAbility,
   SerializedAbilityCost,
 } from "../adapter/types.ts";
@@ -16,6 +17,17 @@ export const SHARD_ABBREVIATION: Record<string, string> = {
   BlackRed: "B/R", BlackGreen: "B/G", RedWhite: "R/W", RedGreen: "R/G",
   GreenWhite: "G/W", GreenBlue: "G/U",
 };
+
+/** Convert a ManaCost to display-ready shard abbreviations (e.g., ["2", "U", "U"]). */
+export function manaCostToShards(cost: ManaCost): string[] {
+  if (cost.type !== "Cost") return [];
+  const shards: string[] = [];
+  if (cost.generic > 0) shards.push(String(cost.generic));
+  for (const s of cost.shards) {
+    shards.push(SHARD_ABBREVIATION[s] ?? s);
+  }
+  return shards;
+}
 
 // Mirrors Rust AbilityCost serialization shape (serde tag = "type").
 type SerializedCost = {

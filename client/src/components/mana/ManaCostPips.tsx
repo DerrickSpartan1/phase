@@ -1,17 +1,6 @@
 import type { ManaCost } from "../../adapter/types.ts";
-import { SHARD_ABBREVIATION } from "../../viewmodel/costLabel.ts";
+import { manaCostToShards } from "../../viewmodel/costLabel.ts";
 import { ManaSymbol } from "./ManaSymbol.tsx";
-
-/** Convert a ManaCost to display-ready shard abbreviations (e.g., ["2", "U", "U"]). */
-function manaCostToShards(cost: ManaCost): string[] {
-  if (cost.type !== "Cost") return [];
-  const shards: string[] = [];
-  if (cost.generic > 0) shards.push(String(cost.generic));
-  for (const s of cost.shards) {
-    shards.push(SHARD_ABBREVIATION[s] ?? s);
-  }
-  return shards;
-}
 
 type PipSize = "sm" | "md" | "lg";
 

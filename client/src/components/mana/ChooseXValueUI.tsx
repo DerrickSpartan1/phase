@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { useGameStore } from "../../stores/gameStore.ts";
+import { manaCostToShards } from "../../viewmodel/costLabel.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { ManaSymbol } from "./ManaSymbol.tsx";
 
@@ -24,8 +25,8 @@ export function ChooseXValueUI() {
 
   const pendingCostShards = useMemo(() => {
     if (!pendingCast) return null;
-    if (pendingCast.cost.type !== "Cost") return null;
-    return pendingCast.cost.shards;
+    const shards = manaCostToShards(pendingCast.cost);
+    return shards.length > 0 ? shards : null;
   }, [pendingCast]);
 
   const cardName = useMemo(() => {
