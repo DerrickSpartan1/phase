@@ -7,7 +7,7 @@ use crate::types::ability::{
     TypedFilter,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{ExileLink, GameState, WaitingFor};
+use crate::types::game_state::{ExileLink, ExileLinkKind, GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
@@ -161,15 +161,20 @@ pub(crate) fn execute_zone_move(
                         shuffle_library(state, owner);
                     }
                 }
-                // CR 610.3a: Track exile-until-leaves links
+                // Track cards exiled by the source. Some linked exiles return when the
+                // source leaves; others are just remembered as "exiled with" the source.
                 if to == Zone::Exile {
-                    if let Some(Duration::UntilHostLeavesPlay) = duration {
-                        state.exile_links.push(ExileLink {
-                            exiled_id: object_id,
-                            source_id,
+                    let kind = match duration {
+                        Some(Duration::UntilHostLeavesPlay) => ExileLinkKind::UntilSourceLeaves {
                             return_zone: from_zone,
-                        });
-                    }
+                        },
+                        _ => ExileLinkKind::TrackedBySource,
+                    };
+                    state.exile_links.push(ExileLink {
+                        exiled_id: object_id,
+                        source_id,
+                        kind,
+                    });
                 }
             }
             ZoneMoveResult::Done
@@ -668,12 +673,16 @@ mod tests {
         assert_eq!(state.exile_links.len(), 1);
         assert_eq!(state.exile_links[0].exiled_id, target_id);
         assert_eq!(state.exile_links[0].source_id, source_id);
-        // CR 610.3a: return_zone should be the zone before exile
-        assert_eq!(state.exile_links[0].return_zone, Zone::Battlefield);
+        assert_eq!(
+            state.exile_links[0].kind,
+            ExileLinkKind::UntilSourceLeaves {
+                return_zone: Zone::Battlefield,
+            }
+        );
     }
 
     #[test]
-    fn exile_without_until_host_leaves_no_link() {
+    fn exile_without_until_host_leaves_tracks_by_source() {
         let mut state = GameState::new_two_player(42);
         let target_id = create_object(
             &mut state,
@@ -703,10 +712,10 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert!(state.exile.contains(&target_id));
-        assert!(
-            state.exile_links.is_empty(),
-            "Should NOT record ExileLink without UntilHostLeavesPlay"
-        );
+        assert_eq!(state.exile_links.len(), 1);
+        assert_eq!(state.exile_links[0].exiled_id, target_id);
+        assert_eq!(state.exile_links[0].source_id, ObjectId(100));
+        assert_eq!(state.exile_links[0].kind, ExileLinkKind::TrackedBySource);
     }
 
     #[test]
@@ -998,16 +1007,18 @@ mod tests {
         for link in &state.exile_links {
             assert_eq!(link.source_id, source_id, "link source should be Starcage");
             assert_eq!(
-                link.return_zone,
-                Zone::Battlefield,
-                "should return to battlefield"
+                link.kind,
+                ExileLinkKind::UntilSourceLeaves {
+                    return_zone: Zone::Battlefield,
+                },
+                "should return to battlefield when source leaves"
             );
         }
     }
 
     #[test]
     fn resolve_all_exiled_by_source_moves_linked_and_consumes_links() {
-        use crate::types::game_state::ExileLink;
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
 
         let mut state = GameState::new_two_player(42);
         let source_id = create_object(
@@ -1045,18 +1056,24 @@ mod tests {
         state.exile_links.push(ExileLink {
             exiled_id: exiled1,
             source_id,
-            return_zone: Zone::Battlefield,
+            kind: ExileLinkKind::UntilSourceLeaves {
+                return_zone: Zone::Battlefield,
+            },
         });
         state.exile_links.push(ExileLink {
             exiled_id: exiled2,
             source_id,
-            return_zone: Zone::Battlefield,
+            kind: ExileLinkKind::UntilSourceLeaves {
+                return_zone: Zone::Battlefield,
+            },
         });
         // Link from a different source — should not be consumed
         state.exile_links.push(ExileLink {
             exiled_id: unlinked,
             source_id: ObjectId(999),
-            return_zone: Zone::Battlefield,
+            kind: ExileLinkKind::UntilSourceLeaves {
+                return_zone: Zone::Battlefield,
+            },
         });
 
         // CR 607.2a + CR 406.6: ChangeZoneAll with ExiledBySource moves linked cards to graveyard.

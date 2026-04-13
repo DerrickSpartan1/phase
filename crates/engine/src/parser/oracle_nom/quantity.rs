@@ -5,7 +5,7 @@
 //! "equal to" phrases, and "for each" phrases.
 
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_while1};
 use nom::combinator::{map, opt, value};
 use nom::sequence::preceded;
 use nom::Parser;
@@ -58,6 +58,7 @@ pub fn parse_quantity_expr_number(input: &str) -> OracleResult<'_, QuantityExpr>
 pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_the_number_of,
+        parse_distinct_card_types_exiled_with_source,
         parse_distinct_card_types_in_zone,
         parse_life_total_ref,
         parse_speed_ref,
@@ -87,6 +88,7 @@ fn parse_the_number_of(input: &str) -> OracleResult<'_, QuantityRef> {
 /// Parse the inner part after "the number of".
 fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
+        parse_distinct_card_types_exiled_with_source,
         parse_distinct_card_types_in_zone,
         parse_number_of_controlled_type,
         parse_number_of_cards_in_zone,
@@ -159,6 +161,21 @@ fn parse_distinct_card_types_in_zone(input: &str) -> OracleResult<'_, QuantityRe
     let (rest, _) = tag(" among cards in ").parse(rest)?;
     let (rest, (zone, scope)) = parse_scoped_zone_ref(rest)?;
     Ok((rest, QuantityRef::DistinctCardTypesInZone { zone, scope }))
+}
+
+fn parse_distinct_card_types_exiled_with_source(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("card type").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" among cards exiled with ").parse(rest)?;
+    let (rest, _) = alt((
+        tag("~"),
+        preceded(
+            tag("this "),
+            take_while1(|c: char| c.is_ascii_alphabetic() || c == '-'),
+        ),
+    ))
+    .parse(rest)?;
+    Ok((rest, QuantityRef::DistinctCardTypesExiledBySource))
 }
 
 /// Parse "opponents" / "opponents you have" after "the number of".
@@ -550,6 +567,23 @@ mod tests {
                 scope: CountScope::All,
             }
         );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_distinct_card_types_exiled_with_source() {
+        let (rest, q) =
+            parse_quantity_ref("the number of card types among cards exiled with ~").unwrap();
+        assert_eq!(q, QuantityRef::DistinctCardTypesExiledBySource);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_distinct_card_types_exiled_with_this_creature() {
+        let (rest, q) =
+            parse_quantity_ref("the number of card types among cards exiled with this creature")
+                .unwrap();
+        assert_eq!(q, QuantityRef::DistinctCardTypesExiledBySource);
         assert_eq!(rest, "");
     }
 

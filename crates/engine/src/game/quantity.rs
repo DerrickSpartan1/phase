@@ -350,6 +350,23 @@ fn resolve_ref(
             }
             seen.len() as i32
         }
+        QuantityRef::DistinctCardTypesExiledBySource => {
+            let mut seen = HashSet::new();
+            for link in &state.exile_links {
+                if link.source_id != source_id {
+                    continue;
+                }
+                if let Some(obj) = state.objects.get(&link.exiled_id) {
+                    if obj.zone != Zone::Exile {
+                        continue;
+                    }
+                    for ct in &obj.card_types.core_types {
+                        seen.insert(*ct);
+                    }
+                }
+            }
+            seen.len() as i32
+        }
         // CR 604.3: Count cards in a zone matching optional type filters.
         QuantityRef::ZoneCardCount {
             zone,
@@ -676,6 +693,7 @@ mod tests {
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::CounterType;
+    use crate::types::game_state::{ExileLink, ExileLinkKind};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
@@ -871,6 +889,91 @@ mod tests {
 
         // Should count 3 (2 instants + 1 sorcery in graveyard)
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 3);
+    }
+
+    #[test]
+    fn distinct_card_types_exiled_by_source_counts_linked_types_only() {
+        let mut state = GameState::new_two_player(42);
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let linked_artifact = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Linked Artifact".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&linked_artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let linked_creature = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Linked Creature".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&linked_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .extend([CoreType::Creature, CoreType::Artifact]);
+
+        let other_source = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Other Source".to_string(),
+            Zone::Battlefield,
+        );
+        let unlinked = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(1),
+            "Unlinked Instant".to_string(),
+            Zone::Exile,
+        );
+        state
+            .objects
+            .get_mut(&unlinked)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        state.exile_links.push(ExileLink {
+            source_id: source,
+            exiled_id: linked_artifact,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+        state.exile_links.push(ExileLink {
+            source_id: source,
+            exiled_id: linked_creature,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+        state.exile_links.push(ExileLink {
+            source_id: other_source,
+            exiled_id: unlinked,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCardTypesExiledBySource,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 2);
     }
 
     #[test]

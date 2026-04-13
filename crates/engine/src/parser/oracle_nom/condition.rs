@@ -1530,6 +1530,25 @@ mod tests {
     }
 
     #[test]
+    fn test_there_are_card_types_among_cards_exiled_with_source() {
+        let (rest, c) =
+            parse_inner_condition("there are four or more card types among cards exiled with ~")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::DistinctCardTypesExiledBySource,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            } => {}
+            other => panic!("expected DistinctCardTypesExiledBySource GE 4, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_there_are_subtype_cards_in_graveyard() {
         let (rest, c) =
             parse_inner_condition("there are three or more Lesson cards in your graveyard")

@@ -1215,6 +1215,9 @@ pub enum QuantityRef {
     /// CR 604.3: Count distinct card types (CoreType) across cards in a zone.
     /// Scope controls which players' zones are counted.
     DistinctCardTypesInZone { zone: ZoneRef, scope: CountScope },
+    /// CR 607.2a + CR 406.6: Count distinct card types across cards exiled with the source.
+    /// Used for linked-exile patterns like "card types among cards exiled with this creature".
+    DistinctCardTypesExiledBySource,
     /// CR 604.3: Count cards in a zone matching optional type filters.
     /// Empty card_types means all cards. Multiple entries = OR (any match).
     /// "creature cards in your graveyard" → zone=Graveyard, card_types=[Creature], scope=Controller

@@ -238,10 +238,13 @@ fn filter_inner(
             .is_some_and(|set| set.contains(&object_id)),
         // CR 607.2a + CR 406.6: Match cards exiled by source via exile-until-leaves links.
         // CR 610.3: Linked abilities track which cards were exiled by the first ability.
-        TargetFilter::ExiledBySource => state
-            .exile_links
-            .iter()
-            .any(|link| link.source_id == source_id && link.exiled_id == object_id),
+        TargetFilter::ExiledBySource => state.objects.get(&object_id).is_some_and(|obj| {
+            obj.zone == Zone::Exile
+                && state
+                    .exile_links
+                    .iter()
+                    .any(|link| link.source_id == source_id && link.exiled_id == object_id)
+        }),
         // CR 603.7c: Event-context references resolve to players, not objects.
         TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
@@ -1479,7 +1482,7 @@ mod tests {
 
     #[test]
     fn exiled_by_source_matches_linked_objects() {
-        use crate::types::game_state::ExileLink;
+        use crate::types::game_state::{ExileLink, ExileLinkKind};
 
         let mut state = GameState::new_two_player(42);
         let source = create_object(
@@ -1508,7 +1511,7 @@ mod tests {
         state.exile_links.push(ExileLink {
             exiled_id: exiled,
             source_id: source,
-            return_zone: Zone::Battlefield,
+            kind: ExileLinkKind::TrackedBySource,
         });
 
         let filter = TargetFilter::ExiledBySource;

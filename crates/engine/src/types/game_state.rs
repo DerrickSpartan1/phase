@@ -228,11 +228,18 @@ pub struct DamageRecord {
 /// CR 607.2a + CR 406.6: Tracks the link between an exiling source and the exiled card.
 /// When the source leaves the battlefield, the exiled card returns (CR 610.3a).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExileLinkKind {
+    /// CR 610.3a: Return the exiled object when the source leaves the battlefield.
+    UntilSourceLeaves { return_zone: Zone },
+    /// Track cards "exiled with" a source without creating an automatic return.
+    TrackedBySource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExileLink {
     pub exiled_id: ObjectId,
     pub source_id: ObjectId,
-    /// CR 610.3a: The zone the exiled object occupied before being exiled.
-    pub return_zone: Zone,
+    pub kind: ExileLinkKind,
 }
 
 /// Tracks commander damage dealt to a specific player by a specific commander.
@@ -2473,7 +2480,9 @@ mod tests {
         let link = ExileLink {
             exiled_id: ObjectId(10),
             source_id: ObjectId(5),
-            return_zone: Zone::Battlefield,
+            kind: ExileLinkKind::UntilSourceLeaves {
+                return_zone: Zone::Battlefield,
+            },
         };
         let json = serde_json::to_string(&link).unwrap();
         let deserialized: ExileLink = serde_json::from_str(&json).unwrap();
@@ -2565,7 +2574,9 @@ mod tests {
         state.exile_links.push(ExileLink {
             exiled_id: ObjectId(10),
             source_id: ObjectId(5),
-            return_zone: Zone::Battlefield,
+            kind: ExileLinkKind::UntilSourceLeaves {
+                return_zone: Zone::Battlefield,
+            },
         });
         state.pending_trigger = Some(PendingTrigger {
             source_id: ObjectId(5),

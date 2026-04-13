@@ -5716,6 +5716,39 @@ mod tests {
     }
 
     #[test]
+    fn static_keen_eyed_curator_condition_parses() {
+        use crate::types::ability::{Comparator, QuantityExpr, QuantityRef};
+
+        let def = parse_static_line(
+            "As long as there are four or more card types among cards exiled with this creature, it gets +4/+4 and has trample.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 4 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 4 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            }));
+        assert!(matches!(
+            def.condition,
+            Some(StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctCardTypesExiledBySource,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 4 },
+            })
+        ));
+    }
+
+    #[test]
     fn static_as_long_as_unrecognized_condition() {
         // Conditions the parser cannot yet decompose fall through to Unrecognized.
         // The whole "As long as X, Y" string is captured permissively so the effect still fires.

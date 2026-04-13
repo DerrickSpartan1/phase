@@ -63,6 +63,7 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
                         | crate::types::ability::CastingPermission::WarpExile { .. }
                 )
             });
+            state.exile_links.retain(|link| link.exiled_id != object_id);
         }
 
         if from == Zone::Battlefield {

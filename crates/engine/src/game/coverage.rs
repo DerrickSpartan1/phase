@@ -503,6 +503,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 fmt_zone_ref(zone)
             )
         }
+        QuantityRef::DistinctCardTypesExiledBySource => {
+            "card types among cards exiled with source".into()
+        }
         QuantityRef::ZoneCardCount {
             zone,
             card_types,
@@ -3323,6 +3326,7 @@ fn quantity_ref_variant_name(qref: &QuantityRef) -> &'static str {
         QuantityRef::TargetLifeTotal => "TargetLifeTotal",
         QuantityRef::Devotion { .. } => "Devotion",
         QuantityRef::DistinctCardTypesInZone { .. } => "DistinctCardTypesInZone",
+        QuantityRef::DistinctCardTypesExiledBySource => "DistinctCardTypesExiledBySource",
         QuantityRef::ZoneCardCount { .. } => "ZoneCardCount",
         QuantityRef::BasicLandTypeCount => "BasicLandTypeCount",
         QuantityRef::PreviousEffectAmount => "PreviousEffectAmount",

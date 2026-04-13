@@ -2391,9 +2391,15 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
             ..
         } = event
         {
-            // Find exile links where this object was the source
+            // Find exile links where this object was the source and the exile
+            // effect specified an automatic return when that source leaves.
             for link in &state.exile_links {
-                if link.source_id == *object_id {
+                if link.source_id == *object_id
+                    && matches!(
+                        &link.kind,
+                        crate::types::game_state::ExileLinkKind::UntilSourceLeaves { .. }
+                    )
+                {
                     to_return.push(link.clone());
                 }
             }
@@ -2413,7 +2419,12 @@ pub(super) fn check_exile_returns(state: &mut GameState, events: &mut Vec<GameEv
             .map(|obj| obj.zone == Zone::Exile)
             .unwrap_or(false);
         if still_in_exile {
-            zones::move_to_zone(state, link.exiled_id, link.return_zone, events);
+            let crate::types::game_state::ExileLinkKind::UntilSourceLeaves { return_zone } =
+                &link.kind
+            else {
+                continue;
+            };
+            zones::move_to_zone(state, link.exiled_id, *return_zone, events);
         }
     }
 
@@ -5736,7 +5747,7 @@ mod trigger_target_tests {
 mod exile_return_tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::game_state::ExileLink;
+    use crate::types::game_state::{ExileLink, ExileLinkKind};
     use crate::types::identifiers::CardId;
 
     #[test]
@@ -5769,7 +5780,9 @@ mod exile_return_tests {
         state.exile_links.push(ExileLink {
             exiled_id,
             source_id,
-            return_zone: Zone::Battlefield,
+            kind: ExileLinkKind::UntilSourceLeaves {
+                return_zone: Zone::Battlefield,
+            },
         });
 
         // Simulate events where source leaves the battlefield
@@ -5829,7 +5842,9 @@ mod exile_return_tests {
         state.exile_links.push(ExileLink {
             exiled_id,
             source_id,
-            return_zone: Zone::Hand,
+            kind: ExileLinkKind::UntilSourceLeaves {
+                return_zone: Zone::Hand,
+            },
         });
 
         let events = vec![crate::types::events::GameEvent::ZoneChanged {
@@ -5880,7 +5895,9 @@ mod exile_return_tests {
         state.exile_links.push(ExileLink {
             exiled_id,
             source_id,
-            return_zone: Zone::Battlefield,
+            kind: ExileLinkKind::UntilSourceLeaves {
+                return_zone: Zone::Battlefield,
+            },
         });
 
         let events = vec![crate::types::events::GameEvent::ZoneChanged {
@@ -5937,12 +5954,16 @@ mod exile_return_tests {
         state.exile_links.push(ExileLink {
             exiled_id,
             source_id,
-            return_zone: Zone::Battlefield,
+            kind: ExileLinkKind::UntilSourceLeaves {
+                return_zone: Zone::Battlefield,
+            },
         });
         state.exile_links.push(ExileLink {
             exiled_id: other_exiled,
             source_id: other_source,
-            return_zone: Zone::Battlefield,
+            kind: ExileLinkKind::UntilSourceLeaves {
+                return_zone: Zone::Battlefield,
+            },
         });
 
         let events = vec![crate::types::events::GameEvent::ZoneChanged {
