@@ -2,8 +2,8 @@
 //!
 //! CR 103.5 (`docs/MagicCompRules.txt:295`): deciding to keep after the
 //! mulligan process. When a deck's mana-ramp commitment is meaningful, opening
-//! hands that combine a ramp spell with enough lands to cast it early are
-//! strongly preferred.
+//! hands that combine a ramp piece (dork/rock/fetch-spell/ritual/extra-landdrop)
+//! with enough lands to use it are strongly preferred.
 //!
 //! Opts out for decks where `features.mana_ramp.commitment <= 0.3` — the
 //! baseline `KeepablesByLandCount` policy is the sole voice for those decks.
@@ -12,6 +12,7 @@ use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::identifiers::ObjectId;
 
+use crate::features::mana_ramp::is_ramp_piece_parts;
 use crate::features::DeckFeatures;
 use crate::plan::PlanSnapshot;
 use crate::policies::registry::{PolicyId, PolicyReason};
@@ -51,38 +52,29 @@ impl MulliganPolicy for RampKeepablesMulligan {
         let mut land_count: i64 = 0;
         let mut ramp_count: i64 = 0;
 
+        // Classify each hand card structurally using the same parts-based
+        // predicates the feature uses at detection time. This covers all four
+        // ramp axes (dork/rock, land-fetch spell, ritual, extra-land-drop) —
+        // Lightning Bolt on an Instant is NOT counted; Llanowar Elves on a
+        // Creature IS counted.
         for &oid in hand {
             let Some(obj) = state.objects.get(&oid) else {
                 continue;
             };
             if obj.card_types.core_types.contains(&CoreType::Land) {
                 land_count += 1;
+                continue;
             }
-            // A ramp piece in hand is any instant/sorcery that could
-            // accelerate mana — detected via the presence of a Spell-kind
-            // ability that searches for a land or produces mana. We keep this
-            // light (just type check + ability-kind check) to avoid duplicating
-            // the full chain-walk at mulligan evaluation time; exact shape
-            // matters less at this decision point than presence.
-            //
-            // Creatures and artifacts (dorks/rocks) are already counted
-            // implicitly by the commitment floor: a deck with high dork_count
-            // also has high commitment and opts in here.
-            if obj
-                .card_types
-                .core_types
-                .iter()
-                .any(|t| matches!(t, CoreType::Instant | CoreType::Sorcery))
-                && obj.abilities.iter().any(|a| {
-                    use engine::types::ability::AbilityKind;
-                    a.kind == AbilityKind::Spell
-                })
-            {
+            if is_ramp_piece_parts(
+                &obj.card_types.core_types,
+                &obj.abilities,
+                &obj.static_definitions,
+            ) {
                 ramp_count += 1;
             }
         }
 
-        // Ideal: ramp spell + enough lands to cast it early.
+        // Ideal: ramp piece + enough lands to deploy it early.
         if ramp_count >= 1 && land_count >= 2 {
             return MulliganScore::Score {
                 delta: 2.0,
@@ -93,7 +85,7 @@ impl MulliganPolicy for RampKeepablesMulligan {
             };
         }
 
-        // A ramp spell with only one land is risky but passable.
+        // A ramp piece with only one land is risky but passable.
         if ramp_count >= 1 && land_count == 1 {
             return MulliganScore::Score {
                 delta: 0.5,
@@ -103,7 +95,7 @@ impl MulliganPolicy for RampKeepablesMulligan {
             };
         }
 
-        // Many lands but no ramp spells in hand undermines a ramp deck's plan.
+        // Many lands but no ramp pieces in hand undermines a ramp deck's plan.
         if ramp_count == 0 && land_count >= 3 {
             return MulliganScore::Score {
                 delta: -0.5,
@@ -127,7 +119,10 @@ impl MulliganPolicy for RampKeepablesMulligan {
 mod tests {
     use super::*;
     use engine::game::zones::create_object;
-    use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr};
+    use engine::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaProduction, QuantityExpr,
+        TargetFilter, TypedFilter,
+    };
     use engine::types::card_type::{CardType, CoreType};
     use engine::types::game_state::GameState;
     use engine::types::identifiers::CardId;
@@ -153,20 +148,88 @@ mod tests {
         PlanSnapshot::default()
     }
 
-    fn add_card(
-        state: &mut GameState,
-        idx: u64,
-        name: &str,
-        core_types: Vec<CoreType>,
-        with_spell_ability: bool,
-    ) -> ObjectId {
-        let oid = create_object(
-            state,
-            CardId(2000 + idx),
-            PlayerId(0),
-            name.to_string(),
-            Zone::Hand,
+    /// Canonical tap-for-mana ability (mana dork / mana rock shape).
+    fn tap_for_mana_ability() -> AbilityDefinition {
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed { colors: Vec::new() },
+                restrictions: Vec::new(),
+                grants: Vec::new(),
+                expiry: None,
+            },
         );
+        ability.cost = Some(AbilityCost::Tap);
+        ability
+    }
+
+    /// Land-fetch spell ability (Rampant Growth shape — search library, put
+    /// land onto battlefield).
+    fn land_fetch_spell_ability() -> AbilityDefinition {
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::land()),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+            },
+        );
+        ability.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Typed(TypedFilter::land()),
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: true,
+                enter_tapped: true,
+                enters_attacking: false,
+                up_to: false,
+            },
+        )));
+        ability
+    }
+
+    /// Non-ramp Spell-kind ability (Lightning Bolt / Opt shape) — used as a
+    /// negative to verify the classifier doesn't count every instant/sorcery.
+    fn non_ramp_spell_ability() -> AbilityDefinition {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        )
+    }
+
+    enum Card {
+        Land,
+        DorkCreature,
+        FetchSpellSorcery,
+        NonRampInstant,
+    }
+
+    fn add_card(state: &mut GameState, idx: u64, card: Card) -> ObjectId {
+        let (name, core_types, ability) = match card {
+            Card::Land => (format!("Forest {idx}"), vec![CoreType::Land], None),
+            Card::DorkCreature => (
+                format!("Llanowar Elves {idx}"),
+                vec![CoreType::Creature],
+                Some(tap_for_mana_ability()),
+            ),
+            Card::FetchSpellSorcery => (
+                format!("Rampant Growth {idx}"),
+                vec![CoreType::Sorcery],
+                Some(land_fetch_spell_ability()),
+            ),
+            Card::NonRampInstant => (
+                format!("Lightning Bolt {idx}"),
+                vec![CoreType::Instant],
+                Some(non_ramp_spell_ability()),
+            ),
+        };
+        let oid = create_object(state, CardId(2000 + idx), PlayerId(0), name, Zone::Hand);
         let obj = state.objects.get_mut(&oid).expect("just created");
         obj.card_types = CardType {
             supertypes: Vec::new(),
@@ -174,47 +237,18 @@ mod tests {
             subtypes: Vec::new(),
         };
         obj.mana_cost = ManaCost::NoCost;
-        if with_spell_ability {
-            obj.abilities.push(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Draw {
-                    count: QuantityExpr::Fixed { value: 1 },
-                },
-            ));
+        if let Some(a) = ability {
+            obj.abilities.push(a);
         }
         oid
     }
 
-    fn make_hand(lands: usize, sorcery_ramps: usize, filler: usize) -> (GameState, Vec<ObjectId>) {
+    fn make_hand(cards: Vec<Card>) -> (GameState, Vec<ObjectId>) {
         let mut state = GameState::new_two_player(42);
         state.players[0].hand.clear();
         let mut hand = Vec::new();
-        for i in 0..lands {
-            hand.push(add_card(
-                &mut state,
-                i as u64,
-                &format!("Forest {i}"),
-                vec![CoreType::Land],
-                false,
-            ));
-        }
-        for j in 0..sorcery_ramps {
-            hand.push(add_card(
-                &mut state,
-                (100 + j) as u64,
-                &format!("Rampant Growth {j}"),
-                vec![CoreType::Sorcery],
-                true,
-            ));
-        }
-        for k in 0..filler {
-            hand.push(add_card(
-                &mut state,
-                (200 + k) as u64,
-                &format!("Filler {k}"),
-                vec![CoreType::Creature],
-                false,
-            ));
+        for (i, c) in cards.into_iter().enumerate() {
+            hand.push(add_card(&mut state, i as u64, c));
         }
         (state, hand)
     }
@@ -222,7 +256,15 @@ mod tests {
     #[test]
     fn opts_out_when_commitment_low() {
         let features = features_with_commitment(0.1);
-        let (state, hand) = make_hand(3, 1, 3);
+        let (state, hand) = make_hand(vec![
+            Card::Land,
+            Card::Land,
+            Card::Land,
+            Card::FetchSpellSorcery,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+        ]);
         let score =
             RampKeepablesMulligan.evaluate(&hand, &state, &features, &plan(), TurnOrder::OnPlay, 0);
         match score {
@@ -235,10 +277,18 @@ mod tests {
     }
 
     #[test]
-    fn ideal_hand_ramp_plus_two_lands() {
+    fn ideal_hand_fetch_spell_plus_two_lands() {
         let features = features_with_commitment(0.9);
-        // 2 lands + 1 ramp + 4 filler = 7 cards
-        let (state, hand) = make_hand(2, 1, 4);
+        // 2 lands + 1 fetch spell + 4 filler = 7 cards
+        let (state, hand) = make_hand(vec![
+            Card::Land,
+            Card::Land,
+            Card::FetchSpellSorcery,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+        ]);
         let score =
             RampKeepablesMulligan.evaluate(&hand, &state, &features, &plan(), TurnOrder::OnPlay, 0);
         match score {
@@ -251,26 +301,46 @@ mod tests {
     }
 
     #[test]
-    fn ramp_light_lands_ok() {
+    fn ideal_hand_dork_creature_plus_two_lands() {
+        // Llanowar Elves + 2 lands: classifier must count the dork as ramp.
+        // Regression: old policy ignored permanent-type ramp entirely.
         let features = features_with_commitment(0.9);
-        // 1 land + 1 ramp + 5 filler
-        let (state, hand) = make_hand(1, 1, 5);
+        let (state, hand) = make_hand(vec![
+            Card::Land,
+            Card::Land,
+            Card::DorkCreature,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+        ]);
         let score =
             RampKeepablesMulligan.evaluate(&hand, &state, &features, &plan(), TurnOrder::OnPlay, 0);
         match score {
             MulliganScore::Score { delta, reason } => {
                 assert!(delta > 0.0, "expected positive delta, got {delta}");
-                assert_eq!(reason.kind, "ramp_light_lands_ok");
+                assert_eq!(reason.kind, "ramp_keepable_ideal");
             }
-            _ => panic!("expected light-lands Score"),
+            _ => panic!("expected ideal Score"),
         }
     }
 
     #[test]
-    fn no_ramp_in_hand_penalty() {
+    fn non_ramp_instant_is_not_counted_as_ramp() {
+        // Regression: an older classifier counted every instant/sorcery as
+        // ramp because every spell has AbilityKind::Spell. Lightning Bolt on
+        // an Instant must NOT boost ramp_count — 3 lands + only Bolts should
+        // score as no-ramp-in-hand.
         let features = features_with_commitment(0.9);
-        // 3 lands + 0 ramp + 4 filler
-        let (state, hand) = make_hand(3, 0, 4);
+        let (state, hand) = make_hand(vec![
+            Card::Land,
+            Card::Land,
+            Card::Land,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+        ]);
         let score =
             RampKeepablesMulligan.evaluate(&hand, &state, &features, &plan(), TurnOrder::OnPlay, 0);
         match score {
@@ -283,10 +353,40 @@ mod tests {
     }
 
     #[test]
+    fn ramp_light_lands_ok() {
+        let features = features_with_commitment(0.9);
+        let (state, hand) = make_hand(vec![
+            Card::Land,
+            Card::FetchSpellSorcery,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+        ]);
+        let score =
+            RampKeepablesMulligan.evaluate(&hand, &state, &features, &plan(), TurnOrder::OnPlay, 0);
+        match score {
+            MulliganScore::Score { delta, reason } => {
+                assert!(delta > 0.0, "expected positive delta, got {delta}");
+                assert_eq!(reason.kind, "ramp_light_lands_ok");
+            }
+            _ => panic!("expected light-lands Score"),
+        }
+    }
+
+    #[test]
     fn defer_to_baseline_when_no_lands_no_ramp() {
         let features = features_with_commitment(0.9);
-        // 0 lands + 0 ramp + 7 filler
-        let (state, hand) = make_hand(0, 0, 7);
+        let (state, hand) = make_hand(vec![
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+            Card::NonRampInstant,
+        ]);
         let score =
             RampKeepablesMulligan.evaluate(&hand, &state, &features, &plan(), TurnOrder::OnPlay, 0);
         match score {

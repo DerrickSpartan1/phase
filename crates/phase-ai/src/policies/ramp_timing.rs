@@ -10,17 +10,16 @@
 //! resolve immediately — they don't go on the stack. CR 601.2f: cost reductions
 //! interact with the total cost after it's locked in.
 
-use engine::game::game_object::GameObject;
-use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, TargetFilter, TypeFilter};
 use engine::types::actions::GameAction;
 use engine::types::card_type::CoreType;
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
-use engine::types::zones::Zone;
 
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
-use crate::ability_chain::collect_chain_effects;
+use crate::features::mana_ramp::{
+    chain_has_mana_effect, is_land_fetch_spell_parts, is_ritual_parts,
+};
 use crate::features::DeckFeatures;
 
 /// Minimum commitment required to activate this policy at all.
@@ -110,8 +109,15 @@ impl TacticalPolicy for RampTimingPolicy {
 }
 
 /// True when the current candidate action is ramp-shaped — a ramp mana
-/// ability activation, land-fetch spell, or ritual. Works directly over
-/// `GameObject` fields so no `CardFace` conversion is required at decision time.
+/// ability activation, land-fetch spell, or ritual. Delegates to the feature
+/// module's parts-based classifiers so there is a single structural source of
+/// truth across feature detection and runtime policy scoring.
+///
+/// Note: `GameAction::TapLandForMana` is deliberately NOT handled here. It
+/// routes to `DecisionKind::ManaPayment` (see `decision_kind.rs`) and
+/// `engine::ai_support::candidates` explicitly excludes it from priority
+/// candidates, so this policy — which declares `CastSpell`,
+/// `ActivateManaAbility`, `ActivateAbility` — never sees it.
 fn is_ramp_shaped_action(ctx: &PolicyContext<'_>) -> bool {
     match &ctx.candidate.action {
         GameAction::ActivateAbility {
@@ -125,98 +131,14 @@ fn is_ramp_shaped_action(ctx: &PolicyContext<'_>) -> bool {
                 return false;
             };
             // A dork/rock activation: the ability chain contains Effect::Mana.
-            ability_chain_has_mana(ability)
+            chain_has_mana_effect(ability)
         }
-        // CR 605.1a: mana ability (TapLandForMana) resolves immediately — it
-        // doesn't go on the stack. All land-tapping for mana is ramp-shaped.
-        GameAction::TapLandForMana { .. } => true,
         GameAction::CastSpell { object_id, .. } => {
             let Some(obj) = ctx.state.objects.get(object_id) else {
                 return false;
             };
-            obj_is_land_fetch_spell(obj) || obj_is_ritual(obj)
-        }
-        _ => false,
-    }
-}
-
-/// True if any effect in the ability's chain is `Effect::Mana`.
-fn ability_chain_has_mana(ability: &AbilityDefinition) -> bool {
-    collect_chain_effects(ability)
-        .iter()
-        .any(|e| matches!(e, Effect::Mana { .. }))
-}
-
-/// True when the `GameObject` is an instant/sorcery whose spell ability chain
-/// searches the library for a land and moves it to the battlefield or hand.
-/// CR 701.23 + CR 305.4: land-fetch spells (Rampant Growth, Cultivate shape).
-fn obj_is_land_fetch_spell(obj: &GameObject) -> bool {
-    let is_instant_or_sorcery = obj
-        .card_types
-        .core_types
-        .iter()
-        .any(|t| matches!(t, CoreType::Instant | CoreType::Sorcery));
-    if !is_instant_or_sorcery {
-        return false;
-    }
-    obj.abilities.iter().any(|ability| {
-        ability.kind == AbilityKind::Spell
-            && ability_chain_searches_for_land(ability)
-            && ability_chain_puts_land_to_safe_zone(ability)
-    })
-}
-
-/// True when the `GameObject` is an instant/sorcery whose spell ability chain
-/// contains `Effect::Mana` but is NOT a land-fetch spell. CR 605.5b: spells
-/// are never mana abilities; rituals are instants/sorceries producing mana.
-fn obj_is_ritual(obj: &GameObject) -> bool {
-    let is_instant_or_sorcery = obj
-        .card_types
-        .core_types
-        .iter()
-        .any(|t| matches!(t, CoreType::Instant | CoreType::Sorcery));
-    if !is_instant_or_sorcery {
-        return false;
-    }
-    // Rituals and fetches must be disjoint — fetches take priority.
-    if obj_is_land_fetch_spell(obj) {
-        return false;
-    }
-    obj.abilities
-        .iter()
-        .any(|ability| ability.kind == AbilityKind::Spell && ability_chain_has_mana(ability))
-}
-
-fn ability_chain_searches_for_land(ability: &AbilityDefinition) -> bool {
-    collect_chain_effects(ability).iter().any(|e| {
-        matches!(
-            e,
-            Effect::SearchLibrary { filter, .. } if filter_references_land(filter)
-        )
-    })
-}
-
-fn ability_chain_puts_land_to_safe_zone(ability: &AbilityDefinition) -> bool {
-    collect_chain_effects(ability).iter().any(|e| {
-        matches!(
-            e,
-            Effect::ChangeZone {
-                destination: Zone::Battlefield | Zone::Hand,
-                ..
-            }
-        )
-    })
-}
-
-fn filter_references_land(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(typed) => typed.type_filters.iter().any(|tf| match tf {
-            TypeFilter::Land => true,
-            TypeFilter::AnyOf(inner) => inner.iter().any(|t| matches!(t, TypeFilter::Land)),
-            _ => false,
-        }),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(filter_references_land)
+            is_land_fetch_spell_parts(&obj.card_types.core_types, &obj.abilities)
+                || is_ritual_parts(&obj.card_types.core_types, &obj.abilities)
         }
         _ => false,
     }
@@ -265,7 +187,8 @@ fn hand_has_ramp_spell(ctx: &PolicyContext<'_>) -> bool {
         let Some(obj) = ctx.state.objects.get(&oid) else {
             return false;
         };
-        obj_is_land_fetch_spell(obj) || obj_is_ritual(obj)
+        is_land_fetch_spell_parts(&obj.card_types.core_types, &obj.abilities)
+            || is_ritual_parts(&obj.card_types.core_types, &obj.abilities)
     })
 }
 

@@ -24,7 +24,8 @@
 
 use engine::game::DeckEntry;
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, CostCategory, Effect, TargetFilter, TypeFilter,
+    AbilityDefinition, AbilityKind, ControllerRef, CostCategory, Effect, StaticDefinition,
+    TargetFilter, TypeFilter,
 };
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
@@ -117,15 +118,22 @@ pub fn detect(deck: &[DeckEntry]) -> ManaRampFeature {
 /// CR 605.1a: activated mana ability — doesn't require a target, could add
 /// mana when it resolves, is not a loyalty ability.
 pub(crate) fn is_mana_dork(face: &CardFace) -> bool {
-    let is_permanent = face
-        .card_type
-        .core_types
+    is_mana_dork_parts(&face.card_type.core_types, &face.abilities)
+}
+
+/// Parts-based variant of [`is_mana_dork`] for callers holding a `GameObject`
+/// rather than a `CardFace`. Both live views carry the same underlying data;
+/// passing slices keeps the single source of truth without forcing a
+/// `GameObject → CardFace` conversion. See also [`policies::ramp_timing`] and
+/// [`policies::mulligan::ramp_keepables`] which delegate here.
+pub(crate) fn is_mana_dork_parts(core_types: &[CoreType], abilities: &[AbilityDefinition]) -> bool {
+    let is_permanent = core_types
         .iter()
         .any(|t| matches!(t, CoreType::Creature | CoreType::Artifact));
     if !is_permanent {
         return false;
     }
-    face.abilities.iter().any(|ability| {
+    abilities.iter().any(|ability| {
         ability.kind == AbilityKind::Activated
             && ability.cost_categories().contains(&CostCategory::TapsSelf)
             && chain_has_mana_effect(ability)
@@ -140,15 +148,20 @@ pub(crate) fn is_mana_dork(face: &CardFace) -> bool {
 /// their library for a land card. CR 305.4: putting a land onto the
 /// battlefield does not count as playing a land.
 pub(crate) fn is_land_fetch_spell(face: &CardFace) -> bool {
-    let is_instant_or_sorcery = face
-        .card_type
-        .core_types
+    is_land_fetch_spell_parts(&face.card_type.core_types, &face.abilities)
+}
+
+pub(crate) fn is_land_fetch_spell_parts(
+    core_types: &[CoreType],
+    abilities: &[AbilityDefinition],
+) -> bool {
+    let is_instant_or_sorcery = core_types
         .iter()
         .any(|t| matches!(t, CoreType::Instant | CoreType::Sorcery));
     if !is_instant_or_sorcery {
         return false;
     }
-    face.abilities.iter().any(|ability| {
+    abilities.iter().any(|ability| {
         ability.kind == AbilityKind::Spell
             && chain_searches_for_land(ability)
             && chain_puts_land_to_safe_zone(ability)
@@ -161,15 +174,22 @@ pub(crate) fn is_land_fetch_spell(face: &CardFace) -> bool {
 /// CR 605.5b: a spell can never be a mana ability — it is cast and resolves
 /// normally. Rituals are instants/sorceries that produce mana as their effect.
 pub(crate) fn is_ritual(face: &CardFace) -> bool {
-    let is_instant_or_sorcery = face
-        .card_type
-        .core_types
+    is_ritual_parts(&face.card_type.core_types, &face.abilities)
+}
+
+pub(crate) fn is_ritual_parts(core_types: &[CoreType], abilities: &[AbilityDefinition]) -> bool {
+    let is_instant_or_sorcery = core_types
         .iter()
         .any(|t| matches!(t, CoreType::Instant | CoreType::Sorcery));
     if !is_instant_or_sorcery {
         return false;
     }
-    face.abilities
+    // Rituals and land-fetches must remain disjoint — a Cultivate-shape spell
+    // that also produces mana in-chain is a fetch, not a ritual.
+    if is_land_fetch_spell_parts(core_types, abilities) {
+        return false;
+    }
+    abilities
         .iter()
         .any(|ability| ability.kind == AbilityKind::Spell && chain_has_mana_effect(ability))
 }
@@ -177,7 +197,11 @@ pub(crate) fn is_ritual(face: &CardFace) -> bool {
 /// A card grants extra land drops if it has a static ability with
 /// `AdditionalLandDrop` or `MayPlayAdditionalLand` mode. CR 305.2.
 pub(crate) fn is_extra_landdrop(face: &CardFace) -> bool {
-    face.static_abilities.iter().any(|s| {
+    is_extra_landdrop_parts(&face.static_abilities)
+}
+
+pub(crate) fn is_extra_landdrop_parts(static_abilities: &[StaticDefinition]) -> bool {
+    static_abilities.iter().any(|s| {
         matches!(
             s.mode,
             StaticMode::AdditionalLandDrop { .. } | StaticMode::MayPlayAdditionalLand
@@ -185,9 +209,24 @@ pub(crate) fn is_extra_landdrop(face: &CardFace) -> bool {
     })
 }
 
+/// True when a card (via its typed parts) qualifies as any flavour of ramp —
+/// a mana dork/rock, a land-fetch spell, a ritual, or an extra-land-drop
+/// permanent (Exploration-shape). Used by the mulligan policy to classify
+/// hand contents structurally, without re-implementing the four axis checks.
+pub(crate) fn is_ramp_piece_parts(
+    core_types: &[CoreType],
+    abilities: &[AbilityDefinition],
+    static_abilities: &[StaticDefinition],
+) -> bool {
+    is_mana_dork_parts(core_types, abilities)
+        || is_land_fetch_spell_parts(core_types, abilities)
+        || is_ritual_parts(core_types, abilities)
+        || is_extra_landdrop_parts(static_abilities)
+}
+
 /// Walk every effect in the ability's chain and return true if any is
 /// `Effect::Mana`. A damage-only chain (e.g., Prodigal Sorcerer) returns false.
-fn chain_has_mana_effect(ability: &AbilityDefinition) -> bool {
+pub(crate) fn chain_has_mana_effect(ability: &AbilityDefinition) -> bool {
     collect_chain_effects(ability)
         .iter()
         .any(|e| matches!(e, Effect::Mana { .. }))
