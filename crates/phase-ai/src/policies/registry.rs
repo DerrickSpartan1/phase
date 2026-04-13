@@ -14,6 +14,7 @@ use super::interaction_reservation::InteractionReservationPolicy;
 use super::landfall_timing::LandfallTimingPolicy;
 use super::lethality_awareness::LethalityAwarenessPolicy;
 use super::life_total_resource::LifeTotalResourcePolicy;
+use super::ramp_timing::RampTimingPolicy;
 use super::recursion_awareness::RecursionAwarenessPolicy;
 use super::sacrifice_value::SacrificeValuePolicy;
 use super::tutor::TutorPolicy;
@@ -51,8 +52,10 @@ pub enum PolicyId {
     LifeTotalResource,
     CardAdvantage,
     LandfallTiming,
+    RampTiming,
     KeepablesByLandCount,
     LandfallKeepablesMulligan,
+    RampKeepablesMulligan,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
@@ -161,6 +164,7 @@ impl Default for PolicyRegistry {
             Box::new(LifeTotalResourcePolicy),
             Box::new(CardAdvantagePolicy),
             Box::new(LandfallTimingPolicy),
+            Box::new(RampTimingPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {

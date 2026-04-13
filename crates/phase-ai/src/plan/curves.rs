@@ -18,7 +18,7 @@ const SCHEDULE_LEN: usize = 15;
 pub fn derive_snapshot(features: &DeckFeatures) -> PlanSnapshot {
     let tempo_class = tempo_class_for(features);
     let expected_lands = expected_lands_for(features);
-    let expected_mana = expected_lands; // No mana_ramp contribution yet — stub returns 0.
+    let expected_mana = expected_mana_for(features);
     let expected_threats = expected_threats_for(features);
 
     PlanSnapshot {
@@ -30,10 +30,10 @@ pub fn derive_snapshot(features: &DeckFeatures) -> PlanSnapshot {
 }
 
 fn tempo_class_for(features: &DeckFeatures) -> TempoClass {
-    // Landfall commitment biases toward Ramp regardless of coarse archetype —
-    // a landfall deck plays like a ramp deck in practice (extra lands per turn,
-    // threats scale with lands). Everything else maps from `DeckArchetype`.
-    if features.landfall.commitment > 0.5 {
+    // Landfall and mana_ramp commitment both bias toward Ramp regardless of
+    // coarse archetype — both play like ramp decks in practice (extra lands
+    // per turn, threats scale with resources).
+    if features.landfall.commitment > 0.5 || features.mana_ramp.commitment > 0.5 {
         return TempoClass::Ramp;
     }
     match features.archetype {
@@ -52,10 +52,13 @@ fn expected_lands_for(features: &DeckFeatures) -> [u8; SCHEDULE_LEN] {
         let turn = (turn_idx + 1) as u8;
         *slot = turn.min(6);
     }
-    // Landfall commitment bumps the turn-3 and turn-4 schedule by one extra
-    // land each, modeling a fetch crack during those turns. Ratchet forward so
-    // the later slots stay consistent with the bump.
-    if features.landfall.commitment > 0.3 {
+    // A single `wants_ramp_curve` gate prevents double-bumping when both
+    // landfall and mana_ramp are high — both features indicate the same
+    // "play more lands" intention, so one +1 application is correct.
+    // CR 305.2: additional land drops from Azusa-likes raise the per-turn cap.
+    let wants_ramp_curve =
+        features.landfall.commitment > 0.5 || features.mana_ramp.commitment > 0.3;
+    if wants_ramp_curve {
         for (turn_idx, slot) in lands.iter_mut().enumerate().skip(2) {
             if turn_idx < 4 {
                 *slot = slot.saturating_add(1);
@@ -67,6 +70,30 @@ fn expected_lands_for(features: &DeckFeatures) -> [u8; SCHEDULE_LEN] {
         }
     }
     lands
+}
+
+/// Expected available mana per turn — starts from land projections and adds
+/// the contribution of dorks / rituals that can be played on earlier turns.
+///
+/// CR 106.4: mana pools empty each step; `expected_mana` models per-turn
+/// availability, not accumulated totals. CR 305.2: additional land drops
+/// further raise the ceiling when `wants_ramp_curve`.
+pub(crate) fn expected_mana_for(features: &DeckFeatures) -> [u8; SCHEDULE_LEN] {
+    let mut mana = expected_lands_for(features);
+    // When significant mana ramp is present, model one extra mana on turns 2
+    // and 3 (a dork played on turn 1 starts contributing on turn 2) and two
+    // extra mana on turns 4–6 (compounded ramp: dorks + fetch lands).
+    if features.mana_ramp.commitment > 0.3 {
+        for (turn_idx, slot) in mana.iter_mut().enumerate() {
+            let bonus: u8 = match turn_idx + 1 {
+                2 | 3 => 1,
+                4..=6 => 2,
+                _ => 0,
+            };
+            *slot = slot.saturating_add(bonus).min(10);
+        }
+    }
+    mana
 }
 
 fn expected_threats_for(features: &DeckFeatures) -> [u8; SCHEDULE_LEN] {
@@ -87,7 +114,7 @@ fn expected_threats_for(features: &DeckFeatures) -> [u8; SCHEDULE_LEN] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::features::{DeckFeatures, LandfallFeature};
+    use crate::features::{DeckFeatures, LandfallFeature, ManaRampFeature};
 
     #[test]
     fn landfall_commitment_bumps_turn_three_and_four_lands() {
@@ -123,5 +150,92 @@ mod tests {
     fn empty_features_produces_midrange_default() {
         let snapshot = derive_snapshot(&DeckFeatures::default());
         assert_eq!(snapshot.tempo_class, TempoClass::Midrange);
+    }
+
+    #[test]
+    fn ramp_commitment_bumps_expected_mana_turn_two_and_three() {
+        let no_ramp = DeckFeatures::default();
+        let baseline_mana = expected_mana_for(&no_ramp);
+        // Turn 2 baseline: 2 (lands) + 0 (no ramp bonus). Turn 3: 3.
+        assert_eq!(baseline_mana[1], 2, "baseline turn 2");
+        assert_eq!(baseline_mana[2], 3, "baseline turn 3");
+
+        let features = DeckFeatures {
+            mana_ramp: ManaRampFeature {
+                dork_count: 4,
+                commitment: 0.48, // > 0.3 triggers both land and mana bumps
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let ramped = expected_mana_for(&features);
+
+        // Turn 2 (index 1): land baseline 2 + mana ramp +1 = 3.
+        assert_eq!(
+            ramped[1], 3,
+            "turn 2 mana should be bumped by +1 (mana bonus)"
+        );
+        // Turn 3 (index 2): land baseline 3 + land ramp bump +1 + mana ramp +1 = 5.
+        assert_eq!(
+            ramped[2], 5,
+            "turn 3 mana should be bumped by +2 (land + mana bonus)"
+        );
+        // Turn 4 (index 3): land baseline 4 + land ramp bump +1 + mana ramp +2 = 7.
+        assert_eq!(
+            ramped[3], 7,
+            "turn 4 mana should be bumped by +3 (land + mana bonus)"
+        );
+        // Verify it's strictly higher than baseline at the important early turns.
+        assert!(
+            ramped[1] > baseline_mana[1],
+            "turn 2 mana must exceed baseline"
+        );
+        assert!(
+            ramped[2] > baseline_mana[2],
+            "turn 3 mana must exceed baseline"
+        );
+    }
+
+    #[test]
+    fn ramp_and_landfall_stack_is_idempotent() {
+        // Both landfall (> 0.5) and mana_ramp (> 0.3) active — the
+        // `wants_ramp_curve` gate in `expected_lands_for` must apply
+        // `saturating_add(1)` exactly once, not twice.
+        let baseline_lands = expected_lands_for(&DeckFeatures::default());
+
+        let both_features = DeckFeatures {
+            landfall: LandfallFeature {
+                commitment: 0.9,
+                ..Default::default()
+            },
+            mana_ramp: ManaRampFeature {
+                dork_count: 4,
+                commitment: 0.48,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let both_lands = expected_lands_for(&both_features);
+
+        // Turn 3 (index 2) must be exactly +1 above baseline — not +2.
+        assert_eq!(
+            both_lands[2],
+            baseline_lands[2] + 1,
+            "double-bump guard: turn 3 land should be exactly +1"
+        );
+    }
+
+    #[test]
+    fn high_ramp_commitment_picks_ramp_tempo() {
+        let features = DeckFeatures {
+            mana_ramp: ManaRampFeature {
+                dork_count: 8,
+                commitment: 0.96,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let snapshot = derive_snapshot(&features);
+        assert_eq!(snapshot.tempo_class, TempoClass::Ramp);
     }
 }
