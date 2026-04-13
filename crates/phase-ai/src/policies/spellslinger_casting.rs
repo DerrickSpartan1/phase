@@ -21,7 +21,7 @@ use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use crate::features::spellslinger_prowess::{
     has_prowess_parts, is_burn_to_player_parts, is_cast_payoff_parts, is_copy_effect_parts,
-    is_low_curve_spell_parts, COMMITMENT_FLOOR,
+    is_low_curve_spell_parts, is_nth_spell_payoff_parts, COMMITMENT_FLOOR,
 };
 use crate::features::DeckFeatures;
 
@@ -171,7 +171,14 @@ impl TacticalPolicy for SpellslingerCastingPolicy {
         // A spell is off-strategy if: MV > 4 AND not an IS AND not a payoff.
         let is_is =
             core_types.contains(&CoreType::Instant) || core_types.contains(&CoreType::Sorcery);
-        let is_payoff_card = is_cast_payoff_parts(triggers) || has_prowess_parts(keywords);
+        // Include nth-spell payoffs explicitly. In practice every nth-spell
+        // trigger also satisfies `is_cast_payoff_parts` (same SpellCast mode,
+        // same scope), but documenting the disjunction guards against future
+        // tightening of `is_cast_payoff_parts` that would silently demote
+        // nth-spell cards into the off-strategy bucket.
+        let is_payoff_card = is_cast_payoff_parts(triggers)
+            || is_nth_spell_payoff_parts(triggers)
+            || has_prowess_parts(keywords);
         if mv > 4 && !is_is && !is_payoff_card && delta == 0.0 {
             delta -= 0.4;
             reason_kind = "spellslinger_off_strategy";

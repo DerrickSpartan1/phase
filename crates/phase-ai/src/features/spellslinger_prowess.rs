@@ -704,13 +704,16 @@ mod tests {
     #[test]
     fn commitment_above_floor_for_burn() {
         // Mono-Red Burn: ~36 nonland, 0 payoffs, 28 low-curve IS.
+        // spell_density = 28/36 ≈ 0.778 → commitment ≈ 0.778.
+        // CR 121.1 (card-draw) baseline used elsewhere; here we lock in the
+        // burn calibration anchor at > 0.40 so the doc claim stays enforced.
         let mut bolt = instant_face("Bolt");
         bolt.mana_cost = ManaCost::generic(1);
         let deck = vec![entry(bolt, 28), entry(creature_face("Bear"), 8)];
         let f = detect(&deck);
         assert!(
-            f.commitment > COMMITMENT_FLOOR,
-            "Burn should be above COMMITMENT_FLOOR, got {}",
+            f.commitment > 0.40,
+            "Burn should hit calibration floor 0.40, got {}",
             f.commitment
         );
     }
