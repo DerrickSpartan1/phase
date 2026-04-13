@@ -6,12 +6,16 @@
 //!   (`crates/engine/src/types/triggers.rs:26-27`, CR 603.6c).
 //! - `CostCategory::SacrificesPermanent` is the sacrifice-cost gate
 //!   (`crates/engine/src/types/ability.rs:1858`, CR 701.21).
-//! - Anti-fetchland disambiguator: `Effect::SearchLibrary` anywhere in the
-//!   ability's effect chain → reject (mirrors `features/landfall.rs:172-190`).
+//! - Anti-fetchland disambiguator: rejects abilities that match the canonical
+//!   fetchland shape (`SearchLibrary` for Land + `ChangeZone` to Battlefield).
+//!   Delegates to `features::landfall::ability_searches_library_for_land` —
+//!   landfall is the canonical owner of fetchland semantics.
 //! - `Effect::Token { types: Vec<String>, .. }` at `ability.rs:2131`.
 //!   Creature tokens have `types.iter().any(|s| s == "Creature")`.
 //! - `Effect::ChangeZone { origin: Some(Graveyard), destination: Battlefield,
-//!   .. }` is the recursion shape (`ability.rs:2271`, CR 701.13).
+//!   .. }` is the recursion shape (`ability.rs:2271`). Recursion does not
+//!   correspond to a single CR keyword action — it's a generic zone-change
+//!   effect, so no specific CR annotation applies here.
 //! - `AbilityCost::Sacrifice { target: TargetFilter, .. }` at `ability.rs:1757`
 //!   — after the `CostCategory::SacrificesPermanent` gate confirms the cost
 //!   type, the `target` field is inspected to verify creature-you-control scope.
@@ -31,6 +35,7 @@ use engine::types::triggers::TriggerMode;
 use engine::types::zones::Zone;
 
 use crate::ability_chain::collect_chain_effects;
+use crate::features::landfall::ability_searches_library_for_land;
 
 /// CR 701.21 + CR 603.6c + CR 111.1: per-deck aristocrats classification.
 ///
@@ -301,7 +306,7 @@ fn typed_filter_is_creature_you_control_or_any(typed: &TypedFilter) -> bool {
 ///   count — their `types` lacks "Creature". CR 111.1.
 /// - Creature recursion: `Effect::ChangeZone { origin: Some(Graveyard),
 ///   destination: Battlefield, target, .. }` where `target` references a creature.
-///   CR 701.13.
+///   Generic zone-change effect — no CR keyword action applies.
 fn is_fodder_source(face: &CardFace) -> bool {
     // Check abilities.
     if face.abilities.iter().any(|ability| {
@@ -325,7 +330,8 @@ fn is_creature_fodder_effect(e: &&Effect) -> bool {
     match e {
         // CR 111.1: creature token production.
         Effect::Token { types, .. } => types.iter().any(|s| s == "Creature"),
-        // CR 701.13: recursion from graveyard to battlefield targeting a creature.
+        // Recursion from graveyard to battlefield targeting a creature.
+        // No CR keyword action — generic zone-change effect.
         Effect::ChangeZone {
             origin,
             destination,
@@ -350,50 +356,10 @@ fn filter_references_creature(filter: &TargetFilter) -> bool {
     }
 }
 
-/// Walk the ability's effect chain looking for a `SearchLibrary` whose filter
-/// matches a Land, followed (in the same chain) by a `ChangeZone` to the
-/// battlefield. The canonical fetchland shape is
-/// `SearchLibrary { filter: Land } → ChangeZone { destination: Battlefield }`.
-///
-/// Mirrors features::landfall::ability_searches_library_for_land — landfall is
-/// the canonical fetchland disambiguator.
-fn ability_searches_library_for_land(ability: &AbilityDefinition) -> bool {
-    let effects = collect_chain_effects(ability);
-    let searches_land = effects.iter().any(|e| {
-        matches!(
-            e,
-            Effect::SearchLibrary { filter, .. } if target_filter_references_land(filter)
-        )
-    });
-    let puts_onto_battlefield = effects.iter().any(|e| {
-        matches!(
-            e,
-            Effect::ChangeZone {
-                destination: Zone::Battlefield,
-                ..
-            }
-        )
-    });
-    searches_land && puts_onto_battlefield
-}
-
-fn target_filter_references_land(filter: &TargetFilter) -> bool {
-    match filter {
-        TargetFilter::Typed(typed) => typed.type_filters.iter().any(type_filter_is_land),
-        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(target_filter_references_land)
-        }
-        _ => false,
-    }
-}
-
-fn type_filter_is_land(tf: &TypeFilter) -> bool {
-    match tf {
-        TypeFilter::Land => true,
-        TypeFilter::AnyOf(inner) => inner.iter().any(type_filter_is_land),
-        _ => false,
-    }
-}
+// Fetchland-shape detection (`ability_searches_library_for_land` and its
+// helpers) lives in `features::landfall` and is imported above. Landfall is
+// the canonical owner of land-fetch semantics; aristocrats consumes it as a
+// negative filter (an outlet must NOT be a fetchland).
 
 #[cfg(test)]
 mod tests {
@@ -713,21 +679,19 @@ mod tests {
     }
 
     #[test]
-    fn tutor_with_sacrifice_cost_is_not_an_outlet() {
-        // Diabolic Intent shape: sac creature + SearchLibrary → Hand.
-        // The fetchland check requires SearchLibrary + ChangeZone to Battlefield.
-        // A tutor to hand only has ChangeZone to Hand → not rejected by fetchland gate.
-        // However it IS a sac outlet (correct behavior — it does sacrifice a creature).
+    fn tutor_with_sacrifice_cost_is_an_outlet() {
+        // Diabolic Intent shape: sac creature + SearchLibrary → Hand. The
+        // anti-fetchland gate only rejects `SearchLibrary + ChangeZone →
+        // Battlefield` (the canonical fetchland shape); a tutor that searches
+        // to Hand passes through. By the structural definition of "sacrifice
+        // outlet" — sacrifice cost + non-mana effect — Diabolic Intent
+        // qualifies, which matches its real-world play in aristocrats shells
+        // (sacrifice fodder for a tutored combo piece).
         let mut face = creature_face("Diabolic Intent");
         face.abilities.push(diabolic_intent_ability());
         let deck = vec![entry(face, 1)];
 
-        // Diabolic Intent IS a sac outlet — the plan says to reject tutor-with-sac
-        // but the technical definition of "outlet" is correct: it sac's a creature
-        // for an effect. The test name reflects that we want to verify behavior.
-        // The ability doesn't match the fetchland gate (destination = Hand, not BF).
         let feature = detect(&deck);
-        // Diabolic Intent has sac-creature cost with non-mana effect → valid outlet.
         assert_eq!(
             feature.outlet_count, 1,
             "Diabolic Intent is a valid sac outlet"
@@ -836,6 +800,26 @@ mod tests {
 
         let feature = detect(&deck);
         assert_eq!(feature.fodder_source_count, 1);
+    }
+
+    #[test]
+    fn creature_token_in_trigger_execute_counts_as_fodder() {
+        // Bitterblossom / Ophiomancer shape: an upkeep trigger whose
+        // `execute` chain creates a creature token. `is_fodder_source` must
+        // walk `triggers[*].execute` chains, not just `face.abilities`.
+        let mut face = creature_face("Token Triggerer");
+        let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+            .valid_card(TargetFilter::SelfRef)
+            .destination(Zone::Battlefield)
+            .execute(creature_token_ability());
+        face.triggers.push(trigger);
+        let deck = vec![entry(face, 1)];
+
+        let feature = detect(&deck);
+        assert_eq!(
+            feature.fodder_source_count, 1,
+            "creature-token effect inside a trigger's execute chain should count as fodder"
+        );
     }
 
     // --- Commitment tests ---

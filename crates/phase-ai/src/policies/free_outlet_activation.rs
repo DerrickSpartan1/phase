@@ -7,9 +7,9 @@
 //! from battlefield to graveyard — the moment of sacrifice. CR 603.10a: some
 //! zone-change triggers look back in time; the trigger checks the last known
 //! information of the creature. CR 701.21: sacrifice is the keyword action that
-//! moves the permanent to the graveyard. CR 704.5g: state-based actions check
-//! for lethal damage after sacrificing toughness-boosted creatures, but
-//! sacrifice itself bypasses destruction.
+//! moves the permanent to the graveyard. CR 701.21a: a sacrificed permanent
+//! moves directly into its owner's graveyard — sacrifice is not destruction
+//! and bypasses regenerate / indestructible.
 
 use engine::game::game_object::GameObject;
 use engine::types::actions::GameAction;

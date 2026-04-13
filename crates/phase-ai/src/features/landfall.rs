@@ -132,7 +132,7 @@ fn typed_filter_is_land_you_control(typed: &TypedFilter) -> bool {
     typed.type_filters.iter().any(type_filter_is_land)
 }
 
-fn type_filter_is_land(tf: &TypeFilter) -> bool {
+pub(crate) fn type_filter_is_land(tf: &TypeFilter) -> bool {
     match tf {
         TypeFilter::Land => true,
         TypeFilter::AnyOf(inner) => inner.iter().any(type_filter_is_land),
@@ -169,7 +169,7 @@ fn ability_sacrifices_permanent(ability: &AbilityDefinition) -> bool {
 /// matches a Land, followed (in the same chain) by a `ChangeZone` to the
 /// battlefield. The canonical fetchland shape is
 /// `SearchLibrary { filter: Land ... } → ChangeZone { destination: Battlefield }`.
-fn ability_searches_library_for_land(ability: &AbilityDefinition) -> bool {
+pub(crate) fn ability_searches_library_for_land(ability: &AbilityDefinition) -> bool {
     let effects = collect_chain_effects(ability);
     let searches_land = effects.iter().any(|e| {
         matches!(
@@ -189,7 +189,7 @@ fn ability_searches_library_for_land(ability: &AbilityDefinition) -> bool {
     searches_land && puts_onto_battlefield
 }
 
-fn target_filter_references_land(filter: &TargetFilter) -> bool {
+pub(crate) fn target_filter_references_land(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(typed) => typed.type_filters.iter().any(type_filter_is_land),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
