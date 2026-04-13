@@ -14,10 +14,11 @@ use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 use engine::types::zones::Zone;
 
-use super::context::PolicyContext;
+use super::context::{collect_ability_effects, PolicyContext};
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
 use crate::features::plus_one_counters::{
-    ability_places_plus_one_counter, ability_proliferates, COMMITMENT_FLOOR, COMMITTED_VALUE_FLOOR,
+    ability_places_plus_one_counter, ability_proliferates,
+    replacement_modifies_p1p1_counters_parts, COMMITMENT_FLOOR, COMMITTED_VALUE_FLOOR,
 };
 use crate::features::DeckFeatures;
 
@@ -119,13 +120,15 @@ impl TacticalPolicy for PlusOneCountersPolicy {
             }
         }
 
-        // Branch 3: Doubler synergy — source has doubler AND a pending counter
-        // effect is on the stack. CR 614.1a.
-        let source_has_doubler = object.replacement_definitions.iter().any(|r| {
-            r.event == engine::types::replacements::ReplacementEvent::AddCounter
-                && r.quantity_modification.is_some()
-        });
-        if source_has_doubler && stack_has_pending_counter_effect(ctx.state) {
+        // Branch 3: Doubler synergy — the AI controls a passive counter-doubler
+        // on the battlefield (Hardened Scales, Doubling Season) AND a pending
+        // counter effect is on the stack about to resolve. CR 614.1a: the
+        // replacement applies at the moment the counter is added, so the value
+        // is in the stack-pending-effect → controller-has-doubler combination,
+        // not in the activated source's own replacements.
+        if any_doubler_on_battlefield(ctx.state, ctx.ai_player)
+            && stack_has_pending_counter_effect(ctx.state)
+        {
             return PolicyVerdict::Score {
                 delta: 1.2,
                 reason: PolicyReason::new("doubler_active_with_pending_counter"),
@@ -192,16 +195,39 @@ fn count_permanents_with_counters(state: &GameState, player: PlayerId) -> usize 
         .count()
 }
 
-/// True if the current stack contains a pending AddCounter / PutCounter event.
+/// True if the current stack contains a pending AddCounter / PutCounter event
+/// anywhere in a stacked spell's full effect chain (including `sub_ability`).
 /// Used by the doubler branch to detect "I can double this counter effect".
 /// CR 614.1a: replacement applies at the moment the counter is added.
+///
+/// Walks the entire `ResolvedAbility` chain via `collect_ability_effects` —
+/// catches "Draw a card. Put a +1/+1 counter on target creature." where the
+/// counter effect lives in `sub_ability`, not on the head effect.
 fn stack_has_pending_counter_effect(state: &GameState) -> bool {
     state.stack.iter().any(|entry| {
         let Some(resolved) = entry.ability() else {
             return false;
         };
-        effect_has_p1p1_counter(&resolved.effect)
+        collect_ability_effects(resolved)
+            .iter()
+            .any(|e| effect_has_p1p1_counter(e))
     })
+}
+
+/// True if any AI-controlled battlefield permanent has a passive replacement
+/// effect that modifies +1/+1 counter quantities (Hardened Scales, Doubling
+/// Season, Branching Evolution, Vorinclex). CR 614.1a.
+fn any_doubler_on_battlefield(state: &GameState, player: PlayerId) -> bool {
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| obj.controller == player && obj.zone == Zone::Battlefield)
+        .any(|obj| {
+            obj.replacement_definitions
+                .iter()
+                .any(replacement_modifies_p1p1_counters_parts)
+        })
 }
 
 /// Checks whether an effect places a P1P1 counter.
@@ -541,6 +567,39 @@ mod tests {
     }
 
     // ─── verdict() — non-counter spell ───────────────────────────────────────
+
+    #[test]
+    fn any_doubler_on_battlefield_finds_passive_replacement() {
+        // Hardened-Scales-shape: a creature on the AI's battlefield with a
+        // ReplacementDefinition that modifies AddCounter quantity. The doubler
+        // branch must scan battlefield permanents (where passive replacements
+        // live), NOT the activated source's own replacements.
+        use engine::types::ability::{QuantityModification, ReplacementDefinition};
+        use engine::types::replacements::ReplacementEvent;
+        let mut state = GameState::new_two_player(42);
+        let scales_id = create_object(
+            &mut state,
+            CardId(99),
+            AI,
+            "Hardened Scales".to_string(),
+            Zone::Battlefield,
+        );
+        let mut rep = ReplacementDefinition::new(ReplacementEvent::AddCounter);
+        rep.quantity_modification = Some(QuantityModification::Plus { value: 1 });
+        state
+            .objects
+            .get_mut(&scales_id)
+            .unwrap()
+            .replacement_definitions
+            .push(rep);
+
+        assert!(any_doubler_on_battlefield(&state, AI));
+
+        // No doubler when the only permanent is a vanilla creature.
+        let mut empty_state = GameState::new_two_player(42);
+        let _bear = add_creature(&mut empty_state, 100, Zone::Battlefield);
+        assert!(!any_doubler_on_battlefield(&empty_state, AI));
+    }
 
     #[test]
     fn non_counter_spell_yields_na() {

@@ -35,8 +35,8 @@ use std::collections::BTreeSet;
 
 use engine::game::DeckEntry;
 use engine::types::ability::{
-    AbilityDefinition, Effect, FilterProp, ReplacementDefinition, StaticDefinition, TargetFilter,
-    TriggerDefinition,
+    AbilityDefinition, ControllerRef, Effect, FilterProp, ReplacementDefinition, StaticDefinition,
+    TargetFilter, TriggerDefinition,
 };
 use engine::types::counter::CounterType;
 use engine::types::keywords::Keyword;
@@ -256,8 +256,18 @@ fn effect_places_plus_one_counter(e: &&Effect) -> bool {
 /// True if this replacement definition modifies the quantity of +1/+1 counters
 /// placed. Matches `ReplacementEvent::AddCounter` with a non-None
 /// `quantity_modification`. CR 614.1a.
-fn replacement_modifies_p1p1_counters(rep: &ReplacementDefinition) -> bool {
+///
+/// Note: `ReplacementEvent::AddCounter` is a unit variant with no counter-type
+/// discriminator, so this predicate cannot distinguish a P1P1 doubler from
+/// poison/charge doublers without inspecting `execute`/`condition`. In
+/// practice this is fine — a deck running counter-quantity replacements is
+/// almost certainly running them for the deck's primary counter type.
+pub(crate) fn replacement_modifies_p1p1_counters_parts(rep: &ReplacementDefinition) -> bool {
     rep.event == ReplacementEvent::AddCounter && rep.quantity_modification.is_some()
+}
+
+fn replacement_modifies_p1p1_counters(rep: &ReplacementDefinition) -> bool {
+    replacement_modifies_p1p1_counters_parts(rep)
 }
 
 /// True if this static definition is a payoff for creatures with +1/+1 counters
@@ -288,9 +298,14 @@ fn filter_has_p1p1_counter_prop(filter: Option<&TargetFilter>) -> bool {
     }
 }
 
-/// True if this trigger fires when a +1/+1 counter is added to a creature.
-/// Matches the counter trigger modes and verifies `counter_filter` is set to P1P1.
-/// CR 122.6 + CR 122.7.
+/// True if this trigger fires when a +1/+1 counter is added to a creature
+/// you control (or a wildcard-scope creature). Opponent-scoped triggers
+/// ("whenever a +1/+1 counter is placed on a creature an opponent controls")
+/// are rejected — those punish opponents, not reward you.
+///
+/// Matches the counter trigger modes and verifies `counter_filter` is P1P1.
+/// CR 122.6 + CR 122.7. Mirrors the `ControllerRef::Opponent` rejection in
+/// `aristocrats::typed_filter_is_creature_you_control`.
 fn trigger_is_counter_payoff(t: &TriggerDefinition) -> bool {
     let is_counter_mode = matches!(
         t.mode,
@@ -303,9 +318,37 @@ fn trigger_is_counter_payoff(t: &TriggerDefinition) -> bool {
         return false;
     }
     // counter_filter must specifically be P1P1 to avoid matching loyalty/lore triggers.
-    t.counter_filter
+    let p1p1_match = t
+        .counter_filter
         .as_ref()
-        .is_some_and(|cf| cf.counter_type == CounterType::Plus1Plus1)
+        .is_some_and(|cf| cf.counter_type == CounterType::Plus1Plus1);
+    if !p1p1_match {
+        return false;
+    }
+    // Reject opponent-scoped triggers on either `valid_card` (the permanent
+    // receiving the counter) or `valid_target` (target reference). A wildcard
+    // (None) or you-scoped filter is acceptable.
+    !filter_is_opponent_scoped(t.valid_card.as_ref())
+        && !filter_is_opponent_scoped(t.valid_target.as_ref())
+}
+
+/// True if a filter narrows to `ControllerRef::Opponent` — used to reject
+/// opponent-scoped trigger payoffs that punish opponents rather than reward
+/// the AI. Walks `Or`/`And` defensively. None or wildcard returns false.
+fn filter_is_opponent_scoped(filter: Option<&TargetFilter>) -> bool {
+    let Some(filter) = filter else {
+        return false;
+    };
+    match filter {
+        TargetFilter::Typed(tf) => matches!(tf.controller, Some(ControllerRef::Opponent)),
+        // For Or, opponent-scoped iff EVERY branch is opponent-scoped (a mixed
+        // filter like "creature you control or a creature an opponent controls"
+        // is still partially yours). For And, opponent-scoped iff ANY branch
+        // narrows to opponent (it's a conjunction — every constraint must hold).
+        TargetFilter::Or { filters } => filters.iter().all(|f| filter_is_opponent_scoped(Some(f))),
+        TargetFilter::And { filters } => filters.iter().any(|f| filter_is_opponent_scoped(Some(f))),
+        _ => false,
+    }
 }
 
 #[cfg(test)]
@@ -503,13 +546,50 @@ mod tests {
     // ─── Scope guard tests ───────────────────────────────────────────────────
 
     #[test]
-    fn opponent_scope_payoff_ignored() {
-        // A CounterAdded trigger with NO counter_filter is not a +1/+1 payoff.
+    fn untyped_counter_trigger_not_a_p1p1_payoff() {
+        // A CounterAdded trigger with NO counter_filter is not a +1/+1 payoff
+        // (it would also fire on loyalty/lore/charge counters).
         let mut face = make_face("Generic Counter Trigger");
         let t = TriggerDefinition::new(TriggerMode::CounterAdded);
-        // counter_filter = None → does not match P1P1 specifically.
         face.triggers.push(t);
         assert!(!face_has_triggered_counter_payoff(&face));
+    }
+
+    #[test]
+    fn opponent_scoped_counter_trigger_rejected() {
+        // A "whenever a +1/+1 counter is placed on a creature an opponent
+        // controls" trigger is NOT a payoff for the AI — it punishes opponents.
+        // Mirrors aristocrats::typed_filter_is_creature_you_control rejection.
+        use engine::types::ability::ControllerRef;
+        let mut face = make_face("Punisher Trigger");
+        let t = TriggerDefinition::new(TriggerMode::CounterAdded)
+            .counter_filter(CounterTriggerFilter {
+                counter_type: CounterType::Plus1Plus1,
+                threshold: None,
+            })
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::Opponent),
+            ));
+        face.triggers.push(t);
+        assert!(!face_has_triggered_counter_payoff(&face));
+    }
+
+    #[test]
+    fn you_scoped_counter_trigger_accepted() {
+        // Mirror counterpoint to opponent rejection — explicit You scope must
+        // be accepted.
+        use engine::types::ability::ControllerRef;
+        let mut face = make_face("Counter Payoff");
+        let t = TriggerDefinition::new(TriggerMode::CounterAdded)
+            .counter_filter(CounterTriggerFilter {
+                counter_type: CounterType::Plus1Plus1,
+                threshold: None,
+            })
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            ));
+        face.triggers.push(t);
+        assert!(face_has_triggered_counter_payoff(&face));
     }
 
     #[test]
