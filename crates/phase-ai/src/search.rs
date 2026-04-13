@@ -342,14 +342,37 @@ pub(crate) fn deterministic_choice(
         return Some(action);
     }
 
-    // Mulligan decisions: use hand-quality heuristic (search can't evaluate these)
+    // CR 103.5 + CR 103.6: Mulligan decisions — defer to the sibling
+    // `MulliganRegistry` for structured, feature-aware hand evaluation. All
+    // registered `MulliganPolicy` implementations contribute; search can't
+    // evaluate these (the hand isn't yet committed to an opening state).
     if let WaitingFor::MulliganDecision {
         player,
         mulligan_count,
     } = &state.waiting_for
     {
-        let keep = should_keep_hand(state, *player, *mulligan_count);
-        return Some(GameAction::MulliganDecision { keep });
+        let ctx = build_ai_context(state, *player, config);
+        let default_features = crate::features::DeckFeatures::default();
+        let default_plan = crate::plan::PlanSnapshot::default();
+        let features = ctx
+            .session
+            .features
+            .get(player)
+            .unwrap_or(&default_features);
+        let plan = ctx.session.plan.get(player).unwrap_or(&default_plan);
+        let hand = state.players[player.0 as usize].hand.clone();
+        let turn_order = crate::policies::mulligan::turn_order_for(state, *player);
+        let decision = crate::policies::mulligan::MulliganRegistry::default().evaluate_hand(
+            &hand,
+            state,
+            features,
+            plan,
+            turn_order,
+            *mulligan_count,
+        );
+        return Some(GameAction::MulliganDecision {
+            keep: decision.keep,
+        });
     }
 
     // Scry/Dig/Surveil: use card evaluation heuristics
@@ -666,181 +689,6 @@ fn prefer_land_drop(
         .iter()
         .find(|action| matches!(action, GameAction::PlayLand { .. }))
         .cloned()
-}
-
-/// Decide whether to keep the current hand based on land/spell ratio,
-/// castability, and mana curve presence.
-///
-/// Always keeps at 4 or fewer cards (after mulligans). For larger hands,
-/// checks land count, whether the lands can produce colors for the spells,
-/// and whether there are plays available in the first few turns.
-fn should_keep_hand(state: &GameState, player: PlayerId, mulligan_count: u8) -> bool {
-    let hand = &state.players[player.0 as usize].hand;
-    let hand_size = hand.len();
-
-    // Always keep at 4 or fewer cards
-    if hand_size <= 4 {
-        return true;
-    }
-
-    // After 2+ mulligans, be much more lenient — keep any hand with at least 1 land + 1 spell
-    if mulligan_count >= 2 {
-        let has_land = hand.iter().any(|&oid| {
-            state
-                .objects
-                .get(&oid)
-                .is_some_and(|o| o.card_types.core_types.contains(&CoreType::Land))
-        });
-        let has_spell = hand.iter().any(|&oid| {
-            state
-                .objects
-                .get(&oid)
-                .is_some_and(|o| !o.card_types.core_types.contains(&CoreType::Land))
-        });
-        return has_land && has_spell;
-    }
-
-    let mut land_count = 0;
-    let mut available_colors = Vec::new();
-
-    for &oid in hand.iter() {
-        let Some(obj) = state.objects.get(&oid) else {
-            continue;
-        };
-        if obj.card_types.core_types.contains(&CoreType::Land) {
-            land_count += 1;
-            // Collect colors this land can produce from its subtypes
-            for subtype in &obj.card_types.subtypes {
-                if let Some(mana_type) =
-                    engine::game::mana_payment::land_subtype_to_mana_type(subtype)
-                {
-                    if !available_colors.contains(&mana_type) {
-                        available_colors.push(mana_type);
-                    }
-                }
-            }
-        }
-    }
-
-    let spell_count = hand_size - land_count;
-
-    // Basic land count check: need lands and spells
-    let land_ok = if hand_size >= 6 {
-        (2..=5).contains(&land_count)
-    } else {
-        // 5 card hand: keep with 1-4 lands; already kept <=4 above
-        land_count >= 1 && spell_count >= 1
-    };
-
-    if !land_ok {
-        return false;
-    }
-
-    // Castability check: count spells castable in the first 3 turns
-    // given available land colors and expected mana progression.
-    let castable_early = hand
-        .iter()
-        .filter(|&&oid| {
-            let Some(obj) = state.objects.get(&oid) else {
-                return false;
-            };
-            if obj.card_types.core_types.contains(&CoreType::Land) {
-                return false;
-            }
-            let mv = obj.mana_cost.mana_value();
-            // Can we cast it in the first 3 turns? (need MV <= land_count + 1 for draw steps)
-            if mv > (land_count as u32 + 1) {
-                return false;
-            }
-            // Check color requirements against available land colors
-            spell_colors_available(&obj.mana_cost, &available_colors)
-        })
-        .count();
-
-    // Reject hands where nothing is castable early despite having lands + spells
-    if castable_early == 0 && spell_count > 0 {
-        return false;
-    }
-
-    true
-}
-
-/// Check whether the colors required by a spell's mana cost can be
-/// produced by the available mana types (from lands in hand).
-fn spell_colors_available(
-    cost: &engine::types::mana::ManaCost,
-    available: &[engine::types::mana::ManaType],
-) -> bool {
-    use engine::types::mana::{ManaCost, ManaCostShard, ManaType};
-
-    let ManaCost::Cost { shards, .. } = cost else {
-        return true; // NoCost or SelfManaCost — always castable
-    };
-
-    // For each colored shard, check if at least one of its colors is available.
-    // Hybrid shards (e.g., WhiteBlue) are satisfied if either color is available.
-    for shard in shards {
-        let satisfied = match shard {
-            ManaCostShard::White | ManaCostShard::PhyrexianWhite | ManaCostShard::TwoWhite => {
-                available.contains(&ManaType::White)
-            }
-            ManaCostShard::Blue | ManaCostShard::PhyrexianBlue | ManaCostShard::TwoBlue => {
-                available.contains(&ManaType::Blue)
-            }
-            ManaCostShard::Black | ManaCostShard::PhyrexianBlack | ManaCostShard::TwoBlack => {
-                available.contains(&ManaType::Black)
-            }
-            ManaCostShard::Red | ManaCostShard::PhyrexianRed | ManaCostShard::TwoRed => {
-                available.contains(&ManaType::Red)
-            }
-            ManaCostShard::Green | ManaCostShard::PhyrexianGreen | ManaCostShard::TwoGreen => {
-                available.contains(&ManaType::Green)
-            }
-            ManaCostShard::WhiteBlue | ManaCostShard::PhyrexianWhiteBlue => {
-                available.contains(&ManaType::White) || available.contains(&ManaType::Blue)
-            }
-            ManaCostShard::BlueBlack | ManaCostShard::PhyrexianBlueBlack => {
-                available.contains(&ManaType::Blue) || available.contains(&ManaType::Black)
-            }
-            ManaCostShard::BlackRed | ManaCostShard::PhyrexianBlackRed => {
-                available.contains(&ManaType::Black) || available.contains(&ManaType::Red)
-            }
-            ManaCostShard::RedGreen | ManaCostShard::PhyrexianRedGreen => {
-                available.contains(&ManaType::Red) || available.contains(&ManaType::Green)
-            }
-            ManaCostShard::GreenWhite | ManaCostShard::PhyrexianGreenWhite => {
-                available.contains(&ManaType::Green) || available.contains(&ManaType::White)
-            }
-            ManaCostShard::WhiteBlack | ManaCostShard::PhyrexianWhiteBlack => {
-                available.contains(&ManaType::White) || available.contains(&ManaType::Black)
-            }
-            ManaCostShard::BlueRed | ManaCostShard::PhyrexianBlueRed => {
-                available.contains(&ManaType::Blue) || available.contains(&ManaType::Red)
-            }
-            ManaCostShard::BlackGreen | ManaCostShard::PhyrexianBlackGreen => {
-                available.contains(&ManaType::Black) || available.contains(&ManaType::Green)
-            }
-            ManaCostShard::RedWhite | ManaCostShard::PhyrexianRedWhite => {
-                available.contains(&ManaType::Red) || available.contains(&ManaType::White)
-            }
-            ManaCostShard::GreenBlue | ManaCostShard::PhyrexianGreenBlue => {
-                available.contains(&ManaType::Green) || available.contains(&ManaType::Blue)
-            }
-            // Colorless, Snow, X, ColorlessWhite etc. — no color requirement
-            ManaCostShard::Colorless
-            | ManaCostShard::Snow
-            | ManaCostShard::X
-            | ManaCostShard::ColorlessWhite
-            | ManaCostShard::ColorlessBlue
-            | ManaCostShard::ColorlessBlack
-            | ManaCostShard::ColorlessRed
-            | ManaCostShard::ColorlessGreen => true,
-        };
-        if !satisfied {
-            return false;
-        }
-    }
-    true
 }
 
 /// Evaluate a card's value for scry/dig/surveil decisions.

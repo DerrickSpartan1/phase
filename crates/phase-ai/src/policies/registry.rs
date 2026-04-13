@@ -51,6 +51,8 @@ pub enum PolicyId {
     LifeTotalResource,
     CardAdvantage,
     LandfallTiming,
+    KeepablesByLandCount,
+    LandfallKeepablesHand,
 }
 
 /// Coarse routing kind for a candidate decision. Each policy declares which
