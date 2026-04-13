@@ -133,6 +133,10 @@ fn handle_activated_mode_choice(
             );
             if let Some(index) = ability_index {
                 restrictions::record_ability_activation(state, source_id, index);
+                // CR 117.1b: Priority permits unbounded activation.
+                // `pending_activations` is a per-priority-window AI-guard —
+                // see `GameState::pending_activations`.
+                state.pending_activations.push((source_id, index));
             }
         } else {
             let selection = begin_target_selection_for_ability(
@@ -173,6 +177,10 @@ fn handle_activated_mode_choice(
         );
         if let Some(index) = ability_index {
             restrictions::record_ability_activation(state, source_id, index);
+            // CR 117.1b: Priority permits unbounded activation.
+            // `pending_activations` is a per-priority-window AI-guard —
+            // see `GameState::pending_activations`.
+            state.pending_activations.push((source_id, index));
         }
     }
 

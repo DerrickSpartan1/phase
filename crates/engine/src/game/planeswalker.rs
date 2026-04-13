@@ -226,6 +226,9 @@ fn finalize_loyalty_activation(
     );
 
     super::restrictions::record_ability_activation(state, pw_id, ability_index);
+    // CR 117.1b: Priority permits unbounded activation. `pending_activations`
+    // is a per-priority-window AI-guard — see `GameState::pending_activations`.
+    state.pending_activations.push((pw_id, ability_index));
     events.push(GameEvent::AbilityActivated { source_id: pw_id });
     state.lands_tapped_for_mana.remove(&player);
     state.priority_passes.clear();

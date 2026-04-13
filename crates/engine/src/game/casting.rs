@@ -2473,6 +2473,9 @@ pub fn handle_activate_ability(
             );
 
             restrictions::record_ability_activation(state, source_id, ability_index);
+            // CR 117.1b: Priority permits unbounded activation. `pending_activations`
+            // is a per-priority-window AI-guard — see `GameState::pending_activations`.
+            state.pending_activations.push((source_id, ability_index));
             events.push(GameEvent::AbilityActivated { source_id });
             state.priority_passes.clear();
             state.priority_pass_count = 0;
@@ -2529,6 +2532,9 @@ pub fn handle_activate_ability(
     );
 
     restrictions::record_ability_activation(state, source_id, ability_index);
+    // CR 117.1b: Priority permits unbounded activation. `pending_activations`
+    // is a per-priority-window AI-guard — see `GameState::pending_activations`.
+    state.pending_activations.push((source_id, ability_index));
     events.push(GameEvent::AbilityActivated { source_id });
 
     state.priority_passes.clear();

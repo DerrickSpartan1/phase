@@ -259,6 +259,12 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             // Other phase triggers (Upkeep, End, etc.) only process PhaseChanged events
             // which the pipeline already filters, so they don't need this guard.
             state.cancelled_casts.clear();
+            // CR 117.4 + 608.1: When all players pass in succession the stack
+            // begins resolving; at that moment the AI-guard against re-activating
+            // still-pending abilities is no longer needed. Cleared unconditionally
+            // on PassPriority (not on PlayLand — playing a land doesn't resolve
+            // the stack, so prior activations are still pending).
+            state.pending_activations.clear();
             let stack_was_empty = state.stack.is_empty();
             let wf = priority::handle_priority_pass(state, &mut events);
             if stack_was_empty && !state.stack.is_empty() && state.phase == Phase::CombatDamage {

@@ -241,23 +241,35 @@ pub fn score_candidates(
         &services.context,
     );
 
-    // Filter out spells/abilities that were cast then cancelled this priority window.
-    // Prevents deterministic cast→cancel→recast infinite loops.
-    let gated: Vec<_> = if state.cancelled_casts.is_empty() {
-        gated
-    } else {
-        gated
-            .into_iter()
-            .filter(|g| match &g.candidate.action {
-                GameAction::CastSpell { object_id, .. }
-                | GameAction::ActivateAbility {
-                    source_id: object_id,
-                    ..
-                } => !state.cancelled_casts.contains(object_id),
-                _ => true,
-            })
-            .collect()
-    };
+    // Filter out (a) spells/abilities that were cast then cancelled this
+    // priority window (prevents cast→cancel→recast loops), and (b) activated
+    // abilities whose prior activation is still pending on the stack (prevents
+    // the AI softmax from re-picking the same ability before it resolves —
+    // a pathological score outcome when the effect is redundant or self-undoing).
+    // Both guards clear on PassPriority (see `GameState::pending_activations`).
+    let gated: Vec<_> =
+        if state.cancelled_casts.is_empty() && state.pending_activations.is_empty() {
+            gated
+        } else {
+            gated
+                .into_iter()
+                .filter(|g| match &g.candidate.action {
+                    GameAction::CastSpell { object_id, .. } => {
+                        !state.cancelled_casts.contains(object_id)
+                    }
+                    GameAction::ActivateAbility {
+                        source_id,
+                        ability_index,
+                    } => {
+                        !state.cancelled_casts.contains(source_id)
+                            && !state
+                                .pending_activations
+                                .contains(&(*source_id, *ability_index))
+                    }
+                    _ => true,
+                })
+                .collect()
+        };
 
     let actions: Vec<GameAction> = gated
         .iter()

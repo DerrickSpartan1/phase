@@ -223,6 +223,11 @@ pub(crate) fn handle_select_targets(
         );
 
         restrictions::record_ability_activation(state, pending.object_id, ability_index);
+        // CR 117.1b: Priority permits unbounded activation. `pending_activations`
+        // is a per-priority-window AI-guard — see `GameState::pending_activations`.
+        state
+            .pending_activations
+            .push((pending.object_id, ability_index));
         events.push(GameEvent::AbilityActivated {
             source_id: pending.object_id,
         });
@@ -312,6 +317,12 @@ pub(crate) fn handle_choose_target(
                 );
 
                 restrictions::record_ability_activation(state, pending.object_id, ability_index);
+                // CR 117.1b: Priority permits unbounded activation.
+                // `pending_activations` is a per-priority-window AI-guard — see
+                // `GameState::pending_activations`.
+                state
+                    .pending_activations
+                    .push((pending.object_id, ability_index));
                 events.push(GameEvent::AbilityActivated {
                     source_id: pending.object_id,
                 });

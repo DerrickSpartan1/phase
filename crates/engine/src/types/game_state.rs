@@ -1388,6 +1388,19 @@ pub struct GameState {
     #[serde(default)]
     pub cancelled_casts: Vec<ObjectId>,
 
+    /// (source_id, ability_index) pairs for activated abilities pushed to the
+    /// stack during the current priority window. Transient AI-guard that
+    /// prevents the AI's softmax policy from re-choosing the same activated
+    /// ability while its prior activation is still unresolved on the stack —
+    /// a pathological scoring outcome when the effect is redundant (e.g.
+    /// self-exile with delayed return, or gain indestructible UEOT when the
+    /// buff is already active). CR 117.1b permits unbounded activation at
+    /// priority, and absent a CR 602.5b restriction there is no per-turn cap,
+    /// so this is a pure AI-pathology mitigation, not a rules concern.
+    /// Cleared on PassPriority (when the stack will begin resolving).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_activations: Vec<(ObjectId, usize)>,
+
     // Triggered ability targeting
     #[serde(default)]
     pub pending_trigger: Option<crate::game::triggers::PendingTrigger>,
@@ -1876,6 +1889,7 @@ impl GameState {
             dungeon_progress: HashMap::new(),
             initiative: None,
             cancelled_casts: Vec::new(),
+            pending_activations: Vec::new(),
         }
     }
 
