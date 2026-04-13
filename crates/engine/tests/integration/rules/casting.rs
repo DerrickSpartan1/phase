@@ -475,23 +475,23 @@ fn escape_variant_preserved_through_mana_payment() {
 
     runner
         .act(GameAction::ChooseX { value: 1 })
-        .expect("ChooseX should advance to ManaPayment");
+        .expect("ChooseX should auto-pay and land the spell on the stack");
 
-    assert!(
-        matches!(runner.state().waiting_for, WaitingFor::ManaPayment { .. }),
-        "Expected ManaPayment after ChooseX, got {:?}",
-        runner.state().waiting_for
-    );
-    let pending = runner
-        .state()
-        .pending_cast
-        .as_ref()
-        .expect("pending_cast should exist during ManaPayment");
-    assert_eq!(
-        pending.casting_variant,
-        CastingVariant::Escape,
-        "CastingVariant::Escape must survive through to ManaPayment pending_cast"
-    );
+    // With auto-pay, the concretized `{1}{B}{B}` cost (no hybrid/Phyrexian) is
+    // classified as Unambiguous and `ManaPayment` is skipped entirely. The
+    // CastingVariant::Escape must still survive all the way into the stack entry.
+    let state = runner.state();
+    assert_eq!(state.stack.len(), 1, "spell on stack after auto-pay");
+    match &state.stack[0].kind {
+        engine::types::game_state::StackEntryKind::Spell {
+            casting_variant, ..
+        } => assert_eq!(
+            *casting_variant,
+            CastingVariant::Escape,
+            "CastingVariant::Escape must survive auto-finalization onto the stack"
+        ),
+        other => panic!("expected StackEntryKind::Spell, got {other:?}"),
+    }
 }
 
 /// CR 702.138: CancelCast during exile selection returns to Priority.

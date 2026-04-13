@@ -843,125 +843,12 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 object_id: pending.object_id,
                 value,
             });
-            casting_costs::enter_payment_step(state, player, convoke_mode)
+            casting_costs::enter_payment_step(state, player, convoke_mode, &mut events)?
         }
-        // Finalize mana payment: pay cost from pool and push spell/ability to stack.
+        // CR 601.2h: Player has confirmed payment — delegate to the shared finalizer
+        // that both this branch and the auto-pay path in `enter_payment_step` share.
         (WaitingFor::ManaPayment { player, .. }, GameAction::PassPriority) => {
-            let pending = state.pending_cast.take().ok_or_else(|| {
-                EngineError::InvalidAction("No pending cast to finalize".to_string())
-            })?;
-            if let Some(ability_index) = pending.activation_ability_index {
-                // Activated ability finalization: pay mana from pool, then delegate
-                // remaining costs + target selection + stack push to shared helper.
-                casting::pay_mana_cost(
-                    state,
-                    *player,
-                    pending.object_id,
-                    &pending.cost,
-                    &mut events,
-                )?;
-                casting_costs::push_activated_ability_to_stack(
-                    state,
-                    *player,
-                    pending.object_id,
-                    ability_index,
-                    pending.ability,
-                    pending.activation_cost.as_ref(),
-                    &mut events,
-                )?
-            } else if let Some(unit) = pending.distribute {
-                // CR 601.2d: X-spell distribution — pay mana first to determine X,
-                // then trigger DistributeAmong with total = X.
-                let p = *player;
-                let pool_before = state
-                    .players
-                    .iter()
-                    .find(|pl| pl.id == p)
-                    .map(|pl| pl.mana_pool.total())
-                    .unwrap_or(0);
-
-                casting::pay_mana_cost(state, p, pending.object_id, &pending.cost, &mut events)?;
-
-                let pool_after = state
-                    .players
-                    .iter()
-                    .find(|pl| pl.id == p)
-                    .map(|pl| pl.mana_pool.total())
-                    .unwrap_or(0);
-                // CR 107.1b + CR 601.2f: Prefer the explicit `chosen_x` set during
-                // `WaitingFor::ChooseXValue`. Fallback to inference (total paid minus
-                // non-X colored/generic costs) preserves behavior for any legacy paths
-                // that bypass ChooseX. ManaCost::mana_value() excludes X (CR 202.3e).
-                let non_x_cost = pending.cost.mana_value();
-                let total_paid = pool_before.saturating_sub(pool_after) as u32;
-                let x_value = pending
-                    .ability
-                    .chosen_x
-                    .unwrap_or_else(|| total_paid.saturating_sub(non_x_cost));
-
-                let targets = super::ability_utils::flatten_targets_in_chain(&pending.ability);
-                // Store pending cast for post-distribution resumption.
-                // Use ManaCost::NoCost since mana was already paid above —
-                // finalize_cast will be called after DistributeAmong completes and
-                // must not re-deduct mana.
-                let mut pending_resumed = crate::types::game_state::PendingCast::new(
-                    pending.object_id,
-                    pending.card_id,
-                    pending.ability,
-                    crate::types::mana::ManaCost::NoCost,
-                );
-                pending_resumed.casting_variant = pending.casting_variant;
-                pending_resumed.origin_zone = pending.origin_zone;
-
-                // CR 601.2d: "divided evenly, rounded down" — EvenSplitDamage bypasses
-                // interactive distribution. Remainder is intentionally lost per Oracle text;
-                // total dealt may be less than the original amount.
-                if unit == crate::types::game_state::DistributionUnit::EvenSplitDamage
-                    && !targets.is_empty()
-                {
-                    let num = targets.len() as u32;
-                    let per_target = x_value / num;
-                    let distribution: Vec<_> =
-                        targets.iter().map(|t| (t.clone(), per_target)).collect();
-                    pending_resumed.ability.distribution = Some(distribution);
-                    state.pending_cast = Some(Box::new(pending_resumed));
-
-                    // Resume casting pipeline directly.
-                    let pending = state.pending_cast.take().unwrap();
-                    casting_costs::finalize_cast(
-                        state,
-                        p,
-                        pending.object_id,
-                        pending.card_id,
-                        pending.ability,
-                        &pending.cost,
-                        pending.casting_variant,
-                        pending.origin_zone,
-                        &mut events,
-                    )?
-                } else {
-                    state.pending_cast = Some(Box::new(pending_resumed));
-
-                    WaitingFor::DistributeAmong {
-                        player: p,
-                        total: x_value,
-                        targets,
-                        unit,
-                    }
-                }
-            } else {
-                casting_costs::finalize_cast(
-                    state,
-                    *player,
-                    pending.object_id,
-                    pending.card_id,
-                    pending.ability,
-                    &pending.cost,
-                    pending.casting_variant,
-                    pending.origin_zone,
-                    &mut events,
-                )?
-            }
+            casting_costs::finalize_mana_payment(state, *player, &mut events)?
         }
         // Allow mana abilities during mana payment (mid-cast)
         (

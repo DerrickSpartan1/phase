@@ -2408,11 +2408,12 @@ pub fn handle_activate_ability(
             pending_wb.activation_cost = Some(cost.clone());
             pending_wb.activation_ability_index = Some(ability_index);
             state.pending_cast = Some(Box::new(pending_wb));
-            return Ok(casting_costs::enter_payment_step(
+            return casting_costs::enter_payment_step(
                 state,
                 player,
                 Some(ConvokeMode::Waterbend),
-            ));
+                events,
+            );
         }
 
         // CR 107.1b + CR 601.2f: When an activated ability's cost includes a mana
@@ -2425,7 +2426,7 @@ pub fn handle_activate_ability(
             pending_x.activation_cost = remaining;
             pending_x.activation_ability_index = Some(ability_index);
             state.pending_cast = Some(Box::new(pending_x));
-            return Ok(casting_costs::enter_payment_step(state, player, None));
+            return casting_costs::enter_payment_step(state, player, None, events);
         }
     }
 
@@ -3218,37 +3219,7 @@ mod tests {
         };
         assert_eq!(max, 3, "pool of 5 minus fixed GG=2 should bound X at 3");
 
-        // Commit X = 3.
-        let result = apply(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
-        assert!(matches!(result.waiting_for, WaitingFor::ManaPayment { .. }));
-        assert!(
-            result
-                .events
-                .iter()
-                .any(|e| matches!(e, GameEvent::XValueChosen { value: 3, .. })),
-            "should emit XValueChosen event"
-        );
-
-        // Pending cost is now concretized: X shard replaced with 3 generic.
-        let pending = state.pending_cast.as_ref().expect("pending cast present");
-        match &pending.cost {
-            ManaCost::Cost { shards, generic } => {
-                assert!(
-                    !shards.iter().any(|s| matches!(s, ManaCostShard::X)),
-                    "X shard should be removed after concretize"
-                );
-                assert_eq!(*generic, 3, "generic should hold the chosen X value");
-            }
-            other => panic!("expected concrete cost, got {other:?}"),
-        }
-        assert_eq!(
-            pending.ability.chosen_x,
-            Some(3),
-            "chosen_x should propagate to the ability for resolution-time lookup"
-        );
-
-        // Finalize payment — spell resolves and draws X = 3 cards.
-        // Seed 3 cards in library so Draw can succeed.
+        // Seed 3 cards in library so Draw can succeed at resolution.
         for i in 0..3 {
             create_object(
                 &mut state,
@@ -3258,12 +3229,33 @@ mod tests {
                 Zone::Library,
             );
         }
-        // First PassPriority pays mana and moves the spell from hand to stack;
-        // after that, driving priority resolves the stack and Draw fires.
-        let _ = apply(&mut state, GameAction::PassPriority).unwrap();
-        let hand_after_mana_paid = state.players[0].hand.len();
-        assert_eq!(hand_after_mana_paid, 0, "spell moved from hand to stack");
-        assert_eq!(state.stack.len(), 1, "spell on stack");
+
+        // Commit X = 3. Because the concretized cost `{3}{G}{G}` contains no
+        // hybrid/Phyrexian shards and convoke is inactive, `enter_payment_step`
+        // classifies payment as Unambiguous and auto-finalizes — the spell goes
+        // straight to the stack without a `ManaPayment` round trip.
+        let result = apply(&mut state, GameAction::ChooseX { value: 3 }).unwrap();
+        assert!(
+            !matches!(result.waiting_for, WaitingFor::ManaPayment { .. }),
+            "auto-pay should skip ManaPayment for unambiguous concretized costs"
+        );
+        assert!(
+            result
+                .events
+                .iter()
+                .any(|e| matches!(e, GameEvent::XValueChosen { value: 3, .. })),
+            "should emit XValueChosen event"
+        );
+        assert_eq!(
+            state.players[0].hand.len(),
+            0,
+            "spell moved from hand to stack"
+        );
+        assert_eq!(state.stack.len(), 1, "spell on stack after auto-pay");
+        assert!(
+            state.pending_cast.is_none(),
+            "pending_cast is consumed by auto-finalization"
+        );
 
         for _ in 0..4 {
             if state.stack.is_empty() && matches!(state.waiting_for, WaitingFor::Priority { .. }) {
@@ -3593,7 +3585,14 @@ mod tests {
         pending.activation_ability_index = None;
         state.pending_cast = Some(Box::new(pending));
 
-        let waiting = enter_payment_step(&state, PlayerId(0), Some(ConvokeMode::Waterbend));
+        let mut events = Vec::new();
+        let waiting = enter_payment_step(
+            &mut state,
+            PlayerId(0),
+            Some(ConvokeMode::Waterbend),
+            &mut events,
+        )
+        .expect("enter_payment_step should succeed for X + Waterbend pending cast");
         match waiting {
             WaitingFor::ChooseXValue { convoke_mode, .. } => {
                 assert_eq!(
@@ -3677,22 +3676,24 @@ mod tests {
             pending.activation_cost
         );
 
-        // Commit X = 1.
+        // Commit X = 1. The concretized mana cost is `{1}` (pure generic), so
+        // `enter_payment_step` auto-finalizes: mana pays, the deferred Tap
+        // activation cost fires, and the ability lands on the stack — all within
+        // the single `ChooseX` action, no intermediate `ManaPayment` round trip.
         apply(&mut state, GameAction::ChooseX { value: 1 }).unwrap();
-        assert!(matches!(state.waiting_for, WaitingFor::ManaPayment { .. }));
         assert!(
-            !state.objects[&source].tapped,
-            "source still must not be tapped — mana payment hasn't completed"
+            !matches!(state.waiting_for, WaitingFor::ManaPayment { .. }),
+            "auto-pay should skip ManaPayment when the concretized cost is unambiguous"
         );
-
-        // Drive priority: first pass pays mana + deferred Tap, pushing the ability
-        // to the stack. Subsequent passes resolve the ability.
-        apply(&mut state, GameAction::PassPriority).unwrap();
         assert!(
             state.objects[&source].tapped,
-            "source must be tapped after ManaPayment completes and activation_cost pays the Tap"
+            "source must be tapped — auto-finalization paid mana and the deferred Tap"
         );
-        assert_eq!(state.stack.len(), 1, "activated ability on stack");
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "activated ability on stack after auto-pay"
+        );
     }
 
     /// Composite costs with Sacrifice + Pay {X}{G}: the fixed G contributes to

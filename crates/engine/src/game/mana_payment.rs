@@ -135,6 +135,56 @@ pub fn can_pay(pool: &ManaPool, cost: &ManaCost) -> bool {
     can_pay_for_spell(pool, cost, None, false)
 }
 
+/// Classification of a mana cost for auto-pay eligibility.
+///
+/// `Unambiguous` means the cost can be paid without a player-level rules decision:
+/// all shards map to a single mana type (after X has been concretized). `pay_mana_cost`
+/// can resolve the payment deterministically, and the `WaitingFor::ManaPayment` state
+/// adds no information — it is pure ceremony.
+///
+/// The other variants name which rules decision a player still owes. CR 601.2h requires
+/// these to be resolved by the caster before mana is paid, so we must surface the
+/// `ManaPayment` UI for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaymentClassification {
+    /// No hybrid or Phyrexian shards remain — `pay_mana_cost` can auto-tap and spend.
+    Unambiguous,
+    /// Hybrid shard (`{W/U}`, `{2/W}`, `{C/W}`, ...) requires a color choice. CR 107.4e.
+    NeedsHybridChoice,
+    /// Phyrexian shard (`{W/P}`, `{W/U/P}`, ...) requires a mana-vs-2-life choice. CR 107.4f.
+    NeedsPhyrexianChoice,
+}
+
+/// Decide whether a concretized mana cost can be paid without any further player decision.
+///
+/// Inspects each shard through the existing `ShardRequirement` discriminator and flags
+/// the first hybrid or Phyrexian requirement found. Generic / `Single(color)` / `Snow`
+/// shards are always unambiguous — `pay_mana_cost` already picks sources deterministically
+/// and handles auto-tap of free producers.
+///
+/// CR 601.2h: The player must choose how to pay for hybrid and Phyrexian mana as part
+/// of determining total cost. This predicate is the single authority on whether that
+/// choice is actually present in a given cost.
+pub fn classify_payment(cost: &ManaCost) -> PaymentClassification {
+    let ManaCost::Cost { shards, .. } = cost else {
+        return PaymentClassification::Unambiguous;
+    };
+    for shard in shards {
+        match shard_to_mana_type(*shard) {
+            ShardRequirement::Hybrid(..)
+            | ShardRequirement::TwoGenericHybrid(..)
+            | ShardRequirement::ColorlessHybrid(..) => {
+                return PaymentClassification::NeedsHybridChoice;
+            }
+            ShardRequirement::Phyrexian(..) | ShardRequirement::HybridPhyrexian(..) => {
+                return PaymentClassification::NeedsPhyrexianChoice;
+            }
+            ShardRequirement::Single(..) | ShardRequirement::Snow | ShardRequirement::X => {}
+        }
+    }
+    PaymentClassification::Unambiguous
+}
+
 /// Check if the pool can pay the cost, respecting mana restrictions when `spell` is provided.
 ///
 /// CR 106.6: Some abilities that produce mana restrict how that mana can be spent.
@@ -634,6 +684,68 @@ mod tests {
     use super::*;
     use crate::types::identifiers::ObjectId;
     use crate::types::mana::ManaRestriction;
+
+    /// The building-block predicate must classify each shape the parser can produce.
+    /// Generic + colored + snow + free `X` (pre-concretization sentinel) are all
+    /// resolvable by `pay_mana_cost` without player input; hybrid and Phyrexian
+    /// require a rules-level choice per CR 107.4e / 107.4f.
+    #[test]
+    fn classify_payment_recognizes_each_shard_class() {
+        let unambiguous = |shards: Vec<ManaCostShard>| ManaCost::Cost { shards, generic: 0 };
+
+        assert_eq!(
+            classify_payment(&ManaCost::NoCost),
+            PaymentClassification::Unambiguous
+        );
+        assert_eq!(
+            classify_payment(&unambiguous(vec![
+                ManaCostShard::Red,
+                ManaCostShard::Red,
+                ManaCostShard::Colorless,
+            ])),
+            PaymentClassification::Unambiguous,
+            "pure single-color + colorless is always auto-payable"
+        );
+        assert_eq!(
+            classify_payment(&unambiguous(vec![ManaCostShard::Snow, ManaCostShard::Blue])),
+            PaymentClassification::Unambiguous,
+            "snow + single color is auto-payable (pay_mana_cost picks deterministically)"
+        );
+        assert_eq!(
+            classify_payment(&unambiguous(vec![ManaCostShard::WhiteBlue])),
+            PaymentClassification::NeedsHybridChoice,
+        );
+        assert_eq!(
+            classify_payment(&unambiguous(vec![ManaCostShard::TwoGreen])),
+            PaymentClassification::NeedsHybridChoice,
+            "{{2/G}} is a hybrid choice: pay 2 generic or 1 green"
+        );
+        assert_eq!(
+            classify_payment(&unambiguous(vec![ManaCostShard::ColorlessRed])),
+            PaymentClassification::NeedsHybridChoice,
+        );
+        assert_eq!(
+            classify_payment(&unambiguous(vec![ManaCostShard::PhyrexianBlack])),
+            PaymentClassification::NeedsPhyrexianChoice,
+        );
+        assert_eq!(
+            classify_payment(&unambiguous(vec![ManaCostShard::PhyrexianWhiteBlue])),
+            PaymentClassification::NeedsPhyrexianChoice,
+            "hybrid-phyrexian requires a choice (reported as phyrexian since life is an option)"
+        );
+        // First ambiguity wins — we report phyrexian before hybrid if both appear
+        // after a phyrexian shard, which is fine for the auto-pay gate (both paths
+        // require input; the variant is informational for future UI improvements).
+        assert_eq!(
+            classify_payment(&unambiguous(vec![
+                ManaCostShard::Red,
+                ManaCostShard::WhiteBlue,
+                ManaCostShard::PhyrexianBlack,
+            ])),
+            PaymentClassification::NeedsHybridChoice,
+            "scans in order — hybrid is found first"
+        );
+    }
 
     fn make_unit(color: ManaType) -> ManaUnit {
         ManaUnit {

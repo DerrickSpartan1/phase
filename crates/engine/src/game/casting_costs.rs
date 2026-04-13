@@ -855,11 +855,7 @@ fn pay_additional_cost(
                 cost: combined,
                 ..pending
             }));
-            return Ok(enter_payment_step(
-                state,
-                player,
-                Some(ConvokeMode::Waterbend),
-            ));
+            return enter_payment_step(state, player, Some(ConvokeMode::Waterbend), events);
         }
         AbilityCost::Exile {
             count,
@@ -1059,7 +1055,7 @@ pub(super) fn pay_and_push_adventure(
         pending.distribute = distribute;
         pending.origin_zone = origin_zone;
         state.pending_cast = Some(Box::new(pending));
-        return Ok(enter_payment_step(state, player, convoke_mode));
+        return enter_payment_step(state, player, convoke_mode, events);
     }
 
     finalize_cast(
@@ -1516,34 +1512,172 @@ pub fn max_x_value(state: &GameState, player: PlayerId, cost: &ManaCost) -> u32 
 
 /// Single authority for transitioning into the payment step of a cast.
 ///
-/// If the pending cast's cost contains `ManaCostShard::X` and no X value has
-/// been chosen yet, diverts to `WaitingFor::ChooseXValue` so the caster can
-/// pick X before paying mana (CR 601.2f). Otherwise enters `WaitingFor::ManaPayment`
-/// normally. `convoke_mode` passes through either way.
+/// Decides, in order:
+/// 1. **`ChooseXValue`** — the cost still contains an unchosen X (CR 601.2f).
+/// 2. **Auto-finalize** — the concretized cost contains no hybrid/Phyrexian shards
+///    and convoke is not active, so `pay_mana_cost` can deterministically satisfy it.
+///    The `ManaPayment` state is skipped entirely; we proceed directly to stack push.
+///    This mirrors Arena's "cast and resolve" feel for unambiguous costs.
+/// 3. **`ManaPayment`** — player input is required (hybrid choice, Phyrexian life
+///    payment, or convoke tap selection).
 ///
 /// All sites that would otherwise construct `WaitingFor::ManaPayment` during a
-/// cast must go through this helper so X-selection is never bypassed.
+/// cast must go through this helper so X-selection and auto-pay are never bypassed.
 pub fn enter_payment_step(
-    state: &GameState,
+    state: &mut GameState,
     player: PlayerId,
     convoke_mode: Option<ConvokeMode>,
-) -> WaitingFor {
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
     if let Some(pending) = state.pending_cast.as_ref() {
         if pending.ability.chosen_x.is_none() && cost_has_x(&pending.cost) {
             let max = max_x_value(state, player, &pending.cost);
             let pending_cast = pending.clone();
-            return WaitingFor::ChooseXValue {
+            return Ok(WaitingFor::ChooseXValue {
                 player,
                 max,
                 pending_cast,
                 convoke_mode,
-            };
+            });
         }
     }
-    WaitingFor::ManaPayment {
+
+    // CR 601.2h: Auto-finalize when no player-level decision remains. Convoke requires
+    // the caster to choose which creatures to tap, so it always surfaces the modal.
+    if convoke_mode.is_none() {
+        if let Some(pending) = state.pending_cast.as_ref() {
+            if mana_payment::classify_payment(&pending.cost)
+                == mana_payment::PaymentClassification::Unambiguous
+            {
+                return finalize_mana_payment(state, player, events);
+            }
+        }
+    }
+
+    Ok(WaitingFor::ManaPayment {
         player,
         convoke_mode,
+    })
+}
+
+/// Pay the pending cast's mana cost and transition to the next game state.
+///
+/// Dispatches on the shape of `state.pending_cast`:
+/// - **Activated ability** — pay mana, then push the ability to the stack.
+/// - **X-spell with distribution** (`Fireball`-like) — pay mana to determine X total,
+///   then either auto-split (even-damage) or enter `DistributeAmong` (interactive).
+/// - **Normal spell** — delegate to `finalize_cast` which pays mana and pushes.
+///
+/// Called both from the `(ManaPayment, PassPriority)` branch in the main engine
+/// dispatcher and from `enter_payment_step` when classification skips the modal.
+/// This is the single authority for completing a mana payment.
+pub fn finalize_mana_payment(
+    state: &mut GameState,
+    player: PlayerId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let pending = state
+        .pending_cast
+        .take()
+        .ok_or_else(|| EngineError::InvalidAction("No pending cast to finalize".to_string()))?;
+
+    if let Some(ability_index) = pending.activation_ability_index {
+        super::casting::pay_mana_cost(state, player, pending.object_id, &pending.cost, events)?;
+        return push_activated_ability_to_stack(
+            state,
+            player,
+            pending.object_id,
+            ability_index,
+            pending.ability,
+            pending.activation_cost.as_ref(),
+            events,
+        );
     }
+
+    if let Some(unit) = pending.distribute {
+        // CR 601.2d: X-spell distribution — pay mana first to determine X, then
+        // trigger DistributeAmong with total = X.
+        let pool_before = state
+            .players
+            .iter()
+            .find(|pl| pl.id == player)
+            .map(|pl| pl.mana_pool.total())
+            .unwrap_or(0);
+
+        super::casting::pay_mana_cost(state, player, pending.object_id, &pending.cost, events)?;
+
+        let pool_after = state
+            .players
+            .iter()
+            .find(|pl| pl.id == player)
+            .map(|pl| pl.mana_pool.total())
+            .unwrap_or(0);
+        // CR 107.1b + CR 601.2f: Prefer the explicit `chosen_x` set during
+        // `WaitingFor::ChooseXValue`. Fallback to inference (total paid minus
+        // non-X colored/generic costs) preserves behavior for any legacy paths
+        // that bypass ChooseX. ManaCost::mana_value() excludes X (CR 202.3e).
+        let non_x_cost = pending.cost.mana_value();
+        let total_paid = pool_before.saturating_sub(pool_after) as u32;
+        let x_value = pending
+            .ability
+            .chosen_x
+            .unwrap_or_else(|| total_paid.saturating_sub(non_x_cost));
+
+        let targets = super::ability_utils::flatten_targets_in_chain(&pending.ability);
+        // Store pending cast for post-distribution resumption. Use `ManaCost::NoCost`
+        // since mana was already paid above — `finalize_cast` must not re-deduct.
+        let mut pending_resumed = PendingCast::new(
+            pending.object_id,
+            pending.card_id,
+            pending.ability,
+            crate::types::mana::ManaCost::NoCost,
+        );
+        pending_resumed.casting_variant = pending.casting_variant;
+        pending_resumed.origin_zone = pending.origin_zone;
+
+        // CR 601.2d: "divided evenly, rounded down" — EvenSplitDamage bypasses
+        // interactive distribution. Remainder is intentionally lost per Oracle text.
+        if unit == DistributionUnit::EvenSplitDamage && !targets.is_empty() {
+            let num = targets.len() as u32;
+            let per_target = x_value / num;
+            let distribution: Vec<_> = targets.iter().map(|t| (t.clone(), per_target)).collect();
+            pending_resumed.ability.distribution = Some(distribution);
+            state.pending_cast = Some(Box::new(pending_resumed));
+
+            let pending = state.pending_cast.take().unwrap();
+            return finalize_cast(
+                state,
+                player,
+                pending.object_id,
+                pending.card_id,
+                pending.ability,
+                &pending.cost,
+                pending.casting_variant,
+                pending.origin_zone,
+                events,
+            );
+        }
+
+        state.pending_cast = Some(Box::new(pending_resumed));
+        return Ok(WaitingFor::DistributeAmong {
+            player,
+            total: x_value,
+            targets,
+            unit,
+        });
+    }
+
+    finalize_cast(
+        state,
+        player,
+        pending.object_id,
+        pending.card_id,
+        pending.ability,
+        &pending.cost,
+        pending.casting_variant,
+        pending.origin_zone,
+        events,
+    )
 }
 
 /// Return true if the given cost contains a `ManaCostShard::X` shard.

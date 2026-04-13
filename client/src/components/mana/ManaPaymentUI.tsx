@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ManaType } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { manaCostToShards } from "../../viewmodel/costLabel.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { ManaBadge } from "./ManaBadge.tsx";
 import { ManaSymbol } from "./ManaSymbol.tsx";
@@ -36,7 +37,7 @@ export function ManaPaymentUI() {
     const topEntry = stack[stack.length - 1];
     const sourceObj = gameState.objects[topEntry.source_id];
     if (!sourceObj || sourceObj.mana_cost.type !== "Cost") return null;
-    return sourceObj.mana_cost.shards;
+    return manaCostToShards(sourceObj.mana_cost);
   }, [gameState, isManaPayment]);
 
   const cardName = useMemo(() => {
