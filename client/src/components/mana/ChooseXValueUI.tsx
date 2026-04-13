@@ -1,6 +1,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { manaCostToShards } from "../../viewmodel/costLabel.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
@@ -18,6 +19,7 @@ export function ChooseXValueUI() {
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameState = useGameStore((s) => s.gameState);
   const dispatch = useGameStore((s) => s.dispatch);
+  const canAct = useCanActForWaitingState();
 
   const isChooseX = waitingFor?.type === "ChooseXValue";
   const max = isChooseX ? waitingFor.data.max : 0;
@@ -48,7 +50,9 @@ export function ChooseXValueUI() {
     dispatch({ type: "CancelCast" });
   }, [dispatch]);
 
-  if (!isChooseX) return null;
+  // CR 601.2f: X is chosen by the caster; opponents observe via the stack
+  // ghost entry, not an interactive panel.
+  if (!isChooseX || !canAct) return null;
 
   return (
     <AnimatePresence>

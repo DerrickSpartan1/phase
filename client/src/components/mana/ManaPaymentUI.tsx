@@ -2,6 +2,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import type { ManaType } from "../../adapter/types.ts";
+import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 import { ManaBadge } from "./ManaBadge.tsx";
@@ -21,6 +22,7 @@ export function ManaPaymentUI() {
   const waitingFor = useGameStore((s) => s.waitingFor);
   const gameState = useGameStore((s) => s.gameState);
   const dispatch = useGameStore((s) => s.dispatch);
+  const canAct = useCanActForWaitingState();
 
   const isManaPayment = waitingFor?.type === "ManaPayment";
   const playerId = isManaPayment ? waitingFor.data.player : null;
@@ -109,8 +111,10 @@ export function ManaPaymentUI() {
     return cost;
   }, [phyrexianChoices]);
 
-  // Don't render if not a mana payment for the local player
-  if (!isManaPayment || !player) return null;
+  // Don't render if not a mana payment the local player can act on.
+  // CR 601.2g: mana payment is a decision for the caster alone; opponents
+  // see the mid-cast state via the stack display, not an interactive panel.
+  if (!isManaPayment || !player || !canAct) return null;
 
   return (
     <AnimatePresence>

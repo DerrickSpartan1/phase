@@ -28,6 +28,35 @@ fn add_mana(state: &mut GameState, player: PlayerId, color: ManaType, count: usi
     }
 }
 
+/// Populate `state.pending_cast` with a dummy value so synthetic `ManaPayment`
+/// states satisfy the drift invariant in `game::derived` (CR 601.2: mana
+/// payment only occurs mid-cast, so the two storage sites must agree).
+///
+/// In production, `ManaPayment` is only entered via `enter_payment_step` once
+/// `state.pending_cast` is populated. These tests bypass the cast flow and
+/// assign `waiting_for` directly, so we mirror the precondition manually.
+fn set_dummy_pending_cast(state: &mut GameState) {
+    state.pending_cast = Some(Box::new(PendingCast {
+        object_id: ObjectId(0),
+        card_id: CardId(0),
+        ability: ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: "TestSpell".to_string(),
+                description: None,
+            },
+            vec![],
+            ObjectId(0),
+            P0,
+        ),
+        cost: ManaCost::NoCost,
+        activation_cost: None,
+        activation_ability_index: None,
+        target_constraints: vec![],
+        casting_variant: CastingVariant::Normal,
+        distribute: None,
+    }));
+}
+
 // ---------------------------------------------------------------------------
 // Step 1: Earthbend event emission
 // ---------------------------------------------------------------------------
@@ -125,6 +154,7 @@ fn test_waterbending_tap_to_pay() {
     let mut runner = scenario.build();
 
     // Set up ManaPayment state with Waterbend mode
+    set_dummy_pending_cast(runner.state_mut());
     runner.state_mut().waiting_for = WaitingFor::ManaPayment {
         player: P0,
         convoke_mode: Some(ConvokeMode::Waterbend),
@@ -450,6 +480,7 @@ fn test_convoke_white_creature_produces_white() {
         .color
         .push(ManaColor::White);
 
+    set_dummy_pending_cast(runner.state_mut());
     runner.state_mut().waiting_for = WaitingFor::ManaPayment {
         player: P0,
         convoke_mode: Some(ConvokeMode::Convoke),
@@ -495,6 +526,7 @@ fn test_convoke_multicolor_creature_accepts_either_color() {
         obj.color.push(ManaColor::Green);
     }
 
+    set_dummy_pending_cast(runner.state_mut());
     runner.state_mut().waiting_for = WaitingFor::ManaPayment {
         player: P0,
         convoke_mode: Some(ConvokeMode::Convoke),
@@ -557,6 +589,7 @@ fn test_convoke_colorless_always_valid() {
     let creature_id = scenario.add_creature(P0, "Myr Token", 1, 1).id();
     let mut runner = scenario.build();
 
+    set_dummy_pending_cast(runner.state_mut());
     runner.state_mut().waiting_for = WaitingFor::ManaPayment {
         player: P0,
         convoke_mode: Some(ConvokeMode::Convoke),
@@ -587,6 +620,7 @@ fn test_convoke_preserves_mode_across_taps() {
     let c2 = scenario.add_creature(P0, "Helper 2", 1, 1).id();
     let mut runner = scenario.build();
 
+    set_dummy_pending_cast(runner.state_mut());
     runner.state_mut().waiting_for = WaitingFor::ManaPayment {
         player: P0,
         convoke_mode: Some(ConvokeMode::Convoke),
@@ -639,6 +673,7 @@ fn test_waterbend_tap_does_emit_waterbend_event() {
     let creature_id = scenario.add_creature(P0, "Water Helper", 1, 1).id();
     let mut runner = scenario.build();
 
+    set_dummy_pending_cast(runner.state_mut());
     runner.state_mut().waiting_for = WaitingFor::ManaPayment {
         player: P0,
         convoke_mode: Some(ConvokeMode::Waterbend),
