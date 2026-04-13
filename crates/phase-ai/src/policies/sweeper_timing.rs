@@ -86,11 +86,7 @@ fn candidate_is_sweeper(ctx: &PolicyContext<'_>) -> bool {
     let Some(obj) = ctx.state.objects.get(object_id) else {
         return false;
     };
-    is_sweeper_parts(
-        &obj.card_types.core_types,
-        &obj.abilities,
-        &obj.static_definitions,
-    )
+    is_sweeper_parts(&obj.abilities)
 }
 
 /// Count the number of creature permanents controlled by opponents of `player`.

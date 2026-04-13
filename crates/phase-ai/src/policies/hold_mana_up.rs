@@ -6,11 +6,13 @@
 //! sweepers, few instants) scores high `commitment` but near-zero
 //! `reactive_tempo` and therefore does NOT receive this bias.
 //!
-//! **Relationship to `InteractionReservationPolicy`**: that policy provides a
-//! general pass-priority bonus when the AI holds interaction in hand. This
-//! policy is a feature-driven companion — it penalizes tapping-out on main-phase
-//! casts when the AI has instant-speed interaction it cannot use after doing so.
-//! The two policies are additive, not competing.
+//! **Relationship to `InteractionReservationPolicy`**: that policy scores
+//! `PassPriority` (early-returns on any other candidate); this policy scores
+//! `CastSpell` and `ActivateAbility`. They fire on **disjoint candidate sets**
+//! for the same game state — `InteractionReservationPolicy` rewards passing
+//! to keep mana open, `HoldManaUpForInteractionPolicy` penalizes a cast that
+//! would tap out below the cheapest instant in hand. Together they cover both
+//! sides of the same decision without double-scoring any single candidate.
 //!
 //! CR 117.1a + CR 117.3a: a player may cast instants and activate abilities any
 //! time they have priority — leaving mana open preserves these options on the
@@ -26,11 +28,9 @@ use engine::types::player::PlayerId;
 
 use super::context::PolicyContext;
 use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, TacticalPolicy};
+use crate::features::control::REACTIVE_TEMPO_FLOOR;
+use crate::features::mana_ramp::is_mana_dork_parts;
 use crate::features::DeckFeatures;
-
-/// Minimum reactive_tempo required to activate. Below this, the deck is not
-/// instant-speed interactive enough to warrant holding-mana guidance.
-const REACTIVE_TEMPO_FLOOR: f32 = 0.25;
 
 /// Penalty applied when the AI would tap out below the cost of the cheapest
 /// instant in hand — it can no longer use its interaction this turn cycle.
@@ -119,18 +119,22 @@ fn is_own_main_phase_cast(ctx: &PolicyContext<'_>) -> bool {
     )
 }
 
-/// Count the number of untapped mana sources (lands + mana rocks) the AI
-/// controls. Used as a proxy for available mana this turn.
-/// CR 305.1: basic lands tap to produce mana.
+/// Count the number of untapped mana sources (lands + mana dorks/rocks) the
+/// AI controls. Used as a proxy for available mana this turn.
+///
+/// CR 305.1: basic lands tap to produce mana. Mana rocks/dorks are detected
+/// structurally via `features::mana_ramp::is_mana_dork_parts`, which already
+/// gates on creature/artifact + tap-cost + chain-has-mana — Sol Ring, Mind
+/// Stone, Llanowar Elves, Birds of Paradise all qualify.
 fn count_untapped_mana_sources(state: &GameState, player: PlayerId) -> u32 {
     state
         .battlefield
         .iter()
         .filter_map(|id| state.objects.get(id))
+        .filter(|obj| obj.controller == player && !obj.tapped)
         .filter(|obj| {
-            obj.controller == player
-                && !obj.tapped
-                && obj.card_types.core_types.contains(&CoreType::Land)
+            obj.card_types.core_types.contains(&CoreType::Land)
+                || is_mana_dork_parts(&obj.card_types.core_types, &obj.abilities)
         })
         .count() as u32
 }

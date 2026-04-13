@@ -29,9 +29,7 @@
 //! a mulligan policy analogous to ramp or landfall.
 
 use engine::game::DeckEntry;
-use engine::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, QuantityExpr, StaticDefinition,
-};
+use engine::types::ability::{AbilityDefinition, AbilityKind, Effect, QuantityExpr};
 use engine::types::card::CardFace;
 use engine::types::card_type::CoreType;
 use engine::types::zones::Zone;
@@ -92,6 +90,12 @@ pub struct ControlFeature {
 /// deck. Stricter than landfall/ramp (0.1) because any deck has some removal.
 pub const COMMITMENT_FLOOR: f32 = 0.25;
 
+/// Reactive-tempo floor used by `HoldManaUpForInteractionPolicy`. Numerically
+/// equal to `COMMITMENT_FLOOR` but conceptually independent — a sorcery-heavy
+/// control deck has high commitment but near-zero reactive_tempo, and the
+/// hold-mana-up bias only fires when reactive_tempo crosses this floor.
+pub const REACTIVE_TEMPO_FLOOR: f32 = 0.25;
+
 /// Structural detection — walks each `DeckEntry`'s `CardFace` AST and
 /// classifies cards across control axes.
 ///
@@ -123,18 +127,9 @@ pub fn detect(deck: &[DeckEntry]) -> ControlFeature {
         // Per-axis bool sentinels: a face contributes at most once per axis
         // even if multiple abilities match (e.g., a modal spell).
         let is_cs = is_counterspell(face);
-        let is_sw = is_sweeper_parts(
-            &face.card_type.core_types,
-            &face.abilities,
-            &face.static_abilities,
-        );
+        let is_sw = is_sweeper_parts(&face.abilities);
         // Spot removal is mutually exclusive with sweeper.
-        let is_sr = !is_sw
-            && is_spot_removal_parts(
-                &face.card_type.core_types,
-                &face.abilities,
-                &face.static_abilities,
-            );
+        let is_sr = !is_sw && is_spot_removal_parts(&face.abilities);
         let is_cd = !is_land && is_card_draw(face);
         let is_instant = !is_land && face.card_type.core_types.contains(&CoreType::Instant);
 
@@ -184,6 +179,12 @@ pub fn detect(deck: &[DeckEntry]) -> ControlFeature {
         / f32::max(total_nonland as f32, 1.0);
 
     let commitment = clamp01(2.0 * interaction_density + 1.0 * draw_density);
+    // reactive_tempo intentionally sums two overlapping signals:
+    //   1. instant-only interaction density (counts each interaction spell once)
+    //   2. raw instant ratio (counts every instant in the deck — interaction OR not)
+    // The overlap is by design — an instant-speed counterspell legitimately
+    // contributes to both the "I have interaction I can hold up" signal and the
+    // "this is an instant-heavy deck" signal. Calibration absorbs the overlap.
     let reactive_tempo =
         clamp01(1.5 * interaction_density_instant_only + 1.0 * reactive_instant_ratio);
 
@@ -222,11 +223,11 @@ fn is_counterspell(face: &CardFace) -> bool {
 /// A sweeper is a card whose effect chain contains `DestroyAll`, `DamageAll`,
 /// or `ChangeZoneAll`. Distinct variants from spot removal — no overlap possible.
 /// CR 701.8 (destroy), CR 120.3 (damage), CR 701.13 (exile).
-pub(crate) fn is_sweeper_parts(
-    _core_types: &[CoreType],
-    abilities: &[AbilityDefinition],
-    _static_abilities: &[StaticDefinition],
-) -> bool {
+///
+/// Takes only `abilities` because sweeper detection is purely effect-shape
+/// based. The `_parts` suffix is retained for policy parity with other
+/// classifiers — callers pass `&obj.abilities` directly.
+pub(crate) fn is_sweeper_parts(abilities: &[AbilityDefinition]) -> bool {
     abilities.iter().any(|ability| {
         collect_chain_effects(ability).iter().any(|e| {
             matches!(
@@ -247,11 +248,7 @@ pub(crate) fn is_sweeper_parts(
 ///
 /// Must NOT already be classified as a sweeper (callers enforce mutual exclusivity).
 /// Planeswalker loyalty activations are excluded — only `AbilityKind::Spell` counts.
-pub(crate) fn is_spot_removal_parts(
-    _core_types: &[CoreType],
-    abilities: &[AbilityDefinition],
-    _static_abilities: &[StaticDefinition],
-) -> bool {
+pub(crate) fn is_spot_removal_parts(abilities: &[AbilityDefinition]) -> bool {
     abilities.iter().any(|ability| {
         ability.kind == AbilityKind::Spell
             && collect_chain_effects(ability)
@@ -285,13 +282,11 @@ fn is_card_draw(face: &CardFace) -> bool {
     face.abilities.iter().any(|ability| {
         ability.kind == AbilityKind::Spell
             && collect_chain_effects(ability).iter().any(|e| match e {
-                Effect::Draw { count } => {
-                    // Require at least one card drawn — filter out no-op draws.
-                    matches!(
-                        count,
-                        QuantityExpr::Fixed { value } if *value >= 1
-                    ) || !matches!(count, QuantityExpr::Fixed { value: 0 })
-                }
+                // Any non-zero draw counts. `Fixed { value: 0 }` is a no-op
+                // draw (rare modal corner case); variable / Ref quantities
+                // ("draw X cards") are accepted as net-positive draws since
+                // X is normally ≥ 1 at resolution.
+                Effect::Draw { count } => !matches!(count, QuantityExpr::Fixed { value: 0 }),
                 Effect::Dig { .. } => true,
                 _ => false,
             })
