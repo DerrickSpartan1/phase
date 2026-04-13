@@ -1,9 +1,11 @@
 //! Layer 2 — Plan: derived schedule (static prior) + per-decision realization.
 //!
-//! Phase A scope: types only. Snapshot derivation and live realization land
-//! in Phase B.
+//! `derive_snapshot` lives in `curves.rs` and consumes a `DeckFeatures` prior
+//! to produce a `PlanSnapshot`. Live realization (`PlanState`) is Phase C+.
 
-use crate::features::DeckFeatures;
+pub mod curves;
+
+pub use curves::derive_snapshot;
 
 /// Tempo classification of a deck — a coarse strategic axis used by the plan.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -31,10 +33,4 @@ pub struct PlanState {
     pub lands_behind: i8,
     pub mana_behind: i8,
     pub threats_behind: i8,
-}
-
-/// Phase A stub: returns a default snapshot. Real derivation lands in Phase B
-/// (`plan/curves.rs::derive_snapshot`).
-pub fn derive_snapshot(_features: &DeckFeatures) -> PlanSnapshot {
-    PlanSnapshot::default()
 }

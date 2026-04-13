@@ -11,6 +11,7 @@ use super::etb_value::EtbValuePolicy;
 use super::evasion_removal_priority::EvasionRemovalPriorityPolicy;
 use super::hand_disruption::HandDisruptionPolicy;
 use super::interaction_reservation::InteractionReservationPolicy;
+use super::landfall_timing::LandfallTimingPolicy;
 use super::lethality_awareness::LethalityAwarenessPolicy;
 use super::life_total_resource::LifeTotalResourcePolicy;
 use super::recursion_awareness::RecursionAwarenessPolicy;
@@ -157,6 +158,7 @@ impl Default for PolicyRegistry {
             Box::new(BoardWipeTelegraphPolicy),
             Box::new(LifeTotalResourcePolicy),
             Box::new(CardAdvantagePolicy),
+            Box::new(LandfallTimingPolicy),
         ];
         let mut by_kind: HashMap<DecisionKind, Vec<usize>> = HashMap::new();
         for (idx, policy) in policies.iter().enumerate() {

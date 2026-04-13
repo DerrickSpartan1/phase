@@ -16,7 +16,7 @@ use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
 
 use crate::deck_profile::{ArchetypeClassification, DeckProfile};
-use crate::features::DeckFeatures;
+use crate::features::{landfall, DeckFeatures};
 use crate::plan::{derive_snapshot, PlanSnapshot};
 use crate::policies::registry::PolicyId;
 use crate::strategy_profile::StrategyProfile;
@@ -32,6 +32,7 @@ fn features_for(deck: &[DeckEntry]) -> DeckFeatures {
     DeckFeatures {
         archetype,
         strategy,
+        landfall: landfall::detect(deck),
         ..DeckFeatures::default()
     }
 }

@@ -12,6 +12,7 @@ mod etb_value;
 mod evasion_removal_priority;
 pub(crate) mod hand_disruption;
 mod interaction_reservation;
+mod landfall_timing;
 mod lethality_awareness;
 mod life_total_resource;
 mod mana_efficiency;
