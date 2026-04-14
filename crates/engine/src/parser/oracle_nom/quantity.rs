@@ -255,22 +255,32 @@ fn parse_scoped_zone_ref(input: &str) -> OracleResult<'_, (ZoneRef, CountScope)>
     .parse(input)
 }
 
-/// Parse "its power" / "~'s power" / "this creature's power".
+/// Parse "its power" / "~'s power" / "this creature's power" / "this card's power".
+///
+/// CR 400.7 + CR 208.3: Scavenge and other graveyard-activated effects reference
+/// the source via "this card's power" because the source is a card (not a
+/// creature) when the ability is activated. `SelfPower` is LKI-aware at
+/// resolution time (see `game/quantity.rs`), so all four phrasings resolve
+/// identically.
 fn parse_self_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         value(QuantityRef::SelfPower, tag("its power")),
         value(QuantityRef::SelfPower, tag("~'s power")),
         value(QuantityRef::SelfPower, tag("this creature's power")),
+        value(QuantityRef::SelfPower, tag("this card's power")),
     ))
     .parse(input)
 }
 
-/// Parse "its toughness" / "~'s toughness" / "this creature's toughness".
+/// Parse "its toughness" / "~'s toughness" / "this creature's toughness" /
+/// "this card's toughness". See `parse_self_power_ref` for the card-vs-creature
+/// rationale.
 fn parse_self_toughness_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         value(QuantityRef::SelfToughness, tag("its toughness")),
         value(QuantityRef::SelfToughness, tag("~'s toughness")),
         value(QuantityRef::SelfToughness, tag("this creature's toughness")),
+        value(QuantityRef::SelfToughness, tag("this card's toughness")),
     ))
     .parse(input)
 }
@@ -362,6 +372,10 @@ fn parse_starting_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 }
 
 /// Parse event-context quantity references.
+///
+/// CR 603.7c: "that {noun}" in a triggered ability refers to the object or
+/// value from the triggering event. The source-object variants resolve via
+/// `extract_source_from_event` → live object or LKI cache.
 fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         value(QuantityRef::EventContextAmount, tag("that much")),
@@ -373,6 +387,13 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
         value(
             QuantityRef::EventContextSourceToughness,
             tag("that creature's toughness"),
+        ),
+        // "Whenever you cast an enchantment spell, ... equal to that spell's
+        // mana value" (Dusty Parlor) — the SpellCast event's source object is
+        // the spell itself, so CMC reads cleanly off it.
+        value(
+            QuantityRef::EventContextSourceManaValue,
+            tag("that spell's mana value"),
         ),
     ))
     .parse(input)
@@ -528,6 +549,22 @@ mod tests {
         assert_eq!(rest, "");
     }
 
+    /// CR 400.7: Scavenge activates from the graveyard, so the source is a
+    /// card. All four self-power phrasings must collapse to `SelfPower`.
+    #[test]
+    fn test_parse_quantity_ref_self_power_phrasings() {
+        for phrase in [
+            "its power",
+            "~'s power",
+            "this creature's power",
+            "this card's power",
+        ] {
+            let (rest, q) = parse_quantity_ref(phrase).unwrap();
+            assert_eq!(q, QuantityRef::SelfPower, "phrase: {phrase}");
+            assert_eq!(rest, "", "phrase: {phrase}");
+        }
+    }
+
     #[test]
     fn test_parse_quantity_ref_graveyard() {
         let (rest, q) = parse_quantity_ref("cards in your graveyard and").unwrap();
@@ -624,6 +661,16 @@ mod tests {
         let (rest2, q2) = parse_quantity_ref("that creature's power").unwrap();
         assert_eq!(q2, QuantityRef::EventContextSourcePower);
         assert_eq!(rest2, "");
+    }
+
+    /// CR 603.7c: Dusty Parlor — the SpellCast event's source object is the
+    /// spell, so "that spell's mana value" reads its CMC via the shared
+    /// `EventContextSourceManaValue` resolution path.
+    #[test]
+    fn test_parse_that_spells_mana_value() {
+        let (rest, q) = parse_quantity_ref("that spell's mana value").unwrap();
+        assert_eq!(q, QuantityRef::EventContextSourceManaValue);
+        assert_eq!(rest, "");
     }
 
     #[test]
