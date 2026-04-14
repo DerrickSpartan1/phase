@@ -26,11 +26,22 @@ pub fn resolve(
     };
 
     // Step 1: Resolve the copy source.
-    // SelfRef with no explicit targets → copy the source permanent itself.
-    // Otherwise → use the first Object target from ability.targets.
-    let copy_source_id = if matches!(target_filter, TargetFilter::SelfRef)
-        && ability.targets.is_empty()
-    {
+    // CR 608.2c + 603.10a: LTB self-trigger patterns such as Vaultborn Tyrant
+    // ("create a token that's a copy of it") and Ochre Jelly's delayed trigger
+    // emit `target: ParentTarget` / `SelfRef` with empty `ability.targets`.
+    // In a top-level trigger there is no parent chain, so the anaphor refers to
+    // the source object itself. `TriggeringSource` is deliberately excluded:
+    // it resolves via `state.current_trigger_event`, not `source_id`.
+    //
+    // Zone-eligibility: unlike `Bounce` / `ChangeZone`, `CopyTokenOf` reads
+    // copiable values via `compute_current_copiable_values`, which is
+    // zone-agnostic — so a source in the graveyard is fine.
+    let use_self = matches!(
+        target_filter,
+        TargetFilter::None | TargetFilter::SelfRef | TargetFilter::ParentTarget
+    ) && ability.targets.is_empty();
+
+    let copy_source_id = if use_self {
         ability.source_id
     } else {
         ability
@@ -249,6 +260,57 @@ mod tests {
         assert_eq!(token.power, Some(2));
         assert_eq!(token.toughness, Some(2));
         assert!(token.is_token);
+    }
+
+    /// CR 603.10a / Vaultborn Tyrant + Ochre Jelly class: LTB self-copy triggers
+    /// fire after the source has moved to the graveyard. The parsed effect is
+    /// `CopyTokenOf { target: ParentTarget }` with empty `ability.targets`; the
+    /// resolver must copy the source object from the graveyard.
+    #[test]
+    fn copy_token_of_parent_target_from_graveyard() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Vaultborn Tyrant".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let source = state.objects.get_mut(&source_id).unwrap();
+            source.base_power = Some(6);
+            source.base_toughness = Some(6);
+            source.power = Some(6);
+            source.toughness = Some(6);
+            source.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Dinosaur".to_string()],
+            };
+            source.card_types = source.base_card_types.clone();
+        }
+
+        let ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::ParentTarget,
+                enters_attacking: false,
+                tapped: false,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let token_id = ObjectId(state.next_object_id - 1);
+        let token = state.objects.get(&token_id).unwrap();
+        assert!(token.is_token);
+        assert_eq!(token.name, "Vaultborn Tyrant");
+        assert_eq!(token.power, Some(6));
+        assert_eq!(token.toughness, Some(6));
+        // Source remains in graveyard (we only copy it, we don't move it).
+        assert_eq!(state.objects[&source_id].zone, Zone::Graveyard);
     }
 
     #[test]

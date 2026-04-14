@@ -3,11 +3,14 @@ use nom::bytes::complete::tag;
 use nom::combinator::value;
 use nom::Parser;
 
-use crate::types::ability::{DoublePTMode, DoubleTarget, Effect, MultiTargetSpec, TargetFilter};
+use crate::types::ability::{
+    DoublePTMode, DoubleTarget, Effect, MultiTargetSpec, QuantityExpr, TargetFilter,
+};
 use crate::types::mana::ManaColor;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
+use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_target::{parse_target, parse_type_phrase};
 use super::super::oracle_util::{parse_count_expr, parse_number};
 use super::{resolve_it_pronoun, ParseContext};
@@ -38,7 +41,32 @@ pub(super) fn try_parse_put_counter<'a>(
     // Use parse_count_expr to handle Variable("X") for kicker-X patterns.
     let ((), after_put) = nom_on_lower(lower, lower, |i| value((), tag("put ")).parse(i))?;
     let after_put = after_put.trim();
-    let (count_expr, rest) = parse_count_expr(after_put)?;
+
+    // CR 122.1 + CR 208.3: Detect the dynamic-quantity phrasing
+    // "a number of {type} counters equal to {qty}" (Gruff Triplets:
+    // "a number of +1/+1 counters equal to its power"). Must run before the
+    // generic fixed-count path below — otherwise `parse_count_expr` would read
+    // "a" as count=1 and "number" as the counter type. `dynamic_pending`
+    // signals that the "equal to {qty}" clause is expected to appear after the
+    // counter noun and must be consumed below.
+    let (count_expr, rest, dynamic_pending) =
+        if let Some(after_phrase) = try_strip_a_number_of(after_put) {
+            // Two positions for "equal to {qty}":
+            //   eager: "a number of counters equal to X ..." (counter type absent
+            //          or implicit — rare in practice)
+            //   trailing: "a number of {type} counters equal to X ..." (Gruff class)
+            match nom_quantity::parse_equal_to(after_phrase) {
+                Ok((rest, qty)) => {
+                    let rest = rest.strip_prefix(' ').unwrap_or(rest);
+                    (qty, rest, false)
+                }
+                Err(_) => (QuantityExpr::Fixed { value: 0 }, after_phrase, true),
+            }
+        } else {
+            let (qty, rest) = parse_count_expr(after_put)?;
+            (qty, rest, false)
+        };
+
     // Next word is counter type (e.g. "+1/+1", "loyalty", "charge")
     let type_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
     let raw_type = &rest[..type_end];
@@ -51,6 +79,18 @@ pub(super) fn try_parse_put_counter<'a>(
     })
     .map(|((), r)| r.trim_start())
     .unwrap_or(after_type);
+
+    // If we entered via "a number of ..." without finding the "equal to" clause
+    // eagerly, it MUST appear here after the counter noun. Consume it and
+    // overwrite the placeholder count. Abort the dynamic path if the clause
+    // is missing — the phrase is malformed as a dynamic-count.
+    let (count_expr, after_counter_word) = if dynamic_pending {
+        let (after_clause, qty) = nom_quantity::parse_equal_to(after_counter_word).ok()?;
+        let after_clause = after_clause.strip_prefix(' ').unwrap_or(after_clause);
+        (qty, after_clause)
+    } else {
+        (count_expr, after_counter_word)
+    };
 
     let (target, remainder, multi_target) = if let Some(((), on_rest)) =
         nom_on_lower(after_counter_word, after_counter_word, |i| {
@@ -104,6 +144,15 @@ pub(super) fn try_parse_put_counter<'a>(
         remainder,
         multi_target,
     ))
+}
+
+/// CR 122.1: Consume the "a number of " prefix used in dynamic counter-count
+/// phrases, returning the remainder. Returns None when the prefix is absent.
+fn try_strip_a_number_of(input: &str) -> Option<&str> {
+    tag::<_, _, nom_language::error::VerboseError<&str>>("a number of ")
+        .parse(input)
+        .map(|(rest, _)| rest)
+        .ok()
 }
 
 pub(super) fn try_parse_remove_counter(lower: &str, ctx: &ParseContext) -> Option<Effect> {
@@ -585,6 +634,87 @@ mod tests {
         };
         assert!(matches!(source, TargetFilter::Typed { .. }));
         assert_eq!(counter_type, Some("P1P1".to_string()));
+        assert!(matches!(target, TargetFilter::SelfRef));
+    }
+
+    /// CR 122.1 + CR 208.3: "put a number of +1/+1 counters equal to its power
+    /// on each creature you control named ~" (Gruff Triplets). The dynamic
+    /// count binds to the source's power via `QuantityRef::SelfPower`; the
+    /// counter type is "+1/+1", not the word "number"; the target is a mass
+    /// filter for creatures with the same name (resolved via `normalize_self_refs`
+    /// restoring the card name after the `named ~` re-expansion).
+    #[test]
+    fn put_counter_a_number_of_equal_to_self_power() {
+        use crate::types::ability::{FilterProp, QuantityRef, TypeFilter};
+        let (effect, _, _) = try_parse_put_counter(
+            "put a number of +1/+1 counters equal to its power on each creature you control named Gruff Triplets",
+            "put a number of +1/+1 counters equal to its power on each creature you control named Gruff Triplets",
+            &default_ctx(),
+        )
+        .expect("parse");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = effect
+        else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+        assert_eq!(counter_type, "P1P1");
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::SelfPower
+                }
+            ),
+            "count should be SelfPower, got {count:?}"
+        );
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected Typed filter, got target");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::Named { name } if name.eq_ignore_ascii_case("Gruff Triplets"))));
+    }
+
+    /// Sibling coverage: same dynamic-count phrase shape with a different
+    /// quantity reference ("equal to the number of cards in your hand").
+    /// Confirms the building block generalizes beyond just SelfPower.
+    #[test]
+    fn put_counter_a_number_of_equal_to_hand_size() {
+        use crate::types::ability::{QuantityRef, ZoneRef};
+        let (effect, _, _) = try_parse_put_counter(
+            "put a number of +1/+1 counters equal to the number of cards in your hand on ~",
+            "put a number of +1/+1 counters equal to the number of cards in your hand on ~",
+            &default_ctx(),
+        )
+        .expect("parse");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = effect
+        else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+        assert_eq!(counter_type, "P1P1");
+        // The parser resolves "cards in your hand" to the more specific
+        // ZoneCardCount; either ZoneCardCount or HandSize is semantically valid.
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Hand,
+                        ..
+                    } | QuantityRef::HandSize
+                }
+            ),
+            "count should be hand-card-count reference, got {count:?}"
+        );
         assert!(matches!(target, TargetFilter::SelfRef));
     }
 }

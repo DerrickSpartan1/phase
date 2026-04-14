@@ -1574,6 +1574,66 @@ fn parse_remove_from_combat_ast(lower: &str) -> Option<TargetFilter> {
     Some(target)
 }
 
+/// Parse a possessive determiner from a fixed set of MTG Oracle variants.
+///
+/// Accepts: "your", "their", "its owner's", "that player's". These are the possessives
+/// that can precede a zone reference in a "shuffle X into Y" phrase.
+fn parse_possessive_determiner(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+    value(
+        (),
+        alt((
+            tag("your"),
+            tag("their"),
+            tag("its owner's"),
+            tag("that player's"),
+        )),
+    )
+    .parse(input)
+}
+
+/// Parse "shuffle the cards {from|in} {possessive} {zone} into {possessive} library"
+/// and return the origin zone.
+///
+/// CR 400.6 + CR 701.24a: Recognizes whole-zone bulk moves like Whirlpool Drake's
+/// "shuffle the cards from your hand into your library". The `the cards` phrase
+/// names every card in the origin zone — no targeting or filtering — so the
+/// resulting AST lowers to `ChangeZoneAll` (not `ChangeZone`).
+///
+/// Supports zones: hand, graveyard, exile. Returns None for any other structure.
+fn parse_mass_zone_to_library(lower: &str) -> Option<Zone> {
+    // "shuffle the cards {from|in} "
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("shuffle the cards ")
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = alt((
+        value((), tag::<_, _, VerboseError<&str>>("from ")),
+        value((), tag::<_, _, VerboseError<&str>>("in ")),
+    ))
+    .parse(rest)
+    .ok()?;
+    // "{possessive} "
+    let (rest, _) = parse_possessive_determiner(rest).ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" ").parse(rest).ok()?;
+    // zone word
+    let (rest, origin) = alt((
+        value(Zone::Hand, tag::<_, _, VerboseError<&str>>("hand")),
+        value(
+            Zone::Graveyard,
+            tag::<_, _, VerboseError<&str>>("graveyard"),
+        ),
+        value(Zone::Exile, tag::<_, _, VerboseError<&str>>("exile")),
+    ))
+    .parse(rest)
+    .ok()?;
+    // " into {possessive} library"
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" into ").parse(rest).ok()?;
+    let (rest, _) = parse_possessive_determiner(rest).ok()?;
+    let (_rest, _) = tag::<_, _, VerboseError<&str>>(" library")
+        .parse(rest)
+        .ok()?;
+    Some(origin)
+}
+
 pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImperativeAst> {
     if matches!(
         lower,
@@ -1636,6 +1696,15 @@ pub(super) fn parse_shuffle_ast(text: &str, lower: &str) -> Option<ShuffleImpera
     if contains_possessive(lower, "shuffle", "hand") {
         return Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origin: Zone::Hand });
     }
+    // CR 701.24a + CR 400.6: "shuffle the cards from {possessive} {zone} into
+    // {possessive} library" — whole-zone mass move + implicit shuffle (Whirlpool
+    // Drake / Warrior / Rider). The phrase "the cards from your hand" names every
+    // card in the zone, so this lowers to ChangeZoneAll (no targeting, no filter).
+    // Must run before the generic targeted-shuffle path below, which would otherwise
+    // consume "the cards" as a `ParentTarget` pronoun.
+    if let Some(origin) = parse_mass_zone_to_library(lower) {
+        return Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origin });
+    }
     // CR 701.24a: "shuffle target card from your graveyard into your library" —
     // targeted zone change (origin → library) + implicit shuffle.
     // Placed after possessive checks to avoid matching "shuffle your graveyard into library".
@@ -1688,6 +1757,13 @@ pub(super) fn lower_shuffle_ast(ast: ShuffleImperativeAst) -> ParsedEffectClause
             with_shuffle_sub_ability(effect)
         }
         ShuffleImperativeAst::ChangeZoneAllToLibrary { origin } => {
+            // CR 400.6 + CR 400.3: "shuffle {possessive} {zone} into {possessive}
+            // library" moves every card in the origin zone owned by the
+            // identified player. The sentinel `TargetFilter::Controller` is
+            // later remapped to a concrete player by `inject_subject_target`
+            // when a subject like "that player" precedes the shuffle phrase
+            // (Jace's ultimate) — otherwise the resolver treats it as "the
+            // ability controller's cards".
             let effect = Effect::ChangeZoneAll {
                 origin: Some(origin),
                 destination: Zone::Library,
@@ -2858,10 +2934,18 @@ pub(super) fn parse_zone_counter_ast(
         }
         // Then fixed-count put ("put N counter(s) on ...")
         // Detect "each"/"all" to route to PutCounterAll (mass placement without targeting).
+        // CR 122.1: "on each" and "on all" indicate mass application. The "counter(s)"
+        // anchor handles the common case; the bare "on each "/"on all " fallbacks
+        // cover phrases where a quantity clause ("equal to its power") intervenes
+        // between the counter noun and the target — e.g. Gruff Triplets:
+        // "put a number of +1/+1 counters equal to its power on each creature you
+        // control named ~".
         let is_all = nom_primitives::scan_contains(lower, "counter on each")
             || nom_primitives::scan_contains(lower, "counters on each")
             || nom_primitives::scan_contains(lower, "counter on all")
-            || nom_primitives::scan_contains(lower, "counters on all");
+            || nom_primitives::scan_contains(lower, "counters on all")
+            || nom_primitives::scan_contains(lower, "on each ")
+            || nom_primitives::scan_contains(lower, "on all ");
         return match try_parse_put_counter(lower, text, ctx) {
             Some((
                 Effect::PutCounter {
@@ -4082,6 +4166,53 @@ mod tests {
                 assert_eq!(duration, Some(Duration::UntilEndOfCombat));
             }
             other => panic!("Expected GenericEffect, got {other:?}"),
+        }
+    }
+
+    /// CR 400.6 + CR 701.24a: "shuffle the cards from your hand into your
+    /// library" — Whirlpool Drake class. The phrase names every card in the
+    /// hand, so the lowered AST must be ChangeZoneAllToLibrary (mass move),
+    /// not a TargetedChangeZoneToLibrary where "the cards" would be read as
+    /// a pronoun target.
+    #[test]
+    fn parse_shuffle_cards_from_your_hand_into_your_library() {
+        let text = "shuffle the cards from your hand into your library";
+        let result = parse_shuffle_ast(text, text);
+        match result {
+            Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origin }) => {
+                assert_eq!(origin, Zone::Hand);
+            }
+            other => panic!("Expected ChangeZoneAllToLibrary Hand, got {other:?}"),
+        }
+    }
+
+    /// Sibling coverage: the same structural phrase with a different zone
+    /// ("from your graveyard into your library") must also route to the mass
+    /// path — confirms the combinator generalizes across zones.
+    #[test]
+    fn parse_shuffle_cards_from_your_graveyard_into_your_library() {
+        let text = "shuffle the cards from your graveyard into your library";
+        let result = parse_shuffle_ast(text, text);
+        match result {
+            Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origin }) => {
+                assert_eq!(origin, Zone::Graveyard);
+            }
+            other => panic!("Expected ChangeZoneAllToLibrary Graveyard, got {other:?}"),
+        }
+    }
+
+    /// Possessive variance: "shuffle the cards from their hand into their
+    /// library" (opponent-facing phrasing) — same structure, different
+    /// possessive.
+    #[test]
+    fn parse_shuffle_cards_from_their_hand_into_their_library() {
+        let text = "shuffle the cards from their hand into their library";
+        let result = parse_shuffle_ast(text, text);
+        match result {
+            Some(ShuffleImperativeAst::ChangeZoneAllToLibrary { origin }) => {
+                assert_eq!(origin, Zone::Hand);
+            }
+            other => panic!("Expected ChangeZoneAllToLibrary Hand, got {other:?}"),
         }
     }
 }

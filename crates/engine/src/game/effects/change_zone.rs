@@ -241,14 +241,24 @@ pub fn resolve(
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(ability, target_filter);
 
-    // SelfRef with no explicit targets: process the source object through the zone-change pipeline
-    // (e.g., "shuffle ~ into its owner's library")
-    let self_ref_targets =
-        if matches!(target_filter, TargetFilter::SelfRef) && ability.targets.is_empty() {
-            vec![TargetRef::Object(ability.source_id)]
-        } else {
-            vec![]
-        };
+    // CR 608.2c + 603.10a: Self-referential top-level triggers process the
+    // source object through the zone-change pipeline. Covers:
+    //   - `SelfRef` (the parser's `~` anaphor: "shuffle ~ into its owner's library")
+    //   - `ParentTarget` (the "it" anaphor on a top-level trigger with no
+    //     parent chain: Academy Rector, Bronzehide Lion, Loyal Cathar, etc.)
+    //   - `None` (no explicit target on an effect that still needs a subject)
+    // In all three cases, an empty `ability.targets` means "the source object".
+    // `TriggeringSource` is deliberately excluded: it resolves via
+    // `state.current_trigger_event`, not `source_id`.
+    let use_self = matches!(
+        target_filter,
+        TargetFilter::None | TargetFilter::SelfRef | TargetFilter::ParentTarget
+    ) && ability.targets.is_empty();
+    let self_ref_targets = if use_self {
+        vec![TargetRef::Object(ability.source_id)]
+    } else {
+        vec![]
+    };
 
     let effective_targets = if self_ref_targets.is_empty() {
         &ability.targets
@@ -470,6 +480,26 @@ pub fn resolve_all(
         _ => return Err(EffectError::MissingParam("ChangeZoneAll".to_string())),
     };
 
+    // CR 400.6 + CR 400.3: `TargetFilter::Controller` / `TargetFilter::Player`
+    // in a mass zone-change reference a *player*, not a set of objects. Such
+    // filters arise from phrases like "shuffle your hand into your library"
+    // (Controller) or "that player shuffles their hand into their library"
+    // (Player, with the subject supplying the target at resolution). Translate
+    // them here to "all cards owned by that player in the origin zone" — the
+    // object-level matcher would otherwise reject them outright.
+    let player_scope: Option<crate::types::player::PlayerId> = match &target_filter {
+        TargetFilter::Controller => Some(ability.controller),
+        TargetFilter::Player => ability
+            .targets
+            .iter()
+            .find_map(|t| match t {
+                crate::types::ability::TargetRef::Player(p) => Some(*p),
+                _ => None,
+            })
+            .or(Some(ability.controller)),
+        _ => None,
+    };
+
     // Use a permissive default filter if the effect's target is None
     let effective_filter = if matches!(target_filter, crate::types::ability::TargetFilter::None) {
         crate::types::ability::TargetFilter::Typed(TypedFilter {
@@ -490,21 +520,38 @@ pub fn resolve_all(
         ability.source_id,
         filter_controller,
     );
-    let matching: Vec<_> = state
-        .objects
-        .iter()
-        .filter(|(&id, obj)| {
-            obj.zone == origin_zone
-                && crate::game::filter::matches_target_filter(state, id, &effective_filter, &ctx)
-        })
-        .map(|(id, _)| *id)
-        .collect();
+    let matching: Vec<_> = if let Some(player) = player_scope {
+        // Player-scoped mass move: select every card in the origin zone
+        // controlled by the target player, regardless of type.
+        state
+            .objects
+            .iter()
+            .filter(|(_, obj)| obj.zone == origin_zone && obj.controller == player)
+            .map(|(id, _)| *id)
+            .collect()
+    } else {
+        state
+            .objects
+            .iter()
+            .filter(|(&id, obj)| {
+                obj.zone == origin_zone
+                    && crate::game::filter::matches_target_filter(
+                        state,
+                        id,
+                        &effective_filter,
+                        &ctx,
+                    )
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    };
 
     // Clean up consumed tracked set after scanning.
     if let TargetFilter::TrackedSet { id } = &effective_filter {
         state.tracked_object_sets.remove(id);
     }
 
+    let mut moved_count: i32 = 0;
     for obj_id in matching {
         // Mass zone moves don't use enter_transformed, enter_tapped, or controller_override
         match execute_zone_move(
@@ -520,6 +567,7 @@ pub fn resolve_all(
             events,
         ) {
             ZoneMoveResult::Done => {
+                moved_count += 1;
                 // CR 610.3: Consume ExileLink after successfully moving the object,
                 // so check_exile_returns won't try to return it again.
                 if matches!(effective_filter, TargetFilter::ExiledBySource) {
@@ -533,6 +581,13 @@ pub fn resolve_all(
             }
         }
     }
+
+    // CR 608.2c: "that many" in a later instruction refers back to the prior
+    // action's count. Record the number of objects moved so downstream
+    // sub-abilities using QuantityRef::EventContextAmount resolve correctly —
+    // e.g., Whirlpool Drake: "shuffle the cards from your hand into your library,
+    // then draw that many cards."
+    state.last_effect_count = Some(moved_count);
 
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
@@ -1495,6 +1550,215 @@ mod tests {
         assert!(
             !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
             "should not prompt for zone choice when optional targeting chose 0"
+        );
+    }
+
+    /// CR 603.10a / Academy Rector class: LTB self-exile triggers fire after the
+    /// source has moved to the graveyard. The parsed effect is
+    /// `ChangeZone { origin: None, destination: Exile, target: ParentTarget }`
+    /// with empty `ability.targets`; the resolver must treat `ParentTarget` as
+    /// a self-reference to `ability.source_id` and move from the current
+    /// (graveyard) zone.
+    #[test]
+    fn ltb_parent_target_self_exile_from_graveyard() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Academy Rector".to_string(),
+            Zone::Graveyard,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+            },
+            vec![],
+            obj_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(!state.players[0].graveyard.contains(&obj_id));
+        assert_eq!(state.objects[&obj_id].zone, Zone::Exile);
+    }
+
+    /// CR 603.10a / Bronzehide Lion class: LTB self-return triggers where the
+    /// source returns to the battlefield (typically under some constraint) must
+    /// find the source in the graveyard and move it back.
+    #[test]
+    fn ltb_parent_target_self_return_to_battlefield_from_graveyard() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Bronzehide Lion".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .base_card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Battlefield,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+            },
+            vec![],
+            obj_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert!(state.battlefield.contains(&obj_id));
+        assert!(!state.players[0].graveyard.contains(&obj_id));
+    }
+
+    /// End-to-end Academy Rector-style pipeline: dies on battlefield → LTB
+    /// trigger fires → resolves from graveyard → source ends up in exile.
+    #[test]
+    fn ltb_parent_target_self_exile_pipeline() {
+        use crate::game::stack::resolve_top;
+        use crate::game::triggers::process_triggers;
+        use crate::types::ability::{AbilityDefinition, AbilityKind, TriggerDefinition};
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Academy Rector".to_string(),
+            Zone::Battlefield,
+        );
+
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.origin = Some(Zone::Battlefield);
+        trigger.destination = Some(Zone::Graveyard);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.trigger_zones = vec![Zone::Graveyard];
+        trigger.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::ChangeZone {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+            },
+        )));
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, obj_id, Zone::Graveyard, &mut events);
+        assert!(state.players[0].graveyard.contains(&obj_id));
+
+        process_triggers(&mut state, &events);
+        assert_eq!(state.stack.len(), 1, "LTB trigger did not reach the stack");
+
+        let mut resolve_events = Vec::new();
+        resolve_top(&mut state, &mut resolve_events);
+        assert_eq!(
+            state.objects[&obj_id].zone,
+            Zone::Exile,
+            "Academy Rector should be in exile"
+        );
+        assert!(!state.players[0].graveyard.contains(&obj_id));
+    }
+
+    /// CR 400.6 + CR 608.2c: `ChangeZoneAll` must set `last_effect_count` to
+    /// the number of objects moved so downstream sub-abilities referring to
+    /// "that many" (via `QuantityRef::EventContextAmount`) resolve correctly.
+    /// Whirlpool Drake class: "shuffle the cards from your hand into your
+    /// library, then draw that many cards."
+    #[test]
+    fn change_zone_all_records_moved_count_for_event_context_amount() {
+        let mut state = GameState::new_two_player(42);
+        // Put three cards in player 0's hand.
+        let h1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card A".into(),
+            Zone::Hand,
+        );
+        let h2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Card B".into(),
+            Zone::Hand,
+        );
+        let h3 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Card C".into(),
+            Zone::Hand,
+        );
+        // Opponent's hand — must NOT be moved (filter is Controller).
+        let opp_hand = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Opponent Card".into(),
+            Zone::Hand,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Hand),
+                destination: Zone::Library,
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        // All three controller's cards moved to library; opponent's card untouched.
+        for id in [h1, h2, h3] {
+            assert_eq!(state.objects[&id].zone, Zone::Library);
+        }
+        assert_eq!(state.objects[&opp_hand].zone, Zone::Hand);
+        assert_eq!(
+            state.last_effect_count,
+            Some(3),
+            "ChangeZoneAll must record moved-object count for EventContextAmount consumers"
         );
     }
 }

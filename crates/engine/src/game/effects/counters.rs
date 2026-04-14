@@ -631,4 +631,108 @@ mod tests {
         assert_eq!(parse_counter_type("P1P1"), CounterType::Plus1Plus1);
         assert_eq!(parse_counter_type("M1M1"), CounterType::Minus1Minus1);
     }
+
+    /// End-to-end Gruff Triplets pipeline test. CR 603.10a + CR 208.3 + CR 122.1:
+    /// when a Gruff Triplets dies, each other Gruff Triplets on the battlefield
+    /// you control gets +1/+1 counters equal to the dying copy's power (LKI).
+    ///
+    /// Mirrors the shape of `test_rancor_ltb_pipeline_returns_to_owner_hand` in
+    /// bounce.rs: build the parsed trigger AST explicitly, destroy the source,
+    /// run `process_triggers` + `resolve_top`, and verify counter placement.
+    #[test]
+    fn gruff_triplets_dies_trigger_uses_lki_power_for_counter_count() {
+        use crate::game::stack::resolve_top;
+        use crate::game::triggers::process_triggers;
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, ControllerRef, FilterProp, QuantityExpr, QuantityRef,
+            TriggerDefinition, TypeFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::triggers::TriggerMode;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Two Gruff Triplets on the battlefield owned by the same player.
+        let dying_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Gruff Triplets".to_string(),
+            Zone::Battlefield,
+        );
+        let sibling_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Gruff Triplets".to_string(),
+            Zone::Battlefield,
+        );
+        for &id in &[dying_id, sibling_id] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.power = Some(3);
+            obj.toughness = Some(3);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        // Wire the dies-trigger AST as the parser would emit it.
+        let target = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Creature)
+                .controller(ControllerRef::You)
+                .properties(vec![FilterProp::Named {
+                    name: "Gruff Triplets".to_string(),
+                }]),
+        );
+        let mut trigger = TriggerDefinition::new(TriggerMode::ChangesZone);
+        trigger.origin = Some(Zone::Battlefield);
+        trigger.destination = Some(Zone::Graveyard);
+        trigger.valid_card = Some(TargetFilter::SelfRef);
+        trigger.trigger_zones = vec![Zone::Graveyard];
+        trigger.execute = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounterAll {
+                counter_type: "P1P1".to_string(),
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::SelfPower,
+                },
+                target,
+            },
+        )));
+        state
+            .objects
+            .get_mut(&dying_id)
+            .unwrap()
+            .trigger_definitions
+            .push(trigger);
+
+        // Move the dying copy to the graveyard, run the trigger pipeline,
+        // resolve the resulting ability.
+        let mut events = Vec::new();
+        crate::game::zones::move_to_zone(&mut state, dying_id, Zone::Graveyard, &mut events);
+        assert!(state.players[0].graveyard.contains(&dying_id));
+
+        process_triggers(&mut state, &events);
+        assert_eq!(state.stack.len(), 1, "dies trigger did not reach stack");
+
+        let mut resolve_events = Vec::new();
+        resolve_top(&mut state, &mut resolve_events);
+
+        // Sibling should have 3 +1/+1 counters (the dying copy's LKI power).
+        // The dying copy itself is in the graveyard and must not receive counters
+        // (it no longer matches the battlefield-filtered target set).
+        assert_eq!(
+            state.objects[&sibling_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            3,
+            "sibling should get +1/+1 counters equal to LKI power of dying Triplets"
+        );
+        assert!(
+            !state.objects[&dying_id]
+                .counters
+                .contains_key(&CounterType::Plus1Plus1),
+            "dying copy in graveyard should not receive counters"
+        );
+    }
 }
