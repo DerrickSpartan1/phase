@@ -9,6 +9,22 @@ interface ScryfallDataEntry {
   keywords: string[];
 }
 
+/**
+ * Scryfall's default MTG card back image.
+ *
+ * Scryfall identifies the generic MTG card back with a fixed ID
+ * (`0aeebaf5-8c7d-4636-9e82-8c27447861f7`) served from the `backs.scryfall.io`
+ * CDN subdomain. This URL is stable across Scryfall versions — it is not
+ * regenerated with each bulk data refresh, so it lives here as a constant
+ * rather than in `scryfall-data.json`.
+ *
+ * Hotlinking (rather than bundling a `card-back.png`) keeps the repo free of
+ * WotC-copyrighted raster assets; the user's browser fetches directly from
+ * Scryfall at runtime, matching the pattern used for every other card image.
+ */
+export const CARD_BACK_URL =
+  "https://backs.scryfall.io/normal/0/a/0aeebaf5-8c7d-4636-9e82-8c27447861f7.jpg";
+
 type ScryfallDataMap = Record<string, ScryfallDataEntry>;
 
 let scryfallDataPromise: Promise<ScryfallDataMap | null> | null = null;

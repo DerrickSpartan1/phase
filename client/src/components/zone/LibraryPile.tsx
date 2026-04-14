@@ -1,5 +1,6 @@
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 
 interface LibraryPileProps {
@@ -92,7 +93,7 @@ export function LibraryPile({ playerId }: LibraryPileProps) {
           <TopCard cardName={topCardName} />
         ) : (
           <img
-            src="/card-back.png"
+            src={CARD_BACK_URL}
             alt="Library"
             className="h-full w-full rounded-lg object-cover"
             draggable={false}

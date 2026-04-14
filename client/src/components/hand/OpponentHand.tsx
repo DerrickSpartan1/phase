@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
+import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
@@ -106,7 +107,7 @@ function OpponentCardThumbnail({ cardId, cardName }: { cardId: ObjectId; cardNam
 
   return (
     <img
-      src="/card-back.png"
+      src={CARD_BACK_URL}
       alt="Card back"
       className="rounded-lg border border-gray-600 shadow-md object-cover"
       style={cardStyle}

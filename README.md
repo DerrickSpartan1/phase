@@ -223,14 +223,33 @@ scripts/              Build and setup scripts
 - **Email**: [matt@phase-rs.dev](mailto:matt@phase-rs.dev)
 - **Discord**: [discord.gg/dUZwhYHUyk](https://discord.gg/dUZwhYHUyk)
 
+## Non-Commercial Fan Project
+
+phase.rs is a non-commercial fan project built under the spirit of the
+[Wizards of the Coast Fan Content Policy](https://company.wizards.com/en/legal/fancontentpolicy).
+It exists for hobbyist, educational, and research use only.
+
+- **No bundled Wizards assets.** This repository does not distribute MTG card
+  images, card art, mana symbol artwork, card-frame graphics, or the
+  Comprehensive Rules document. Card images and mana symbols are fetched from
+  [Scryfall](https://scryfall.com/) at runtime by the user's browser. Card
+  metadata is sourced from [MTGJSON](https://mtgjson.com/).
+- **No affiliation.** phase.rs is not affiliated with, endorsed by, sponsored
+  by, or approved by Wizards of the Coast LLC or Hasbro, Inc.
+
+Magic: The Gathering, Planeswalker, the mana symbols, and all associated
+names, text, and imagery are trademarks and copyrights of Wizards of the
+Coast LLC. All rights reserved by their respective owners.
+
+If you believe content in this repository infringes your rights, please see
+[DMCA.md](DMCA.md).
+
 ## Acknowledgments
 
 - [MTGJSON](https://mtgjson.com/) — Card data (MIT licensed)
 - [Scryfall](https://scryfall.com/) — Card images and search API
 - [MTGGoldfish](https://www.mtggoldfish.com/) — Metagame deck data
-- [Wizards of the Coast](https://magic.wizards.com/) — Magic: The Gathering game rules and Comprehensive Rules
-
-Magic: The Gathering is a trademark of Wizards of the Coast. This project is not affiliated with or endorsed by Wizards of the Coast.
+- [Wizards of the Coast](https://magic.wizards.com/) — Magic: The Gathering
 
 ## License
 

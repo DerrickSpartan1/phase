@@ -21,6 +21,14 @@ if [ $FAIL -ne 0 ]; then
   exit 1
 fi
 
+# Optional: fetch the WotC Comprehensive Rules for local CR lookups.
+# Gitignored — not redistributed by this repo. Non-fatal on failure.
+if [ ! -f docs/MagicCompRules.txt ]; then
+  echo ""
+  echo "Fetching MTG Comprehensive Rules (local dev reference only)..."
+  ./scripts/fetch-comp-rules.sh || echo "  (skipped — you can run ./scripts/fetch-comp-rules.sh later)"
+fi
+
 echo ""
 echo "Step 2/3: Installing frontend dependencies..."
 (cd client && pnpm install)

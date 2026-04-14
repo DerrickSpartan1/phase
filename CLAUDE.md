@@ -241,7 +241,7 @@ State is filtered per-player (`filter_state_for_player`) to hide opponent's hand
 ## Documentation (`docs/`)
 
 - **`.claude/skills/oracle-parser/SKILL.md`** — Oracle parser single source of truth: architecture, nom combinator mandate, parsing priority system, AST type system, all helper modules, CR annotation protocol, and contribution checklists.
-- **`docs/MagicCompRules.txt`** — Full MTG Comprehensive Rules text from Wizards of the Coast. Use this as the authoritative source when verifying CR numbers, looking up rule text, or annotating new game logic. `grep -n "^702.180" docs/MagicCompRules.txt` to look up any rule.
+- **`docs/MagicCompRules.txt`** — Full MTG Comprehensive Rules text from Wizards of the Coast. **Gitignored — not redistributed in this repo.** Run `./scripts/fetch-comp-rules.sh` once to download a local copy. Use this as the authoritative source when verifying CR numbers, looking up rule text, or annotating new game logic. `grep -n "^702.180" docs/MagicCompRules.txt` to look up any rule.
 - **`.claude/skills/add-engine-effect/SKILL.md`** — Complete checklist for adding a new effect to the engine: types → parser → resolver → targeting → multiplayer filter → frontend → AI → tests. Covers every registration point that must be updated in lockstep. **Use this as the authoritative guide for any new effect work.**
 
 ## Conventions
