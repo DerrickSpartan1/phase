@@ -680,6 +680,50 @@ mod tests {
             .any(|p| matches!(p, FilterProp::Named { name } if name.eq_ignore_ascii_case("Gruff Triplets"))));
     }
 
+    /// CR 603.7c: Dusty Parlor — "Whenever you cast an enchantment spell,
+    /// put a number of +1/+1 counters equal to that spell's mana value on
+    /// up to one target creature." The dynamic count binds to the triggering
+    /// SpellCast event's source object (the spell itself) via
+    /// `QuantityRef::EventContextSourceManaValue`, which resolves to the
+    /// spell's printed CMC at trigger resolution time.
+    #[test]
+    fn put_counter_a_number_of_equal_to_spells_mana_value() {
+        use crate::types::ability::QuantityRef;
+        let (effect, _, multi) = try_parse_put_counter(
+            "put a number of +1/+1 counters equal to that spell's mana value on up to one target creature",
+            "put a number of +1/+1 counters equal to that spell's mana value on up to one target creature",
+            &default_ctx(),
+        )
+        .expect("parse");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = effect
+        else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+        assert_eq!(counter_type, "P1P1");
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextSourceManaValue
+                }
+            ),
+            "count should be EventContextSourceManaValue, got {count:?}"
+        );
+        assert!(matches!(target, TargetFilter::Typed { .. }));
+        assert_eq!(
+            multi,
+            Some(MultiTargetSpec {
+                min: 0,
+                max: Some(1)
+            }),
+            "up to one target creature → MultiTargetSpec {{ 0, 1 }}"
+        );
+    }
+
     /// Sibling coverage: same dynamic-count phrase shape with a different
     /// quantity reference ("equal to the number of cards in your hand").
     /// Confirms the building block generalizes beyond just SelfPower.
