@@ -110,3 +110,5 @@ mod sba;
 mod stack;
 #[path = "rules/targeting.rs"]
 mod targeting;
+#[path = "rules/tribute.rs"]
+mod tribute;

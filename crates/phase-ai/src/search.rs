@@ -50,6 +50,17 @@ pub fn choose_action(
     config: &AiConfig,
     rng: &mut impl Rng,
 ) -> Option<GameAction> {
+    // CR 702.104a: Tribute prompt — the AI's pay/decline decision has a
+    // dedicated simple-eval heuristic rather than going through the tactical
+    // policy registry. Punishment value vs counter value.
+    if matches!(state.waiting_for, WaitingFor::TributeChoice { .. }) {
+        if let Some(decision) = crate::tribute_eval::decide(state) {
+            return Some(GameAction::DecideOptionalEffect {
+                accept: decision.accept(),
+            });
+        }
+    }
+
     let scored = score_candidates(state, ai_player, config);
     if scored.is_empty() {
         // No valid candidates from search — fall back to a safe escape action

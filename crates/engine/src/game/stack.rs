@@ -240,6 +240,21 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             obj.cast_from_zone = ability.context.cast_from_zone;
                         }
                     }
+                    // CR 614.12a: Drain mandatory replacement post-effects (e.g., the
+                    // Siege protector / Tribute opponent-choice prompt that was stashed
+                    // by `apply_single_replacement` while resolving this ZoneChange).
+                    // Sets `state.waiting_for` to the resulting prompt, if any — the
+                    // caller's post-stack resolution checks waiting_for before returning
+                    // priority. Without this drain the choice would be silently dropped.
+                    if let Some(effect_def) = state.post_replacement_effect.take() {
+                        let _ = super::engine_replacement::apply_post_replacement_effect(
+                            state,
+                            &effect_def,
+                            Some(entry.id),
+                            None,
+                            events,
+                        );
+                    }
                 }
                 super::replacement::ReplacementResult::Prevented => {
                     // CR 608.3e: Permanent spell's ETB was fully prevented —

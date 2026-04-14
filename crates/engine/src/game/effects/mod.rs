@@ -106,6 +106,7 @@ pub mod tap_untap;
 pub mod token;
 pub mod token_copy;
 pub mod transform_effect;
+pub mod tribute;
 pub mod venture;
 pub mod win_lose;
 
@@ -280,6 +281,9 @@ pub fn resolve_effect(
         Effect::Explore => explore::resolve(state, ability, events),
         Effect::ExploreAll { .. } => explore::resolve_all(state, ability, events),
         Effect::Investigate => investigate::resolve(state, ability, events),
+        // CR 702.104a: Tribute — the chosen opponent decides pay/decline via
+        // WaitingFor::TributeChoice (reuses GameAction::DecideOptionalEffect).
+        Effect::Tribute { .. } => tribute::resolve(state, ability, events),
         // CR 701.56a: Time travel — interactive counter manipulation on suspended/time-countered permanents.
         // Currently a no-op; full interactive implementation requires WaitingFor infrastructure.
         Effect::TimeTravel => Ok(()),
@@ -1100,6 +1104,7 @@ pub fn resolve_ability_chain(
                 | WaitingFor::MultiTargetSelection { .. }
                 | WaitingFor::OptionalEffectChoice { .. }
                 | WaitingFor::OpponentMayChoice { .. }
+                | WaitingFor::TributeChoice { .. }
                 | WaitingFor::DiscoverChoice { .. }
                 | WaitingFor::TopOrBottomChoice { .. }
                 | WaitingFor::ProliferateChoice { .. }

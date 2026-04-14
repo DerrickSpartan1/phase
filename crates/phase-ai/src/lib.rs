@@ -21,6 +21,7 @@ pub mod strategy_profile;
 pub mod synergy;
 pub mod tactical_gate;
 pub mod threat_profile;
+pub mod tribute_eval;
 pub mod zone_eval;
 
 pub use card_hints::should_play_now;

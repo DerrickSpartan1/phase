@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ControllerRef, Effect, ModalChoice, PlayerFilter,
-    ResolvedAbility, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition, TypeFilter,
-    TypedFilter, UnlessCost,
+    AbilityDefinition, AbilityKind, ChosenAttribute, ControllerRef, Effect, ModalChoice,
+    PlayerFilter, ResolvedAbility, TargetFilter, TargetRef, TriggerCondition, TriggerDefinition,
+    TributeOutcome, TypeFilter, TypedFilter, UnlessCost,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
@@ -1484,13 +1484,19 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::SourceInZone { zone } => source_id
             .and_then(|id| state.objects.get(&id))
             .is_some_and(|obj| obj.zone == *zone),
-        // CR 702.104b: Tribute — the opponent chosen for tribute declined to place the
-        // +1/+1 counters. Tribute is not yet implemented as an interactive ETB mechanic
-        // (no opponent-choice WaitingFor), so creatures with Tribute always enter without
-        // counters. That means tribute was never paid, so this condition is correctly
-        // `true` for every Tribute card in the engine's current state. Once the Tribute
-        // mechanic is wired (tracked separately), this will need to read actual choice state.
-        TriggerCondition::TributeNotPaid => true,
+        // CR 702.104b: True when the Tribute ETB replacement resolved without the
+        // chosen opponent placing the +1/+1 counters. Reads the creature's
+        // persisted `ChosenAttribute::TributeOutcome` — explicit `Declined` or no
+        // outcome recorded (e.g., all opponents eliminated before the prompt) both
+        // count as "tribute wasn't paid". An explicit `Paid` outcome suppresses the
+        // trigger.
+        TriggerCondition::TributeNotPaid => source_id
+            .and_then(|id| state.objects.get(&id))
+            .is_none_or(|obj| {
+                !obj.chosen_attributes
+                    .iter()
+                    .any(|a| matches!(a, ChosenAttribute::TributeOutcome(TributeOutcome::Paid)))
+            }),
         // CR 207.2c: Addendum — cast during main phase.
         TriggerCondition::CastDuringMainPhase => {
             matches!(state.phase, Phase::PreCombatMain | Phase::PostCombatMain)

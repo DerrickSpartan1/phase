@@ -725,6 +725,18 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 &mut events,
             );
         }
+        // CR 702.104a: The chosen opponent for a Tribute creature decided pay/decline.
+        (
+            waiting_for @ WaitingFor::TributeChoice { .. },
+            GameAction::DecideOptionalEffect { accept },
+        ) => {
+            return engine_payment_choices::handle_tribute_choice(
+                state,
+                waiting_for.clone(),
+                accept,
+                &mut events,
+            );
+        }
         // CR 118.12: Player decided whether to pay an "unless pays" cost.
         (waiting_for @ WaitingFor::UnlessPayment { .. }, GameAction::PayUnlessCost { pay }) => {
             return engine_payment_choices::handle_unless_payment(

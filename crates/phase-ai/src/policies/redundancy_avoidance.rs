@@ -327,6 +327,7 @@ fn redundancy_delta(
         | Effect::GiveControl { .. }
         | Effect::RemoveFromCombat { .. }
         | Effect::Conjure { .. }
+        | Effect::Tribute { .. }
         | Effect::Unimplemented { .. } => None,
     }
 }

@@ -245,6 +245,19 @@ impl std::str::FromStr for CardPlayMode {
     }
 }
 
+/// CR 702.104a + CR 702.104b: The outcome of the Tribute choice the chosen opponent
+/// made as the creature entered the battlefield. Persisted as a `ChosenAttribute` on
+/// the Tribute creature so the companion "if tribute wasn't paid" trigger (CR
+/// 702.104b) can read the decision. A typed enum rather than a `bool` so the absence
+/// of any `TributeOutcome` remains distinguishable from an explicit `Declined`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TributeOutcome {
+    /// The chosen opponent placed the Tribute +1/+1 counters (CR 702.104a).
+    Paid,
+    /// The chosen opponent declined (CR 702.104b: "if tribute wasn't paid").
+    Declined,
+}
+
 /// A typed choice stored on a permanent (e.g., "choose a color" → Color(Red)).
 /// The variant discriminant serves as the category key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -262,6 +275,10 @@ pub enum ChosenAttribute {
     Player(PlayerId),
     /// Stores two chosen colors as a pair.
     TwoColors([ManaColor; 2]),
+    /// CR 702.104a + CR 702.104b: Records whether the opponent chosen for the
+    /// Tribute ETB replacement paid tribute or declined. Read by the companion
+    /// `TriggerCondition::TributeNotPaid` evaluator.
+    TributeOutcome(TributeOutcome),
 }
 
 impl ChosenAttribute {
@@ -278,6 +295,13 @@ impl ChosenAttribute {
             // Player covers both Player and Opponent choice types
             Self::Player(_) => ChoiceType::Player,
             Self::TwoColors(_) => ChoiceType::TwoColors,
+            // CR 702.104: Tribute outcome uses a dedicated prompt type rather than
+            // a NamedChoice (two fixed labels: Paid / Declined). Classify under the
+            // Labeled category so external listings (e.g., AI candidate generation)
+            // can recognise it as a Yes/No-shaped prompt.
+            Self::TributeOutcome(_) => ChoiceType::Labeled {
+                options: vec!["Paid".to_string(), "Declined".to_string()],
+            },
         }
     }
 
@@ -2379,6 +2403,16 @@ pub enum Effect {
     },
     /// CR 702.136: Investigate — create a Clue artifact token.
     Investigate,
+    /// CR 702.104a: Tribute — "As this creature enters, an opponent of your choice may
+    /// put N +1/+1 counters on it." The chosen opponent (persisted on the source as
+    /// `ChosenAttribute::Player` by a preceding `Effect::Choose { Opponent, persist }`)
+    /// is prompted pay-or-decline; the outcome is recorded on the source as
+    /// `ChosenAttribute::TributeOutcome` so the companion "if tribute wasn't paid"
+    /// trigger condition (CR 702.104b) can read it.
+    Tribute {
+        /// Number of +1/+1 counters placed if tribute is paid.
+        count: u32,
+    },
     /// CR 701.56a: Time travel — for each permanent you control with a time counter
     /// and each suspended card you own, you may add or remove a time counter.
     TimeTravel,
@@ -3271,6 +3305,7 @@ impl Effect {
             | Effect::DoublePTAll { .. }
             | Effect::Explore
             | Effect::Investigate
+            | Effect::Tribute { .. }
             | Effect::BecomeMonarch
             | Effect::Proliferate
             | Effect::Populate
@@ -3373,6 +3408,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Explore => "Explore",
         Effect::ExploreAll { .. } => "ExploreAll",
         Effect::Investigate => "Investigate",
+        Effect::Tribute { .. } => "Tribute",
         Effect::TimeTravel => "TimeTravel",
         Effect::BecomeMonarch => "BecomeMonarch",
         Effect::Proliferate => "Proliferate",
@@ -3520,6 +3556,7 @@ pub enum EffectKind {
     Explore,
     ExploreAll,
     Investigate,
+    Tribute,
     TimeTravel,
     BecomeMonarch,
     Proliferate,
@@ -3664,6 +3701,7 @@ impl From<&Effect> for EffectKind {
             Effect::Explore => EffectKind::Explore,
             Effect::ExploreAll { .. } => EffectKind::ExploreAll,
             Effect::Investigate => EffectKind::Investigate,
+            Effect::Tribute { .. } => EffectKind::Tribute,
             Effect::TimeTravel => EffectKind::TimeTravel,
             Effect::BecomeMonarch => EffectKind::BecomeMonarch,
             Effect::Proliferate => EffectKind::Proliferate,

@@ -857,6 +857,17 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
     },
+    /// CR 702.104a: The chosen opponent of a Tribute creature must decide whether
+    /// to place the Tribute +1/+1 counters. `source_id` is the entering Tribute
+    /// creature; `count` is the number of +1/+1 counters to place on accept. On
+    /// either branch, a `ChosenAttribute::TributeOutcome` is persisted on the
+    /// source so the companion "if tribute wasn't paid" trigger (CR 702.104b) can
+    /// read the outcome. Reuses `GameAction::DecideOptionalEffect`.
+    TributeChoice {
+        player: PlayerId,
+        source_id: ObjectId,
+        count: u32,
+    },
     /// CR 608.2d + CR 101.4: An opponent may choose to perform an optional effect.
     /// Prompts opponents in APNAP order. First accept wins; remaining are not prompted.
     OpponentMayChoice {
@@ -1195,6 +1206,7 @@ impl WaitingFor {
             | WaitingFor::HarmonizeTapChoice { player, .. }
             | WaitingFor::OptionalEffectChoice { player, .. }
             | WaitingFor::OpponentMayChoice { player, .. }
+            | WaitingFor::TributeChoice { player, .. }
             | WaitingFor::UnlessPayment { player, .. }
             | WaitingFor::DiscoverChoice { player, .. }
             | WaitingFor::TopOrBottomChoice { player, .. }

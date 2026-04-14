@@ -863,7 +863,9 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
-        WaitingFor::OptionalEffectChoice { .. } | WaitingFor::OpponentMayChoice { .. } => {
+        WaitingFor::OptionalEffectChoice { .. }
+        | WaitingFor::OpponentMayChoice { .. }
+        | WaitingFor::TributeChoice { .. } => {
             vec![
                 candidate(
                     GameAction::DecideOptionalEffect { accept: true },

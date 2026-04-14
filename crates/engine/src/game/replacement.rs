@@ -1817,7 +1817,14 @@ fn apply_single_replacement(
     // come from whichever branch is being applied — `execute` on accept / mandatory,
     // `decline` on decline. Both must flow through the pipeline so dominance and
     // downstream replacements see a consistent ProposedEvent (CR 614.5).
-    let (event_key, modifiers) = match repl_def_ref {
+    //
+    // CR 614.12a: Mandatory replacement effects whose `execute` is non-modifier work
+    // (e.g., `Effect::Choose { Opponent, persist: true }` for Siege protector /
+    // Tribute) stash the execute as a `post_replacement_effect` so it runs in the
+    // same resolution step, right after the ZoneChange completes. Without this,
+    // the chooser would never be prompted. Optional replacements set
+    // `post_replacement_effect` in `continue_replacement` when the player accepts.
+    let (event_key, modifiers, mandatory_post_effect) = match repl_def_ref {
         Some(repl_def) => {
             let ability = match branch {
                 ReplacementBranch::Execute => repl_def.execute.as_deref(),
@@ -1826,7 +1833,23 @@ fn apply_single_replacement(
                     ReplacementMode::Mandatory => None,
                 },
             };
-            (repl_def.event.clone(), event_modifiers_for_ability(ability))
+            let post_effect = match (branch, &repl_def.mode) {
+                (ReplacementBranch::Execute, ReplacementMode::Mandatory) => {
+                    repl_def.execute.as_deref().and_then(|def| {
+                        if EventModifiers::has_only_event_modifier(Some(def)) {
+                            None
+                        } else {
+                            Some(Box::new(def.clone()))
+                        }
+                    })
+                }
+                _ => None,
+            };
+            (
+                repl_def.event.clone(),
+                event_modifiers_for_ability(ability),
+                post_effect,
+            )
         }
         None => return Ok(proposed),
     };
@@ -1859,6 +1882,17 @@ fn apply_single_replacement(
                     } = new_event
                     {
                         enter_with_counters.extend(modifiers.etb_counters.iter().cloned());
+                    }
+                }
+                // CR 614.12a: Stash the mandatory execute ability as a post-replacement
+                // effect when it has work beyond the event modifiers (e.g., a Choose
+                // prompt for Siege protector / Tribute opponent selection). Runs after
+                // the ZoneChange completes. Only the first such stash in a chained
+                // pipeline wins; this matches how Optional replacements queue their
+                // accept-branch post-effect.
+                if let Some(post) = mandatory_post_effect {
+                    if state.post_replacement_effect.is_none() {
+                        state.post_replacement_effect = Some(post);
                     }
                 }
                 events.push(GameEvent::ReplacementApplied {

@@ -43,6 +43,12 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::CastWithKeyword { .. }
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::CantBeBlockedBy { .. }
+            // CR 602.5 + CR 603.2a: CantBeActivated carries `who` + `source_filter`.
+            | StaticMode::CantBeActivated { .. }
+            // CR 701.23 + CR 609.3: CantSearchLibrary carries `cause`.
+            | StaticMode::CantSearchLibrary { .. }
+            // CR 603.2g: SuppressTriggers carries `source_filter` + `events`.
+            | StaticMode::SuppressTriggers { .. }
     )
 }
 
@@ -1328,6 +1334,9 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         }
         Effect::SetDayNight { to } => {
             d.push(("to".into(), format!("{to:?}")));
+        }
+        Effect::Tribute { count } => {
+            d.push(("count".into(), count.to_string()));
         }
         // Effects with no interesting parameters
         Effect::Unimplemented { .. }

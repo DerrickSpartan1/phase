@@ -637,6 +637,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_casualty(face);
     synthesize_entwine(face);
     synthesize_siege_intrinsics(face);
+    synthesize_tribute_intrinsics(face);
 }
 
 /// CR 310.11a + CR 310.11b: Synthesize the two intrinsic abilities every Siege has:
@@ -738,6 +739,77 @@ pub fn synthesize_siege_intrinsics(face: &mut CardFace) {
             );
         face.triggers.push(trigger);
     }
+}
+
+/// CR 702.104a: Synthesize the intrinsic ETB replacement for every creature with
+/// `Keyword::Tribute(N)`.
+///
+/// Oracle: "Tribute N (As this creature enters, an opponent of your choice may put
+/// N +1/+1 counters on it.)"
+///
+/// Modeled as a self-referential `Moved` replacement whose post-replacement effect
+/// chain has two stages:
+///
+///   1. `Effect::Choose { Opponent, persist: true }` — controller picks the opponent;
+///      the selection is persisted on the entering creature as `ChosenAttribute::Player`
+///      (mirrors `synthesize_siege_intrinsics`' protector choice).
+///
+///   2. `Effect::Tribute { count: N }` (sub-ability) — reads the persisted opponent,
+///      prompts them pay/decline via `WaitingFor::TributeChoice`, and on resolution
+///      records `ChosenAttribute::TributeOutcome` so the companion "if tribute
+///      wasn't paid" trigger (CR 702.104b) can read the outcome.
+pub fn synthesize_tribute_intrinsics(face: &mut CardFace) {
+    let Some(count) = face.keywords.iter().find_map(|k| match k {
+        Keyword::Tribute(n) => Some(*n),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    // Idempotency guard: don't re-add if already synthesized (parser pipelines can
+    // run twice in some code paths).
+    let already_synthesized = face.replacements.iter().any(|r| {
+        matches!(r.event, ReplacementEvent::Moved)
+            && matches!(r.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                r.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::Choose {
+                    choice_type: ChoiceType::Opponent,
+                    persist: true,
+                }),
+            )
+            && r.execute
+                .as_deref()
+                .and_then(|a| a.sub_ability.as_deref())
+                .is_some_and(|sub| matches!(&*sub.effect, Effect::Tribute { .. }))
+    });
+    if already_synthesized {
+        return;
+    }
+
+    // Stage 2: Effect::Tribute { count } — the chosen opponent decides pay/decline.
+    let tribute_stage = AbilityDefinition::new(AbilityKind::Spell, Effect::Tribute { count });
+
+    // Stage 1: Effect::Choose { Opponent, persist } — controller picks the opponent.
+    // Chained with stage 2 as a sub-ability (runs after the Choose resolves).
+    let choose_stage = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Choose {
+            choice_type: ChoiceType::Opponent,
+            persist: true,
+        },
+    )
+    .sub_ability(tribute_stage);
+
+    let mut replacement = ReplacementDefinition::new(ReplacementEvent::Moved);
+    replacement.valid_card = Some(TargetFilter::SelfRef);
+    replacement.destination_zone = Some(Zone::Battlefield);
+    replacement.description = Some(format!(
+        "CR 702.104a: Tribute {count} — as this creature enters, an opponent of your choice may put {count} +1/+1 counters on it.",
+    ));
+    replacement.execute = Some(Box::new(choose_stage));
+
+    face.replacements.push(replacement);
 }
 
 /// Build a `CardFace` from MTGJSON data, running the Oracle text parser and all synthesis.

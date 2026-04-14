@@ -156,6 +156,39 @@ pub(super) fn handle_opponent_may_choice(
     Ok(action_result(events, state.waiting_for.clone()))
 }
 
+/// CR 702.104a: Resolve the chosen opponent's pay/decline decision for a Tribute
+/// creature. On accept, add N +1/+1 counters to the source and persist
+/// `TributeOutcome::Paid`. On decline, persist `TributeOutcome::Declined`. Either
+/// way, the companion "if tribute wasn't paid" trigger (CR 702.104b) can read the
+/// recorded outcome.
+pub(super) fn handle_tribute_choice(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    accept: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<ActionResult, EngineError> {
+    let WaitingFor::TributeChoice {
+        source_id, count, ..
+    } = waiting_for
+    else {
+        return Err(EngineError::InvalidAction(
+            "Not waiting for tribute choice".to_string(),
+        ));
+    };
+
+    if accept {
+        effects::tribute::apply_paid(state, source_id, count, events);
+    } else {
+        effects::tribute::apply_declined(state, source_id);
+    }
+
+    // Return priority to the active player so the ETB triggered ability can see
+    // the persisted TributeOutcome when its intervening-if condition is checked.
+    set_active_priority(state);
+    resume_pending_continuation_if_priority(state, events)?;
+    Ok(action_result(events, state.waiting_for.clone()))
+}
+
 pub(super) fn handle_unless_payment(
     state: &mut GameState,
     waiting_for: WaitingFor,
