@@ -150,31 +150,26 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 114.3: EmblemStatic — fallback for unparseable emblem static text.
     registry.insert(StaticMode::EmblemStatic, handle_rule_mod);
 
-    // Stub modes -- recognized but no-op until needed.
+    // No generic `StaticMode::Other(...)` stubs are currently needed.
     //
-    // Cost-modification statics are NOT in this list despite initial appearances:
-    // the engine handles cost modifications through first-class typed variants
-    // (`StaticMode::ReduceCost`, `RaiseCost`, `ReduceAbilityCost`,
-    // `DefilerCostReduction`). Historical stub names like "ReduceCostEach" /
-    // "SetCost" / "AlternateCost" were never emitted by the parser and have
-    // been removed to keep the stub list honest.
-    let stubs = [
-        "Devoid",
-        "Forecast",
-        "ETBReplacement",
-        "DamageReduction",
-        "PreventDamage",
-        "DealtDamageInsteadExile",
-        "AttackRestriction",
-        "MinBlockers",
-        "MaxBlockers",
-        "CantExistWithout",
-        "LeavesPlay",
-        "ChangesZoneAll",
-    ];
-    for mode in &stubs {
-        registry.insert(StaticMode::Other((*mode).into()), handle_stub);
-    }
+    // Historical placeholder names (Devoid, Forecast, ETBReplacement,
+    // DamageReduction, PreventDamage, DealtDamageInsteadExile,
+    // AttackRestriction, MinBlockers, MaxBlockers, CantExistWithout,
+    // LeavesPlay, ChangesZoneAll, ReduceCostEach, SetCost, AlternateCost)
+    // were removed after audit confirmed zero parser emission and zero
+    // runtime consumers. The real engine-level mechanics live in typed
+    // variants or other subsystems:
+    //   - Devoid / Forecast         → `Keyword` enum (CR 702.114 / 702.56)
+    //   - ChangesZoneAll            → `TriggerMode::ChangesZoneAll`
+    //   - PreventDamage             → `Effect::PreventDamage`
+    //   - DamageReduction / cost-mod variants → typed `StaticMode` variants
+    //     (`ReduceCost`, `RaiseCost`, `DefilerCostReduction`, etc.)
+    //   - ETBReplacement / LeavesPlay → `ReplacementDefinition`
+    //     (ChangeZone / Moved events)
+    //
+    // If a new card introduces a static pattern that genuinely needs a
+    // runtime-recognized-but-no-op placeholder, add it here and document
+    // the reason.
 
     // CR 305.2, CR 306.7, CR 701.3, CR 701.19, CR 701.21, CR 701.24, CR 701.27,
     // CR 702.5, CR 702.6, CR 120.1, CR 120.2: Prohibition-family statics are
@@ -403,11 +398,6 @@ fn handle_static_lifelink(
     vec![StaticEffect::RuleModification {
         mode: "Lifelink".to_string(),
     }]
-}
-
-/// Stub handler for recognized but unimplemented modes.
-fn handle_stub(_state: &GameState, _mode: &StaticMode, _source_id: ObjectId) -> Vec<StaticEffect> {
-    Vec::new()
 }
 
 /// Check if any active static ability of the given mode applies to the context.
@@ -665,10 +655,15 @@ mod tests {
     #[test]
     fn test_registry_has_all_modes() {
         let registry = build_static_registry();
-        // 1 Continuous + 15 core rule-mod + 47 stubs = 63
+        // 1 Continuous + core rule-mod variants + 11 promoted prohibition
+        // entries (CR 305.2, CR 306.7, CR 701.3, CR 701.19, CR 701.21,
+        // CR 701.24, CR 701.27, CR 702.5, CR 702.6, CR 120.1, CR 120.2).
+        // Phantom `StaticMode::Other(...)` stubs with no parser emission
+        // were removed; if you're adding a new static mode, bump this lower
+        // bound so the test reflects it.
         assert!(
-            registry.len() >= 61,
-            "Expected 61+ modes, got {}",
+            registry.len() >= 25,
+            "Expected 25+ modes, got {}",
             registry.len()
         );
     }
