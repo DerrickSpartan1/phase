@@ -116,11 +116,20 @@ pub fn pay_life_as_cost(
 
     // CR 119.4: Pay life is life loss — route through the damage/life-loss helper
     // so the replacement pipeline fires. A `ReplacementDeferred` here (CR 614.7
-    // multiple competing replacements) is not reachable in practice for pay-life
-    // costs; if it ever occurs, treat it as unpayable rather than half-pay.
+    // multiple competing LifeLoss replacements requiring a player choice) is
+    // not reachable in practice for pay-life costs — no current replacement
+    // effect intercepts cost-path life loss. If that ever ships, the
+    // cost-payment flow would need a new WaitingFor round-trip; for now,
+    // report the cost as unpayable to avoid silently half-applying.
     match apply_damage_life_loss(state, player, amount, events) {
         Ok(_) => PayLifeCostResult::Paid { amount },
-        Err(ReplacementDeferred) => PayLifeCostResult::LockedCantLoseLife,
+        Err(ReplacementDeferred) => {
+            debug_assert!(
+                false,
+                "pay_life_as_cost: unexpected ReplacementDeferred during cost payment"
+            );
+            PayLifeCostResult::InsufficientLife
+        }
     }
 }
 

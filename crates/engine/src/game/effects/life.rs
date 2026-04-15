@@ -663,6 +663,100 @@ mod tests {
         assert_eq!(state.players[0].life, 20, "life gain must be suppressed");
     }
 
+    /// CR 119.5 + CR 119.8: Setting life to a lower total under CantLoseLife
+    /// suppresses only the loss direction — the life total stays the same.
+    #[test]
+    fn set_life_total_downward_blocked_by_cant_lose_only() {
+        let mut state = GameState::new_two_player(42);
+        add_life_lock_permanent(
+            &mut state,
+            PlayerId(0),
+            StaticMode::CantLoseLife,
+            ControllerRef::You,
+        );
+
+        // Setting life to 5 would lose 15.
+        let ability = ResolvedAbility::new(
+            Effect::SetLifeTotal {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_set_life_total(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            state.players[0].life, 20,
+            "loss direction must be suppressed"
+        );
+    }
+
+    /// CR 119.5 + CR 119.7: Setting life to a higher total under CantGainLife
+    /// suppresses only the gain direction — the life total stays the same.
+    #[test]
+    fn set_life_total_upward_blocked_by_cant_gain_only() {
+        let mut state = GameState::new_two_player(42);
+        add_life_lock_permanent(
+            &mut state,
+            PlayerId(0),
+            StaticMode::CantGainLife,
+            ControllerRef::You,
+        );
+
+        // Setting life to 30 would gain 10.
+        let ability = ResolvedAbility::new(
+            Effect::SetLifeTotal {
+                amount: QuantityExpr::Fixed { value: 30 },
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_set_life_total(&mut state, &ability, &mut events).unwrap();
+        assert_eq!(
+            state.players[0].life, 20,
+            "gain direction must be suppressed"
+        );
+    }
+
+    /// CR 119.5: With no locks, set-life-total routes through the gain/loss
+    /// helpers and updates the life total both directions.
+    #[test]
+    fn set_life_total_both_directions_without_locks() {
+        // Upward.
+        let mut state = GameState::new_two_player(42);
+        let ability_gain = ResolvedAbility::new(
+            Effect::SetLifeTotal {
+                amount: QuantityExpr::Fixed { value: 30 },
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_set_life_total(&mut state, &ability_gain, &mut events).unwrap();
+        assert_eq!(state.players[0].life, 30, "set-life-up must take effect");
+
+        // Downward.
+        let ability_loss = ResolvedAbility::new(
+            Effect::SetLifeTotal {
+                amount: QuantityExpr::Fixed { value: 5 },
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_set_life_total(&mut state, &ability_loss, &mut events).unwrap();
+        assert_eq!(state.players[0].life, 5, "set-life-down must take effect");
+    }
+
     /// CR 119.7: The lock only affects players matching the static's filter.
     /// An opponent with no lock continues to gain life normally.
     #[test]

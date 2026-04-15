@@ -9,8 +9,9 @@ use crate::types::game_state::GameState;
 use super::{EffectError, ResolvedAbility};
 
 /// CR 118.1: Pay a cost as part of an effect resolution.
-/// CR 118.2: Paying life is not loss of life — replacement effects do not apply.
 /// CR 117.1: Mana payment uses auto-tap + pool deduction.
+/// CR 119.4: Paying life IS losing life — replacement effects and the
+/// CantLoseLife lock both apply, routed via `life_costs::pay_life_as_cost`.
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
