@@ -468,17 +468,27 @@ pub fn resolve_all(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (origin_zone, dest_zone, target_filter) = match &ability.effect {
+    // CR 604.3: When the target filter encodes multiple zones via `InAnyZone`,
+    // scan their union; otherwise fall back to the explicit `origin` (or
+    // `Battlefield`). Single-zone filters (`InZone` alone) preserve legacy
+    // behavior — only the multi-zone shape opts into the union scan.
+    let (origin_zones, dest_zone, target_filter) = match &ability.effect {
         Effect::ChangeZoneAll {
             origin,
             destination,
             target,
         } => {
-            let origin_z = origin.unwrap_or(Zone::Battlefield);
-            (origin_z, *destination, target.clone())
+            let extracted = target.extract_zones();
+            let scan_zones = if extracted.len() > 1 {
+                extracted
+            } else {
+                vec![origin.unwrap_or(Zone::Battlefield)]
+            };
+            (scan_zones, *destination, target.clone())
         }
         _ => return Err(EffectError::MissingParam("ChangeZoneAll".to_string())),
     };
+    let origin_zone = origin_zones[0];
 
     // CR 400.6 + CR 400.3: `TargetFilter::Controller` / `TargetFilter::Player`
     // in a mass zone-change reference a *player*, not a set of objects. Such
@@ -515,18 +525,20 @@ pub fn resolve_all(
 
     // Collect matching object IDs from the origin zone.
     // Explicit filter-controller override (e.g., "creature that player controls")
-    // — use `from_source_with_controller` to honor the remapping.
-    let ctx = crate::game::filter::FilterContext::from_source_with_controller(
-        ability.source_id,
+    // — use `from_ability_with_controller` so target-inheriting predicates like
+    // `FilterProp::SameNameAsParentTarget` can read the parent target out of
+    // `ability.targets` while still honoring the remapped controller.
+    let ctx = crate::game::filter::FilterContext::from_ability_with_controller(
+        ability,
         filter_controller,
     );
     let matching: Vec<_> = if let Some(player) = player_scope {
-        // Player-scoped mass move: select every card in the origin zone
+        // Player-scoped mass move: select every card in any of the origin zones
         // controlled by the target player, regardless of type.
         state
             .objects
             .iter()
-            .filter(|(_, obj)| obj.zone == origin_zone && obj.controller == player)
+            .filter(|(_, obj)| origin_zones.contains(&obj.zone) && obj.controller == player)
             .map(|(id, _)| *id)
             .collect()
     } else {
@@ -534,7 +546,7 @@ pub fn resolve_all(
             .objects
             .iter()
             .filter(|(&id, obj)| {
-                obj.zone == origin_zone
+                origin_zones.contains(&obj.zone)
                     && crate::game::filter::matches_target_filter(
                         state,
                         id,
@@ -553,11 +565,20 @@ pub fn resolve_all(
 
     let mut moved_count: i32 = 0;
     for obj_id in matching {
+        // CR 400.3: Each object's actual current zone is the source zone for the
+        // move. Single-zone callers pass `origin_zones = [zone]`; multi-zone
+        // callers (e.g. "search graveyard, hand, and library") let each object's
+        // own zone drive the move so per-zone replacements/triggers fire correctly.
+        let per_object_origin = state
+            .objects
+            .get(&obj_id)
+            .map(|o| o.zone)
+            .unwrap_or(origin_zone);
         // Mass zone moves don't use enter_transformed, enter_tapped, or controller_override
         match execute_zone_move(
             state,
             obj_id,
-            origin_zone,
+            per_object_origin,
             dest_zone,
             ability.source_id,
             ability.duration.as_ref(),
@@ -568,6 +589,13 @@ pub fn resolve_all(
         ) {
             ZoneMoveResult::Done => {
                 moved_count += 1;
+                // CR 400.7 + CR 608.2c: Track hand-origin exiles separately so
+                // QuantityRef::ExiledFromHandThisResolution can resolve "draws a
+                // card for each card exiled from their hand this way".
+                if per_object_origin == Zone::Hand && dest_zone == Zone::Exile {
+                    state.exiled_from_hand_this_resolution =
+                        state.exiled_from_hand_this_resolution.saturating_add(1);
+                }
                 // CR 610.3: Consume ExileLink after successfully moving the object,
                 // so check_exile_returns won't try to return it again.
                 if matches!(effective_filter, TargetFilter::ExiledBySource) {
@@ -1760,5 +1788,109 @@ mod tests {
             Some(3),
             "ChangeZoneAll must record moved-object count for EventContextAmount consumers"
         );
+    }
+
+    /// CR 400.7 + CR 701.23 + CR 701.24: Multi-zone same-name exile.
+    /// Exercises the Deadly Cover-Up "search [player]'s graveyard, hand, and
+    /// library for any number of cards with that name and exile them" branch.
+    /// Verifies (a) cards in all three zones matching the parent target's name
+    /// are exiled, (b) cards with different names are untouched, and (c) the
+    /// per-resolution hand-exile counter is populated for the downstream
+    /// `Draw { count: ExiledFromHandThisResolution }` step.
+    #[test]
+    fn change_zone_all_multi_zone_same_name_as_parent_target_exiles_and_counts_hand() {
+        use crate::types::ability::FilterProp;
+        let mut state = GameState::new_two_player(42);
+
+        // Parent target: a "Grizzly Bears" card already exiled by a prior step
+        // (its name persists via lki_cache; we model it as still in Exile here).
+        let seed = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Exile,
+        );
+
+        // Matching cards in three zones owned by player 1.
+        let bear_gy = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Graveyard,
+        );
+        let bear_hand1 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        let bear_hand2 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Hand,
+        );
+        let bear_lib = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(1),
+            "Grizzly Bears".to_string(),
+            Zone::Library,
+        );
+
+        // Distractor: a card in the graveyard with a different name. Must not exile.
+        let other_gy = create_object(
+            &mut state,
+            CardId(6),
+            PlayerId(1),
+            "Llanowar Elves".to_string(),
+            Zone::Graveyard,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: None,
+                destination: Zone::Exile,
+                target: TargetFilter::Typed(
+                    crate::types::ability::TypedFilter::default().properties(vec![
+                        FilterProp::InAnyZone {
+                            zones: vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+                        },
+                        FilterProp::SameNameAsParentTarget,
+                    ]),
+                ),
+            },
+            // Parent target supplies the "that name" referent.
+            vec![TargetRef::Object(seed)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        state.exiled_from_hand_this_resolution = 0;
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        // All four matching bears now in exile.
+        for &id in &[bear_gy, bear_hand1, bear_hand2, bear_lib] {
+            assert_eq!(
+                state.objects[&id].zone,
+                Zone::Exile,
+                "matching bear {id:?} must be exiled"
+            );
+        }
+        // Distractor untouched.
+        assert_eq!(state.objects[&other_gy].zone, Zone::Graveyard);
+
+        // Per-resolution counter equals the number of cards exiled FROM HAND only.
+        assert_eq!(
+            state.exiled_from_hand_this_resolution, 2,
+            "exactly two hand-origin exiles must be recorded for downstream Draw"
+        );
+
+        // Total moved across all zones is 4 (two from hand + one each from GY/Lib).
+        assert_eq!(state.last_effect_count, Some(4));
     }
 }

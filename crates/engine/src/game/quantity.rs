@@ -420,6 +420,10 @@ fn resolve_ref(
             .max_by_key(|(id, _)| id.0)
             .map(|(_, ids)| ids.len() as i32)
             .unwrap_or(0),
+        // CR 400.7 + CR 608.2c: Read the per-resolution counter populated by
+        // ChangeZoneAll when it exiles cards from a hand. Used by "draws a card
+        // for each card exiled from their hand this way" (Deadly Cover-Up).
+        QuantityRef::ExiledFromHandThisResolution => state.exiled_from_hand_this_resolution as i32,
         // CR 603.7c: Numeric value from the triggering event.
         // Falls back to last_effect_count for sub_ability continuations where
         // current_trigger_event has no amount (e.g., "discard up to N, then draw that many").

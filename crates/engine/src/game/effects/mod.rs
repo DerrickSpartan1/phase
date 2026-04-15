@@ -559,6 +559,7 @@ pub fn resolve_ability_chain(
         state.last_revealed_ids.clear();
         state.last_zone_changed_ids.clear();
         state.last_effect_amount = None;
+        state.exiled_from_hand_this_resolution = 0;
     }
 
     // BeginGame abilities are handled at game-start setup, not during stack resolution

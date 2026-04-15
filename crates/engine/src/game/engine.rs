@@ -59,6 +59,7 @@ pub fn apply(state: &mut GameState, action: GameAction) -> Result<ActionResult, 
     // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
     // consumed by sub_ability continuations via EventContextAmount fallback.
     state.last_effect_count = None;
+    state.exiled_from_hand_this_resolution = 0;
     let mut result = apply_action(state, action)?;
     bump_state_revision(state);
     mark_public_state_all_dirty(state);

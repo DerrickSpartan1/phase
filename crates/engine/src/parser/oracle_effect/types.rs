@@ -489,6 +489,13 @@ pub(super) enum SearchCreationImperativeAst {
         destination: Zone,
         enter_tapped: bool,
     },
+    /// CR 400.7 + CR 701.23 + CR 701.24: "Search [possessive] graveyard, hand,
+    /// and library for any number of cards with that name and exile them."
+    /// Lowered to `Effect::ChangeZoneAll` with multi-zone origin
+    /// (`InAnyZone[Graveyard, Hand, Library]`) + `SameNameAsParentTarget` filter,
+    /// scoped to the owner of the parent target's exiled card. Used by
+    /// Deadly Cover-Up.
+    MultiZoneSameNameExile,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

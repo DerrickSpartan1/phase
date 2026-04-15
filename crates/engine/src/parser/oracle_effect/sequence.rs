@@ -121,9 +121,22 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                             && tag::<_, _, VerboseError<&str>>("put ")
                                 .parse(remainder_trimmed)
                                 .is_ok();
+                    // CR 701.18a + CR 701.23: "search [zones] for [filter] and exile them"
+                    // is a single compound search-and-exile action — keep it together so
+                    // the imperative dispatcher can recognize the multi-zone pattern.
+                    // Accepts "search ..." and "then search ..." prefixes, and either
+                    // "with that name" or "with the same name as that card" suffixes.
+                    let has_search_prefix = nom_primitives::scan_contains(&before_lower, "search ");
+                    let search_with_that_name = has_search_prefix
+                        && (before_lower.ends_with("with that name")
+                            || before_lower.ends_with("with the same name as that card"))
+                        && tag::<_, _, VerboseError<&str>>("exile them")
+                            .parse(remainder_trimmed)
+                            .is_ok();
                     let suppress = nom_primitives::scan_contains(&before_lower, "from among")
                         || is_inside_temporal_prefix(&before_lower)
-                        || targeted_compound_continuation;
+                        || targeted_compound_continuation
+                        || search_with_that_name;
                     if !suppress && starts_bare_and_clause(remainder_trimmed) {
                         push_clause_chunk(&mut chunks, before_and, Some(ClauseBoundary::Comma));
                         current.clear();

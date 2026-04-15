@@ -121,6 +121,22 @@ impl<'a> FilterContext<'a> {
             ability: Some(ability),
         }
     }
+
+    /// CR 107.3a + CR 700.5: Full ability context with an explicit controller
+    /// override. Use when the filter controller differs from `ability.controller`
+    /// (e.g., "creature that player controls" mass-move dispatched to a target
+    /// player) AND the filter still needs the resolving ability for target-
+    /// inheriting predicates like `FilterProp::SameNameAsParentTarget`.
+    pub fn from_ability_with_controller(
+        ability: &'a ResolvedAbility,
+        controller: PlayerId,
+    ) -> Self {
+        Self {
+            source_id: ability.source_id,
+            source_controller: Some(controller),
+            ability: Some(ability),
+        }
+    }
 }
 
 /// Check if an object matches a typed TargetFilter against the given context.
@@ -768,6 +784,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::Targets { .. }
         | FilterProp::Named { .. }
         | FilterProp::SameName
+        | FilterProp::SameNameAsParentTarget
         | FilterProp::Other { .. } => false,
     }
 }
@@ -785,6 +802,26 @@ struct SourceContext<'a> {
     /// without a resolving ability (combat restrictions, layer predicates); in that
     /// case, per CR 107.2, any `Variable("X")` fallback resolves to 0.
     ability: Option<&'a ResolvedAbility>,
+}
+
+/// CR 201.2 + CR 700.5 + CR 400.7: Resolve the printed name of the first
+/// `TargetRef::Object` in the resolving ability's targets, falling back to the
+/// LKI cache when the targeted object has already left its zone (e.g. exiled
+/// by the immediately preceding sub-effect).
+///
+/// Returns `None` when no ability is in scope, when the ability has no object
+/// targets, or when the referenced object has no record in either `state.objects`
+/// or `state.lki_cache`.
+fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> Option<String> {
+    let ability = ability?;
+    let id = ability.targets.iter().find_map(|t| match t {
+        crate::types::ability::TargetRef::Object(id) => Some(*id),
+        crate::types::ability::TargetRef::Player(_) => None,
+    })?;
+    if let Some(obj) = state.objects.get(&id) {
+        return Some(obj.name.clone());
+    }
+    state.lki_cache.get(&id).map(|lki| lki.name.clone())
 }
 
 /// Resolve a dynamic filter threshold against the source context.
@@ -884,6 +921,12 @@ fn matches_filter_prop(
                 false
             }
         }
+        // CR 201.2 + CR 700.5: Match objects whose name equals the resolving ability's
+        // first object target (the parent target captured by the chained sub-ability).
+        // Falls back to the LKI cache when the targeted object has already left its zone
+        // (e.g., the seed was just exiled by the preceding effect).
+        FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
+            .is_some_and(|name| obj.name.eq_ignore_ascii_case(&name)),
         FilterProp::InZone { zone } => obj.zone == *zone,
         FilterProp::Owned { controller } => match controller {
             ControllerRef::You => source.controller == Some(obj.owner),
@@ -1095,6 +1138,10 @@ fn zone_change_record_matches_property(
             .objects
             .get(&source.id)
             .is_some_and(|s| s.name.eq_ignore_ascii_case(&record.name)),
+        // CR 201.2 + CR 700.5: Same-name match against the resolving ability's
+        // first object target (parent target). Mirrors the live-object evaluator.
+        FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
+            .is_some_and(|name| record.name.eq_ignore_ascii_case(&name)),
 
         // -------- Group 3: dynamic battlefield state (N/A once left zone) --------
         // These predicates query live battlefield state (tap status, combat role,

@@ -38,6 +38,10 @@ fn default_game_number() -> u8 {
     1
 }
 
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
 fn default_remaining_one() -> u32 {
     1
 }
@@ -1882,6 +1886,14 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_effect_count: Option<i32>,
 
+    /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the most recent
+    /// `Effect::ChangeZoneAll` resolution. Read by `QuantityRef::ExiledFromHandThisResolution`
+    /// for "draws a card for each card exiled from their hand this way" patterns
+    /// (Deadly Cover-Up, Lost Legacy class). Cleared at the top of apply() so each
+    /// resolution starts at 0.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub exiled_from_hand_this_resolution: u32,
+
     /// CR 722: The current monarch, if any. At the beginning of the monarch's end step,
     /// the monarch draws a card. When a creature deals combat damage to the monarch,
     /// the creature's controller becomes the monarch.
@@ -2118,6 +2130,7 @@ impl GameState {
             last_zone_changed_ids: Vec::new(),
             last_effect_amount: None,
             last_effect_count: None,
+            exiled_from_hand_this_resolution: 0,
             monarch: None,
             city_blessing: HashSet::new(),
             restrictions: Vec::new(),
@@ -2272,6 +2285,7 @@ impl PartialEq for GameState {
             && self.last_revealed_ids == other.last_revealed_ids
             && self.last_zone_changed_ids == other.last_zone_changed_ids
             && self.last_effect_count == other.last_effect_count
+            && self.exiled_from_hand_this_resolution == other.exiled_from_hand_this_resolution
             && self.lki_cache == other.lki_cache
             && self.city_blessing == other.city_blessing
     }

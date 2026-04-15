@@ -1114,6 +1114,19 @@ pub enum FilterProp {
     /// Matches objects with the same name as a previously-referenced card.
     /// Used for "search your library for a card with that name" patterns.
     SameName,
+    /// CR 201.2 + CR 700.5: Matches objects whose name equals the name of the
+    /// resolving ability's first object target. Used by chained sub-abilities
+    /// where a prior step targeted/exiled a card and the next step references
+    /// "cards with that name" — e.g., Deadly Cover-Up's "search ... for any
+    /// number of cards with that name and exile them" (the "that name" is the
+    /// name of the card exiled by the immediately preceding effect, which is
+    /// inherited as the first target via `TargetFilter::ParentTarget`).
+    ///
+    /// Differs from `SameName` (which reads the source object's name): this
+    /// reads from `ability.targets[0]` when that target is `TargetRef::Object`,
+    /// looking up the name from `state.objects` (or `lki_cache` if the target
+    /// has already left its zone).
+    SameNameAsParentTarget,
     Other {
         value: String,
     },
@@ -1363,6 +1376,12 @@ pub enum QuantityRef {
     /// Only valid during sub-ability chain resolution; returns 0 outside that context.
     /// The caller (token resolver) is responsible for consuming the tracked set after use.
     TrackedSetSize,
+    /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the immediately
+    /// preceding `Effect::ChangeZoneAll` resolution. Read by Deadly Cover-Up's
+    /// "draws a card for each card exiled from their hand this way." The counter
+    /// is tracked in `state.exiled_from_hand_this_resolution` and reset at the
+    /// top of each player action and at the start of each top-level ability chain.
+    ExiledFromHandThisResolution,
     /// CR 609.3: Numeric amount produced by the preceding effect in the sub_ability chain.
     /// Used for "gain life equal to the life lost this way" and similar patterns where
     /// a sub_ability references the parent effect's numeric result (life lost, damage dealt).
@@ -3331,6 +3350,46 @@ impl TargetFilter {
             }
             TargetFilter::Not { filter } => filter.extract_in_zone(),
             _ => None,
+        }
+    }
+
+    /// CR 604.3: Returns the union of explicit zone constraints in this filter.
+    /// Preserves the multi-zone semantics of `FilterProp::InAnyZone` (e.g.
+    /// "search ... graveyard, hand, and library") that `extract_in_zone` collapses
+    /// to a single zone. Falls back to the single `InZone` when only that variant
+    /// is present. Returns an empty Vec when the filter imposes no zone constraint.
+    pub fn extract_zones(&self) -> Vec<crate::types::zones::Zone> {
+        let mut out = Vec::new();
+        self.collect_zones(&mut out);
+        out
+    }
+
+    fn collect_zones(&self, out: &mut Vec<crate::types::zones::Zone>) {
+        match self {
+            TargetFilter::Typed(tf) => {
+                for p in &tf.properties {
+                    match p {
+                        FilterProp::InAnyZone { zones } => {
+                            for z in zones {
+                                if !out.contains(z) {
+                                    out.push(*z);
+                                }
+                            }
+                        }
+                        FilterProp::InZone { zone } if !out.contains(zone) => {
+                            out.push(*zone);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                for f in filters {
+                    f.collect_zones(out);
+                }
+            }
+            TargetFilter::Not { filter } => filter.collect_zones(out),
+            _ => {}
         }
     }
 }

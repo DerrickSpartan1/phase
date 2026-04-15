@@ -638,6 +638,68 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
     }
 }
 
+/// CR 400.7 + CR 701.23 + CR 701.24: Recognize the multi-zone same-name exile
+/// pattern used by Deadly Cover-Up and the Lost Legacy class.
+///
+/// The matched grammar is, in BNF-like form:
+///
+/// ```text
+/// "search " <possessive>
+///     ("graveyard, hand, and library" | <permutation>)
+///     " for " ("any number of cards" | "all cards" | "a card")
+///     " with that name and exile them"
+/// ```
+///
+/// Returns `Some(())` on match — the lowering step constructs the
+/// `Effect::ChangeZoneAll` directly (multi-zone origin + filter + destination
+/// are fixed by the matched pattern). Returns `None` for any other shape so
+/// the regular library-search branch can run.
+fn try_parse_multi_zone_same_name_exile(lower: &str) -> Option<()> {
+    fn run(input: &str) -> Result<(&str, ()), nom::Err<VerboseError<&str>>> {
+        // search <possessive> graveyard, hand, and library
+        let (input, _) = tag::<_, _, VerboseError<&str>>("search ").parse(input)?;
+        let (input, _) = alt((
+            tag::<_, _, VerboseError<&str>>("its owner's "),
+            tag("their "),
+            tag("that player's "),
+            tag("target player's "),
+            tag("target opponent's "),
+            tag("an opponent's "),
+            tag("your "),
+        ))
+        .parse(input)?;
+        let (input, _) = alt((
+            tag::<_, _, VerboseError<&str>>("graveyard, hand, and library"),
+            tag("graveyard, hand and library"),
+            tag("graveyard, library, and hand"),
+            tag("hand, graveyard, and library"),
+            tag("library, graveyard, and hand"),
+        ))
+        .parse(input)?;
+        // for [any number of] cards with that name and exile them
+        let (input, _) = tag::<_, _, VerboseError<&str>>(" for ").parse(input)?;
+        let (input, _) = alt((
+            value((), tag::<_, _, VerboseError<&str>>("any number of cards")),
+            value((), tag("all cards")),
+            value((), tag("a card")),
+        ))
+        .parse(input)?;
+        // Match the trailing same-name suffix in either of two synonymous forms:
+        //   " with that name and exile them"            (Deadly Cover-Up, Lost Legacy)
+        //   " with the same name as that card and exile them"  (Surgical Extraction)
+        let (input, _) = alt((
+            value(
+                (),
+                tag::<_, _, VerboseError<&str>>(" with that name and exile them"),
+            ),
+            value((), tag(" with the same name as that card and exile them")),
+        ))
+        .parse(input)?;
+        Ok((input, ()))
+    }
+    run(lower).ok().map(|_| ())
+}
+
 pub(super) fn parse_search_and_creation_ast(
     text: &str,
     lower: &str,
@@ -650,6 +712,13 @@ pub(super) fn parse_search_and_creation_ast(
             destination: details.destination,
             enter_tapped: details.enter_tapped,
         });
+    }
+    // CR 400.7 + CR 701.23 + CR 701.24: "search [possessive] graveyard, hand,
+    // and library for [filter] and exile them" — multi-zone exile of every card
+    // matching the filter. Recognized before the single-zone library search
+    // because both patterns share the "search " prefix; multi-zone wins on match.
+    if try_parse_multi_zone_same_name_exile(lower).is_some() {
+        return Some(SearchCreationImperativeAst::MultiZoneSameNameExile);
     }
     if starts_with_possessive(lower, "search", "library")
         || nom_on_lower(lower, lower, |i| {
@@ -810,6 +879,22 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             count,
             destination,
             enter_tapped,
+        },
+        // CR 400.7 + CR 701.23 + CR 701.24: Multi-zone same-name exile.
+        // The target filter encodes both the zone union (graveyard, hand,
+        // library) via `InAnyZone` and the name match against the parent
+        // target via `SameNameAsParentTarget`. The ChangeZoneAll resolver
+        // reads multi-zone origins from the filter and per-object zone-of-
+        // origin to track hand-origin exiles for the downstream draw count.
+        SearchCreationImperativeAst::MultiZoneSameNameExile => Effect::ChangeZoneAll {
+            origin: None,
+            destination: Zone::Exile,
+            target: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                crate::types::ability::FilterProp::InAnyZone {
+                    zones: vec![Zone::Graveyard, Zone::Hand, Zone::Library],
+                },
+                crate::types::ability::FilterProp::SameNameAsParentTarget,
+            ])),
         },
     }
 }
@@ -4360,6 +4445,78 @@ mod tests {
                 assert_eq!(origin, Zone::Hand);
             }
             other => panic!("Expected ChangeZoneAllToLibrary Hand, got {other:?}"),
+        }
+    }
+
+    /// CR 400.7 + CR 701.23: Multi-zone same-name exile combinator covers
+    /// the whole sibling class (Deadly Cover-Up, Lost Legacy, Cranial
+    /// Extraction, Memoricide, Surgical Extraction). Both "with that name"
+    /// and "with the same name as that card" forms are accepted.
+    #[test]
+    fn parse_multi_zone_same_name_exile_pattern() {
+        let positives = [
+            "search its owner's graveyard, hand, and library for any number of cards with that name and exile them",
+            "search target player's graveyard, hand, and library for any number of cards with that name and exile them",
+            "search target player's graveyard, hand, and library for all cards with that name and exile them",
+            "search its owner's graveyard, hand, and library for any number of cards with the same name as that card and exile them",
+            "search their graveyard, hand, and library for a card with that name and exile them",
+        ];
+        for text in positives {
+            assert!(
+                try_parse_multi_zone_same_name_exile(text).is_some(),
+                "expected match for: {text}"
+            );
+        }
+
+        let negatives = [
+            // Library-only — handled by the regular SearchLibrary branch.
+            "search your library for a card",
+            // Two-zone permutation we don't recognize (deliberate scope cut).
+            "search target player's graveyard and library for any number of cards with that name and exile them",
+            // Different action verb after — single-zone search-and-put-into-hand.
+            "search your library for a basic land card and put it into your hand",
+        ];
+        for text in negatives {
+            assert!(
+                try_parse_multi_zone_same_name_exile(text).is_none(),
+                "expected no match for: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_search_creation_lowering_emits_change_zone_all_with_same_name_as_parent_target() {
+        use crate::types::ability::FilterProp;
+        let text = "search its owner's graveyard, hand, and library for any number of cards with that name and exile them";
+        let ast = parse_search_and_creation_ast(text, text)
+            .expect("multi-zone same-name exile must parse");
+        let effect = lower_search_and_creation_ast(ast);
+        match effect {
+            Effect::ChangeZoneAll {
+                origin,
+                destination,
+                target,
+            } => {
+                assert!(
+                    origin.is_none(),
+                    "origin must be None — zones come from filter"
+                );
+                assert_eq!(destination, Zone::Exile);
+                let TargetFilter::Typed(tf) = target else {
+                    panic!("Expected Typed target, got {target:?}");
+                };
+                let zones_ok = tf.properties.iter().any(|p| {
+                    matches!(p, FilterProp::InAnyZone { zones }
+                        if zones == &vec![Zone::Graveyard, Zone::Hand, Zone::Library])
+                });
+                let same_name_ok = tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::SameNameAsParentTarget));
+                assert!(zones_ok, "InAnyZone[GY,Hand,Lib] missing");
+                assert!(same_name_ok, "SameNameAsParentTarget missing");
+            }
+            other => panic!("Expected ChangeZoneAll, got {other:?}"),
         }
     }
 }

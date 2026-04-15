@@ -387,6 +387,23 @@ fn is_event_context_referent(prefix: &str) -> bool {
     false
 }
 
+/// CR 400.7 + CR 608.2c: Match "<noun> exiled from <possessive> hand this way"
+/// — used by Deadly Cover-Up's "draws a card for each card exiled from their
+/// hand this way." Tries the `exiled from <possessive> hand` combinator at
+/// every word boundary and returns `Some(())` on the first match.
+fn try_parse_exiled_from_hand_this_way(lower: &str) -> Option<()> {
+    crate::parser::oracle_nom::primitives::scan_at_word_boundaries(lower, |input| {
+        let (rest, _) = tag::<_, _, VerboseError<&str>>("exiled from ").parse(input)?;
+        let (rest, _) = alt((
+            value((), tag::<_, _, VerboseError<&str>>("their hand")),
+            value((), tag("its owner's hand")),
+            value((), tag("that player's hand")),
+        ))
+        .parse(rest)?;
+        Ok((rest, ()))
+    })
+}
+
 /// Parse the clause after "for each" into a QuantityRef.
 pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     let clause = clause.trim().trim_end_matches('.');
@@ -400,6 +417,13 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
     // "card put into a graveyard this way" / "creature card exiled this way" / etc.
     // "this way" references objects from the preceding effect's tracked set.
     if clause.contains("this way") {
+        // CR 400.7 + CR 608.2c: "card exiled from [possessive] hand this way" —
+        // hand-origin exiles only (Deadly Cover-Up). Resolves against the
+        // dedicated per-resolution counter populated by `ChangeZoneAll`.
+        let lower = clause.to_ascii_lowercase();
+        if try_parse_exiled_from_hand_this_way(&lower).is_some() {
+            return Some(QuantityRef::ExiledFromHandThisResolution);
+        }
         return Some(QuantityRef::TrackedSetSize);
     }
 
