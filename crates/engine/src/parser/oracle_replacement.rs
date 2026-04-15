@@ -62,7 +62,7 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
 
     // --- "You may have ~ enter as a copy of [filter]" (clone replacement) ---
     // CR 707.9: "Enter as a copy" is a replacement effect modifying the ETB event.
-    if let Some(def) = parse_clone_replacement(&norm_lower, &text) {
+    if let Some(def) = parse_clone_replacement(&norm_lower, &text, card_name) {
         return Some(def);
     }
 
@@ -358,9 +358,19 @@ fn parse_as_enters_choose(norm_lower: &str, original_text: &str) -> Option<Repla
 
 /// CR 707.9 / CR 614.1c: Parse clone replacement effect.
 /// "You may have ~ enter as a copy of [any] [type] on the battlefield"
+/// "You may have ~ enter as a copy of any creature card in a graveyard, ..."
 /// Emits an Optional Moved replacement with BecomeCopy as the execute effect.
-/// The player chooses a valid permanent to copy as part of the replacement.
-fn parse_clone_replacement(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
+/// The player chooses a valid card to copy as part of the replacement.
+///
+/// The source zone is carried on the returned filter via `FilterProp::InZone`
+/// (battlefield is the default when no zone qualifier is present).
+/// `card_name` threads through so `"his/her/its name is <card name>"` exception
+/// clauses can emit a `SetName` override keyed to the original card name.
+fn parse_clone_replacement(
+    norm_lower: &str,
+    original_text: &str,
+    card_name: &str,
+) -> Option<ReplacementDefinition> {
     // Must contain "enter as a copy of" (after self-ref normalization)
     let (before_copy, copy_match) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
         tag::<_, _, VerboseError<&str>>("enter as a copy of ").parse(i)
@@ -371,8 +381,11 @@ fn parse_clone_replacement(norm_lower: &str, original_text: &str) -> Option<Repl
     }
 
     let after_copy = &copy_match["enter as a copy of ".len()..];
-    let (_, (type_text, suffix)) =
-        nom_primitives::split_once_on(after_copy, " on the battlefield").ok()?;
+    // CR 400.1: Match any supported source zone. Battlefield is the existing
+    // Clone/Phantasmal Image class; graveyard (Superior Spider-Man) extends the
+    // same building block. The zone flows onto the filter's `FilterProp::InZone`
+    // below so `find_copy_targets` can scan the correct zone without branching.
+    let (type_text, suffix, source_zone) = split_on_clone_source_zone(after_copy)?;
     // Strip "any " / "a " / "an " article before the type phrase
     let type_text = alt((
         tag::<_, _, VerboseError<&str>>("any "),
@@ -383,21 +396,37 @@ fn parse_clone_replacement(norm_lower: &str, original_text: &str) -> Option<Repl
     .map_or(type_text, |(rest, _)| rest)
     .trim();
 
-    let (filter, leftover) = parse_type_phrase(type_text);
+    let (mut filter, leftover) = parse_type_phrase(type_text);
     if !leftover.trim().is_empty() {
         return None;
     }
 
+    // CR 400.1: Thread the source zone onto the filter when it isn't the default
+    // battlefield. `parse_type_phrase` does not emit `InZone` from a bare type
+    // word like "creature", so the zone must be attached here. Skip for
+    // battlefield to preserve existing Clone/Phantasmal Image filter shape.
+    if source_zone != Zone::Battlefield {
+        filter = attach_zone_to_filter(filter, source_zone);
+    }
+
     // CR 707.9 / CR 614.1c: The suffix carries any "except it's a {type}" and
     // "it has {keyword}" modifications plus the optional mana-value ceiling.
+    // Also handles "except its/his/her name is X" (SetName override) and
+    // "except he's/she's/it's N/M {type list} in addition to its other types"
+    // (P/T override + type additions; CR 707.9b).
+    //
     // Unrecognized fragments degrade gracefully to `(None, vec![])` so the plain
     // BecomeCopy replacement still registers — dropping the entire replacement
     // for an unparsed suffix would lose the clone behaviour entirely.
-    let (mana_value_limit, additional_modifications) = parse_clone_suffix(suffix.trim());
+    //
+    // The suffix may also carry a trailing "When you do, ..." reflexive trigger
+    // clause past the sentence boundary — parsed separately into a sub_ability.
+    let (mana_value_limit, additional_modifications, post_period) =
+        parse_clone_suffix(suffix.trim(), card_name);
 
     // CR 707.9a: The copy effect uses the chosen object's copiable values.
     // This is NOT targeting (hexproof/shroud don't apply).
-    let copy_effect = AbilityDefinition::new(
+    let mut copy_effect = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::BecomeCopy {
             target: filter,
@@ -408,6 +437,15 @@ fn parse_clone_replacement(norm_lower: &str, original_text: &str) -> Option<Repl
     )
     .description(original_text.to_string());
 
+    // CR 603.12: "When you do, ..." — reflexive trigger that fires when the
+    // clone replacement's choose-and-copy action was performed. Parsed as a
+    // sub_ability with condition `WhenYouDo`; the parent's targets (the copied
+    // source card) are forwarded so "that card" (`TargetFilter::TriggeringSource`)
+    // resolves to the chosen card for e.g. "exile that card".
+    if let Some(reflexive) = parse_when_you_do_reflexive(post_period) {
+        copy_effect = copy_effect.sub_ability(reflexive);
+    }
+
     Some(
         ReplacementDefinition::new(ReplacementEvent::Moved)
             .execute(copy_effect)
@@ -417,28 +455,122 @@ fn parse_clone_replacement(norm_lower: &str, original_text: &str) -> Option<Repl
     )
 }
 
+/// Split the post-"enter as a copy of " remainder into (type_text, suffix, source_zone).
+/// Recognises both the battlefield form ("... on the battlefield, ...") and the
+/// graveyard forms ("... in a graveyard, ...", "... in any graveyard, ..."). The
+/// returned `type_text` is the span between "enter as a copy of " and the zone
+/// clause; `suffix` is everything after the zone clause (including the leading
+/// `,` / `.` boundary).
+fn split_on_clone_source_zone(after_copy: &str) -> Option<(&str, &str, Zone)> {
+    let candidates: &[(&str, Zone)] = &[
+        (" on the battlefield", Zone::Battlefield),
+        (" in any graveyard", Zone::Graveyard),
+        (" in a graveyard", Zone::Graveyard),
+    ];
+    // Earliest-matching phrase wins — "in a graveyard" before "in any graveyard"
+    // when both appear; structurally equivalent to `split_on_first_of` but also
+    // returns the zone selector.
+    let mut best: Option<(usize, usize, Zone)> = None;
+    for &(phrase, zone) in candidates {
+        if let Ok((_, (before, _))) = nom_primitives::split_once_on(after_copy, phrase) {
+            let pos = before.len();
+            if best.is_none_or(|(best_pos, _, _)| pos < best_pos) {
+                best = Some((pos, phrase.len(), zone));
+            }
+        }
+    }
+    let (pos, len, zone) = best?;
+    let type_text = &after_copy[..pos];
+    let suffix = &after_copy[pos + len..];
+    Some((type_text, suffix, zone))
+}
+
+/// Attach `FilterProp::InZone { zone }` to a filter produced by `parse_type_phrase`.
+/// `parse_type_phrase` handles its own "in a graveyard" suffix when present in
+/// the type text, but clone-replacement text carries the zone *outside* the type
+/// phrase ("any creature card in a graveyard"), so the zone must be merged in.
+fn attach_zone_to_filter(filter: TargetFilter, zone: Zone) -> TargetFilter {
+    use crate::types::ability::FilterProp;
+    match filter {
+        TargetFilter::Typed(mut tf) => {
+            if !tf
+                .properties
+                .iter()
+                .any(|p| matches!(p, FilterProp::InZone { .. }))
+            {
+                tf.properties.push(FilterProp::InZone { zone });
+            }
+            TargetFilter::Typed(tf)
+        }
+        other => other,
+    }
+}
+
+/// Parse a trailing "When you do, ..." reflexive trigger clause.
+///
+/// Delegates to the existing effect-chain parser, which routes
+/// `strip_if_you_do_conditional` to set `condition = AbilityCondition::WhenYouDo`
+/// on the resulting AbilityDefinition (CR 603.12 reflexive trigger semantics).
+/// Returns None when the text doesn't start with a "when you do" phrase or the
+/// chain parser produces an unimplemented effect (so the caller can fall back
+/// to the plain BecomeCopy replacement without a reflexive trigger).
+fn parse_when_you_do_reflexive(post_period: &str) -> Option<AbilityDefinition> {
+    let trimmed = post_period.trim_start_matches(['.', ' ']);
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Guard: only accept text whose lowered form actually begins with "when you do".
+    let lower = trimmed.to_lowercase();
+    let starts_with_when_you_do = tag::<_, _, VerboseError<&str>>("when you do")
+        .parse(lower.as_str())
+        .is_ok();
+    if !starts_with_when_you_do {
+        return None;
+    }
+    let def = super::oracle_effect::parse_effect_chain(trimmed, AbilityKind::Spell);
+    // Reject unimplemented fallbacks — the chain parser returns
+    // `Effect::Unimplemented` when no pattern matches, which would attach a
+    // dead sub_ability to the clone replacement.
+    if matches!(*def.effect, Effect::Unimplemented { .. }) {
+        return None;
+    }
+    Some(def)
+}
+
 /// Parse the suffix of a clone replacement, which carries the optional
 /// "with mana value ≤ cost" ceiling (CR 614.1c), any "except it's a(n) {type}"
-/// type/subtype additions, and any "and it has {keyword[,...]}" keyword grants
-/// (CR 707.9a).
+/// type/subtype additions, any "and it has {keyword[,...]}" keyword grants
+/// (CR 707.9a), and — for gender-preserving copies (Superior Spider-Man) —
+/// `"except <possessive> name is <card name>"` and
+/// `"<subject pronoun>'s N/M {type list} in addition to its other types"`.
 ///
 /// The input is the already-lowercased, trimmed portion of the Oracle line
-/// after `"on the battlefield"`.
+/// after the source-zone clause (`"on the battlefield"` / `"in a graveyard"`).
+///
+/// Returns `(mana_value_limit, modifications, post_period)` where `post_period`
+/// is the text remaining after the optional sentence-terminating `.` — used by
+/// the caller to parse a trailing "When you do, ..." reflexive clause.
 ///
 /// Fail-soft: the parser is **total** over the input. Any unrecognized leading
 /// fragment yields defaults (`None`, `vec![]`) so the caller can still register
 /// the plain `BecomeCopy` replacement. This preserves correctness for cards
-/// whose `except` clause is not yet understood (e.g. Phantasmal Image's inline
-/// gained ability, Vesuvan Doppelganger's "doesn't copy that creature's color")
-/// rather than dropping their clone behaviour entirely.
-fn parse_clone_suffix(suffix: &str) -> (Option<CopyManaValueLimit>, Vec<ContinuousModification>) {
-    // Absorb a trailing '.' (if any) once we've peeled off recognised clauses.
+/// whose `except` clause is not yet understood (e.g. Vesuvan Doppelganger's
+/// "doesn't copy that creature's color") rather than dropping their clone
+/// behaviour entirely.
+fn parse_clone_suffix<'a>(
+    suffix: &'a str,
+    card_name: &str,
+) -> (
+    Option<CopyManaValueLimit>,
+    Vec<ContinuousModification>,
+    &'a str,
+) {
     let (remaining, mana_value_limit) =
         parse_mana_value_limit_clause(suffix).unwrap_or((suffix, None));
-    let (_remaining, modifications) =
-        parse_except_clause(remaining).unwrap_or((remaining, Vec::new()));
+    let (post_except, modifications) =
+        parse_except_clause(remaining, card_name).unwrap_or((remaining, Vec::new()));
 
-    (mana_value_limit, modifications)
+    (mana_value_limit, modifications, post_except)
 }
 
 /// CR 614.1c: " with mana value less than or equal to the amount of mana spent to cast {self_ref}".
@@ -462,7 +594,13 @@ fn parse_mana_value_limit_clause(suffix: &str) -> Option<(&str, Option<CopyManaV
 /// Each `except_body` independently contributes typed modifications. Bodies
 /// that don't match a known shape are silently skipped so we still keep the
 /// ones that do. The trailing '.' is optional and non-load-bearing.
-fn parse_except_clause(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+///
+/// The remainder returned is the span after any sentence-terminating `.` so
+/// callers can continue parsing trailing clauses (e.g. "When you do, ...").
+fn parse_except_clause<'a>(
+    input: &'a str,
+    card_name: &str,
+) -> Option<(&'a str, Vec<ContinuousModification>)> {
     // ", except " — if missing, there are no modifications to extract.
     let (mut rest, _) = tag::<_, _, VerboseError<&str>>(", except ")
         .parse(input)
@@ -471,7 +609,7 @@ fn parse_except_clause(input: &str) -> Option<(&str, Vec<ContinuousModification>
 
     loop {
         let before = rest;
-        if let Some((after, mods)) = parse_except_body(rest) {
+        if let Some((after, mods)) = parse_except_body(rest, card_name) {
             modifications.extend(mods);
             rest = after;
         } else {
@@ -497,12 +635,24 @@ fn parse_except_clause(input: &str) -> Option<(&str, Vec<ContinuousModification>
     Some((rest, modifications))
 }
 
-/// Parse a single "except it ..." body, producing zero or more modifications.
+/// Parse a single "except ..." body, producing zero or more modifications.
 /// Recognised shapes:
 ///   - "it's a(n) {subtype} in addition to its other types"   → AddSubtype
 ///   - "it's a(n) {core_type} in addition to its other types" → AddType
-///   - "it has {keyword[, keyword, ...]}"                     → AddKeyword per
-fn parse_except_body(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+///   - "it has {keyword[, keyword, ...]}"                     → AddKeyword per kw
+///   - "<possessive> name is ~"                               → SetName(card_name)
+///   - "<subject>'s N/M {type list} in addition to its other types"
+///     → SetPower + SetToughness + AddType/AddSubtype per word
+fn parse_except_body<'a>(
+    input: &'a str,
+    card_name: &str,
+) -> Option<(&'a str, Vec<ContinuousModification>)> {
+    if let Some((rest, name_mod)) = parse_name_override(input, card_name) {
+        return Some((rest, vec![name_mod]));
+    }
+    if let Some((rest, mods)) = parse_subject_pt_and_types(input) {
+        return Some((rest, mods));
+    }
     if let Some((rest, subtype)) = parse_its_a_type_in_addition(input) {
         return Some((rest, vec![subtype]));
     }
@@ -510,6 +660,124 @@ fn parse_except_body(input: &str) -> Option<(&str, Vec<ContinuousModification>)>
         return Some((rest, keywords));
     }
     None
+}
+
+/// CR 707.9b + CR 707.2: "his/her/its name is ~" — emit a `SetName` override
+/// keyed to the original card name. The `~` here is the self-ref sentinel
+/// inserted by `normalize_card_name_refs`; we don't need to peel the card's
+/// literal name because the suffix text was produced from the already-
+/// normalised Oracle line.
+fn parse_name_override<'a>(
+    input: &'a str,
+    card_name: &str,
+) -> Option<(&'a str, ContinuousModification)> {
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("his name is "),
+        tag("her name is "),
+        tag("its name is "),
+    ))
+    .parse(input)
+    .ok()?;
+    // Accept "~" (normalised self-ref) as the name target. This keeps the
+    // parser strict — "except its name is Whatever" should only emit SetName
+    // when the name is the card's own (which is what normalisation produces).
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("~").parse(rest).ok()?;
+    Some((
+        rest,
+        ContinuousModification::SetName {
+            name: card_name.to_string(),
+        },
+    ))
+}
+
+/// CR 707.9b: "<subject> N/M {type list} in addition to its other types" where
+/// the subject is a pronoun-contraction ("he's" / "she's" / "it's" with either
+/// straight or curly apostrophes). Produces `SetPower` + `SetToughness`
+/// (overriding the copied P/T per CR 707.9b) and one `AddType`/`AddSubtype`
+/// per word in the type list. Layer placement is automatic from the variants'
+/// own `layer()` methods: SetPT at layer 7b, type additions at layer 4
+/// (CR 613.1d) — the layer system applies type additions after the copy's
+/// own types via timestamp order.
+fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("he's a "),
+        tag("he\u{2019}s a "),
+        tag("she's a "),
+        tag("she\u{2019}s a "),
+        tag("it's a "),
+        tag("it\u{2019}s a "),
+    ))
+    .parse(input)
+    .ok()?;
+
+    // Parse "N/M " — both components are positive integers.
+    let (rest, (power, toughness)) = parse_pt_pair(rest)?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" ").parse(rest).ok()?;
+
+    // Grab the type list up to " in addition to its/his/her other types".
+    let (type_text, rest) = split_on_first_of(
+        rest,
+        &[
+            " in addition to its other types",
+            " in addition to his other types",
+            " in addition to her other types",
+        ],
+    )?;
+
+    let mut mods = vec![
+        ContinuousModification::SetPower { value: power },
+        ContinuousModification::SetToughness { value: toughness },
+    ];
+
+    // Type list is space-separated in the copy class ("Spider Human Hero").
+    // Reuse the shared core-type vs subtype dispatch from parse_its_a_type_in_addition.
+    for word in type_text.split_whitespace() {
+        if word.is_empty() {
+            continue;
+        }
+        let canonical = canonicalize_subtype_name(word);
+        let modification = if let Ok(core_type) = CoreType::from_str(&canonical) {
+            ContinuousModification::AddType { core_type }
+        } else {
+            ContinuousModification::AddSubtype { subtype: canonical }
+        };
+        mods.push(modification);
+    }
+
+    Some((rest, mods))
+}
+
+/// Structural multi-candidate splitter: return the (before, after) pair for the
+/// earliest-matching phrase in `candidates`. None if no candidate matches.
+fn split_on_first_of<'a>(text: &'a str, candidates: &[&str]) -> Option<(&'a str, &'a str)> {
+    let mut best: Option<(usize, usize)> = None;
+    for phrase in candidates {
+        if let Ok((_, (before, _))) = nom_primitives::split_once_on(text, phrase) {
+            let pos = before.len();
+            if best.is_none_or(|(bp, _)| pos < bp) {
+                best = Some((pos, phrase.len()));
+            }
+        }
+    }
+    let (pos, len) = best?;
+    Some((&text[..pos], &text[pos + len..]))
+}
+
+/// Parse "N/M" where N and M are positive integers. Input is already lowercase.
+/// Returns the remainder positioned immediately after "N/M" (caller peels the
+/// following space) and the `(power, toughness)` pair.
+fn parse_pt_pair(input: &str) -> Option<(&str, (i32, i32))> {
+    use nom::character::complete::digit1;
+    let parser = |i| -> nom::IResult<&str, (&str, &str), VerboseError<&str>> {
+        let (i, p) = digit1(i)?;
+        let (i, _) = char('/')(i)?;
+        let (i, t) = digit1(i)?;
+        Ok((i, (p, t)))
+    };
+    let (rest, (p, t)) = parser(input).ok()?;
+    let power: i32 = p.parse().ok()?;
+    let toughness: i32 = t.parse().ok()?;
+    Some((rest, (power, toughness)))
 }
 
 /// "it's a(n) {type_word} in addition to its other types"
@@ -3214,8 +3482,9 @@ mod tests {
         // Hypothetical clone: "except it's a Spirit in addition to its other
         // types and it has flying, trample, and lifelink." Each keyword must
         // become an `AddKeyword` modification.
-        let (mana_value_limit, modifications) = parse_clone_suffix(
+        let (mana_value_limit, modifications, _post) = parse_clone_suffix(
             "with mana value less than or equal to the amount of mana spent to cast ~, except it's a spirit in addition to its other types and it has flying, trample, and lifelink.",
+            "Hypothetical Clone",
         );
         assert_eq!(
             mana_value_limit,
@@ -3561,5 +3830,157 @@ mod tests {
                 mana_type: ManaType::Colorless
             })
         );
+    }
+
+    // ── Superior Spider-Man (Mind Swap) ──
+    // CR 707.9 + CR 707.2 + CR 613.1d: zone-qualified clone replacement with
+    // copiable-value name override, P/T override, and additive subtype list,
+    // plus a trailing reflexive "When you do, exile that card" sub-ability
+    // (CR 603.12).
+
+    #[test]
+    fn superior_spider_man_parses_graveyard_clone_with_all_exceptions() {
+        let def = parse_replacement_line(
+            "Mind Swap — You may have Superior Spider-Man enter as a copy of any creature card in a graveyard, except his name is Superior Spider-Man and he's a 4/4 Spider Human Hero in addition to his other types. When you do, exile that card.",
+            "Superior Spider-Man",
+        )
+        .expect("should parse clone replacement");
+
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            def.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+
+        let execute = def.execute.as_ref().expect("execute present");
+        let Effect::BecomeCopy {
+            target,
+            additional_modifications,
+            ..
+        } = &*execute.effect
+        else {
+            panic!("expected BecomeCopy, got {:?}", execute.effect);
+        };
+
+        // Filter scopes the copy source to a creature card in a graveyard.
+        match target {
+            TargetFilter::Typed(tf) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf.properties.iter().any(|p| matches!(
+                    p,
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard
+                    }
+                )));
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+
+        // additional_modifications must contain SetName + SetPower + SetToughness +
+        // one AddSubtype per type word.
+        assert!(
+            additional_modifications.contains(&ContinuousModification::SetName {
+                name: "Superior Spider-Man".to_string()
+            })
+        );
+        assert!(additional_modifications.contains(&ContinuousModification::SetPower { value: 4 }));
+        assert!(
+            additional_modifications.contains(&ContinuousModification::SetToughness { value: 4 })
+        );
+        for subtype in ["Spider", "Human", "Hero"] {
+            assert!(
+                additional_modifications.contains(&ContinuousModification::AddSubtype {
+                    subtype: subtype.to_string()
+                }),
+                "missing AddSubtype({subtype}) in {additional_modifications:?}"
+            );
+        }
+
+        // Reflexive "When you do, exile that card." attaches as a sub_ability
+        // with condition WhenYouDo. The child effect must be an exile ChangeZone
+        // to the (forwarded) parent target via ParentTarget.
+        let sub = execute.sub_ability.as_ref().expect("reflexive sub_ability");
+        assert_eq!(
+            sub.condition,
+            Some(crate::types::ability::AbilityCondition::WhenYouDo)
+        );
+        match &*sub.effect {
+            Effect::ChangeZone {
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(*destination, Zone::Exile);
+                assert_eq!(*target, TargetFilter::ParentTarget);
+            }
+            other => panic!("expected ChangeZone(Exile), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn zone_qualifier_defaults_to_battlefield_for_classic_clones() {
+        // Clone's filter must not gain a spurious InZone { Battlefield } — the
+        // engine-side `find_copy_targets` defaults to the battlefield when the
+        // filter has no InZone property. Preserving the empty properties list
+        // keeps the filter shape identical to pre-change Clone behaviour.
+        let def = parse_replacement_line(
+            "You may have Clone enter as a copy of any creature on the battlefield.",
+            "Clone",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        let Effect::BecomeCopy { target, .. } = &*execute.effect else {
+            panic!("expected BecomeCopy");
+        };
+        match target {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.properties.is_empty(),
+                    "Clone's filter must not carry InZone; got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_pt_pair_handles_single_and_double_digit_values() {
+        // Sanity: the 4/4 used by Superior Spider-Man works, as does a
+        // two-digit "12/12" (hypothetical future card).
+        let (rest, (p, t)) = parse_pt_pair("4/4 spider").unwrap();
+        assert_eq!((p, t), (4, 4));
+        assert_eq!(rest, " spider");
+        let (rest, (p, t)) = parse_pt_pair("12/12 giant").unwrap();
+        assert_eq!((p, t), (12, 12));
+        assert_eq!(rest, " giant");
+    }
+
+    #[test]
+    fn parse_pt_pair_rejects_non_numeric_halves() {
+        assert!(parse_pt_pair("a/4").is_none());
+        assert!(parse_pt_pair("4/").is_none());
+    }
+
+    #[test]
+    fn split_on_clone_source_zone_prefers_battlefield_when_present() {
+        // Phantasmal Image-style text should still resolve to battlefield.
+        let (type_text, _suffix, zone) =
+            split_on_clone_source_zone("any creature on the battlefield, except...").unwrap();
+        assert_eq!(type_text, "any creature");
+        assert_eq!(zone, Zone::Battlefield);
+    }
+
+    #[test]
+    fn split_on_clone_source_zone_accepts_graveyard_variants() {
+        let (type_text, _, zone) =
+            split_on_clone_source_zone("any creature card in a graveyard, except...").unwrap();
+        assert_eq!(type_text, "any creature card");
+        assert_eq!(zone, Zone::Graveyard);
+
+        let (type_text, _, zone) =
+            split_on_clone_source_zone("any creature card in any graveyard, except...").unwrap();
+        assert_eq!(type_text, "any creature card");
+        assert_eq!(zone, Zone::Graveyard);
     }
 }

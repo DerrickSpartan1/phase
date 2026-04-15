@@ -509,12 +509,18 @@ fn find_copy_targets(
     controller: PlayerId,
     max_mana_value: Option<u32>,
 ) -> Vec<ObjectId> {
+    // CR 400.1 + CR 707.9: Clone replacements default to scanning the battlefield,
+    // but extensions like Superior Spider-Man's Mind Swap (CR 707.9b) copy a card
+    // from any graveyard. The filter carries the source zone via `FilterProp::InZone`;
+    // fall back to battlefield when no zone constraint is present to preserve
+    // Clone / Phantasmal Image / Vesuvan Doppelganger / Cackling Counterpart behaviour.
+    let source_zone = filter.extract_in_zone().unwrap_or(Zone::Battlefield);
     let ctx = super::filter::FilterContext::from_source_with_controller(source_id, controller);
     state
         .objects
         .iter()
         .filter(|(id, obj)| {
-            obj.zone == Zone::Battlefield
+            obj.zone == source_zone
                 && **id != source_id
                 && max_mana_value.is_none_or(|max| obj.mana_cost.mana_value() <= max)
                 && super::filter::matches_target_filter(state, **id, filter, &ctx)
@@ -956,5 +962,117 @@ mod tests {
         assert!(token.card_types.subtypes.iter().any(|s| s == "Soldier"));
         assert_eq!(token.color, vec![ManaColor::White]);
         assert!(token.keywords.contains(&Keyword::Flying));
+    }
+
+    // ── Zone-qualified clone source (Superior Spider-Man) ──
+    // CR 707.9 + CR 400.1: `find_copy_targets` scans the zone encoded on the
+    // filter's `FilterProp::InZone`. When the filter has no zone property,
+    // battlefield is the default (preserving Clone / Phantasmal Image etc.).
+    #[test]
+    fn find_copy_targets_scans_graveyard_when_filter_has_in_zone_graveyard() {
+        use crate::types::ability::{FilterProp, TypeFilter, TypedFilter};
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let bf_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Battlefield Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bf_creature).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+        let gy_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Graveyard Bear".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&gy_creature).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+        let source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Spidey".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Filter: "any creature card in a graveyard"
+        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).properties(vec![
+            FilterProp::InZone {
+                zone: Zone::Graveyard,
+            },
+        ]));
+
+        let targets = find_copy_targets(&state, &filter, source, PlayerId(0), None);
+        assert!(
+            targets.contains(&gy_creature),
+            "graveyard creature must be a legal copy target"
+        );
+        assert!(
+            !targets.contains(&bf_creature),
+            "battlefield creature must not be a legal copy target when filter scopes graveyard"
+        );
+    }
+
+    #[test]
+    fn find_copy_targets_defaults_to_battlefield_for_classic_clone_filter() {
+        use crate::types::ability::{TypeFilter, TypedFilter};
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let bf_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Battlefield Bear".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&bf_creature).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+        let gy_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Graveyard Bear".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&gy_creature).unwrap();
+            obj.base_card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.core_types = vec![CoreType::Creature];
+        }
+        let source = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Clone".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Filter: "any creature" (no zone property)
+        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature));
+
+        let targets = find_copy_targets(&state, &filter, source, PlayerId(0), None);
+        assert!(
+            targets.contains(&bf_creature),
+            "Clone with no zone filter must find battlefield creature"
+        );
+        assert!(
+            !targets.contains(&gy_creature),
+            "Clone with no zone filter must not leak into the graveyard"
+        );
     }
 }

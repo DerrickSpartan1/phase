@@ -7867,6 +7867,210 @@ mod phase_trigger_regression_tests {
         );
         assert!(result.is_err());
     }
+
+    // ── Superior Spider-Man integration test ──
+    // CR 707.9 + CR 707.2 + CR 613.1d + CR 603.12: Full flow for
+    // `Mind Swap — You may have Superior Spider-Man enter as a copy of any
+    // creature card in a graveyard, except his name is Superior Spider-Man and
+    // he's a 4/4 Spider Human Hero in addition to his other types. When you
+    // do, exile that card.`
+    #[test]
+    fn superior_spider_man_full_copy_flow_copies_graveyard_card_and_exiles_it() {
+        use crate::types::ability::ContinuousModification;
+        use crate::types::card_type::Supertype;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Elesh Norn in PlayerId(1)'s graveyard with abilities + keywords.
+        let elesh = zones::create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Elesh Norn".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&elesh).unwrap();
+            obj.base_name = "Elesh Norn".to_string();
+            obj.base_power = Some(7);
+            obj.base_toughness = Some(7);
+            obj.base_card_types = crate::types::card_type::CardType {
+                supertypes: vec![Supertype::Legendary],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Phyrexian".to_string(), "Praetor".to_string()],
+            };
+            obj.base_keywords = vec![crate::types::keywords::Keyword::Vigilance];
+            obj.base_abilities = vec![crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Activated,
+                Effect::Draw {
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                },
+            )];
+        }
+
+        // Superior Spider-Man freshly on battlefield under PlayerId(0)'s control.
+        let spidey = zones::create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Superior Spider-Man".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&spidey).unwrap();
+            obj.base_name = "Superior Spider-Man".to_string();
+            obj.base_power = Some(4);
+            obj.base_toughness = Some(4);
+            obj.base_card_types = crate::types::card_type::CardType {
+                supertypes: vec![Supertype::Legendary],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![
+                    "Spider".to_string(),
+                    "Human".to_string(),
+                    "Hero".to_string(),
+                ],
+            };
+            // Install the replacement exactly as the parser would emit it:
+            // BecomeCopy with additional_modifications + reflexive sub_ability.
+            let reflexive = crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::ChangeZone {
+                    origin: None,
+                    destination: Zone::Exile,
+                    target: TargetFilter::ParentTarget,
+                    owner_library: false,
+                    enter_transformed: false,
+                    under_your_control: false,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                },
+            );
+            let reflexive = crate::types::ability::AbilityDefinition {
+                condition: Some(crate::types::ability::AbilityCondition::WhenYouDo),
+                ..reflexive
+            };
+            let become_copy = crate::types::ability::AbilityDefinition::new(
+                crate::types::ability::AbilityKind::Spell,
+                Effect::BecomeCopy {
+                    target: TargetFilter::Typed(
+                        crate::types::ability::TypedFilter::new(
+                            crate::types::ability::TypeFilter::Creature,
+                        )
+                        .properties(vec![
+                            crate::types::ability::FilterProp::InZone {
+                                zone: Zone::Graveyard,
+                            },
+                        ]),
+                    ),
+                    duration: None,
+                    mana_value_limit: None,
+                    additional_modifications: vec![
+                        ContinuousModification::SetName {
+                            name: "Superior Spider-Man".to_string(),
+                        },
+                        ContinuousModification::SetPower { value: 4 },
+                        ContinuousModification::SetToughness { value: 4 },
+                        ContinuousModification::AddSubtype {
+                            subtype: "Spider".to_string(),
+                        },
+                        ContinuousModification::AddSubtype {
+                            subtype: "Human".to_string(),
+                        },
+                        ContinuousModification::AddSubtype {
+                            subtype: "Hero".to_string(),
+                        },
+                    ],
+                },
+            )
+            .sub_ability(reflexive);
+            obj.replacement_definitions.push(
+                crate::types::ability::ReplacementDefinition::new(
+                    crate::types::replacements::ReplacementEvent::Moved,
+                )
+                .execute(become_copy),
+            );
+        }
+
+        // Simulate reaching CopyTargetChoice directly (the replacement pipeline
+        // tests cover the preceding "enter" pause; here we focus on the
+        // post-choice resolution: copy + reflexive trigger firing).
+        state.waiting_for = WaitingFor::CopyTargetChoice {
+            player: PlayerId(0),
+            source_id: spidey,
+            valid_targets: vec![elesh],
+            max_mana_value: None,
+        };
+
+        let result = apply(
+            &mut state,
+            GameAction::ChooseTarget {
+                target: Some(TargetRef::Object(elesh)),
+            },
+        );
+        assert!(result.is_ok(), "copy target choice should resolve");
+
+        // (a) Copied abilities from Elesh Norn: activated Draw ability should be present.
+        let copied = state.objects.get(&spidey).unwrap();
+        assert!(
+            copied
+                .abilities
+                .iter()
+                .any(|a| matches!(&*a.effect, Effect::Draw { .. })),
+            "copied abilities must include Elesh Norn's Draw"
+        );
+        assert!(
+            copied
+                .keywords
+                .contains(&crate::types::keywords::Keyword::Vigilance),
+            "copied keywords must include Vigilance"
+        );
+
+        // (b) Name is overridden to Superior Spider-Man (not Elesh Norn).
+        assert_eq!(
+            copied.name, "Superior Spider-Man",
+            "SetName must override the copied name"
+        );
+
+        // (c) P/T overridden to 4/4.
+        assert_eq!(copied.power, Some(4));
+        assert_eq!(copied.toughness, Some(4));
+
+        // (d) Types include Elesh Norn's (Phyrexian, Praetor) AND additive
+        //     Spider/Human/Hero.
+        for subtype in ["Phyrexian", "Praetor", "Spider", "Human", "Hero"] {
+            assert!(
+                copied.card_types.subtypes.iter().any(|s| s == subtype),
+                "missing subtype {subtype} in {:?}",
+                copied.card_types.subtypes
+            );
+        }
+
+        // (e) Reflexive trigger fired and exiled Elesh Norn from the graveyard.
+        // `WhenYouDo` either resolves inline within the parent chain or queues
+        // a `PendingTrigger` → CR 603.12 + CR 603.7a. Drain priority passes up
+        // to a small bound so the trigger resolves before we assert. Each pass
+        // resolves at most one stack item; the cap prevents infinite loops if
+        // a new state dead-ends.
+        for _ in 0..16 {
+            if matches!(state.waiting_for, WaitingFor::Priority { .. }) && state.stack.is_empty() {
+                break;
+            }
+            if apply(&mut state, GameAction::PassPriority).is_err() {
+                break;
+            }
+        }
+
+        let elesh_obj = state
+            .objects
+            .get(&elesh)
+            .expect("Elesh Norn object still present after exile");
+        assert_eq!(
+            elesh_obj.zone,
+            Zone::Exile,
+            "reflexive trigger must exile the copied graveyard card"
+        );
+    }
 }
 
 #[cfg(test)]

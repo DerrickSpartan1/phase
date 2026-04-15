@@ -868,6 +868,13 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             ContinuousModification::CopyValues { values } => {
                 apply_copiable_values(obj, values);
             }
+            // CR 707.9b + CR 707.2: Name override is a copiable-value override
+            // applied at Layer 1 after the base CopyValues (ordered by timestamp
+            // within the layer, so the override in `additional_modifications`
+            // follows `CopyValues` in `add_transient_continuous_effect`).
+            ContinuousModification::SetName { name } => {
+                obj.name = name.clone();
+            }
             ContinuousModification::AddPower { value } => {
                 if let Some(ref mut p) = obj.power {
                     *p += value;
@@ -1064,11 +1071,20 @@ pub(crate) fn compute_current_copiable_values(
             .collect();
     copy_effects = order_active_continuous_effects(Layer::Copy, &copy_effects, state);
     for effect in &copy_effects {
-        if let ContinuousModification::CopyValues {
-            values: effect_values,
-        } = &effect.modification
-        {
-            values = (**effect_values).clone();
+        match &effect.modification {
+            ContinuousModification::CopyValues {
+                values: effect_values,
+            } => {
+                values = (**effect_values).clone();
+            }
+            // CR 707.9b: Name overrides from "except its name is X" clauses
+            // become part of the copiable values of the copy. A subsequent
+            // copy of this object must see the overridden name, not the
+            // source's name.
+            ContinuousModification::SetName { name } => {
+                values.name = name.clone();
+            }
+            _ => {}
         }
     }
     Some(values)

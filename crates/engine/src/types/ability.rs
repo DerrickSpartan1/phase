@@ -5301,6 +5301,13 @@ pub enum ContinuousModification {
     CopyValues {
         values: Box<CopiableValues>,
     },
+    /// CR 707.9 + CR 707.2: Override the copy's name after `CopyValues` applies.
+    /// Used by "enter as a copy, except its name is X" (e.g., Superior Spider-Man's
+    /// Mind Swap). Applied in Layer 1 so the override is part of the copy's
+    /// copiable values (per CR 707.9b).
+    SetName {
+        name: String,
+    },
     AddPower {
         value: i32,
     },

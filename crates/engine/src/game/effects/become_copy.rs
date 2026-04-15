@@ -681,6 +681,156 @@ mod tests {
         assert!(values.keywords.contains(&Keyword::Trample));
     }
 
+    // ── Superior Spider-Man: zone-qualified clone + name/PT/type overrides ──
+    // CR 707.9b + CR 613.1d + CR 613.1a: When a clone replacement carries
+    // additional modifications (name, P/T, type additions), the resulting
+    // permanent must end up with the target's abilities (from CopyValues) but
+    // the overridden name + P/T (from SetName, SetPower, SetToughness) and
+    // additional subtypes layered on top.
+    #[test]
+    fn become_copy_with_set_name_and_pt_and_subtype_overrides() {
+        let mut state = GameState::new_two_player(42);
+
+        // Set up Elesh Norn as the copy source in a graveyard (PlayerId(1)'s).
+        let elesh = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Elesh Norn".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&elesh).unwrap();
+            obj.base_name = "Elesh Norn".to_string();
+            obj.base_power = Some(7);
+            obj.base_toughness = Some(7);
+            obj.base_card_types = CardType {
+                supertypes: vec![crate::types::card_type::Supertype::Legendary],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec!["Phyrexian".to_string(), "Praetor".to_string()],
+            };
+        }
+
+        // Set up Superior Spider-Man on the battlefield (just-entered clone).
+        let spidey = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Superior Spider-Man".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&spidey).unwrap();
+            obj.base_name = "Superior Spider-Man".to_string();
+            obj.base_power = Some(4);
+            obj.base_toughness = Some(4);
+            obj.base_card_types = CardType {
+                supertypes: vec![crate::types::card_type::Supertype::Legendary],
+                core_types: vec![CoreType::Creature],
+                subtypes: vec![
+                    "Spider".to_string(),
+                    "Human".to_string(),
+                    "Hero".to_string(),
+                ],
+            };
+        }
+
+        // Resolve BecomeCopy with exactly the modifications the parser would emit.
+        let ability = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![
+                    ContinuousModification::SetName {
+                        name: "Superior Spider-Man".to_string(),
+                    },
+                    ContinuousModification::SetPower { value: 4 },
+                    ContinuousModification::SetToughness { value: 4 },
+                    ContinuousModification::AddSubtype {
+                        subtype: "Spider".to_string(),
+                    },
+                    ContinuousModification::AddSubtype {
+                        subtype: "Human".to_string(),
+                    },
+                    ContinuousModification::AddSubtype {
+                        subtype: "Hero".to_string(),
+                    },
+                ],
+            },
+            vec![TargetRef::Object(elesh)],
+            spidey,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        let result = state.objects.get(&spidey).unwrap();
+
+        // Name override (CR 707.9b): not Elesh Norn.
+        assert_eq!(result.name, "Superior Spider-Man");
+
+        // P/T override (CR 707.9b + CR 613.4b SetPT): 4/4, not 7/7.
+        assert_eq!(result.power, Some(4));
+        assert_eq!(result.toughness, Some(4));
+
+        // Types include Elesh Norn's (Phyrexian, Praetor) + Spider-Man's additive
+        // list (Spider, Human, Hero) per CR 613.1d. `AddSubtype` is idempotent.
+        for subtype in ["Phyrexian", "Praetor", "Spider", "Human", "Hero"] {
+            assert!(
+                result.card_types.subtypes.iter().any(|s| s == subtype),
+                "missing subtype {subtype} in {:?}",
+                result.card_types.subtypes
+            );
+        }
+        // Core type preserved (Creature from Elesh Norn).
+        assert!(result.card_types.core_types.contains(&CoreType::Creature));
+    }
+
+    // CR 707.9b + CR 707.2c: When a second copy effect targets a permanent
+    // that already has a copy effect with an overridden name, the second copy
+    // must see the overridden name as part of the copiable values, not the
+    // original object's base name.
+    #[test]
+    fn chained_copy_reads_set_name_override_as_copiable_value() {
+        let mut state = GameState::new_two_player(42);
+
+        let elesh = create_creature(&mut state, 1, PlayerId(1), "Elesh Norn", 7, 7);
+        let spidey = create_creature(&mut state, 2, PlayerId(0), "Superior Spider-Man", 4, 4);
+
+        // Spider-Man copies Elesh Norn with SetName override.
+        let spidey_ability = ResolvedAbility::new(
+            Effect::BecomeCopy {
+                target: TargetFilter::Any,
+                duration: None,
+                mana_value_limit: None,
+                additional_modifications: vec![ContinuousModification::SetName {
+                    name: "Superior Spider-Man".to_string(),
+                }],
+            },
+            vec![TargetRef::Object(elesh)],
+            spidey,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &spidey_ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+        assert_eq!(state.objects[&spidey].name, "Superior Spider-Man");
+
+        // Now a vanilla Clone copies Spider-Man.
+        let clone = create_creature(&mut state, 3, PlayerId(0), "Clone", 0, 0);
+        let clone_ability = make_copy_ability(spidey, clone, PlayerId(0), None);
+        resolve(&mut state, &clone_ability, &mut events).unwrap();
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects[&clone].name, "Superior Spider-Man",
+            "clone of Spider-Man copy should see the overridden name as copiable value (CR 707.9b)"
+        );
+    }
+
     // ── Reset regression: abilities revert when copy ends ─────────────────
     #[test]
     fn abilities_revert_to_empty_when_copy_expires() {
