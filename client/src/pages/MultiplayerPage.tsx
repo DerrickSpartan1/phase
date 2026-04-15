@@ -381,18 +381,11 @@ export function MultiplayerPage() {
           navigate("/");
         }
       } else {
-        // Join flow
+        // Join flow. Typed codes use `parseRoomCode` for direct dial
+        // (peer-code path); lobby-row clicks with `context.is_p2p` are
+        // already intercepted upstream in `handleJoinGame` and never
+        // reach here.
         const { code, password } = action;
-
-        // On a `LobbyOnly` server every join is P2P — the code typed or
-        // clicked resolves through the broker to the host's PeerJS peer
-        // id. Direct-dial is correct only for `Full` servers with pure
-        // PeerJS rooms.
-        const serverMode = useMultiplayerStore.getState().serverInfo?.mode;
-        if (serverMode === "LobbyOnly") {
-          void joinP2PRoom(code, password);
-          return true;
-        }
 
         const p2pCode = parseRoomCode(code);
         if (p2pCode && code.trim().length === 5) {
@@ -415,7 +408,7 @@ export function MultiplayerPage() {
 
       return true;
     },
-    [expandDeck, startHosting, navigate, navigateToP2PHost, showToast, joinP2PRoom],
+    [expandDeck, startHosting, navigate, navigateToP2PHost, showToast],
   );
 
   // Host setup complete → execute immediately if deck exists, otherwise prompt
@@ -442,12 +435,12 @@ export function MultiplayerPage() {
     ) => {
       // Explicit `=== true` so legacy lobby rows (older server builds
       // without `is_p2p`) fall through to the server-run flow rather
-      // than being treated as P2P. On a `LobbyOnly` server the broker
-      // is the only translator from the displayed game code to the
-      // host's PeerJS peer ID, so every join — typed code or lobby
-      // click — must go through `joinP2PRoom` regardless of `context`.
-      const serverMode = useMultiplayerStore.getState().serverInfo?.mode;
-      if (context?.is_p2p === true || serverMode === "LobbyOnly") {
+      // than being treated as P2P. Typed-code joins intentionally do
+      // NOT route through the broker — the code a user types is the
+      // 5-char peer `roomCode` (shared out of band), not the broker's
+      // 6-char `gameCode`. Lobby-row clicks carry `context.is_p2p`
+      // and use `joinP2PRoom` for the broker lookup.
+      if (context?.is_p2p === true) {
         void joinP2PRoom(code, password);
         return;
       }

@@ -300,7 +300,7 @@ export function GameProvider({
               signal.throwIfAborted();
             }
 
-            const host = await hostRoom();
+            const host = await hostRoom(signal);
             // Before the adapter takes ownership of the Peer, `host.destroy`
             // is the only way to tear it down; once the adapter owns it,
             // `adapter.dispose()` is the sole teardown path.
@@ -325,14 +325,17 @@ export function GameProvider({
               signal.throwIfAborted();
             }
 
-            // The code displayed to the host must match what a guest
-            // would use to join. When broker-registered, the lobby (and
-            // `resolveGuest`) advertise the server-assigned `gameCode`;
-            // the peer `roomCode` is an internal dialing detail. Without
-            // broker the peer code IS the join code.
+            // Always display the peer `roomCode` to the host — it's the
+            // 5-char code the client's `parseRoomCode` recognizes and
+            // the one that works through the direct-dial path. The
+            // broker's `gameCode` uses a different, wider alphabet (6
+            // chars, includes 0/L) and is strictly an internal lobby
+            // key — it's *not* something a guest can type into the
+            // join field. Lobby-row clicks route through `resolveGuest`
+            // which translates the broker key → peer id for the guest.
             onP2PEventRef.current?.({
               type: "roomCreated",
-              roomCode: serverGameCode ?? host.roomCode,
+              roomCode: host.roomCode,
             });
             onP2PEventRef.current?.({ type: "waitingForGuest" });
 
@@ -360,7 +363,7 @@ export function GameProvider({
           } else {
             // p2p-join
             const code = joinCode!;
-            const { conn, peer } = await joinRoom(code);
+            const { conn, peer } = await joinRoom(code, signal);
             hostPeerHandle = peer;
             signal.throwIfAborted();
 
