@@ -30,6 +30,58 @@ export interface FormatConfig {
   team_based: boolean;
 }
 
+// ── Lobby ────────────────────────────────────────────────────────────────
+
+/**
+ * Wire-level lobby row as broadcast by `phase-server`. Field names are
+ * snake_case to match the Rust `LobbyGame` struct exactly — see
+ * `crates/server-core/src/protocol.rs`.
+ */
+export interface LobbyGame {
+  game_code: string;
+  host_name: string;
+  created_at: number;
+  has_password: boolean;
+  format?: GameFormat;
+  current_players?: number;
+  max_players?: number;
+  /** Display-only version string (e.g. "0.1.11"). */
+  host_version?: string;
+  /**
+   * Git short-hash of the host's build. Used as a hard compatibility gate:
+   * when the lobby list renders, rows whose commit doesn't match the
+   * client's own build are disabled because the host and guest would run
+   * diverged engine rules otherwise.
+   */
+  host_build_commit?: string;
+  /** Optional host-provided label for this room, distinct from their player
+   * name. When present, the lobby row shows it as the primary title with
+   * the host's player name as secondary metadata. */
+  room_name?: string | null;
+  /**
+   * `true` when the row represents a P2P-brokered room (host runs the
+   * engine; guests dial the host). `false`/absent for server-run rooms.
+   * Always compare with `=== true` — an older `phase-server` build omits
+   * the field entirely, so treating `undefined` as falsy is what we want.
+   */
+  is_p2p?: boolean;
+}
+
+/**
+ * Broker response to `JoinGameWithPassword` on a `LobbyOnly` server. Gives
+ * the guest everything they need to dial the host over PeerJS plus the
+ * format and match config so the pre-flight can refuse to dial a room
+ * with an incompatible format.
+ */
+export interface PeerInfo {
+  game_code: string;
+  host_peer_id: string;
+  format_config?: FormatConfig | null;
+  match_config: MatchConfig;
+  player_count: number;
+  filled_seats: number;
+}
+
 // ── Match / Series ───────────────────────────────────────────────────────
 
 export type MatchType = "Bo1" | "Bo3";

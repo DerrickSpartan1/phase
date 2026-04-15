@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { GameFormat } from "../../adapter/types";
-import { PROTOCOL_VERSION, type ServerInfo } from "../../adapter/ws-adapter";
-import { isValidWebSocketUrl, parseJoinCode } from "../../services/serverDetection";
+import { parseJoinCode } from "../../services/serverDetection";
 import { isLobbyEntryCompatible, useMultiplayerStore } from "../../stores/multiplayerStore";
 import { MenuPanel } from "../menu/MenuShell";
 import { menuButtonClass } from "../menu/buttonStyles";
@@ -40,6 +39,14 @@ const FORMAT_FILTERS: { value: GameFormat | null; label: string }[] = [
   { value: "FreeForAll", label: "FFA" },
 ];
 
+type RoomTypeFilter = "all" | "p2p" | "server";
+
+const ROOM_TYPE_FILTERS: { value: RoomTypeFilter; label: string }[] = [
+  { value: "all", label: "All" },
+  { value: "p2p", label: "P2P" },
+  { value: "server", label: "Server" },
+];
+
 export function LobbyView({
   onHostGame,
   onHostP2P,
@@ -64,149 +71,90 @@ export function LobbyView({
   } | null>(null);
   const [passwordInput, setPasswordInput] = useState("");
   const [formatFilter, setFormatFilter] = useState<GameFormat | null>(null);
+  const [roomTypeFilter, setRoomTypeFilter] = useState<RoomTypeFilter>("all");
   const [serverPickerOpen, setServerPickerOpen] = useState(false);
-  const wsRef = useRef<WebSocket | null>(null);
+  const subscribeLobby = useMultiplayerStore((s) => s.subscribeLobby);
+  const ensureSubscriptionSocket = useMultiplayerStore(
+    (s) => s.ensureSubscriptionSocket,
+  );
 
   useEffect(() => {
-    // P2P mode doesn't need server lobby connection
+    // P2P mode uses a direct PeerJS code and has no lobby to subscribe to.
     if (isP2P) return;
 
-    let connected = false;
-    let isCleaningUp = false;
-    let notifiedOffline = false;
-    const notifyServerOffline = () => {
-      if (connected || isCleaningUp || notifiedOffline) {
+    let cancelled = false;
+    let ambientDetach: (() => void) | null = null;
+    let lobbyDetach: (() => void) | null = null;
+
+    // Delegate lobby traffic to the shared subscription socket owned by
+    // `multiplayerStore`. The store re-handshakes on drops, re-sends
+    // `SubscribeLobby` on reconnect, and fans out `LobbyUpdate` snapshots
+    // to every subscriber — removing the duplicate handshake this
+    // component previously maintained.
+    (async () => {
+      const detach = await subscribeLobby((next) => {
+        if (cancelled) return;
+        gamesRef.current = next;
+        setGames(next);
+      });
+      if (cancelled) {
+        detach?.();
         return;
       }
-      notifiedOffline = true;
-      onServerOffline?.();
-    };
+      if (detach === null) {
+        onServerOffline?.();
+        return;
+      }
+      lobbyDetach = detach;
 
-    if (!isValidWebSocketUrl(serverAddress)) {
-      notifyServerOffline();
-      return;
-    }
-
-    // Connect to server lobby for game list subscription
-    const ws = new WebSocket(serverAddress);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      // SubscribeLobby is deferred until ServerHello arrives — the server
-      // rejects every non-hello frame before the handshake completes.
-      connected = true;
-      ws.send(
-        JSON.stringify({
-          type: "ClientHello",
-          data: {
-            client_version: __APP_VERSION__,
-            build_commit: __BUILD_HASH__,
-            protocol_version: PROTOCOL_VERSION,
-          },
-        }),
-      );
-    };
-
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data as string) as { type: string; data?: unknown };
-
-      switch (msg.type) {
-        case "ServerHello": {
-          const data = msg.data as {
-            server_version: string;
-            build_commit: string;
-            protocol_version: number;
-            mode: "Full" | "LobbyOnly";
+      // The store's `subscribeLobby` exposes only `LobbyUpdate`-family
+      // frames; `PlayerCount` and reactive `PasswordRequired` frames are
+      // ambient on the same socket. Attach a thin listener to catch them
+      // without opening a second WS — `ensureSubscriptionSocket` is
+      // idempotent here since `subscribeLobby` has already opened it.
+      const socket = await ensureSubscriptionSocket();
+      if (cancelled || !socket) {
+        if (!socket) onServerOffline?.();
+        return;
+      }
+      const ambientListener = (event: MessageEvent) => {
+        let msg: { type: string; data?: unknown };
+        try {
+          msg = JSON.parse(event.data as string) as {
+            type: string;
+            data?: unknown;
           };
-          const info: ServerInfo = {
-            version: data.server_version,
-            buildCommit: data.build_commit,
-            protocolVersion: data.protocol_version,
-            mode: data.mode,
-          };
-          useMultiplayerStore.getState().setServerInfo(info);
-          if (info.protocolVersion !== PROTOCOL_VERSION) {
-            notifyServerOffline();
-            ws.close();
-            break;
-          }
-          ws.send(JSON.stringify({ type: "SubscribeLobby" }));
-          break;
+        } catch {
+          return;
         }
-        case "LobbyUpdate": {
-          const data = msg.data as { games: LobbyGame[] };
-          gamesRef.current = data.games;
-          setGames(data.games);
-          break;
-        }
-        case "LobbyGameAdded": {
-          const data = msg.data as { game: LobbyGame };
-          setGames((prev) => {
-            const next = [...prev, data.game];
-            gamesRef.current = next;
-            return next;
-          });
-          break;
-        }
-        case "LobbyGameUpdated": {
-          // Replace an existing entry in-place so `current_players` ticks up
-          // live as guests join. If the game_code isn't in the current list
-          // we silently ignore — either the client hasn't received its
-          // initial `LobbyUpdate` snapshot yet (any in-flight update will
-          // be superseded by the snapshot), or the game was removed and
-          // this update raced in-flight; appending would resurrect it.
-          // `LobbyGameAdded` is the only path that introduces new rows.
-          const data = msg.data as { game: LobbyGame };
-          setGames((prev) => {
-            const idx = prev.findIndex((g) => g.game_code === data.game.game_code);
-            if (idx < 0) return prev;
-            const next = prev.map((g, i) => (i === idx ? data.game : g));
-            gamesRef.current = next;
-            return next;
-          });
-          break;
-        }
-        case "LobbyGameRemoved": {
-          const data = msg.data as { game_code: string };
-          setGames((prev) => {
-            const next = prev.filter((g) => g.game_code !== data.game_code);
-            gamesRef.current = next;
-            return next;
-          });
-          break;
-        }
-        case "PlayerCount": {
+        if (msg.type === "PlayerCount") {
           const data = msg.data as { count: number };
           setPlayerCount(data.count);
-          break;
-        }
-        case "PasswordRequired": {
+        } else if (msg.type === "PasswordRequired") {
+          // Reactive fallback: the proactive path in `handleJoinFromList`
+          // opens the modal before any server round-trip, so this only
+          // fires for stale rows where the client thought the room was
+          // open and the server said otherwise.
           const data = msg.data as { game_code: string };
-          const game = gamesRef.current.find((g) => g.game_code === data.game_code);
+          const game = gamesRef.current.find(
+            (g) => g.game_code === data.game_code,
+          );
           setPasswordModal({ gameCode: data.game_code, format: game?.format });
           setPasswordInput("");
-          break;
         }
-      }
-    };
-
-    ws.onerror = () => {
-      notifyServerOffline();
-    };
-
-    ws.onclose = () => {
-      notifyServerOffline();
-    };
+      };
+      socket.ws.addEventListener("message", ambientListener);
+      ambientDetach = () => {
+        socket.ws.removeEventListener("message", ambientListener);
+      };
+    })();
 
     return () => {
-      isCleaningUp = true;
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: "UnsubscribeLobby" }));
-      }
-      ws.close();
-      wsRef.current = null;
+      cancelled = true;
+      ambientDetach?.();
+      lobbyDetach?.();
     };
-  }, [serverAddress, isP2P, onServerOffline]);
+  }, [isP2P, subscribeLobby, ensureSubscriptionSocket, onServerOffline]);
 
   const handleJoinFromList = useCallback(
     (code: string, format?: GameFormat) => {
@@ -251,9 +199,23 @@ export function LobbyView({
     }
   }, [passwordModal, passwordInput, onJoinGame]);
 
-  const filteredGames = formatFilter
-    ? games.filter((g) => (g.format ?? "Standard") === formatFilter)
-    : games;
+  // Only show the room-type segmented filter when the visible list is
+  // actually mixed. On a single-purpose deploy (all-P2P or all-server)
+  // the control is noise, and hiding it matches the "don't add UI without
+  // clear value" bar. Compared via `=== true` so absent/undefined entries
+  // (older server builds pre-`is_p2p`) count as server-run, not unknown.
+  const hasP2PRow = useMemo(() => games.some((g) => g.is_p2p === true), [games]);
+  const hasServerRow = useMemo(() => games.some((g) => g.is_p2p !== true), [games]);
+  const showRoomTypeFilter = hasP2PRow && hasServerRow;
+
+  const filteredGames = useMemo(() => {
+    return games.filter((g) => {
+      if (formatFilter && (g.format ?? "Standard") !== formatFilter) return false;
+      if (roomTypeFilter === "p2p" && g.is_p2p !== true) return false;
+      if (roomTypeFilter === "server" && g.is_p2p === true) return false;
+      return true;
+    });
+  }, [games, formatFilter, roomTypeFilter]);
 
   return (
     <MenuPanel className="relative z-10 mx-auto flex w-full max-w-xl flex-col gap-6 px-4 py-5">
@@ -288,6 +250,24 @@ export function LobbyView({
               onClick={() => setFormatFilter(opt.value)}
               className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
                 formatFilter === opt.value
+                  ? "bg-white/10 text-white"
+                  : "text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      {isServer && showRoomTypeFilter && (
+        <div className="flex rounded-[16px] bg-black/18 p-0.5 ring-1 ring-white/10">
+          {ROOM_TYPE_FILTERS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setRoomTypeFilter(opt.value)}
+              className={`rounded px-3 py-1 text-xs font-medium transition-colors ${
+                roomTypeFilter === opt.value
                   ? "bg-white/10 text-white"
                   : "text-gray-400 hover:text-gray-200"
               }`}

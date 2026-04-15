@@ -156,6 +156,7 @@ impl LobbyManager {
             max_players: meta.max_players,
             format: meta.format,
             room_name: meta.room_name.clone(),
+            is_p2p: !meta.host_peer_id.is_empty(),
         })
     }
 
@@ -174,6 +175,7 @@ impl LobbyManager {
                 max_players: meta.max_players,
                 format: meta.format,
                 room_name: meta.room_name.clone(),
+                is_p2p: !meta.host_peer_id.is_empty(),
             })
             .collect()
     }
@@ -291,6 +293,41 @@ mod tests {
         let codes: Vec<&str> = public.iter().map(|g| g.game_code.as_str()).collect();
         assert!(codes.contains(&"GAME01"));
         assert!(codes.contains(&"GAME03"));
+    }
+
+    #[test]
+    fn public_game_derives_is_p2p_from_host_peer_id() {
+        let mut lobby = LobbyManager::new();
+        // Full-mode registration: empty peer ID → is_p2p must be false.
+        lobby.register_game(
+            "FULL01",
+            RegisterGameRequest {
+                host_name: "FullHost".to_string(),
+                public: true,
+                ..Default::default()
+            },
+        );
+        // LobbyOnly-mode registration: non-empty peer ID → is_p2p must be true.
+        lobby.register_game(
+            "P2P01",
+            RegisterGameRequest {
+                host_name: "BrokerHost".to_string(),
+                public: true,
+                host_peer_id: "peer-xyz".to_string(),
+                ..Default::default()
+            },
+        );
+
+        let full = lobby.public_game("FULL01").expect("full entry listed");
+        let p2p = lobby.public_game("P2P01").expect("p2p entry listed");
+        assert!(!full.is_p2p);
+        assert!(p2p.is_p2p);
+
+        let all = lobby.public_games();
+        let full = all.iter().find(|g| g.game_code == "FULL01").unwrap();
+        let p2p = all.iter().find(|g| g.game_code == "P2P01").unwrap();
+        assert!(!full.is_p2p);
+        assert!(p2p.is_p2p);
     }
 
     #[test]

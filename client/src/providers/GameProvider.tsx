@@ -13,6 +13,10 @@ import type { FeedDeck } from "../types/feed";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
 import { hostRoom, joinRoom } from "../network/connection";
+import {
+  openBrokerClient,
+  type BrokerClient,
+} from "../services/brokerClient";
 import { loadP2PSession } from "../services/p2pSession";
 import type { ParsedDeck } from "../services/deckParser";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
@@ -168,6 +172,13 @@ export interface GameProviderProps {
   matchConfig?: MatchConfig;
   /** CR 103.1: 0 = human plays first, 1 = opponent plays first, undefined = random. */
   firstPlayer?: number;
+  /**
+   * When `mode === "p2p-host"`, whether to register the room with a
+   * lobby-only broker so it appears in the public listing. `false` hosts
+   * a pure-PeerJS room (room code shared out-of-band). Ignored outside
+   * the P2P host flow.
+   */
+  useBroker?: boolean;
   onWsEvent?: (event: WsAdapterEvent) => void;
   onP2PEvent?: (event: P2PAdapterEvent) => void;
   onReady?: () => void;
@@ -187,6 +198,7 @@ export function GameProvider({
   playerCount,
   matchConfig,
   firstPlayer,
+  useBroker = false,
   onWsEvent,
   onP2PEvent,
   onReady,
@@ -224,7 +236,20 @@ export function GameProvider({
     const hasSession = loadWsSession() !== null;
     const isReconnect = isOnline && !joinCode && hasSession;
 
-    let cancelled = false;
+    // AbortController threaded through the P2P setup pipeline (below).
+    // Component unmount calls `ac.abort()` in the cleanup; each `await`
+    // inside `setupP2P` rechecks via `signal.throwIfAborted()`, so
+    // teardown converges on a single `catch` regardless of which step was
+    // in flight when the user navigated away.
+    //
+    // The non-P2P branches (AI, online, local) retain the `cancelled`
+    // flag pattern — migrating them to AbortController is out of scope
+    // for this change and carries regression risk in flows that work.
+    // `cancelled` is declared inside those branches; the P2P branch uses
+    // `signal.aborted` exclusively.
+    const ac = new AbortController();
+    const { signal } = ac;
+
     let wsUnsubscribe: (() => void) | null = null;
     let p2pUnsubscribe: (() => void) | null = null;
     // Per plan §4 "Peer ownership": the adapter's `dispose()` is the SOLE
@@ -244,58 +269,92 @@ export function GameProvider({
 
       const deckList = buildDeckList(parsedDeck, formatConfig);
 
-      const setupP2P = async () => {
-        if (cancelled) return;
+      const wireP2PEvents = (adapter: P2PHostAdapter | P2PGuestAdapter) => {
+        p2pUnsubscribe = adapter.onEvent((event) => {
+          if (event.type === "playerIdentity") {
+            useMultiplayerStore.getState().setActivePlayerId(event.playerId);
+          }
+          if (event.type === "stateChanged") {
+            processRemoteUpdate(event.state, event.events, event.legalResult);
+          }
+          onP2PEventRef.current?.(event);
+        });
+      };
 
+      const setupP2P = async () => {
         const effectivePlayerCount = playerCount ?? 2;
+
+        // Resources that may need undoing on abort/error. `broker` is
+        // closed unconditionally when set; `serverGameCode` gates the
+        // compensating `unregister` call — we only un-do a registration
+        // that actually landed.
+        let broker: BrokerClient | null = null;
+        let serverGameCode: string | null = null;
+        let hostPeerHandle: { destroy: () => void } | null = null;
 
         try {
           if (mode === "p2p-host") {
+            if (useBroker) {
+              const serverAddress = useMultiplayerStore.getState().serverAddress;
+              broker = await openBrokerClient(serverAddress, { signal });
+              signal.throwIfAborted();
+            }
+
             const host = await hostRoom();
             // Before the adapter takes ownership of the Peer, `host.destroy`
-            // is the only way to tear it down; after construction, use
-            // `adapter.dispose()`.
-            if (cancelled) { host.destroy(); return; }
+            // is the only way to tear it down; once the adapter owns it,
+            // `adapter.dispose()` is the sole teardown path.
+            hostPeerHandle = host;
+            signal.throwIfAborted();
+
+            if (broker) {
+              const registered = await broker.registerHost({
+                hostPeerId: host.peer.id,
+                deck: deckList.player,
+                displayName: useMultiplayerStore.getState().displayName || "Host",
+                public: true,
+                password: null,
+                timerSeconds: null,
+                playerCount: effectivePlayerCount,
+                matchConfig: matchConfig ?? { match_type: "Bo1" },
+                formatConfig: formatConfig ?? null,
+                aiSeats: [],
+                roomName: null,
+              });
+              serverGameCode = registered.gameCode;
+              signal.throwIfAborted();
+            }
 
             onP2PEventRef.current?.({ type: "roomCreated", roomCode: host.roomCode });
             onP2PEventRef.current?.({ type: "waitingForGuest" });
 
             // The adapter owns the host Peer reference and subscribes to
             // guest connections internally via `peer.on("connection", ...)`.
-            // No `createPeerSession` here — the adapter wraps each guest.
             const adapter = new P2PHostAdapter(
               deckList,
               host.peer,
               effectivePlayerCount,
               formatConfig,
               matchConfig,
+              undefined,
+              broker ?? undefined,
+              serverGameCode ?? undefined,
             );
             p2pAdapter = adapter;
+            // Ownership of the Peer transfers to the adapter here; don't
+            // double-destroy in the compensating cleanup below.
+            hostPeerHandle = null;
 
-            p2pUnsubscribe = adapter.onEvent((event) => {
-              if (event.type === "playerIdentity") {
-                useMultiplayerStore.getState().setActivePlayerId(event.playerId);
-              }
-              if (event.type === "stateChanged") {
-                processRemoteUpdate(event.state, event.events, event.legalResult);
-              }
-              onP2PEventRef.current?.(event);
-            });
+            wireP2PEvents(adapter);
 
             await initGame(gameId, adapter, undefined, formatConfig, effectivePlayerCount, matchConfig);
-            if (cancelled) return;
-            controller = createGameLoopController({ mode: "online" });
-            controller.start();
-            onReadyRef.current?.();
-            audioManager.setContext("battlefield");
+            signal.throwIfAborted();
           } else {
             // p2p-join
             const code = joinCode!;
             const { conn, peer } = await joinRoom(code);
-            // Before the adapter takes ownership of the Peer, direct
-            // `peer.destroy()` is the only way to tear it down; after
-            // construction, use `adapter.dispose()`.
-            if (cancelled) { peer.destroy(); return; }
+            hostPeerHandle = peer;
+            signal.throwIfAborted();
 
             // hostPeerId is reconstructed the same way joinRoom builds it:
             // PEER_ID_PREFIX + code. Guest adapter needs it for auto-reconnect
@@ -310,35 +369,42 @@ export function GameProvider({
               existing?.playerToken,
             );
             p2pAdapter = adapter;
+            hostPeerHandle = null;
 
-            p2pUnsubscribe = adapter.onEvent((event) => {
-              if (event.type === "playerIdentity") {
-                useMultiplayerStore.getState().setActivePlayerId(event.playerId);
-              }
-              if (event.type === "stateChanged") {
-                processRemoteUpdate(event.state, event.events, event.legalResult);
-              }
-              onP2PEventRef.current?.(event);
-            });
+            wireP2PEvents(adapter);
 
             await initGame(gameId, adapter, undefined, undefined, undefined, matchConfig);
-            if (cancelled) return;
-            controller = createGameLoopController({ mode: "online" });
-            controller.start();
-            onReadyRef.current?.();
-            audioManager.setContext("battlefield");
+            signal.throwIfAborted();
           }
+
+          controller = createGameLoopController({ mode: "online" });
+          controller.start();
+          onReadyRef.current?.();
+          audioManager.setContext("battlefield");
         } catch (err) {
-          if (cancelled) return;
+          // Compensating teardown — fires for both aborts (unmount) and
+          // real errors. Each branch is idempotent so the shape matches
+          // whichever step of the pipeline failed.
+          if (serverGameCode && broker) {
+            // Registration landed but a later step failed; unwind the
+            // server-side lobby entry. Best-effort; the server's 5-minute
+            // expiry is the backstop if this itself fails.
+            await broker.unregister(serverGameCode).catch(() => {
+              /* best-effort */
+            });
+          }
+          broker?.close();
+          hostPeerHandle?.destroy();
+          if (signal.aborted) return;
           const message = err instanceof Error ? err.message : String(err);
           onP2PEventRef.current?.({ type: "error", message });
         }
       };
 
-      setupP2P();
+      void setupP2P();
 
       return () => {
-        cancelled = true;
+        ac.abort();
         if (controller) controller.dispose();
         if (p2pUnsubscribe) p2pUnsubscribe();
         // `adapter.dispose()` is the SOLE tear-down path for the host/guest
@@ -349,6 +415,8 @@ export function GameProvider({
         reset();
       };
     }
+
+    let cancelled = false;
 
     if (isOnline || isReconnect) {
       const parsedDeck = loadActiveDeck();
@@ -590,7 +658,7 @@ export function GameProvider({
         scheduleStoreReset(reset);
       }
     };
-  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer]);
+  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>

@@ -7,8 +7,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { GameAction, GameObject, GameState, WaitingFor } from "../types";
 import { WebSocketAdapter } from "../ws-adapter";
 
-class MockWebSocket {
+class MockWebSocket extends EventTarget {
   static OPEN = 1;
+  static last: MockWebSocket | null = null;
   readyState = MockWebSocket.OPEN;
   onopen: (() => void) | null = null;
   onmessage: ((event: { data: string }) => void) | null = null;
@@ -16,9 +17,43 @@ class MockWebSocket {
   onclose: (() => void) | null = null;
   send = vi.fn();
   close = vi.fn();
+  constructor(public url: string) {
+    super();
+    MockWebSocket.last = this;
+  }
+  dispatchSynthetic(type: "message" | "close", data?: string) {
+    if (type === "message" && data !== undefined) {
+      this.onmessage?.({ data });
+      this.dispatchEvent(new MessageEvent("message", { data }));
+    } else if (type === "close") {
+      this.onclose?.();
+      this.dispatchEvent(new Event("close"));
+    }
+  }
 }
 
 vi.stubGlobal("WebSocket", MockWebSocket);
+
+const SERVER_HELLO = JSON.stringify({
+  type: "ServerHello",
+  data: {
+    server_version: "0.0.0-test",
+    build_commit: "testhash",
+    protocol_version: 1,
+    mode: "Full",
+  },
+});
+
+/** Settle the async handshake so `this.ws` is bound before tests fire
+ *  game-level frames. Mirrors the helper in `ws-adapter.test.ts`. */
+async function completeHandshake(adapter: WebSocketAdapter): Promise<MockWebSocket> {
+  await Promise.resolve();
+  const ws = MockWebSocket.last!;
+  ws.dispatchSynthetic("message", SERVER_HELLO);
+  await Promise.resolve();
+  await Promise.resolve();
+  return (adapter as unknown as { ws: MockWebSocket }).ws;
+}
 vi.stubGlobal("localStorage", {
   getItem: vi.fn(() => null),
   setItem: vi.fn(),
@@ -48,10 +83,10 @@ describe("shared adapter contract fixtures", () => {
     const listener = vi.fn();
     adapter.onEvent(listener);
 
+    MockWebSocket.last = null;
     const initPromise = adapter.initialize();
-    const ws = (adapter as unknown as { ws: MockWebSocket }).ws;
-    ws.onopen?.();
-    ws.onmessage?.({ data: JSON.stringify(fixture) });
+    const ws = await completeHandshake(adapter);
+    ws.dispatchSynthetic("message", JSON.stringify(fixture));
     await initPromise;
 
     expect(listener).toHaveBeenCalledWith({
@@ -76,13 +111,13 @@ describe("shared adapter contract fixtures", () => {
     const listener = vi.fn();
     adapter.onEvent(listener);
 
+    MockWebSocket.last = null;
     const initPromise = adapter.initialize();
-    const ws = (adapter as unknown as { ws: MockWebSocket }).ws;
-    ws.onopen?.();
-    ws.onmessage?.({ data: JSON.stringify(gameStartedFixture) });
+    const ws = await completeHandshake(adapter);
+    ws.dispatchSynthetic("message", JSON.stringify(gameStartedFixture));
     await initPromise;
 
-    ws.onmessage?.({ data: JSON.stringify(stateUpdateFixture) });
+    ws.dispatchSynthetic("message", JSON.stringify(stateUpdateFixture));
 
     expect(listener).toHaveBeenCalledWith(
       expect.objectContaining({

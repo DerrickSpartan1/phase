@@ -89,6 +89,11 @@ pub struct LobbyGame {
     /// field existed, preserved for backward compatibility.
     #[serde(default)]
     pub room_name: Option<String>,
+    /// True when this room is P2P-brokered (host runs the engine). False for
+    /// server-run rooms. Derived from `host_peer_id` presence at publish
+    /// time. This field is populated by the server, never by clients.
+    #[serde(default)]
+    pub is_p2p: bool,
 }
 
 /// Info about a single player slot in a waiting room, sent to all connected players.
@@ -623,6 +628,7 @@ mod tests {
                 max_players: 2,
                 format: None,
                 room_name: None,
+                is_p2p: false,
             }],
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -652,6 +658,7 @@ mod tests {
                 max_players: 2,
                 format: None,
                 room_name: None,
+                is_p2p: true,
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -679,6 +686,7 @@ mod tests {
                 max_players: 4,
                 format: Some(GameFormat::Commander),
                 room_name: Some("Board-wipe special".to_string()),
+                is_p2p: false,
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
@@ -960,6 +968,7 @@ mod tests {
             max_players: 4,
             format: Some(GameFormat::Commander),
             room_name: Some("Spellslingers".to_string()),
+            is_p2p: true,
         };
         let json = serde_json::to_string(&game).unwrap();
         let parsed: LobbyGame = serde_json::from_str(&json).unwrap();
@@ -969,6 +978,7 @@ mod tests {
         assert_eq!(parsed.max_players, 4);
         assert_eq!(parsed.format, Some(GameFormat::Commander));
         assert_eq!(parsed.room_name, Some("Spellslingers".to_string()));
+        assert!(parsed.is_p2p);
     }
 
     #[test]
@@ -987,6 +997,9 @@ mod tests {
         assert_eq!(parsed.max_players, 0);
         assert_eq!(parsed.format, None);
         assert_eq!(parsed.room_name, None);
+        // Pre-PR-2 servers never emitted is_p2p; decoding such a payload must
+        // default to `false` so legacy rows are treated as server-run.
+        assert!(!parsed.is_p2p);
     }
 
     #[test]

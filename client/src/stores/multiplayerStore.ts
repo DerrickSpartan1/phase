@@ -1,13 +1,25 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 
-import type { FormatConfig, GameFormat, MatchType, PlayerId } from "../adapter/types";
+import type { FormatConfig, GameFormat, LobbyGame, MatchType, PlayerId } from "../adapter/types";
 import { PROTOCOL_VERSION, type ServerInfo } from "../adapter/ws-adapter";
 import {
   clearWsSession,
   loadWsSession,
   saveWsSession,
 } from "../services/multiplayerSession";
+import {
+  resolveGuestOver,
+  subscribeLobbyOver,
+  type ResolveResult,
+} from "../services/brokerClient";
+import {
+  HandshakeError,
+  openPhaseSocket,
+  withReconnect,
+  type PhaseSocket,
+  type ReconnectHandle,
+} from "../services/openPhaseSocket";
 import { isValidWebSocketUrl } from "../services/serverDetection";
 import { saveActiveGame, useGameStore } from "./gameStore";
 
@@ -24,24 +36,42 @@ let hostReconnectTimer: ReturnType<typeof setTimeout> | null = null;
 const HOST_MAX_RECONNECT_ATTEMPTS = 3;
 
 /**
- * The first frame the hosting WS would have sent (CreateGameWithSettings or
- * Reconnect) is deferred until the server's ServerHello is received, so a
- * version-mismatched connection never registers a lobby or claims a session.
+ * Long-lived, reconnecting subscription channel. Opened on first
+ * multiplayer-home entry via `ensureSubscriptionSocket`, not at app boot:
+ * users who never touch multiplayer don't pay for a WS. Shared between
+ * the lobby subscribe path (SubscribeLobby / LobbyUpdate traffic) and the
+ * P2P guest resolve path (JoinGameWithPassword → PeerInfo). The
+ * `withReconnect` wrapper re-handshakes up to 3 times on unexpected
+ * drops; `onStateChange` drives pending-RPC rejection and re-subscribe.
  */
-let hostHandshakeContinuation: (() => void) | null = null;
+let subscriptionReconnect: ReconnectHandle | null = null;
+/** Awaiters of the first open — resolves once the handshake lands, or with
+ * `null` if the factory exhausts all retries without ever connecting. */
+let subscriptionFirstOpen: Promise<PhaseSocket | null> | null = null;
 
-function sendClientHello(ws: WebSocket): void {
-  ws.send(
-    JSON.stringify({
-      type: "ClientHello",
-      data: {
-        client_version: __APP_VERSION__,
-        build_commit: __BUILD_HASH__,
-        protocol_version: PROTOCOL_VERSION,
-      },
-    }),
-  );
-}
+/**
+ * AbortControllers for in-flight `resolveGuest` calls. On the socket's
+ * `reconnecting` transition we abort every pending call so the caller
+ * gets a `connection_lost` result immediately rather than waiting for
+ * its own timeout. New calls after reconnect use fresh controllers.
+ */
+const pendingResolveAborts: Set<AbortController> = new Set();
+
+/**
+ * Registered lobby subscribers. The store multiplexes one
+ * `subscribeLobbyOver` attachment across all of them: the first
+ * subscriber sends `SubscribeLobby` to the server, subsequent
+ * subscribers are fanned-out snapshots from the cached `lobbySnapshot`,
+ * and only the *last* subscriber leaving sends `UnsubscribeLobby`. This
+ * prevents the ref-counting bug where one caller's unsubscribe would
+ * silence every other caller on the same shared socket.
+ */
+const lobbySubscribers: Set<(games: LobbyGame[]) => void> = new Set();
+/** Most recent `LobbyUpdate` snapshot, used to seed new subscribers. */
+let lobbySnapshot: LobbyGame[] | null = null;
+/** Per-socket detach returned by `subscribeLobbyOver`. Re-bound on
+ * reconnect; `null` when no socket is attached. */
+let lobbyAttachDetach: (() => void) | null = null;
 
 export interface AiSeatConfig {
   seatIndex: number;
@@ -178,6 +208,32 @@ interface MultiplayerActions {
   cancelHosting: () => void;
   clearPendingGameRoute: () => void;
   setServerInfo: (info: ServerInfo | null) => void;
+  /**
+   * Lazily open the long-lived subscription socket and return the
+   * `PhaseSocket`. Idempotent: a second call while an open is in flight
+   * returns the same promise. Resolves `null` if the handshake fails so
+   * callers can fall back rather than crash.
+   */
+  ensureSubscriptionSocket: () => Promise<PhaseSocket | null>;
+  /** Close and discard the subscription socket. Called on store teardown. */
+  closeSubscriptionSocket: () => void;
+  /**
+   * Send `JoinGameWithPassword` over the subscription socket and return a
+   * discriminated `ResolveResult`. Opens the socket lazily if it's not yet
+   * alive. Does NOT navigate — the caller inspects the result and handles
+   * password retry, build mismatch, etc. before navigation.
+   */
+  resolveGuest: (code: string, password?: string) => Promise<ResolveResult>;
+  /**
+   * Subscribe to lobby-list updates over the subscription socket. Returns
+   * a cleanup function that detaches listeners and sends `UnsubscribeLobby`.
+   * Callers should not await; `onUpdate` fires asynchronously once the
+   * first `LobbyUpdate` snapshot arrives. Returns `null` when the socket
+   * could not be opened so the caller can render a fallback.
+   */
+  subscribeLobby: (
+    onUpdate: (games: LobbyGame[]) => void,
+  ) => Promise<(() => void) | null>;
 }
 
 /**
@@ -425,35 +481,11 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           pendingGameRoute: null,
         });
 
-        // Shared message handler for both initial and reconnect WebSockets
+        // Shared post-handshake message handler. ServerHello is handled
+        // upstream by `openPhaseSocket`, so by the time we get here the
+        // server's identity is already known and compatible.
         const handleHostMessage = (ws: WebSocket, msg: { type: string; data?: unknown }) => {
-          if (msg.type === "ServerHello") {
-            const data = msg.data as {
-              server_version: string;
-              build_commit: string;
-              protocol_version: number;
-              mode: "Full" | "LobbyOnly";
-            };
-            const info: ServerInfo = {
-              version: data.server_version,
-              buildCommit: data.build_commit,
-              protocolVersion: data.protocol_version,
-              mode: data.mode,
-            };
-            set({ serverInfo: info });
-            if (info.protocolVersion !== PROTOCOL_VERSION) {
-              hostHandshakeContinuation = null;
-              ws.close();
-              get().showToast(
-                `Server protocol version ${info.protocolVersion} does not match client ${PROTOCOL_VERSION}. Please refresh.`,
-              );
-              get().cancelHosting();
-              return;
-            }
-            const cont = hostHandshakeContinuation;
-            hostHandshakeContinuation = null;
-            cont?.();
-          } else if (msg.type === "GameCreated") {
+          if (msg.type === "GameCreated") {
             const data = msg.data as { game_code: string; player_token: string };
             saveWsSession({
               gameCode: data.game_code,
@@ -489,6 +521,71 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           }
         };
 
+        // Open a phase socket (handshake + version gate) then attach our
+        // post-handshake message/close handlers and send `setupFrame`. All
+        // callers (initial connect + reconnect) funnel through here so the
+        // handshake policy lives in one place.
+        const openHostSocket = async (
+          setupFrame: () => unknown,
+          onReopen: () => void,
+        ): Promise<void> => {
+          if (!isValidWebSocketUrl(get().serverAddress)) {
+            clearWsSession();
+            set({
+              hostGameCode: null,
+              hostIsPublic: false,
+              hostingStatus: "idle",
+              playerSlots: [],
+            });
+            get().showToast("Invalid server address. Update it in Settings.");
+            return;
+          }
+
+          let socket;
+          try {
+            socket = await openPhaseSocket(get().serverAddress);
+          } catch (err) {
+            if (
+              err instanceof HandshakeError &&
+              err.kind === "protocol_mismatch"
+            ) {
+              get().showToast(err.message);
+              get().cancelHosting();
+              return;
+            }
+            if (!gameStartedFired) {
+              hostWs = null;
+              onReopen();
+            }
+            return;
+          }
+
+          set({ serverInfo: socket.serverInfo });
+          hostWs = socket.ws;
+
+          socket.ws.onmessage = (event) => {
+            const msg = JSON.parse(event.data as string) as {
+              type: string;
+              data?: unknown;
+            };
+            handleHostMessage(socket.ws, msg);
+          };
+          socket.ws.onerror = () => {
+            if (!gameStartedFired) {
+              hostWs = null;
+              onReopen();
+            }
+          };
+          socket.ws.onclose = () => {
+            if (!gameStartedFired && hostWs === socket.ws) {
+              hostWs = null;
+              onReopen();
+            }
+          };
+
+          socket.ws.send(JSON.stringify(setupFrame()));
+        };
+
         // Attempt to reconnect the hosting WS using stored session token
         const attemptHostReconnect = () => {
           if (gameStartedFired) return;
@@ -511,118 +608,37 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
           hostReconnectTimer = setTimeout(() => {
             hostReconnectTimer = null;
             if (gameStartedFired) return;
-
-            if (!isValidWebSocketUrl(get().serverAddress)) {
-              clearWsSession();
-              set({
-                hostGameCode: null,
-                hostIsPublic: false,
-                hostingStatus: "idle",
-                playerSlots: [],
-              });
-              get().showToast("Invalid server address. Update it in Settings.");
-              return;
-            }
-            const rws = new WebSocket(get().serverAddress);
-            hostWs = rws;
-
-            rws.onopen = () => {
-              hostHandshakeContinuation = () => {
-                rws.send(
-                  JSON.stringify({
-                    type: "Reconnect",
-                    data: {
-                      game_code: session.gameCode,
-                      player_token: session.playerToken,
-                    },
-                  }),
-                );
-              };
-              sendClientHello(rws);
-            };
-
-            rws.onmessage = (event) => {
-              const msg = JSON.parse(event.data as string) as {
-                type: string;
-                data?: unknown;
-              };
-              handleHostMessage(rws, msg);
-            };
-
-            rws.onerror = () => {
-              if (!gameStartedFired) {
-                hostWs = null;
-                attemptHostReconnect();
-              }
-            };
-
-            rws.onclose = () => {
-              if (!gameStartedFired && hostWs === rws) {
-                hostWs = null;
-                attemptHostReconnect();
-              }
-            };
+            void openHostSocket(
+              () => ({
+                type: "Reconnect",
+                data: {
+                  game_code: session.gameCode,
+                  player_token: session.playerToken,
+                },
+              }),
+              attemptHostReconnect,
+            );
           }, delay);
         };
 
-        // Wire up the initial WebSocket handlers
-        if (!isValidWebSocketUrl(get().serverAddress)) {
-          set({
-            hostGameCode: null,
-            hostIsPublic: false,
-            hostingStatus: "idle",
-            playerSlots: [],
-          });
-          get().showToast("Invalid server address. Update it in Settings.");
-          return;
-        }
-        const ws = new WebSocket(get().serverAddress);
-        hostWs = ws;
-
-        ws.onopen = () => {
-          hostHandshakeContinuation = () => {
-            ws.send(
-              JSON.stringify({
-                type: "CreateGameWithSettings",
-                data: {
-                  deck: { main_deck: deck.main_deck, sideboard: deck.sideboard, commander: deck.commander ?? [] },
-                  display_name: settings.displayName,
-                  public: settings.public,
-                  password: settings.password || null,
-                  timer_seconds: settings.timerSeconds,
-                  player_count: settings.formatConfig.max_players,
-                  match_config: { match_type: settings.matchType },
-                  format_config: settings.formatConfig,
-                  ai_seats: settings.aiSeats,
-                  room_name: settings.roomName,
-                },
-              }),
-            );
-          };
-          sendClientHello(ws);
-        };
-
-        ws.onmessage = (event) => {
-          const msg = JSON.parse(event.data as string) as {
-            type: string;
-            data?: unknown;
-          };
-          handleHostMessage(ws, msg);
-        };
-
-        ws.onerror = () => {
-          if (!gameStartedFired) {
-            hostWs = null;
-            attemptHostReconnect();
-          }
-        };
-
-        ws.onclose = () => {
-          if (!gameStartedFired && hostWs === ws) {
-            hostWs = null;
-            attemptHostReconnect();
-          }
-        };
+        void openHostSocket(
+          () => ({
+            type: "CreateGameWithSettings",
+            data: {
+              deck: { main_deck: deck.main_deck, sideboard: deck.sideboard, commander: deck.commander ?? [] },
+              display_name: settings.displayName,
+              public: settings.public,
+              password: settings.password || null,
+              timer_seconds: settings.timerSeconds,
+              player_count: settings.formatConfig.max_players,
+              match_config: { match_type: settings.matchType },
+              format_config: settings.formatConfig,
+              ai_seats: settings.aiSeats,
+              room_name: settings.roomName,
+            },
+          }),
+          attemptHostReconnect,
+        );
       },
 
       cancelHosting: () => {
@@ -636,7 +652,6 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
         }
         gameStartedFired = false;
         hostReconnectAttempt = 0;
-        hostHandshakeContinuation = null;
         clearWsSession();
         set({
           hostGameCode: null,
@@ -648,6 +663,154 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       },
 
       clearPendingGameRoute: () => set({ pendingGameRoute: null }),
+
+      ensureSubscriptionSocket: async () => {
+        // Fast path: handle is live and currently has a connected socket.
+        const existing = subscriptionReconnect?.current();
+        if (existing && existing.ws.readyState === WebSocket.OPEN) {
+          return existing;
+        }
+        // Deduped first-open promise: concurrent callers await the same
+        // `withReconnect` bootstrapping without racing handshakes.
+        if (subscriptionFirstOpen) return subscriptionFirstOpen;
+
+        const addr = get().serverAddress;
+        if (!isValidWebSocketUrl(addr)) return null;
+
+        subscriptionFirstOpen = new Promise<PhaseSocket | null>((resolve) => {
+          let settled = false;
+          const settle = (val: PhaseSocket | null) => {
+            if (settled) return;
+            settled = true;
+            resolve(val);
+          };
+
+          subscriptionReconnect = withReconnect(
+            () =>
+              openPhaseSocket(addr).catch((err) => {
+                // Protocol mismatch is not retryable — surface the toast
+                // on the *first* handshake attempt, then let
+                // `withReconnect` treat subsequent attempts as plain
+                // errors (they'll keep rejecting until "offline" fires).
+                if (
+                  err instanceof HandshakeError &&
+                  err.kind === "protocol_mismatch"
+                ) {
+                  get().showToast(err.message);
+                }
+                throw err;
+              }),
+            {
+              attempts: 3,
+              onStateChange: (state) => {
+                if (state === "open") {
+                  const socket = subscriptionReconnect?.current() ?? null;
+                  if (socket) {
+                    set({ serverInfo: socket.serverInfo });
+                    // Re-attach the single multiplexed lobby listener if
+                    // any subscribers are registered. The first snapshot
+                    // from the server will overwrite `lobbySnapshot` and
+                    // fan-out; stale cached data is not authoritative
+                    // across a reconnect.
+                    if (lobbySubscribers.size > 0) {
+                      lobbyAttachDetach = subscribeLobbyOver(socket, (games) => {
+                        lobbySnapshot = games;
+                        for (const cb of lobbySubscribers) cb(games);
+                      });
+                    }
+                  }
+                  settle(socket);
+                } else if (state === "reconnecting") {
+                  // In-flight RPCs would otherwise hang until their own
+                  // timeout. Abort them now so the caller can branch
+                  // immediately. New RPCs registered after this point
+                  // use fresh controllers and are unaffected.
+                  for (const ac of pendingResolveAborts) ac.abort();
+                  pendingResolveAborts.clear();
+                  // Drop the handle to the old socket's listener; it
+                  // will be re-bound on the next "open".
+                  lobbyAttachDetach = null;
+                } else if (state === "offline") {
+                  // Reconnect exhausted. Caller's `ensureSubscriptionSocket`
+                  // resolves `null` so fallback UI renders. Also drain any
+                  // stragglers that joined between reconnecting and offline.
+                  for (const ac of pendingResolveAborts) ac.abort();
+                  pendingResolveAborts.clear();
+                  settle(null);
+                }
+              },
+            },
+          );
+        }).finally(() => {
+          subscriptionFirstOpen = null;
+        });
+
+        return subscriptionFirstOpen;
+      },
+
+      closeSubscriptionSocket: () => {
+        for (const ac of pendingResolveAborts) ac.abort();
+        pendingResolveAborts.clear();
+        lobbyAttachDetach?.();
+        lobbyAttachDetach = null;
+        lobbySubscribers.clear();
+        lobbySnapshot = null;
+        subscriptionReconnect?.close();
+        subscriptionReconnect = null;
+      },
+
+      resolveGuest: async (code, password) => {
+        const socket = await get().ensureSubscriptionSocket();
+        if (!socket) {
+          return {
+            ok: false,
+            reason: "connection_lost",
+            message: "Lobby connection unavailable. Check your server address.",
+          };
+        }
+        // Register an abort controller so a mid-RPC `reconnecting`
+        // transition can cut short the wait with `connection_lost`
+        // rather than letting the caller's own timeout fire.
+        const ac = new AbortController();
+        pendingResolveAborts.add(ac);
+        try {
+          return await resolveGuestOver(socket, code, password, {
+            signal: ac.signal,
+          });
+        } finally {
+          pendingResolveAborts.delete(ac);
+        }
+      },
+
+      subscribeLobby: async (onUpdate) => {
+        const socket = await get().ensureSubscriptionSocket();
+        if (!socket) return null;
+        const wasEmpty = lobbySubscribers.size === 0;
+        lobbySubscribers.add(onUpdate);
+        // First subscriber sends `SubscribeLobby`. Later subscribers ride
+        // the same upstream attachment — sending the frame again per
+        // subscriber, then detaching on their own cleanup, would send
+        // `UnsubscribeLobby` on the shared socket and silence every
+        // other subscriber (the ref-counting bug this structure fixes).
+        if (wasEmpty) {
+          lobbyAttachDetach = subscribeLobbyOver(socket, (games) => {
+            lobbySnapshot = games;
+            for (const cb of lobbySubscribers) cb(games);
+          });
+        } else if (lobbySnapshot) {
+          // Immediate seed for late subscribers so they don't wait on
+          // the next server push to render anything.
+          onUpdate(lobbySnapshot);
+        }
+        return () => {
+          lobbySubscribers.delete(onUpdate);
+          if (lobbySubscribers.size === 0) {
+            lobbyAttachDetach?.();
+            lobbyAttachDetach = null;
+            lobbySnapshot = null;
+          }
+        };
+      },
     }),
     {
       name: "phase-multiplayer",

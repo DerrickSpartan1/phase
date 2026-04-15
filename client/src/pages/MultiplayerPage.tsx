@@ -4,8 +4,10 @@ import { useNavigate } from "react-router";
 import type { GameFormat } from "../adapter/types";
 import { useAudioContext } from "../audio/useAudioContext";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { BrokerOfflinePrompt } from "../components/lobby/BrokerOfflinePrompt";
 import { HostSetup } from "../components/lobby/HostSetup";
 import type { LobbyGame } from "../components/lobby/GameListItem";
+import { JoinErrorDialog } from "../components/lobby/JoinErrorDialog";
 import { LobbyView } from "../components/lobby/LobbyView";
 import { PlayerIdentityBanner } from "../components/lobby/PlayerIdentityBanner";
 import { ServerOfflinePrompt } from "../components/lobby/ServerOfflinePrompt";
@@ -69,6 +71,22 @@ export function MultiplayerPage() {
   // not in the store, because it's scoped to the Multiplayer flow.
   const [serverOfflinePrompt, setServerOfflinePrompt] = useState(false);
   const [lobbyRetryKey, setLobbyRetryKey] = useState(0);
+  // Set when the user clicks "Host online game" on a `LobbyOnly` server but
+  // the broker isn't reachable. Stashes the pending action so the modal's
+  // "Continue without lobby" button can dispatch it with `useBroker: false`.
+  const [brokerOfflinePrompt, setBrokerOfflinePrompt] = useState<
+    { action: PendingAction } | null
+  >(null);
+  // Fatal guest-side errors (build mismatch especially) need more weight
+  // than a transient toast — the user may need to act (refresh the page
+  // to pick up a new build). State is null when no error is displayed.
+  const [joinErrorDialog, setJoinErrorDialog] = useState<
+    {
+      title: string;
+      message: string;
+      primaryAction?: { label: string; onClick: () => void };
+    } | null
+  >(null);
   // Where to return when the user enters deck-select *without* a pending
   // host/join action (i.e. clicked the "Change" affordance on the active-
   // deck banner). Before this, back/confirm both assumed pendingAction
@@ -164,6 +182,31 @@ export function MultiplayerPage() {
   };
 
   // Expand a ParsedDeck into flat name arrays for the server
+  // Extract the per-game URL params + navigate for the P2P host path.
+  // Same shape is used by the happy path (broker reachable) and the
+  // "continue without lobby" fallback, so factoring out keeps them in
+  // lockstep.
+  const navigateToP2PHost = useCallback(
+    (action: Extract<PendingAction, { type: "host" }>, useBroker: boolean) => {
+      const gameId = crypto.randomUUID();
+      useGameStore.setState({ gameId });
+      const params = new URLSearchParams({
+        mode: "p2p-host",
+        match: action.settings.matchType.toLowerCase(),
+        format: action.settings.formatConfig.format,
+        players: String(action.settings.formatConfig.max_players),
+      });
+      // `useBroker` travels via React Router location state — we
+      // intentionally avoid a URL param so a hard refresh re-evaluates
+      // broker reachability from scratch instead of pinning the user to
+      // "no listing" silently.
+      navigate(`/game/${gameId}?${params.toString()}`, {
+        state: { useBroker },
+      });
+    },
+    [navigate],
+  );
+
   const expandDeck = useCallback(() => {
     const deck = loadActiveDeck();
     if (!deck) return null;
@@ -243,20 +286,24 @@ export function MultiplayerPage() {
         }
 
         if (action.connectionMode === "p2p") {
-          const gameId = crypto.randomUUID();
-          useGameStore.setState({ gameId });
-          // Thread format + seat count into the URL — `GamePage` rehydrates
-          // them into `formatConfig` / `playerCount` which flow to
-          // `P2PHostAdapter`. Without these params, P2P host silently
-          // defaults to 2-player Standard regardless of what the user
-          // selected in HostSetup.
-          const params = new URLSearchParams({
-            mode: "p2p-host",
-            match: action.settings.matchType.toLowerCase(),
-            format: action.settings.formatConfig.format,
-            players: String(action.settings.formatConfig.max_players),
-          });
-          navigate(`/game/${gameId}?${params.toString()}`);
+          // Reachability check for the `LobbyOnly` host flow. We lean on
+          // the store's long-lived subscription socket (opened when the
+          // user entered this page) rather than paying a fresh broker
+          // handshake: `ensureSubscriptionSocket` is idempotent and
+          // returns `null` when the server is unreachable, which is
+          // exactly the signal the `BrokerOfflinePrompt` needs. This
+          // also populates `serverInfo` on the store so the mode check
+          // below has authoritative data even on a fresh page load.
+          const store = useMultiplayerStore.getState();
+          const socket = await store.ensureSubscriptionSocket();
+          const mode = socket?.serverInfo.mode ?? store.serverInfo?.mode;
+          if (mode === "LobbyOnly") {
+            if (!socket) {
+              setBrokerOfflinePrompt({ action });
+              return false;
+            }
+          }
+          navigateToP2PHost(action, /* useBroker */ mode === "LobbyOnly");
         } else {
           startHosting(action.settings, deck);
           // Navigate to main menu — the HostingBanner takes over as the
@@ -288,7 +335,7 @@ export function MultiplayerPage() {
 
       return true;
     },
-    [expandDeck, startHosting, navigate, showToast],
+    [expandDeck, startHosting, navigate, navigateToP2PHost, showToast],
   );
 
   // Host setup complete → execute immediately if deck exists, otherwise prompt
@@ -305,6 +352,71 @@ export function MultiplayerPage() {
     [connectionMode, activeDeckName, executeAction],
   );
 
+  const resolveGuest = useMultiplayerStore((s) => s.resolveGuest);
+
+  /**
+   * Guest-path P2P resolve loop. Tries `resolveGuest` over the shared
+   * subscription socket, prompts for a password on `password_required`
+   * and retries on the same socket, surfaces explicit UI for
+   * `build_mismatch` / `connection_lost` / etc., and navigates on
+   * success. No `throw`-based control flow: failures come back as a
+   * discriminated `ResolveResult`.
+   */
+  const joinP2PRoom = useCallback(
+    async (code: string, initialPassword?: string) => {
+      let password = initialPassword;
+      while (true) {
+        const result = await resolveGuest(code, password);
+        if (result.ok) {
+          const gameId = crypto.randomUUID();
+          useGameStore.setState({ gameId });
+          navigate(
+            `/game/${gameId}?mode=p2p-join&code=${result.peerInfo.host_peer_id}`,
+          );
+          return;
+        }
+        if (result.reason === "password_required") {
+          const entered = window.prompt("This room requires a password:");
+          if (!entered) return;
+          password = entered;
+          continue;
+        }
+        // `build_mismatch` is recoverable with a page refresh — surface
+        // it via the modal with an explicit "Refresh" button so the user
+        // isn't left wondering how to resolve it. Other fatal reasons
+        // (`not_found`, `room_full`) go through the same modal without
+        // a primary action — they're terminal and the dismiss button
+        // returns the user to the lobby.
+        if (result.reason === "build_mismatch") {
+          setJoinErrorDialog({
+            title: "Client out of date",
+            message: result.message,
+            primaryAction: {
+              label: "Refresh",
+              onClick: () => window.location.reload(),
+            },
+          });
+          return;
+        }
+        if (
+          result.reason === "not_found" ||
+          result.reason === "room_full"
+        ) {
+          setJoinErrorDialog({
+            title: "Can't join this room",
+            message: result.message,
+          });
+          return;
+        }
+        // Transient failures (`connection_lost`, `error`) — a toast is
+        // enough because the user can simply try again.
+        showToast(result.message);
+        return;
+      }
+    },
+    [navigate, resolveGuest, showToast],
+  );
+
   // Join from lobby → execute immediately if deck exists, otherwise prompt
   const handleJoinGame = useCallback(
     (
@@ -313,6 +425,13 @@ export function MultiplayerPage() {
       format?: GameFormat,
       context?: LobbyGame,
     ) => {
+      // Explicit `=== true` so legacy lobby rows (older server builds
+      // without `is_p2p`) fall through to the server-run flow rather
+      // than being treated as P2P.
+      if (context?.is_p2p === true) {
+        void joinP2PRoom(code, password);
+        return;
+      }
       const action: PendingAction = {
         type: "join",
         code,
@@ -327,7 +446,7 @@ export function MultiplayerPage() {
         setView("deck-select");
       }
     },
-    [activeDeckName, executeAction],
+    [activeDeckName, executeAction, joinP2PRoom],
   );
 
   const handleBack = () => {
@@ -553,6 +672,27 @@ export function MultiplayerPage() {
             // is intentional — we want a clean retry.
             setLobbyRetryKey((k) => k + 1);
           }}
+        />
+      )}
+      {brokerOfflinePrompt && (
+        <BrokerOfflinePrompt
+          serverAddress={serverAddress}
+          onCancel={() => setBrokerOfflinePrompt(null)}
+          onContinueWithoutLobby={() => {
+            const { action } = brokerOfflinePrompt;
+            setBrokerOfflinePrompt(null);
+            if (action.type === "host") {
+              navigateToP2PHost(action, /* useBroker */ false);
+            }
+          }}
+        />
+      )}
+      {joinErrorDialog && (
+        <JoinErrorDialog
+          title={joinErrorDialog.title}
+          message={joinErrorDialog.message}
+          primaryAction={joinErrorDialog.primaryAction}
+          onDismiss={() => setJoinErrorDialog(null)}
         />
       )}
     </div>

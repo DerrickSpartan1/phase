@@ -1,27 +1,9 @@
-import type { GameFormat } from "../../adapter/types";
+import type { GameFormat, LobbyGame } from "../../adapter/types";
 
-interface LobbyGame {
-  game_code: string;
-  host_name: string;
-  created_at: number;
-  has_password: boolean;
-  format?: GameFormat;
-  current_players?: number;
-  max_players?: number;
-  /** Display-only version string (e.g. "0.1.11"). */
-  host_version?: string;
-  /**
-   * Git short-hash of the host's build. Used as a hard compatibility gate:
-   * when the lobby list renders, rows whose commit doesn't match the
-   * client's own build are disabled because the host and guest would run
-   * diverged engine rules otherwise.
-   */
-  host_build_commit?: string;
-  /** Optional host-provided label for this room, distinct from their player
-   * name. When present, the lobby row shows it as the primary title with
-   * the host's player name as secondary metadata. */
-  room_name?: string | null;
-}
+// Re-export so existing `import { LobbyGame } from "./GameListItem"` call
+// sites continue to resolve without needing to update every consumer in
+// the same change.
+export type { LobbyGame };
 
 interface GameListItemProps {
   game: LobbyGame;
@@ -107,6 +89,20 @@ export function GameListItem({ game, onJoin, compatible = true }: GameListItemPr
         {formatLabel}
       </span>
 
+      {/* P2P badge — rendered only when the row is explicitly a P2P-brokered
+          room. Using `=== true` rather than truthiness is deliberate: older
+          server builds omit the field entirely, and treating `undefined` as
+          "unknown" rather than "false" lets us default those rows to the
+          server-run visual. */}
+      {game.is_p2p === true && (
+        <span
+          className="flex-shrink-0 rounded bg-teal-500/20 px-1.5 py-0.5 text-xs font-semibold text-teal-300"
+          title="Peer-to-peer game (host runs the engine)"
+        >
+          P2P
+        </span>
+      )}
+
       {/* Room title and metadata. When the host set an explicit room name
           we show it as the primary title and demote the host's player name
           to the secondary line; otherwise fall back to showing the player
@@ -160,5 +156,3 @@ export function GameListItem({ game, onJoin, compatible = true }: GameListItemPr
     </button>
   );
 }
-
-export type { LobbyGame };

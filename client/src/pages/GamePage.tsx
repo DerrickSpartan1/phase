@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router";
+import { useLocation, useNavigate, useParams, useSearchParams } from "react-router";
 import { AnimatePresence, motion } from "framer-motion";
 
 import type { GameFormat, MatchConfig } from "../adapter/types";
@@ -91,6 +91,19 @@ export function GamePage() {
   const navigate = useNavigate();
   const { id: gameId } = useParams<{ id: string }>();
   const [searchParams] = useSearchParams();
+  const location = useLocation();
+  // `useBroker` is threaded through React Router's location state from
+  // `MultiplayerPage` — intentionally not a URL param, so a hard refresh
+  // re-evaluates broker reachability instead of pinning the "no lobby"
+  // choice silently. On hard-refresh the location state is absent; fall
+  // back to the store's cached `serverInfo.mode` so the user only gets
+  // broker registration when the reachable server is actually `LobbyOnly`.
+  // Without this gate, refreshing `/game/<id>?mode=p2p-host` against a
+  // Full-mode server would attempt `openBrokerClient` and surface an
+  // "Expected LobbyOnly server, got Full" error to the user.
+  const locationState = location.state as { useBroker?: boolean } | null;
+  const cachedServerMode = useMultiplayerStore((s) => s.serverInfo?.mode);
+  const useBroker = locationState?.useBroker ?? (cachedServerMode === "LobbyOnly");
   const rawMode = searchParams.get("mode");
   const difficulty = searchParams.get("difficulty") ?? "Medium";
   const joinCode = searchParams.get("code") ?? "";
@@ -99,7 +112,17 @@ export function GamePage() {
   const matchParam = searchParams.get("match");
   const firstParam = searchParams.get("first");
   const playerCount = playersParam ? Number(playersParam) : undefined;
-  const formatConfig = formatParam ? FORMAT_DEFAULTS[formatParam] : undefined;
+  // Memoize so the `GameProvider` `useEffect` dep array doesn't
+  // tear-down/rebuild the P2P session on every parent re-render. Without
+  // `useMemo`, each render constructs a fresh object reference from
+  // `FORMAT_DEFAULTS[formatParam]` (its lookup returns a stable reference,
+  // but TypeScript's narrowing produces a fresh binding that the linter
+  // treats as new). The explicit memo makes the stability guarantee
+  // self-documenting.
+  const formatConfig = useMemo(
+    () => (formatParam ? FORMAT_DEFAULTS[formatParam] : undefined),
+    [formatParam],
+  );
   // CR 103.1: 0 = play first, 1 = draw first, undefined = random
   const firstPlayer = firstParam === "play" ? 0 : firstParam === "draw" ? 1 : undefined;
   const matchConfig = useMemo<MatchConfig>(
@@ -366,6 +389,7 @@ export function GamePage() {
       playerCount={playerCount}
       matchConfig={matchConfig}
       firstPlayer={firstPlayer}
+      useBroker={useBroker}
       onWsEvent={mode === "online" ? handleWsEvent : undefined}
       onP2PEvent={
         mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined

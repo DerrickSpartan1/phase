@@ -10,6 +10,11 @@ import type {
   SubmitResult,
 } from "./types";
 import { AdapterError, AdapterErrorCode } from "./types";
+import {
+  HandshakeError,
+  openPhaseSocket,
+  type PhaseSocket,
+} from "../services/openPhaseSocket";
 import { isValidWebSocketUrl } from "../services/serverDetection";
 import type { WsSessionData } from "../services/multiplayerSession";
 
@@ -94,12 +99,11 @@ export class WebSocketAdapter implements EngineAdapter {
    */
   private _serverInfo: ServerInfo | null = null;
   /**
-   * Work deferred until a compatible `ServerHello` is received — typically
-   * the create-game, join-game, or reconnect frame. Both `initialize()`
-   * and `tryReconnect()` populate this so their setup frame never goes out
-   * before the handshake completes.
+   * `true` when we're inside a `tryReconnect` flow. Used by the `GameStarted`
+   * path in `handleMessage` to emit a `reconnected` event exactly once when
+   * the server confirms the resumed session.
    */
-  private pendingHelloContinuation: (() => void) | null = null;
+  private reconnectInFlight = false;
 
   constructor(
     private readonly serverUrl: string,
@@ -154,18 +158,10 @@ export class WebSocketAdapter implements EngineAdapter {
         return;
       }
 
-      this.ws = new WebSocket(this.serverUrl);
-
-      this.ws.onopen = () => {
-        this.startPing();
-        this.pendingHelloContinuation = () => {
-          if (this.mode === "host") {
-            this.send({
-              type: "CreateGame",
-              data: { deck: this.deckData },
-            });
-          } else {
-            this.send({
+      const setupFrame =
+        this.mode === "host"
+          ? { type: "CreateGame", data: { deck: this.deckData } }
+          : {
               type: "JoinGameWithPassword",
               data: {
                 game_code: this.joinGameCode!,
@@ -173,55 +169,102 @@ export class WebSocketAdapter implements EngineAdapter {
                 display_name: this.displayName,
                 password: this.joinPassword ?? null,
               },
-            });
-          }
-        };
-        this.sendClientHello();
-      };
+            };
 
-      this.ws.onmessage = (event) => {
-        this.handleMessage(JSON.parse(event.data as string));
-      };
-
-      this.ws.onerror = () => {
-        const err = new AdapterError(
-          "WS_ERROR",
-          "WebSocket connection failed",
-          true,
-        );
-        if (this.initReject) {
-          this.initReject(err);
-          this.initResolve = null;
-          this.initReject = null;
-        }
-      };
-
-      this.ws.onclose = () => {
-        if (this.pingInterval) {
-          clearInterval(this.pingInterval);
-          this.pingInterval = null;
-        }
-        // Clear any pending action state — the server may have already processed
-        // the action but the response was lost with the connection.
-        if (this.pendingReject) {
-          this.emit({ type: "actionPendingChanged", pending: false });
-          this.pendingReject(
-            new AdapterError("WS_CLOSED", "Connection closed during action", true),
-          );
-          this.pendingResolve = null;
-          this.pendingReject = null;
-        }
-        if (this.initReject) {
-          this.initReject(
-            new AdapterError("WS_CLOSED", "Connection closed before game started", true),
-          );
-          this.initResolve = null;
-          this.initReject = null;
-        } else if (this.gameState !== null) {
-          this.attemptReconnect();
-        }
-      };
+      this.attachSocket(setupFrame).catch(() => {
+        // `attachSocket` emits reject via initReject; swallow the
+        // rejection here so it doesn't surface as an unhandled promise.
+      });
     });
+  }
+
+  /**
+   * Opens a `PhaseSocket` via the shared handshake helper, caches the
+   * `ServerInfo`, wires the post-handshake message/close handlers, and
+   * sends `setupFrame`. Used by both `initialize()` and `tryReconnect()`
+   * so the handshake policy lives in exactly one place.
+   */
+  private async attachSocket(setupFrame: unknown): Promise<void> {
+    let socket: PhaseSocket;
+    try {
+      socket = await openPhaseSocket(this.serverUrl);
+    } catch (err) {
+      if (err instanceof HandshakeError) {
+        const retryable = err.kind !== "protocol_mismatch" && err.kind !== "invalid_url";
+        const adapterErr = new AdapterError("WS_ERROR", err.message, retryable);
+        if (this.initReject) {
+          this.initReject(adapterErr);
+          this.initResolve = null;
+          this.initReject = null;
+        }
+        if (err.kind === "protocol_mismatch" && err.serverInfo) {
+          // Incompatible handshake — surface an explicit event so the
+          // UI can render the version-mismatch prompt even if no one is
+          // awaiting `initialize()`. Use the real `ServerInfo` parsed
+          // from `ServerHello` so the UI can render accurate
+          // "server is on X, you are on Y" diagnostics.
+          this._serverInfo = err.serverInfo;
+          this.emit({
+            type: "serverHello",
+            info: err.serverInfo,
+            compatible: false,
+          });
+        }
+        return;
+      }
+      if (this.initReject) {
+        this.initReject(
+          new AdapterError("WS_ERROR", String(err), true),
+        );
+        this.initResolve = null;
+        this.initReject = null;
+      }
+      return;
+    }
+
+    this.ws = socket.ws;
+    this._serverInfo = socket.serverInfo;
+    this.emit({ type: "serverHello", info: socket.serverInfo, compatible: true });
+    this.startPing();
+
+    socket.ws.onmessage = (event) => {
+      this.handleMessage(JSON.parse(event.data as string));
+    };
+
+    socket.ws.onerror = () => {
+      const err = new AdapterError("WS_ERROR", "WebSocket connection failed", true);
+      if (this.initReject) {
+        this.initReject(err);
+        this.initResolve = null;
+        this.initReject = null;
+      }
+    };
+
+    socket.ws.onclose = () => {
+      if (this.pingInterval) {
+        clearInterval(this.pingInterval);
+        this.pingInterval = null;
+      }
+      if (this.pendingReject) {
+        this.emit({ type: "actionPendingChanged", pending: false });
+        this.pendingReject(
+          new AdapterError("WS_CLOSED", "Connection closed during action", true),
+        );
+        this.pendingResolve = null;
+        this.pendingReject = null;
+      }
+      if (this.initReject) {
+        this.initReject(
+          new AdapterError("WS_CLOSED", "Connection closed before game started", true),
+        );
+        this.initResolve = null;
+        this.initReject = null;
+      } else if (this.gameState !== null || this.playerToken !== null) {
+        this.attemptReconnect();
+      }
+    };
+
+    socket.ws.send(JSON.stringify(setupFrame));
   }
 
   async submitAction(action: GameAction, _actor: PlayerId): Promise<SubmitResult> {
@@ -307,7 +350,7 @@ export class WebSocketAdapter implements EngineAdapter {
     this.pendingReject = null;
     this.initResolve = null;
     this.initReject = null;
-    this.pendingHelloContinuation = null;
+    this.reconnectInFlight = false;
     this._serverInfo = null;
     this.emit({ type: "actionPendingChanged", pending: false });
     this.emit({ type: "latencyChanged", latencyMs: null });
@@ -327,38 +370,17 @@ export class WebSocketAdapter implements EngineAdapter {
       return false;
     }
 
-    this.ws = new WebSocket(this.serverUrl);
-    this.ws.onopen = () => {
-      this.startPing();
-      this.pendingHelloContinuation = () => {
-        this.send({
-          type: "Reconnect",
-          data: {
-            game_code: session.gameCode,
-            player_token: session.playerToken,
-          },
-        });
-      };
-      this.sendClientHello();
-    };
-    this.ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data as string) as { type: string; data?: unknown };
-      if (msg.type === "GameStarted") {
-        this.reconnectAttempt = 0;
-        this.emit({ type: "reconnected" });
-      }
-      this.handleMessage(msg);
-    };
-    this.ws.onclose = () => {
-      // Retry if we have an active game OR are mid-reconnect (playerToken set but
-      // no gameState yet because the server hasn't responded with GameStarted)
-      if (this.gameState !== null || this.playerToken !== null) {
-        this.attemptReconnect();
-      }
-    };
-    this.ws.onerror = () => {
-      // onclose will fire after onerror, which triggers attemptReconnect
-    };
+    this.reconnectInFlight = true;
+    this.attachSocket({
+      type: "Reconnect",
+      data: {
+        game_code: session.gameCode,
+        player_token: session.playerToken,
+      },
+    }).catch(() => {
+      // attachSocket handles reconnect-driven retries via `attemptReconnect`
+      // in the close handler; a rejection here is benign.
+    });
     return true;
   }
 
@@ -398,17 +420,6 @@ export class WebSocketAdapter implements EngineAdapter {
     this.ws?.send(JSON.stringify(msg));
   }
 
-  private sendClientHello(): void {
-    this.send({
-      type: "ClientHello",
-      data: {
-        client_version: __APP_VERSION__,
-        build_commit: __BUILD_HASH__,
-        protocol_version: PROTOCOL_VERSION,
-      },
-    });
-  }
-
   /** Snapshot of the server's advertised identity, or null before ServerHello. */
   getServerInfo(): ServerInfo | null {
     return this._serverInfo;
@@ -416,52 +427,10 @@ export class WebSocketAdapter implements EngineAdapter {
 
   private handleMessage(msg: { type: string; data?: unknown }): void {
     switch (msg.type) {
-      case "ServerHello": {
-        // Servers send ServerHello exactly once per connection. A duplicate
-        // frame means either a misbehaving server or a test harness; either
-        // way, re-running the continuation would send the setup frame twice.
-        if (this._serverInfo) {
-          return;
-        }
-        const data = msg.data as {
-          server_version: string;
-          build_commit: string;
-          protocol_version: number;
-          mode: "Full" | "LobbyOnly";
-        };
-        const info: ServerInfo = {
-          version: data.server_version,
-          buildCommit: data.build_commit,
-          protocolVersion: data.protocol_version,
-          mode: data.mode,
-        };
-        this._serverInfo = info;
-        const compatible = info.protocolVersion === PROTOCOL_VERSION;
-        this.emit({ type: "serverHello", info, compatible });
-
-        if (!compatible) {
-          // Give up before running the deferred setup frame — a mismatched
-          // protocol will just produce a rejected frame on the other side.
-          this.pendingHelloContinuation = null;
-          const err = new AdapterError(
-            "WS_ERROR",
-            `Server protocol version ${info.protocolVersion} does not match client ${PROTOCOL_VERSION}. Please refresh.`,
-            false,
-          );
-          if (this.initReject) {
-            this.initReject(err);
-            this.initResolve = null;
-            this.initReject = null;
-          }
-          this.ws?.close();
-          return;
-        }
-
-        const cont = this.pendingHelloContinuation;
-        this.pendingHelloContinuation = null;
-        cont?.();
-        break;
-      }
+      // ServerHello is no longer observed here — the shared
+      // `openPhaseSocket` helper consumes it during `attachSocket`, and
+      // `_serverInfo` / the `serverHello` event are populated before the
+      // post-handshake message loop begins.
 
       case "GameCreated": {
         const data = msg.data as { game_code: string; player_token: string };
@@ -475,6 +444,11 @@ export class WebSocketAdapter implements EngineAdapter {
 
       case "GameStarted": {
         const data = msg.data as { state: GameState; your_player: PlayerId; opponent_name?: string; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; spell_costs?: Record<string, ManaCost>; player_token?: string };
+        if (this.reconnectInFlight) {
+          this.reconnectInFlight = false;
+          this.reconnectAttempt = 0;
+          this.emit({ type: "reconnected" });
+        }
         this.gameState = data.state;
         this._playerId = data.your_player;
         this._legalActions = {

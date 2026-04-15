@@ -17,6 +17,7 @@ import { AdapterError } from "./types";
 import { WasmAdapter } from "./wasm-adapter";
 import { createPeerSession, type PeerSession } from "../network/peer";
 import type { P2PMessage } from "../network/protocol";
+import type { BrokerClient } from "../services/brokerClient";
 import { saveP2PSession } from "../services/p2pSession";
 
 /**
@@ -161,6 +162,20 @@ export class P2PHostAdapter implements EngineAdapter {
     private readonly formatConfig?: FormatConfig,
     private readonly matchConfig?: MatchConfig,
     private readonly gracePeriodMs: number = DEFAULT_GRACE_PERIOD_MS,
+    /**
+     * Optional broker that registered this room's lobby entry. When set,
+     * the adapter fires `broker.unregister(brokerGameCode)` after a
+     * successful `initializeGame` so the public listing disappears as
+     * soon as the engine is live. Absent for legacy pure-PeerJS rooms
+     * where no server-side listing exists.
+     */
+    private readonly broker?: BrokerClient,
+    /**
+     * Server-assigned game code for the lobby entry the broker holds.
+     * Required when `broker` is set; unused otherwise. Distinct from the
+     * PeerJS peer ID the guest dials over.
+     */
+    private readonly brokerGameCode?: string,
   ) {
     if (playerCount < 2 || playerCount > 4) {
       throw new AdapterError(
@@ -169,6 +184,29 @@ export class P2PHostAdapter implements EngineAdapter {
         false,
       );
     }
+    if (broker && !brokerGameCode) {
+      throw new AdapterError(
+        "P2P_BROKER_CONFIG",
+        "brokerGameCode is required when broker is provided",
+        false,
+      );
+    }
+  }
+
+  /**
+   * Resolves the guest-deck gate in `initializeGame` so the engine starts
+   * with whatever guests have connected so far. For 2p rooms this is
+   * functionally "start now that the one guest is here"; for 3-4p rooms
+   * it starts with fewer seats than configured — callers are responsible
+   * for their own AI-seat-synthesis follow-up.
+   *
+   * Does NOT itself talk to the broker — the unregister call cascades
+   * through `initializeGame`, which is the single authority for the
+   * broker-side lifecycle (per CLAUDE.md's "single authority" rule).
+   */
+  startNow(): void {
+    const resolvers = this.guestDeckResolvers.splice(0);
+    for (const r of resolvers) r();
   }
 
   onEvent(listener: P2PAdapterEventListener): () => void {
@@ -318,6 +356,20 @@ export class P2PHostAdapter implements EngineAdapter {
     this.gameStarted = true;
     this.emit({ type: "playerIdentity", playerId: 0 });
 
+    // Tear down the public lobby entry only *after* the engine is live.
+    // If the earlier `initializeGame` had thrown (deck resolution, WASM
+    // panic, etc.), firing unregister first would leave the lobby gone
+    // with a dead game — a "room listed but un-joinable" stuck state.
+    // Best-effort: a failure here falls back on the server's 5-minute
+    // `check_expired` backstop; the local game proceeds regardless.
+    if (this.broker && this.brokerGameCode) {
+      void this.broker
+        .unregister(this.brokerGameCode)
+        .catch(() => {
+          /* best-effort — see comment above */
+        });
+    }
+
     // Per-guest game_setup: each guest receives their unique
     // assignedPlayerId, playerToken, and filtered state.
     const legal = await this.wasm.getLegalActions();
@@ -410,6 +462,11 @@ export class P2PHostAdapter implements EngineAdapter {
       /* best-effort */
     }
     this.wasm.dispose();
+    // The broker (when set) wraps a PhaseSocket that the adapter adopted
+    // at construction. Ownership transferred here, so dispose is the last
+    // authority that can close it. `close()` is idempotent via the internal
+    // `closed` flag, so a prior error-path close in GameProvider is safe.
+    this.broker?.close();
     this.listeners = [];
   }
 
