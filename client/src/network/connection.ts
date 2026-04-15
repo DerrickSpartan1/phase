@@ -52,7 +52,7 @@ const PEER_CONFIG: RTCConfiguration = {
 };
 
 function traceP2P(side: "Host" | "Guest", event: string, data?: Record<string, unknown>): void {
-  console.log(`[P2P ${side} Trace]`, performance.now().toFixed(1), event, data ?? {});
+  console.debug(`[P2P ${side} Trace]`, performance.now().toFixed(1), event, data ?? {});
 }
 
 export interface HostResult {

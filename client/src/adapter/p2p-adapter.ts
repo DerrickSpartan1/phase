@@ -82,7 +82,7 @@ const DEFAULT_GRACE_PERIOD_MS = 30_000;
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
 function traceAdapter(side: "Host" | "Guest", event: string, data?: Record<string, unknown>): void {
-  console.log(`[P2P ${side} Adapter]`, performance.now().toFixed(1), event, data ?? {});
+  console.debug(`[P2P ${side} Adapter]`, performance.now().toFixed(1), event, data ?? {});
 }
 
 /**

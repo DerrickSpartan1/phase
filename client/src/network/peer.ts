@@ -4,7 +4,7 @@ import type { P2PMessage } from "./protocol";
 import { validateMessage } from "./protocol";
 
 function tracePeerSession(event: string, data?: Record<string, unknown>): void {
-  console.log("[PeerSession Trace]", performance.now().toFixed(1), event, data ?? {});
+  console.debug("[PeerSession Trace]", performance.now().toFixed(1), event, data ?? {});
 }
 
 export interface PeerSession {
@@ -123,7 +123,10 @@ export function createPeerSession(
       console.warn("Failed to decode message from peer:", e);
       return;
     }
-    tracePeerSession("data", { type: msg.type, buffered: messageHandlers.size === 0 });
+    // Skip ping/pong — they fire every 5s and drown the rest of the trace.
+    if (msg.type !== "ping" && msg.type !== "pong") {
+      tracePeerSession("data", { type: msg.type, queued: messageHandlers.size === 0 });
+    }
 
     if (msg.type === "pong") {
       if (pongTimeout !== null) { clearTimeout(pongTimeout); pongTimeout = null; }
