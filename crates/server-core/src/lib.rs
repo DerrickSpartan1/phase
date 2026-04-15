@@ -15,4 +15,4 @@ pub use protocol::{
     AiSeatRequest, ClientMessage, DeckData, LobbyGame, PlayerSlotInfo, ServerMessage,
 };
 pub use reconnect::ReconnectManager;
-pub use session::{acting_player, SessionManager};
+pub use session::{acting_player, generate_game_code, generate_player_token, SessionManager};

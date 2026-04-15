@@ -41,9 +41,19 @@ type SharedLobbySubscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<ServerMessage>
 type SharedPlayerCount = Arc<AtomicU32>;
 type SharedGameDb = Arc<persistence::GameDb>;
 
+/// Server's advertised role, selected at startup via `--lobby-only`. Copied
+/// into every handler so the dispatch path can gate disabled messages in
+/// lobby-only mode without re-parsing CLI state.
+type Mode = ServerMode;
+
 /// Server-wide limits to prevent resource exhaustion and abuse.
 const MAX_CONNECTIONS: u32 = 200;
 const MAX_GAMES: usize = 100;
+/// Capacity cap for the lobby-only broker path. `LobbyManager` is otherwise
+/// unbounded — without this gate an abusive client could pin an arbitrary
+/// number of `LobbyGameMeta` entries in memory until the 5-minute
+/// `check_expired` pass reaps them.
+const MAX_LOBBY_ENTRIES: usize = 200;
 const RATE_LIMIT_MESSAGES: u32 = 30;
 const RATE_LIMIT_WINDOW_SECS: u64 = 1;
 const MAX_WS_MESSAGE_BYTES: usize = 8 * 1024; // 8 KB
@@ -102,6 +112,15 @@ struct Cli {
     /// Main log: <dir>/phase-server.log, per-game logs: <dir>/games/<code>.log
     #[arg(long, env = "PHASE_LOG_DIR")]
     log_dir: Option<String>,
+
+    /// Run as a lobby-only matchmaking broker for P2P games. In this mode
+    /// the server rejects game-state messages (CreateGame, Action, Reconnect,
+    /// Concede, Emote, SpectatorJoin) and only brokers PeerJS peer IDs via
+    /// CreateGameWithSettings / JoinGameWithPassword / SubscribeLobby. The
+    /// engine and game state never run server-side, eliminating engine/build
+    /// drift between host and server.
+    #[arg(long, env = "PHASE_LOBBY_ONLY")]
+    lobby_only: bool,
 }
 
 /// Per-socket state tracking which game/player this connection belongs to.
@@ -117,6 +136,12 @@ struct SocketIdentity {
     /// identity so downstream handlers (`CreateGameWithSettings`,
     /// `JoinGameWithPassword`) can stamp / compare against host builds.
     client_hello: Option<ClientHelloInfo>,
+    /// Set in lobby-only mode when this socket registered a lobby entry as
+    /// host. On disconnect (or explicit `UnregisterLobby`) the server drops
+    /// the matching lobby entry so abandoned rooms don't linger until the
+    /// 5-minute expiry. Empty in `Full` mode (handled via `game_code` +
+    /// `SessionManager` cleanup).
+    lobby_host_game: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +224,54 @@ fn check_build_commit(host_commit: &str, guest_commit: &str) -> BuildCommitCheck
     }
 }
 
+/// Returns `Some(error_message)` when `msg` is disabled under the current
+/// server `mode`. Called at the top of dispatch so each handler below can
+/// assume the message reached it legitimately.
+///
+/// **Exhaustive by design.** Every `ClientMessage` variant is explicitly
+/// listed so adding a new variant is a compile error until the author
+/// decides its mode policy. A catch-all `_ => None` would default-allow
+/// future variants in both modes, which is the wrong default for a
+/// security-relevant gate.
+fn reject_if_disabled(msg: &ClientMessage, mode: ServerMode) -> Option<&'static str> {
+    const LOBBY_ONLY_REJECTION: &str =
+        "Server is in lobby-only mode — this message is not supported";
+    const FULL_MODE_REJECTION: &str = "UnregisterLobby is only valid on lobby-only servers";
+
+    match msg {
+        // Always allowed — handshake, lobby subscription, ping.
+        ClientMessage::ClientHello { .. }
+        | ClientMessage::SubscribeLobby
+        | ClientMessage::UnsubscribeLobby
+        | ClientMessage::Ping { .. } => None,
+
+        // Game-state messages — disabled in lobby-only mode because the
+        // server doesn't run a session in that mode.
+        ClientMessage::CreateGame { .. }
+        | ClientMessage::JoinGame { .. }
+        | ClientMessage::Action { .. }
+        | ClientMessage::Reconnect { .. }
+        | ClientMessage::Concede
+        | ClientMessage::Emote { .. }
+        | ClientMessage::SpectatorJoin { .. } => match mode {
+            ServerMode::Full => None,
+            ServerMode::LobbyOnly => Some(LOBBY_ONLY_REJECTION),
+        },
+
+        // Broker messages — re-purposed in lobby-only mode, still valid in
+        // Full mode (the Full-mode handler path uses them for hosting/joining
+        // normal server-run games).
+        ClientMessage::CreateGameWithSettings { .. }
+        | ClientMessage::JoinGameWithPassword { .. } => None,
+
+        // Lobby-only-exclusive.
+        ClientMessage::UnregisterLobby { .. } => match mode {
+            ServerMode::Full => Some(FULL_MODE_REJECTION),
+            ServerMode::LobbyOnly => None,
+        },
+    }
+}
+
 impl SocketIdentity {
     /// Set identity and create a tracing span for field inheritance.
     fn set_session(&mut self, game_code: String, player_id: PlayerId, player_token: String) {
@@ -218,6 +291,12 @@ async fn main() {
     let cli = Cli::parse();
 
     let _log_guard = logging::init_logging(cli.log_dir.as_deref(), cli.log_json);
+    let mode: Mode = if cli.lobby_only {
+        ServerMode::LobbyOnly
+    } else {
+        ServerMode::Full
+    };
+    info!(?mode, "server mode selected");
     let data_path = Path::new(&cli.data_dir);
     let export_path = data_path.join("card-data.json");
     let card_db = if export_path.exists() {
@@ -246,8 +325,11 @@ async fn main() {
     let lobby_subscribers: SharedLobbySubscribers = Arc::new(Mutex::new(Vec::new()));
     let player_count: SharedPlayerCount = Arc::new(AtomicU32::new(0));
 
-    // Restore persisted game sessions from disk
-    {
+    // Restore persisted game sessions from disk. In lobby-only mode the
+    // server runs no engine, so persisted GameState snapshots can't be
+    // replayed — skip the restore pass entirely and let SQLite ignore the
+    // stale rows until operators clean them up manually.
+    if matches!(mode, ServerMode::Full) {
         let card_names = db.card_names();
         match game_db.load_all() {
             Ok(persisted_games) => {
@@ -404,6 +486,7 @@ async fn main() {
             lobby_subscribers,
             player_count,
             game_db,
+            mode,
         ));
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", cli.port))
@@ -471,11 +554,12 @@ type AppState = (
     SharedLobbySubscribers,
     SharedPlayerCount,
     SharedGameDb,
+    Mode,
 );
 
 async fn ws_handler(
     ws: WebSocketUpgrade,
-    State((state, connections, db, lobby, lobby_subscribers, player_count, game_db)): State<
+    State((state, connections, db, lobby, lobby_subscribers, player_count, game_db, mode)): State<
         AppState,
     >,
 ) -> impl IntoResponse {
@@ -500,6 +584,7 @@ async fn ws_handler(
                 lobby_subscribers,
                 player_count,
                 game_db,
+                mode,
             )
         })
         .into_response()
@@ -515,6 +600,7 @@ async fn handle_socket(
     lobby_subscribers: SharedLobbySubscribers,
     player_count: SharedPlayerCount,
     game_db: SharedGameDb,
+    mode: Mode,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
 
@@ -529,17 +615,20 @@ async fn handle_socket(
         lobby_subscribed: false,
         session_span: None,
         client_hello: None,
+        lobby_host_game: None,
     };
     let mut rate_limiter = RateLimiter::new();
 
     // Greet the client with our version identity. The client uses this to
     // decide whether to proceed (protocol-version mismatch ⇒ it gives up
-    // before sending any game-affecting frame).
+    // before sending any game-affecting frame). The advertised `mode` lets
+    // the client route host/join flows through WS (Full) or P2P+broker
+    // (LobbyOnly) without probing.
     let hello = ServerMessage::ServerHello {
         server_version: env!("CARGO_PKG_VERSION").to_string(),
         build_commit: build_commit().to_string(),
         protocol_version: PROTOCOL_VERSION,
-        mode: ServerMode::Full,
+        mode,
     };
     if let Ok(json) = serde_json::to_string(&hello) {
         if socket.send(Message::text(json)).await.is_err() {
@@ -601,6 +690,7 @@ async fn handle_socket(
                             &game_db,
                             &tx,
                             &mut identity,
+                            mode,
                         )
                         .instrument(span)
                         .await;
@@ -633,6 +723,32 @@ async fn handle_socket(
                     let _ = sender.send(msg.clone());
                 }
             }
+        }
+    }
+
+    // In lobby-only mode, a host's socket disconnect is the signal that the
+    // lobby row should be cleaned up — the server never tracked a
+    // GameSession for them, so the `handle_disconnect` path above is a
+    // no-op. Drop the lobby entry and broadcast the removal so any
+    // subscribed clients update immediately. The 5-minute `check_expired`
+    // pass is a fallback for cases where this branch doesn't fire (e.g.
+    // process crash).
+    if let Some(game_code) = identity.lobby_host_game.clone() {
+        let removed = {
+            let mut lob = lobby.lock().await;
+            let existed = lob.has_game(&game_code);
+            lob.unregister_game(&game_code);
+            existed
+        };
+        if removed {
+            info!(game = %game_code, "lobby host disconnected — lobby entry removed");
+            broadcast_to_lobby_subscribers(
+                &lobby_subscribers,
+                ServerMessage::LobbyGameRemoved {
+                    game_code: game_code.clone(),
+                },
+            )
+            .await;
         }
     }
 
@@ -730,6 +846,7 @@ async fn handle_client_message(
     game_db: &SharedGameDb,
     tx: &mpsc::UnboundedSender<ServerMessage>,
     identity: &mut SocketIdentity,
+    mode: Mode,
 ) {
     // Handshake gate: ClientHello must be the first message. See
     // `classify_hello_gate` for the full truth table.
@@ -780,6 +897,20 @@ async fn handle_client_message(
         HelloGateOutcome::PassThrough => {
             // Fall through to the regular dispatch below.
         }
+    }
+
+    // Mode gate: some messages are meaningless in one mode or the other.
+    // Rejecting here keeps every handler below single-purpose — they never
+    // need to second-guess whether the message should reach them.
+    if let Some(reason) = reject_if_disabled(&client_msg, mode) {
+        warn!(?mode, msg = ?std::mem::discriminant(&client_msg), %reason, "rejecting message disabled by server mode");
+        let msg = ServerMessage::Error {
+            message: reason.to_string(),
+        };
+        if let Ok(json) = serde_json::to_string(&msg) {
+            let _ = socket.send(Message::text(json)).await;
+        }
+        return;
     }
 
     match client_msg {
@@ -1366,6 +1497,7 @@ async fn handle_client_message(
             ai_seats,
             format_config,
             room_name,
+            host_peer_id,
         } => {
             info!(
                 display_name = %display_name,
@@ -1374,8 +1506,151 @@ async fn handle_client_message(
                 timer = ?timer_seconds,
                 deck_size = deck.main_deck.len(),
                 ai_seats = ai_seats.len(),
+                has_peer_id = host_peer_id.as_deref().is_some_and(|s| !s.is_empty()),
                 "CreateGameWithSettings"
             );
+
+            // --- Lobby-only broker path ------------------------------
+            //
+            // In this mode the server doesn't run a game — it only publishes
+            // the host's PeerJS peer ID so guests can dial them directly.
+            // Deck data, AI seats, and format-legality checks are
+            // host-authoritative and irrelevant here: they're all enforced
+            // on the host's machine when the P2P game actually starts.
+            if matches!(mode, ServerMode::LobbyOnly) {
+                let peer_id = match host_peer_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    Some(id) => id.to_string(),
+                    None => {
+                        warn!("lobby-only CreateGameWithSettings missing host_peer_id");
+                        let msg = ServerMessage::Error {
+                            message: "host_peer_id is required on lobby-only servers".to_string(),
+                        };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+                        return;
+                    }
+                };
+
+                // Re-registration cleanup: if this socket already owns a
+                // lobby entry, drop it before registering the new one.
+                // Without this, a client that calls CreateGameWithSettings
+                // twice would orphan the first entry until the 5-minute
+                // expiry — and disconnect cleanup only sees the latest.
+                if let Some(previous) = identity.lobby_host_game.take() {
+                    let removed = {
+                        let mut lob = lobby.lock().await;
+                        let existed = lob.has_game(&previous);
+                        lob.unregister_game(&previous);
+                        existed
+                    };
+                    if removed {
+                        info!(game = %previous, "replacing previous lobby entry from same socket");
+                        broadcast_to_lobby_subscribers(
+                            lobby_subscribers,
+                            ServerMessage::LobbyGameRemoved {
+                                game_code: previous,
+                            },
+                        )
+                        .await;
+                    }
+                }
+
+                // Capacity cap: `LobbyManager` has no built-in limit, so a
+                // lobby-only server would otherwise accept unbounded
+                // entries until `check_expired` reaps them after 5
+                // minutes. Check under the same lock we'll register with.
+                {
+                    let lob = lobby.lock().await;
+                    if lob.len() >= MAX_LOBBY_ENTRIES {
+                        warn!(
+                            entries = lob.len(),
+                            limit = MAX_LOBBY_ENTRIES,
+                            "lobby full, rejecting CreateGameWithSettings"
+                        );
+                        let msg = ServerMessage::Error {
+                            message: "Server lobby is full, please try again shortly".to_string(),
+                        };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+                        return;
+                    }
+                }
+
+                let game_code = server_core::generate_game_code();
+                let player_token = server_core::generate_player_token();
+                let pc = requested_player_count.clamp(2, 6);
+                let format_for_lobby = format_config.as_ref().map(|fc| fc.format);
+                let (host_version, host_build_commit) = identity
+                    .client_hello
+                    .as_ref()
+                    .map(|h| (h.client_version.clone(), h.build_commit.clone()))
+                    .unwrap_or_default();
+
+                {
+                    let mut lob = lobby.lock().await;
+                    lob.register_game(
+                        &game_code,
+                        RegisterGameRequest {
+                            host_name: display_name.clone(),
+                            public,
+                            password: password.clone(),
+                            timer_seconds,
+                            host_version,
+                            host_build_commit,
+                            // The host fills seat 0 immediately; P2P guests
+                            // join over PeerJS and the host pushes updated
+                            // counts via a LobbyGameUpdated broadcast from
+                            // the client when it observes new connections.
+                            current_players: 1,
+                            max_players: pc as u32,
+                            format: format_for_lobby,
+                            room_name: room_name
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|s| !s.is_empty())
+                                .map(str::to_string),
+                            host_peer_id: peer_id,
+                        },
+                    );
+                }
+
+                // Remember this socket owns the entry so disconnect cleanup
+                // can find it. `set_session` is deliberately not called —
+                // there is no GameSession / PlayerId here.
+                identity.lobby_host_game = Some(game_code.clone());
+
+                let msg = ServerMessage::GameCreated {
+                    game_code: game_code.clone(),
+                    player_token,
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+
+                if public {
+                    let game = {
+                        let lob = lobby.lock().await;
+                        lob.public_game(&game_code)
+                    };
+                    if let Some(game) = game {
+                        broadcast_to_lobby_subscribers(
+                            lobby_subscribers,
+                            ServerMessage::LobbyGameAdded { game },
+                        )
+                        .await;
+                    }
+                }
+
+                info!(game = %game_code, host = %display_name, "lobby-only game registered");
+                return;
+            }
+
             {
                 let mgr = state.lock().await;
                 if mgr.sessions.len() >= MAX_GAMES {
@@ -1622,6 +1897,9 @@ async fn handle_client_message(
                             .map(str::trim)
                             .filter(|s| !s.is_empty())
                             .map(str::to_string),
+                        // Full-mode server runs the engine itself — no
+                        // PeerJS peer is involved, so this stays empty.
+                        host_peer_id: String::new(),
                     },
                 );
 
@@ -1670,6 +1948,120 @@ async fn handle_client_message(
             password,
         } => {
             info!(game = %game_code, joiner = %display_name, "JoinGameWithPassword");
+
+            // --- Lobby-only broker path ------------------------------
+            //
+            // Run the same build-commit + password gates, then hand back
+            // the host's peer ID so the guest can dial over PeerJS. No
+            // session is created server-side. Lobby entry stays so
+            // additional guests (Commander 3–4p) can still join; the host
+            // explicitly drops it via `UnregisterLobby` once its P2P
+            // connections are live.
+            if matches!(mode, ServerMode::LobbyOnly) {
+                let lob = lobby.lock().await;
+
+                let guest_commit = identity
+                    .client_hello
+                    .as_ref()
+                    .map(|h| h.build_commit.as_str())
+                    .unwrap_or("");
+                let host_commit = lob.host_build_commit(&game_code).unwrap_or("");
+                if let BuildCommitCheck::Reject { host, guest } =
+                    check_build_commit(host_commit, guest_commit)
+                {
+                    warn!(game = %game_code, %host, %guest, "build mismatch — refusing join (lobby-only)");
+                    let msg = ServerMessage::Error {
+                        message: format!(
+                            "Build mismatch: host is on {host}, you are on {guest}. Refresh to update."
+                        ),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+
+                match lob.verify_password(&game_code, password.as_deref()) {
+                    Ok(()) => {}
+                    Err(e) if e == "password_required" => {
+                        let msg = ServerMessage::PasswordRequired {
+                            game_code: game_code.clone(),
+                        };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+                        return;
+                    }
+                    Err(e) => {
+                        warn!(game = %game_code, error = %e, "password verification failed (lobby-only)");
+                        let msg = ServerMessage::Error { message: e };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+                        return;
+                    }
+                }
+
+                // Atomic fetch of peer_id + seat counts — both are needed
+                // for PeerInfo and pulling them separately would let a
+                // concurrent UnregisterLobby land between reads. An entry
+                // registered by a Full-mode server has an empty peer_id;
+                // `broker_info` treats that as "not brokerable" so the
+                // error below can distinguish it from a missing game.
+                let (peer_id, max_players, current_players) = match lob.broker_info(&game_code) {
+                    Some(info) => info,
+                    None => {
+                        let exists = lob.has_game(&game_code);
+                        let msg = ServerMessage::Error {
+                            message: if exists {
+                                format!(
+                                    "Game {game_code} is hosted on a Full-mode server and cannot be brokered"
+                                )
+                            } else {
+                                format!("Game not found in lobby: {game_code}")
+                            },
+                        };
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            let _ = socket.send(Message::text(json)).await;
+                        }
+                        return;
+                    }
+                };
+
+                // Seat-full rejection: the host owns final seat assignment
+                // over P2P, but if the lobby already advertises the room
+                // as full there's no point handing out a PeerInfo the
+                // host would immediately refuse.
+                if max_players > 0 && current_players >= max_players {
+                    let msg = ServerMessage::Error {
+                        message: format!("Game {game_code} is full"),
+                    };
+                    if let Ok(json) = serde_json::to_string(&msg) {
+                        let _ = socket.send(Message::text(json)).await;
+                    }
+                    return;
+                }
+
+                let msg = ServerMessage::PeerInfo {
+                    game_code: game_code.clone(),
+                    host_peer_id: peer_id,
+                    format_config: None,
+                    match_config: Default::default(),
+                    player_count: max_players as u8,
+                    filled_seats: current_players as u8,
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                info!(game = %game_code, joiner = %display_name, "sent PeerInfo to guest");
+                // Deck ignored intentionally — the host validates its
+                // guests' decks over P2P once the connection is up. This
+                // also means a guest doesn't waste bandwidth shipping a
+                // full deck list to a broker that can't read it.
+                let _ = deck;
+                return;
+            }
+
             {
                 let lob = lobby.lock().await;
 
@@ -2001,6 +2393,137 @@ async fn handle_client_message(
             if let Ok(json) = serde_json::to_string(&msg) {
                 let _ = socket.send(Message::text(json)).await;
             }
+        }
+
+        ClientMessage::UnregisterLobby { game_code } => {
+            // Ownership check: only the socket that registered this entry
+            // (stored in `identity.lobby_host_game`) may tear it down.
+            // Without this gate any client that subscribed to the lobby
+            // could drop someone else's listing by guessing codes.
+            let is_owner = identity
+                .lobby_host_game
+                .as_deref()
+                .is_some_and(|g| g == game_code);
+            if !is_owner {
+                warn!(game = %game_code, "UnregisterLobby rejected — socket is not the registered host");
+                let msg = ServerMessage::Error {
+                    message: "UnregisterLobby only allowed for the host that registered the game"
+                        .to_string(),
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                return;
+            }
+
+            let removed = {
+                let mut lob = lobby.lock().await;
+                let existed = lob.has_game(&game_code);
+                lob.unregister_game(&game_code);
+                existed
+            };
+            if removed {
+                info!(game = %game_code, "lobby entry removed by host (UnregisterLobby)");
+                broadcast_to_lobby_subscribers(
+                    lobby_subscribers,
+                    ServerMessage::LobbyGameRemoved {
+                        game_code: game_code.clone(),
+                    },
+                )
+                .await;
+            }
+            // Clear so disconnect cleanup doesn't try to unregister again.
+            identity.lobby_host_game = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod mode_gate_tests {
+    use super::*;
+    use engine::types::actions::GameAction;
+    use server_core::protocol::DeckData;
+
+    fn deck() -> DeckData {
+        DeckData {
+            main_deck: vec!["Forest".into()],
+            sideboard: vec![],
+            commander: vec![],
+        }
+    }
+
+    #[test]
+    fn lobby_only_rejects_game_state_messages() {
+        let disabled: Vec<ClientMessage> = vec![
+            ClientMessage::CreateGame { deck: deck() },
+            ClientMessage::JoinGame {
+                game_code: "X".into(),
+                deck: deck(),
+            },
+            ClientMessage::Action {
+                action: GameAction::PassPriority,
+            },
+            ClientMessage::Reconnect {
+                game_code: "X".into(),
+                player_token: "t".into(),
+            },
+            ClientMessage::Concede,
+            ClientMessage::Emote { emote: "GG".into() },
+            ClientMessage::SpectatorJoin {
+                game_code: "X".into(),
+            },
+        ];
+        for msg in disabled {
+            assert!(
+                reject_if_disabled(&msg, ServerMode::LobbyOnly).is_some(),
+                "expected {msg:?} to be rejected in lobby-only mode"
+            );
+        }
+    }
+
+    #[test]
+    fn lobby_only_allows_broker_and_lifecycle_messages() {
+        let allowed: Vec<ClientMessage> = vec![
+            ClientMessage::ClientHello {
+                client_version: "0.1.11".into(),
+                build_commit: "abc".into(),
+                protocol_version: PROTOCOL_VERSION,
+            },
+            ClientMessage::SubscribeLobby,
+            ClientMessage::UnsubscribeLobby,
+            ClientMessage::Ping { timestamp: 0 },
+            ClientMessage::UnregisterLobby {
+                game_code: "X".into(),
+            },
+        ];
+        for msg in allowed {
+            assert!(
+                reject_if_disabled(&msg, ServerMode::LobbyOnly).is_none(),
+                "expected {msg:?} to be allowed in lobby-only mode"
+            );
+        }
+    }
+
+    #[test]
+    fn full_mode_rejects_unregister_lobby() {
+        let msg = ClientMessage::UnregisterLobby {
+            game_code: "X".into(),
+        };
+        assert!(reject_if_disabled(&msg, ServerMode::Full).is_some());
+    }
+
+    #[test]
+    fn full_mode_allows_game_state_messages() {
+        let msgs: Vec<ClientMessage> = vec![
+            ClientMessage::CreateGame { deck: deck() },
+            ClientMessage::Action {
+                action: GameAction::PassPriority,
+            },
+            ClientMessage::Concede,
+            ClientMessage::Ping { timestamp: 0 },
+        ];
+        for m in msgs {
+            assert!(reject_if_disabled(&m, ServerMode::Full).is_none());
         }
     }
 }

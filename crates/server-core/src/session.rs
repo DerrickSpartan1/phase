@@ -655,7 +655,7 @@ impl Default for SessionManager {
     }
 }
 
-fn generate_game_code() -> String {
+pub fn generate_game_code() -> String {
     let mut rng = rand::rng();
     let chars: Vec<char> = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".chars().collect();
     (0..6)
@@ -663,7 +663,7 @@ fn generate_game_code() -> String {
         .collect()
 }
 
-fn generate_player_token() -> String {
+pub fn generate_player_token() -> String {
     let mut rng = rand::rng();
     (0..32)
         .map(|_| format!("{:x}", rng.random_range(0u8..16)))

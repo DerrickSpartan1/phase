@@ -30,13 +30,8 @@ pub fn build_commit() -> &'static str {
 
 /// Advertised role of the server. `Full` runs game sessions end-to-end;
 /// `LobbyOnly` acts as a matchmaking broker for P2P connections and rejects
-/// game-state messages.
-///
-/// Note: `LobbyOnly` is intentionally unused in PR 1 — the server always
-/// sends `ServerMode::Full` today. The variant ships now so the client can
-/// already pattern-match on it; the actual lobby-only dispatch logic lands
-/// in PR 2 (see `.planning/…/lobby-only-server-plan` and the plan file at
-/// `/Users/matt/.claude/plans/cached-puzzling-alpaca.md`).
+/// game-state messages. Selected at server startup via the `--lobby-only`
+/// CLI flag.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ServerMode {
     Full,
@@ -153,6 +148,12 @@ pub enum ClientMessage {
         /// player name. Routed into `LobbyGame.room_name`.
         #[serde(default)]
         room_name: Option<String>,
+        /// PeerJS peer ID of the host, set when the client registers with a
+        /// lobby-only server so guests can dial the host directly over P2P.
+        /// `None` in `Full` server mode (the server runs the engine and P2P
+        /// is not used). `Some("")` is treated identically to `None`.
+        #[serde(default)]
+        host_peer_id: Option<String>,
     },
     JoinGameWithPassword {
         game_code: String,
@@ -169,6 +170,15 @@ pub enum ClientMessage {
     },
     Ping {
         timestamp: u64,
+    },
+    /// Sent by a P2P host on a `LobbyOnly` server once their game is live
+    /// (guest(s) have dialed in and the P2P session is established) so the
+    /// lobby listing is removed immediately instead of waiting for the host
+    /// socket to close or the 5-minute expiry to fire. The server rejects
+    /// this message if the caller's socket isn't the one that registered
+    /// the given `game_code`.
+    UnregisterLobby {
+        game_code: String,
     },
 }
 
@@ -280,6 +290,21 @@ pub enum ServerMessage {
     },
     Pong {
         timestamp: u64,
+    },
+    /// Sent by a `LobbyOnly` server in response to `JoinGameWithPassword`.
+    /// Hands the guest the host's PeerJS peer ID and room metadata so the
+    /// guest can dial the host directly; the server never touches game
+    /// state in this mode. `filled_seats` and `player_count` let the guest
+    /// refuse to dial a full room without paying a P2P handshake.
+    PeerInfo {
+        game_code: String,
+        host_peer_id: String,
+        #[serde(default)]
+        format_config: Option<FormatConfig>,
+        #[serde(default)]
+        match_config: MatchConfig,
+        player_count: u8,
+        filled_seats: u8,
     },
 }
 
@@ -423,6 +448,7 @@ mod tests {
             ai_seats: vec![],
             format_config: None,
             room_name: Some("Friday Night Commander".to_string()),
+            host_peer_id: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -810,6 +836,7 @@ mod tests {
             }],
             format_config: None,
             room_name: None,
+            host_peer_id: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
@@ -966,6 +993,103 @@ mod tests {
     fn build_commit_is_nonempty() {
         // Whether in git or not, build.rs always emits something.
         assert!(!build_commit().is_empty());
+    }
+
+    #[test]
+    fn peer_info_roundtrips() {
+        let msg = ServerMessage::PeerInfo {
+            game_code: "ABC123".to_string(),
+            host_peer_id: "peer-host-xyz".to_string(),
+            format_config: None,
+            match_config: MatchConfig::default(),
+            player_count: 4,
+            filled_seats: 2,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ServerMessage::PeerInfo {
+                game_code,
+                host_peer_id,
+                player_count,
+                filled_seats,
+                ..
+            } => {
+                assert_eq!(game_code, "ABC123");
+                assert_eq!(host_peer_id, "peer-host-xyz");
+                assert_eq!(player_count, 4);
+                assert_eq!(filled_seats, 2);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn unregister_lobby_roundtrips() {
+        let msg = ClientMessage::UnregisterLobby {
+            game_code: "ABC123".to_string(),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::UnregisterLobby { game_code } => {
+                assert_eq!(game_code, "ABC123");
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn create_game_with_settings_host_peer_id_roundtrips() {
+        let msg = ClientMessage::CreateGameWithSettings {
+            deck: DeckData {
+                main_deck: vec!["Forest".to_string()],
+                sideboard: Vec::new(),
+                commander: Vec::new(),
+            },
+            display_name: "Alice".to_string(),
+            public: true,
+            password: None,
+            timer_seconds: None,
+            player_count: 2,
+            match_config: MatchConfig::default(),
+            ai_seats: vec![],
+            format_config: None,
+            room_name: None,
+            host_peer_id: Some("peer-host-abc".to_string()),
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
+        match parsed {
+            ClientMessage::CreateGameWithSettings { host_peer_id, .. } => {
+                assert_eq!(host_peer_id, Some("peer-host-abc".to_string()));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn create_game_with_settings_missing_host_peer_id_defaults_to_none() {
+        // Full-mode clients never send host_peer_id; it should deserialize
+        // as None so those clients keep working.
+        let json = r#"{
+          "type":"CreateGameWithSettings",
+          "data":{
+            "deck":{"main_deck":["Forest"],"sideboard":[]},
+            "display_name":"Alice",
+            "public":true,
+            "password":null,
+            "timer_seconds":null,
+            "player_count":2
+          }
+        }"#;
+        let parsed: ClientMessage = serde_json::from_str(json).unwrap();
+        match parsed {
+            ClientMessage::CreateGameWithSettings { host_peer_id, .. } => {
+                assert_eq!(host_peer_id, None);
+            }
+            _ => panic!("wrong variant"),
+        }
     }
 
     #[test]

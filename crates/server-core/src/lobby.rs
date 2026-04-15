@@ -26,6 +26,10 @@ pub struct RegisterGameRequest {
     /// `host_name` (the player identity). `None` means the lobby row falls
     /// back to the host's name.
     pub room_name: Option<String>,
+    /// PeerJS peer ID of the host for lobby-only server mode. Empty string
+    /// on `Full`-mode servers (the server runs the engine and P2P is not
+    /// used). Guests on a lobby-only server use this to dial the host.
+    pub host_peer_id: String,
 }
 
 struct LobbyGameMeta {
@@ -41,6 +45,7 @@ struct LobbyGameMeta {
     max_players: u32,
     format: Option<GameFormat>,
     room_name: Option<String>,
+    host_peer_id: String,
 }
 
 pub struct LobbyManager {
@@ -84,6 +89,7 @@ impl LobbyManager {
                 max_players: req.max_players,
                 format: req.format,
                 room_name: req.room_name,
+                host_peer_id: req.host_peer_id,
             },
         );
     }
@@ -174,6 +180,36 @@ impl LobbyManager {
 
     pub fn has_game(&self, game_code: &str) -> bool {
         self.games.contains_key(game_code)
+    }
+
+    /// Current number of registered lobby entries. Used by the lobby-only
+    /// broker path to enforce a capacity cap (`LobbyManager` itself is
+    /// unbounded; without a cap, an abusive client could fill the map).
+    pub fn len(&self) -> usize {
+        self.games.len()
+    }
+
+    /// Reports whether the lobby has any registered entries.
+    pub fn is_empty(&self) -> bool {
+        self.games.is_empty()
+    }
+
+    /// Atomic lookup of the fields a broker-path guest response needs:
+    /// host's PeerJS peer ID plus `(max_players, current_players)`. Returns
+    /// `None` if the game isn't registered OR if the entry has no peer ID
+    /// (registered by a `Full`-mode server — nothing to broker). Packaging
+    /// this as a single accessor avoids races where a caller reads the
+    /// peer ID, drops the lock, then re-locks for seat counts.
+    pub fn broker_info(&self, game_code: &str) -> Option<(String, u32, u32)> {
+        let meta = self.games.get(game_code)?;
+        if meta.host_peer_id.is_empty() {
+            return None;
+        }
+        Some((
+            meta.host_peer_id.clone(),
+            meta.max_players,
+            meta.current_players,
+        ))
     }
 
     pub fn timer_seconds(&self, game_code: &str) -> Option<u32> {
@@ -482,6 +518,62 @@ mod tests {
     fn public_game_returns_none_for_missing_entry() {
         let lobby = LobbyManager::new();
         assert!(lobby.public_game("NOPE").is_none());
+    }
+
+    #[test]
+    fn broker_info_returns_atomic_tuple_when_peer_id_populated() {
+        let mut lobby = LobbyManager::new();
+        lobby.register_game(
+            "GAME01",
+            RegisterGameRequest {
+                host_name: "Alice".to_string(),
+                public: true,
+                host_peer_id: "peer-xyz".to_string(),
+                current_players: 1,
+                max_players: 4,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            lobby.broker_info("GAME01"),
+            Some(("peer-xyz".to_string(), 4, 1))
+        );
+    }
+
+    #[test]
+    fn broker_info_returns_none_for_missing_game() {
+        let lobby = LobbyManager::new();
+        assert_eq!(lobby.broker_info("NOPE"), None);
+    }
+
+    #[test]
+    fn broker_info_returns_none_when_peer_id_empty() {
+        // Games registered by a Full-mode server leave host_peer_id as "".
+        // broker_info treats these as "not brokerable" so the caller can
+        // distinguish them from missing games and send a clearer error.
+        let mut lobby = LobbyManager::new();
+        lobby.register_game(
+            "GAME01",
+            RegisterGameRequest {
+                host_name: "Alice".to_string(),
+                public: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(lobby.broker_info("GAME01"), None);
+        assert!(lobby.has_game("GAME01"));
+    }
+
+    #[test]
+    fn len_and_is_empty_reflect_registration() {
+        let mut lobby = LobbyManager::new();
+        assert!(lobby.is_empty());
+        assert_eq!(lobby.len(), 0);
+        register_basic(&mut lobby, "GAME01", "Alice", true, None, None);
+        assert!(!lobby.is_empty());
+        assert_eq!(lobby.len(), 1);
+        lobby.unregister_game("GAME01");
+        assert!(lobby.is_empty());
     }
 
     #[test]
