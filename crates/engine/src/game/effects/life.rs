@@ -42,6 +42,17 @@ pub fn resolve_gain(
         GainLifePlayer::Controller => ability.controller,
     };
 
+    // CR 119.7: "If an effect says that a player can't gain life ... a replacement
+    // effect that would replace a life gain event affecting that player won't do
+    // anything." Short-circuit BEFORE the replacement pipeline.
+    if crate::game::static_abilities::player_has_cant_gain_life(state, player_id) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
     let final_amount = resolve_quantity_with_targets(state, amount, ability);
 
     if final_amount <= 0 {
@@ -113,6 +124,12 @@ pub fn apply_life_gain(
     if amount == 0 {
         return Ok(0);
     }
+    // CR 119.7: Short-circuit BEFORE the replacement pipeline — "can't gain life"
+    // suppresses the life gain event entirely (and any replacements that would
+    // otherwise modify it).
+    if crate::game::static_abilities::player_has_cant_gain_life(state, player_id) {
+        return Ok(0);
+    }
     let proposed = ProposedEvent::LifeGain {
         player_id,
         amount,
@@ -177,6 +194,11 @@ pub fn apply_damage_life_loss(
     events: &mut Vec<GameEvent>,
 ) -> Result<u32, ReplacementDeferred> {
     if amount == 0 {
+        return Ok(0);
+    }
+    // CR 119.8 + CR 120.3: When a player "can't lose life," damage-to-life-loss
+    // conversion is suppressed. Short-circuit BEFORE the replacement pipeline.
+    if crate::game::static_abilities::player_has_cant_lose_life(state, player_id) {
         return Ok(0);
     }
     let proposed = ProposedEvent::LifeLoss {
@@ -258,6 +280,16 @@ pub fn resolve_lose(
         })
         .unwrap_or(ability.controller);
 
+    // CR 119.8: "If an effect says that a player can't lose life ... in that case,
+    // the exchange won't happen." Short-circuit BEFORE the replacement pipeline.
+    if crate::game::static_abilities::player_has_cant_lose_life(state, target_player_id) {
+        events.push(GameEvent::EffectResolved {
+            kind: EffectKind::from(&ability.effect),
+            source_id: ability.source_id,
+        });
+        return Ok(());
+    }
+
     let proposed = ProposedEvent::LifeLoss {
         player_id: target_player_id,
         amount: amount as u32,
@@ -329,6 +361,14 @@ pub fn resolve_set_life_total(
         })
         .unwrap_or(ability.controller);
 
+    // CR 119.5 + CR 119.7 + CR 119.8: A set-life-total is adjudicated as a gain
+    // or loss of the difference. Each direction is independently gated by the
+    // corresponding can't-gain / can't-lose static.
+    let cant_gain =
+        crate::game::static_abilities::player_has_cant_gain_life(state, target_player_id);
+    let cant_lose =
+        crate::game::static_abilities::player_has_cant_lose_life(state, target_player_id);
+
     let player = state
         .players
         .iter_mut()
@@ -340,19 +380,25 @@ pub fn resolve_set_life_total(
 
     // CR 119.5: If the new total is higher, the player gains the difference.
     // If lower, the player loses the difference.
-    if diff > 0 {
+    if diff > 0 && !cant_gain {
         player.life = amount;
         player.life_gained_this_turn += diff as u32;
-    } else if diff < 0 {
+    } else if diff < 0 && !cant_lose {
         player.life = amount;
         player.life_lost_this_turn += (-diff) as u32;
     }
     state.layers_dirty = true;
 
-    if diff != 0 {
+    let effective_diff = match diff.signum() {
+        1 if cant_gain => 0,
+        -1 if cant_lose => 0,
+        _ => diff,
+    };
+
+    if effective_diff != 0 {
         events.push(GameEvent::LifeChanged {
             player_id: target_player_id,
-            amount: diff,
+            amount: effective_diff,
         });
     }
 
@@ -367,9 +413,37 @@ pub fn resolve_set_life_total(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{QuantityExpr, TargetRef};
-    use crate::types::identifiers::ObjectId;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        ControllerRef, QuantityExpr, StaticDefinition, TargetFilter, TargetRef, TypedFilter,
+    };
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::statics::StaticMode;
+    use crate::types::zones::Zone;
+
+    /// Helper: add a permanent with the given life-lock `StaticMode` affecting
+    /// players matching `ControllerRef`. Mirrors `win_lose::tests::add_cant_win_permanent`.
+    fn add_life_lock_permanent(
+        state: &mut GameState,
+        owner: PlayerId,
+        mode: StaticMode,
+        affected_controller: ControllerRef,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(900),
+            owner,
+            "Life Lock".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&id).unwrap().static_definitions.push(
+            StaticDefinition::new(mode).affected(TargetFilter::Typed(
+                TypedFilter::default().controller(affected_controller),
+            )),
+        );
+        id
+    }
 
     #[test]
     fn gain_life_increases_controller_life() {
@@ -449,5 +523,183 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| matches!(e, GameEvent::LifeChanged { amount, .. } if *amount == -2)));
+    }
+
+    /// CR 119.7: "can't gain life" suppresses life gain, life total unchanged.
+    #[test]
+    fn gain_life_blocked_by_cant_gain_life() {
+        let mut state = GameState::new_two_player(42);
+        add_life_lock_permanent(
+            &mut state,
+            PlayerId(0),
+            StaticMode::CantGainLife,
+            ControllerRef::You,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_gain(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].life, 20, "life total must not change");
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::LifeChanged { .. })),
+            "no LifeChanged event should be emitted"
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            GameEvent::EffectResolved {
+                kind: EffectKind::GainLife,
+                ..
+            }
+        )));
+    }
+
+    /// CR 119.7: `apply_life_gain` must short-circuit before the replacement
+    /// pipeline — replacements "won't do anything" per CR 119.7.
+    #[test]
+    fn apply_life_gain_short_circuits_on_cant_gain() {
+        let mut state = GameState::new_two_player(42);
+        add_life_lock_permanent(
+            &mut state,
+            PlayerId(0),
+            StaticMode::CantGainLife,
+            ControllerRef::You,
+        );
+
+        let mut events = Vec::new();
+        let gained = apply_life_gain(&mut state, PlayerId(0), 3, &mut events).unwrap();
+
+        assert_eq!(gained, 0);
+        assert_eq!(state.players[0].life, 20);
+    }
+
+    /// CR 119.8: `apply_damage_life_loss` short-circuits for a CantLoseLife player.
+    #[test]
+    fn apply_damage_life_loss_short_circuits_on_cant_lose() {
+        let mut state = GameState::new_two_player(42);
+        add_life_lock_permanent(
+            &mut state,
+            PlayerId(0),
+            StaticMode::CantLoseLife,
+            ControllerRef::You,
+        );
+
+        let mut events = Vec::new();
+        let lost = apply_damage_life_loss(&mut state, PlayerId(0), 4, &mut events).unwrap();
+
+        assert_eq!(lost, 0);
+        assert_eq!(state.players[0].life, 20);
+    }
+
+    /// CR 119.8: `resolve_lose` suppresses life loss for CantLoseLife player.
+    #[test]
+    fn lose_life_blocked_by_cant_lose_life() {
+        let mut state = GameState::new_two_player(42);
+        add_life_lock_permanent(
+            &mut state,
+            PlayerId(1),
+            StaticMode::CantLoseLife,
+            ControllerRef::You,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                target: None,
+            },
+            vec![TargetRef::Player(PlayerId(1))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_lose(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[1].life, 20);
+    }
+
+    /// CR 119.5 + CR 119.7 + CR 119.8: Set-life-total is gated by both locks.
+    /// With both active (Teferi's Protection case), no life change occurs even
+    /// from a set-life-to-N effect.
+    #[test]
+    fn set_life_total_blocked_by_both_locks() {
+        let mut state = GameState::new_two_player(42);
+        let id = add_life_lock_permanent(
+            &mut state,
+            PlayerId(0),
+            StaticMode::CantGainLife,
+            ControllerRef::You,
+        );
+        // Add the CantLoseLife static to the same permanent.
+        state.objects.get_mut(&id).unwrap().static_definitions.push(
+            StaticDefinition::new(StaticMode::CantLoseLife).affected(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            )),
+        );
+
+        // Try to set PlayerId(0)'s life to 10 (would lose 10).
+        let ability_loss = ResolvedAbility::new(
+            Effect::SetLifeTotal {
+                amount: QuantityExpr::Fixed { value: 10 },
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_set_life_total(&mut state, &ability_loss, &mut events).unwrap();
+        assert_eq!(state.players[0].life, 20, "life loss must be suppressed");
+
+        // Try to set life to 40 (would gain 20).
+        let ability_gain = ResolvedAbility::new(
+            Effect::SetLifeTotal {
+                amount: QuantityExpr::Fixed { value: 40 },
+                target: TargetFilter::Player,
+            },
+            vec![TargetRef::Player(PlayerId(0))],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_set_life_total(&mut state, &ability_gain, &mut events).unwrap();
+        assert_eq!(state.players[0].life, 20, "life gain must be suppressed");
+    }
+
+    /// CR 119.7: The lock only affects players matching the static's filter.
+    /// An opponent with no lock continues to gain life normally.
+    #[test]
+    fn cant_gain_life_only_affects_matching_player() {
+        let mut state = GameState::new_two_player(42);
+        add_life_lock_permanent(
+            &mut state,
+            PlayerId(0),
+            StaticMode::CantGainLife,
+            ControllerRef::You,
+        );
+
+        // PlayerId(1) is not affected by this permanent's "You" scope.
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 5 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            ObjectId(200),
+            PlayerId(1),
+        );
+        let mut events = Vec::new();
+        resolve_gain(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[1].life, 25, "opponent still gains life");
     }
 }

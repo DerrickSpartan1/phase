@@ -502,6 +502,38 @@ pub fn player_has_cant_win(state: &GameState, player_id: PlayerId) -> bool {
     )
 }
 
+/// CR 119.7: Check if a player has active `CantGainLife` protection.
+///
+/// When `true`, effects that would cause the player to gain life have no effect
+/// (CR 119.7: "a replacement effect that would replace a life gain event
+/// affecting that player won't do anything"). Callers must short-circuit BEFORE
+/// invoking the replacement pipeline.
+pub fn player_has_cant_gain_life(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::CantGainLife,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    )
+}
+
+/// CR 119.8: Check if a player has active `CantLoseLife` protection.
+///
+/// When `true`, effects that would cause the player to lose life (including
+/// damage-to-life-loss conversion per CR 120.3) have no effect.
+pub fn player_has_cant_lose_life(state: &GameState, player_id: PlayerId) -> bool {
+    check_static_ability(
+        state,
+        StaticMode::CantLoseLife,
+        &StaticCheckContext {
+            player_id: Some(player_id),
+            ..Default::default()
+        },
+    )
+}
+
 /// Allocation-free equivalent of `check_static_ability` for
 /// `StaticMode::Other(String)` variants. Scans battlefield + command zone
 /// for a static whose mode is `Other(s)` with `s == name`, whose `affected`
