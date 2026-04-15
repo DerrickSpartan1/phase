@@ -185,9 +185,13 @@ class AudioManager {
    */
   setBattlefieldPhase(phase: GamePhaseTag): void {
     if (phase === this.battlefieldPhase) return;
-    if (this.crossfadeInProgress) return;
 
+    // Record the phase immediately so it's never lost, even if a fade is
+    // already in flight. nextTrackIndex re-filters against battlefieldPhase,
+    // so the next natural rotation will pick up the new phase's tracks.
     this.battlefieldPhase = phase;
+
+    if (this.crossfadeInProgress) return;
 
     // Only rebuild track list if we're currently in battlefield context
     if (this.activeContext !== "battlefield") return;
@@ -206,8 +210,13 @@ class AudioManager {
       this.stopMusic(2.5);
       setTimeout(() => {
         this.crossfadeInProgress = false;
-        // Bail if context or theme changed during the fade
-        if (this.generation !== gen) return;
+        // Another generation-bumping call (setContext, playStinger, etc.)
+        // interrupted us — restore gain so music isn't left silenced, then
+        // let the interrupting caller drive playback.
+        if (this.generation !== gen) {
+          this.resetMusicGain();
+          return;
+        }
         this.resetMusicGain();
         this.startMusic();
       }, 2500);
@@ -503,8 +512,11 @@ class AudioManager {
       this.crossfadeTo(this.nextTrackIndex());
     });
 
-    audio.play().catch(() => {
-      usePreferencesStore.getState().setMasterMuted(true);
+    audio.play().catch((err) => {
+      console.warn("[music] play() rejected:", err);
+      if (this.ctx?.state === "suspended") {
+        this.ctx.resume().then(() => audio.play().catch(() => {}));
+      }
     });
   }
 
