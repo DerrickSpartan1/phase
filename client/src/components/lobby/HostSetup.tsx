@@ -43,11 +43,13 @@ const DIFFICULTY_OPTIONS = ["VeryEasy", "Easy", "Medium", "Hard", "VeryHard"];
 const P2P_MAX_PEERS = 4;
 
 export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
-  const storeDisplayName = useMultiplayerStore((s) => s.displayName);
-  const setStoreDisplayName = useMultiplayerStore((s) => s.setDisplayName);
+  // Player name is edited in `PlayerIdentityBanner` above this form (see
+  // MultiplayerPage). We read it here only to submit it and to seed the
+  // room-name placeholder — this form itself intentionally has no
+  // player-name field to avoid the two-inputs-for-one-value confusion.
+  const displayName = useMultiplayerStore((s) => s.displayName);
   const setFormatConfig = useMultiplayerStore((s) => s.setFormatConfig);
 
-  const [displayName, setDisplayName] = useState(storeDisplayName);
   const [roomName, setRoomName] = useState("");
   const [isPublic, setIsPublic] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
@@ -58,15 +60,6 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
   const [playerCount, setPlayerCount] = useState(FORMAT_DEFAULTS.Standard.min_players);
   const [matchType, setMatchType] = useState<MatchType>("Bo1");
   const [aiSeats, setAiSeats] = useState<AiSeatConfig[]>([]);
-
-  // Persist the player's name back to the store on every edit so it stays in
-  // sync across future host/join actions without requiring a submit. This
-  // makes the HostSetup field a legitimate editor for the player's global
-  // identity, not a per-match override.
-  const handleDisplayNameChange = (name: string) => {
-    setDisplayName(name);
-    setStoreDisplayName(name);
-  };
 
   const isP2P = connectionMode === "p2p";
   const maxPlayers = isP2P
@@ -114,12 +107,6 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
   };
 
   const handleHost = () => {
-    // The display-name store write happens on-change already; this branch
-    // is a safety net in case `handleDisplayNameChange` was skipped (e.g.
-    // initial prefill from store was left untouched and no change fired).
-    if (displayName !== storeDisplayName) {
-      setStoreDisplayName(displayName);
-    }
     const finalConfig = { ...formatConfig, max_players: playerCount };
     setFormatConfig(finalConfig);
     const trimmedRoomName = roomName.trim();
@@ -163,29 +150,9 @@ export function HostSetup({ onHost, onBack, connectionMode }: HostSetupProps) {
         </div>
 
         <div className="flex w-full flex-col gap-4">
-        {/* Your (player) name — persistent across sessions. Edits here
-            write-through to the multiplayer store, so the field here is
-            the player's identity editor, not a per-match override. */}
-        <div>
-          <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-gray-400">
-            Your Name
-          </label>
-          <input
-            type="text"
-            value={displayName}
-            onChange={(e) => handleDisplayNameChange(e.target.value)}
-            placeholder="How you appear to others"
-            maxLength={20}
-            className="w-full rounded-[16px] bg-black/18 px-3 py-2 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-white/10 focus:ring-white/20"
-          />
-          <p className="mt-1 text-[11px] text-slate-500">
-            Saved for all future matches.
-          </p>
-        </div>
-
-        {/* Room name — per-match label. Distinct from the player's name so
-            the lobby row can advertise "Friday Night Commander" instead of
-            the host's handle. Optional; blank falls back to player name. */}
+        {/* Room name — per-match label. Distinct from the player's name
+            (edited in the `PlayerIdentityBanner` above this form). Blank
+            falls back to the player's name on the server side. */}
         <div>
           <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-gray-400">
             Room Name <span className="text-slate-600">(optional)</span>
