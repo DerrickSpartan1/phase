@@ -340,10 +340,15 @@ export function GameProvider({
             onP2PEventRef.current?.({ type: "waitingForGuest" });
 
             // The adapter owns the host Peer reference and subscribes to
-            // guest connections internally via `peer.on("connection", ...)`.
+            // guest connections via `hostRoom()`'s documented
+            // `onGuestConnected`. `hostRoom()` buffers connections that
+            // arrive before subscribe, so guests who dial during the
+            // gap between `hostRoom()` returning and `initialize()`
+            // subscribing are not dropped.
             const adapter = new P2PHostAdapter(
               deckList,
               host.peer,
+              host.onGuestConnected,
               effectivePlayerCount,
               formatConfig,
               matchConfig,
@@ -367,9 +372,10 @@ export function GameProvider({
             hostPeerHandle = peer;
             signal.throwIfAborted();
 
-            // hostPeerId is reconstructed the same way joinRoom builds it:
-            // PEER_ID_PREFIX + code. Guest adapter needs it for auto-reconnect
-            // and for sessionStorage keying.
+            // Reconstruct the same peer id `joinRoom(code)` dialed — the
+            // sessionStorage key for auto-reconnect is keyed on the full
+            // prefixed id, and the guest adapter uses it on reconnect to
+            // call `peer.connect(hostPeerId)`.
             const hostPeerId = `phase-${code}`;
             const existing = loadP2PSession(hostPeerId);
             const adapter = new P2PGuestAdapter(

@@ -48,21 +48,22 @@ interface FakePeer {
 
 function createFakePeer(): {
   peer: FakePeer;
+  onGuestConnected: (handler: (conn: DataConnection) => void) => () => void;
   emitConnection: (conn: DataConnection) => void;
 } {
   const handlers = new Set<(conn: DataConnection) => void>();
   return {
     peer: {
-      on(event, handler) {
-        if (event === "connection") handlers.add(handler);
-      },
-      off(event, handler) {
-        if (event === "connection") handlers.delete(handler);
-      },
+      on() {},
+      off() {},
       connect() {
         throw new Error("not used in tests");
       },
       destroy() {},
+    },
+    onGuestConnected(handler) {
+      handlers.add(handler);
+      return () => handlers.delete(handler);
     },
     emitConnection(conn) {
       for (const h of handlers) h(conn);
@@ -109,7 +110,7 @@ function makeHost(
   brokerGameCode?: string,
   playerCount = 2,
 ) {
-  const { peer, emitConnection } = createFakePeer();
+  const { peer, onGuestConnected, emitConnection } = createFakePeer();
   const hostDeck = {
     player: { main_deck: ["Mountain"], sideboard: [] },
     opponent: { main_deck: ["Forest"], sideboard: [] },
@@ -118,6 +119,7 @@ function makeHost(
   const adapter = new P2PHostAdapter(
     hostDeck,
     peer as unknown as Peer,
+    onGuestConnected,
     playerCount,
     undefined,
     undefined,
@@ -143,7 +145,7 @@ afterEach(() => {
 describe("P2PHostAdapter — broker integration", () => {
   it("rejects construction when broker is set without a brokerGameCode", () => {
     const broker = makeBrokerMock();
-    const { peer } = createFakePeer();
+    const { peer, onGuestConnected } = createFakePeer();
     const hostDeck = {
       player: { main_deck: [], sideboard: [] },
       opponent: { main_deck: [], sideboard: [] },
@@ -154,6 +156,7 @@ describe("P2PHostAdapter — broker integration", () => {
         new P2PHostAdapter(
           hostDeck,
           peer as unknown as Peer,
+          onGuestConnected,
           2,
           undefined,
           undefined,

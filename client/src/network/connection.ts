@@ -4,7 +4,25 @@ import type { DataConnection } from "peerjs";
 /** Unambiguous characters -- no 0/O, 1/I/L confusion */
 const CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 5;
+/**
+ * Namespace prefix for PeerJS IDs on the shared `0.peerjs.com` signaling
+ * server. Without it, bare 5-char codes collide with rooms hosted by any
+ * other PeerJS-based app on the internet (and `new Peer(peerId)` would fail
+ * with `unavailable-id`). Keep in sync with `stripPeerIdPrefix` consumers.
+ */
 const PEER_ID_PREFIX = "phase-";
+
+/**
+ * Strip the PeerJS namespace prefix so a peer id from any source (broker
+ * response, legacy storage, current host) can be normalized back to the bare
+ * 5-char room code for re-prefixing by `joinRoom`. Safe for values that
+ * were never prefixed.
+ */
+export function stripPeerIdPrefix(peerId: string): string {
+  return peerId.startsWith(PEER_ID_PREFIX)
+    ? peerId.slice(PEER_ID_PREFIX.length)
+    : peerId;
+}
 
 // Override PeerJS defaults -- their bundled TURN servers are broken
 const PEER_CONFIG: RTCConfiguration = {
@@ -32,6 +50,10 @@ const PEER_CONFIG: RTCConfiguration = {
     },
   ],
 };
+
+function traceP2P(side: "Host" | "Guest", event: string, data?: Record<string, unknown>): void {
+  console.log(`[P2P ${side} Trace]`, performance.now().toFixed(1), event, data ?? {});
+}
 
 export interface HostResult {
   roomCode: string;
@@ -107,15 +129,19 @@ export async function hostRoom(signal?: AbortSignal): Promise<HostResult> {
   const roomCode = generateRoomCode();
   const peerId = PEER_ID_PREFIX + roomCode;
   const peer = new Peer(peerId, { config: PEER_CONFIG });
+  traceP2P("Host", "create-peer", { roomCode, peerId });
 
   let destroyed = false;
   const guestHandlers = new Set<(conn: DataConnection) => void>();
+  // Connections that arrived after `peer.open` but before the adapter
+  // subscribed via `onGuestConnected`. The adapter's construction is
+  // interleaved with `await broker.registerHost()` + `await wasm.initialize()`
+  // in GameProvider, so a guest dialing the room code (from a direct paste
+  // or a broker-lobby click) can open its `DataConnection` before any
+  // handler exists. We hold those opened conns here and flush them on the
+  // first subscribe so no inbound guest is silently dropped.
+  const pendingConns: DataConnection[] = [];
 
-  // Wait for the host to be registered on the signaling server. If
-  // `signal` aborts during this window (React StrictMode double-mount
-  // tearing down the first mount before `open` fires), destroy the
-  // in-flight Peer immediately so it can't leak into the PeerJS
-  // signaling server as an orphan.
   await new Promise<void>((resolve, reject) => {
     if (signal?.aborted) {
       try { peer.destroy(); } catch { /* best-effort */ }
@@ -123,18 +149,21 @@ export async function hostRoom(signal?: AbortSignal): Promise<HostResult> {
       return;
     }
     const onAbort = () => {
+      traceP2P("Host", "abort-before-open", { peerId });
       peer.off("open", onOpen);
       peer.off("error", onError);
       try { peer.destroy(); } catch { /* best-effort */ }
       reject(new DOMException("Aborted", "AbortError"));
     };
     const onOpen = () => {
+      traceP2P("Host", "peer-open", { roomCode, peerId });
       signal?.removeEventListener("abort", onAbort);
       console.log("[P2P Host] registered on signaling server, code:", roomCode);
       peer.off("error", onError);
       resolve();
     };
     const onError = (err: Error) => {
+      traceP2P("Host", "peer-open-error", { peerId, message: err.message });
       signal?.removeEventListener("abort", onAbort);
       peer.off("open", onOpen);
       reject(new Error(`Failed to create room: ${err.message}`));
@@ -146,23 +175,39 @@ export async function hostRoom(signal?: AbortSignal): Promise<HostResult> {
 
   // Multi-fire connection handler: every guest gets wrapped on `open`.
   peer.on("connection", (conn) => {
+    traceP2P("Host", "peer-connection", {
+      peerId,
+      connOpen: conn.open,
+    });
     if (destroyed) {
       try { conn.close(); } catch { /* best-effort */ }
       return;
     }
     conn.on("open", () => {
+      traceP2P("Host", "conn-open", {
+        peerId,
+        connOpen: conn.open,
+      });
       if (destroyed) {
         try { conn.close(); } catch { /* best-effort */ }
+        return;
+      }
+      if (guestHandlers.size === 0) {
+        pendingConns.push(conn);
         return;
       }
       for (const handler of guestHandlers) {
         handler(conn);
       }
     });
+    conn.on("close", () => {
+      traceP2P("Host", "conn-close", { peerId });
+    });
     // Per-conn open errors are non-fatal: the parent Peer survives so other
     // guests remain connected. The PeerSession's own error handler will fire
     // for already-open connections.
     conn.on("error", (err) => {
+      traceP2P("Host", "conn-error", { peerId, message: err.message });
       console.warn("[P2P Host] guest connection error (non-fatal):", err);
     });
   });
@@ -179,10 +224,12 @@ export async function hostRoom(signal?: AbortSignal): Promise<HostResult> {
       || err.type === "socket-error"
       || err.type === "socket-closed";
     if (fatal) {
+      traceP2P("Host", "peer-fatal-error", { peerId, type: err.type, message: err.message });
       console.error("[P2P Host] fatal Peer error, destroying:", err);
       destroyed = true;
       try { peer.destroy(); } catch { /* best-effort */ }
     } else {
+      traceP2P("Host", "peer-nonfatal-error", { peerId, type: err.type, message: err.message });
       console.warn("[P2P Host] non-fatal Peer error:", err);
     }
   });
@@ -192,7 +239,12 @@ export async function hostRoom(signal?: AbortSignal): Promise<HostResult> {
     peerId,
     peer,
     onGuestConnected(handler) {
+      const wasEmpty = guestHandlers.size === 0;
       guestHandlers.add(handler);
+      if (wasEmpty && pendingConns.length > 0) {
+        const flush = pendingConns.splice(0);
+        for (const conn of flush) handler(conn);
+      }
       return () => {
         guestHandlers.delete(handler);
       };
@@ -219,20 +271,12 @@ export function joinRoom(code: string, signal?: AbortSignal): Promise<JoinResult
     }
     const peer = new Peer({ config: PEER_CONFIG });
     const peerId = PEER_ID_PREFIX + code;
-    // Once the initial DataConnection opens, transient peer errors (e.g.,
-    // temporary signaling-server hiccups, failed peer-discovery on a stale
-    // peer-id) must NOT destroy the Peer — the guest adapter needs it alive to
-    // call `peer.connect(hostPeerId)` during auto-reconnect. Only fatal Peer
-    // errors tear down the Peer; everything else is logged and ignored.
     let opened = false;
+    traceP2P("Guest", "create-peer", { code, peerId });
 
-    // If `signal` aborts before the DataConnection opens, destroy the
-    // in-flight Peer so React StrictMode's throw-away first mount can't
-    // race to claim a host seat before the real second-mount Peer
-    // arrives. `opened` guards against post-open aborts — the adapter
-    // owns Peer teardown after that point.
     const onAbort = () => {
       if (opened) return;
+      traceP2P("Guest", "abort-before-open", { peerId });
       try { peer.destroy(); } catch { /* best-effort */ }
       reject(new DOMException("Aborted", "AbortError"));
     };
@@ -243,16 +287,20 @@ export function joinRoom(code: string, signal?: AbortSignal): Promise<JoinResult
         try { peer.destroy(); } catch { /* best-effort */ }
         return;
       }
+      traceP2P("Guest", "peer-open", { peerId });
       console.log("[P2P Guest] registered on signaling server, connecting to:", peerId);
       const conn = peer.connect(peerId);
+      traceP2P("Guest", "connect-called", { peerId, connOpen: conn.open });
 
       const timeout = setTimeout(() => {
+        traceP2P("Guest", "connect-timeout", { peerId });
         signal?.removeEventListener("abort", onAbort);
         reject(new Error("Connection timed out. Check the room code and try again."));
         peer.destroy();
       }, 30_000);
 
       conn.on("open", () => {
+        traceP2P("Guest", "conn-open", { peerId, connOpen: conn.open });
         clearTimeout(timeout);
         signal?.removeEventListener("abort", onAbort);
         opened = true;
@@ -267,13 +315,13 @@ export function joinRoom(code: string, signal?: AbortSignal): Promise<JoinResult
           },
         });
       });
+      conn.on("close", () => {
+        traceP2P("Guest", "conn-close", { peerId, opened });
+      });
 
       conn.on("error", (err) => {
+        traceP2P("Guest", "conn-error", { peerId, opened, message: err.message });
         if (opened) {
-          // Post-open conn errors are surfaced to the PeerSession layer (via
-          // its own `conn.on("error")` in `peer.ts`) and handled as a session
-          // disconnect that triggers auto-reconnect. Do NOT tear down the Peer
-          // here — that would kill the auto-reconnect channel.
           console.warn("[P2P Guest] post-open connection error (non-fatal):", err);
           return;
         }
@@ -297,15 +345,18 @@ export function joinRoom(code: string, signal?: AbortSignal): Promise<JoinResult
         || err.type === "socket-error"
         || err.type === "socket-closed";
       if (!opened) {
+        traceP2P("Guest", "peer-preopen-error", { peerId, type: err.type, message: err.message });
         // Pre-open: any peer error means the initial connect failed — reject.
         reject(new Error(`Failed to connect: ${err.message}`));
         try { peer.destroy(); } catch { /* best-effort */ }
         return;
       }
       if (fatal) {
+        traceP2P("Guest", "peer-fatal-error", { peerId, type: err.type, message: err.message });
         console.error("[P2P Guest] fatal Peer error, destroying:", err);
         try { peer.destroy(); } catch { /* best-effort */ }
       } else {
+        traceP2P("Guest", "peer-nonfatal-error", { peerId, type: err.type, message: err.message });
         console.warn("[P2P Guest] non-fatal Peer error (Peer kept alive for reconnect):", err);
       }
     });

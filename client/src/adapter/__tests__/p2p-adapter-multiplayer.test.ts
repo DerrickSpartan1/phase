@@ -76,20 +76,24 @@ interface FakePeer {
   destroy(): void;
 }
 
-function createFakePeer(): { peer: FakePeer; emitConnection: (conn: DataConnection) => void } {
+function createFakePeer(): {
+  peer: FakePeer;
+  onGuestConnected: (handler: (conn: DataConnection) => void) => () => void;
+  emitConnection: (conn: DataConnection) => void;
+} {
   const handlers = new Set<(conn: DataConnection) => void>();
   return {
     peer: {
-      on(event, handler) {
-        if (event === "connection") handlers.add(handler);
-      },
-      off(event, handler) {
-        if (event === "connection") handlers.delete(handler);
-      },
+      on() {},
+      off() {},
       connect() {
         throw new Error("not used in tests");
       },
       destroy() {},
+    },
+    onGuestConnected(handler) {
+      handlers.add(handler);
+      return () => handlers.delete(handler);
     },
     emitConnection(conn) {
       for (const h of handlers) h(conn);
@@ -114,7 +118,7 @@ class FakeOpenableConnection extends FakeDataConnection {
 }
 
 function makeHost(playerCount: number, gracePeriodMs = 5_000) {
-  const { peer, emitConnection } = createFakePeer();
+  const { peer, onGuestConnected, emitConnection } = createFakePeer();
   const hostDeck = {
     player: { main_deck: ["Mountain"], sideboard: [] },
     opponent: { main_deck: ["Forest"], sideboard: [] },
@@ -123,6 +127,7 @@ function makeHost(playerCount: number, gracePeriodMs = 5_000) {
   const adapter = new P2PHostAdapter(
     hostDeck,
     peer as unknown as Peer,
+    onGuestConnected,
     playerCount,
     undefined,
     undefined,
@@ -151,18 +156,18 @@ describe("P2PHostAdapter — 3-4p multiplayer", () => {
   });
 
   it("rejects construction with playerCount outside 2-4", () => {
-    const { peer } = createFakePeer();
+    const { peer, onGuestConnected } = createFakePeer();
     const hostDeck = {
       player: { main_deck: [], sideboard: [] },
       opponent: { main_deck: [], sideboard: [] },
       ai_decks: [],
     };
-    expect(() => new P2PHostAdapter(hostDeck, peer as unknown as Peer, 1)).toThrow(
-      "P2P supports 2-4 players",
-    );
-    expect(() => new P2PHostAdapter(hostDeck, peer as unknown as Peer, 5)).toThrow(
-      "P2P supports 2-4 players",
-    );
+    expect(
+      () => new P2PHostAdapter(hostDeck, peer as unknown as Peer, onGuestConnected, 1),
+    ).toThrow("P2P supports 2-4 players");
+    expect(
+      () => new P2PHostAdapter(hostDeck, peer as unknown as Peer, onGuestConnected, 5),
+    ).toThrow("P2P supports 2-4 players");
   });
 
   it("enables multiplayer-mode enforcement on the engine at init time", async () => {

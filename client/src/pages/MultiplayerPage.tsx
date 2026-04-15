@@ -17,7 +17,7 @@ import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuShell } from "../components/menu/MenuShell";
 import { MyDecks } from "../components/menu/MyDecks";
 import { ACTIVE_DECK_KEY, loadActiveDeck, touchDeckPlayed } from "../constants/storage";
-import { parseRoomCode } from "../network/connection";
+import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
 import { evaluateDeckCompatibility } from "../services/deckCompatibility";
 import type { LiveCheck } from "./multiplayerPageState";
 import { classifyCompatResult } from "./multiplayerPageState";
@@ -62,7 +62,13 @@ export function MultiplayerPage() {
     hostingStatus !== "idle" ? "waiting" : "lobby",
   );
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
-  const [connectionMode, setConnectionMode] = useState<ConnectionMode>("server");
+  // Initial mode tracks `serverAddress`: if the user has picked "None" in
+  // `ServerPicker` (empty string sentinel), skip straight to P2P so the
+  // lobby doesn't attempt a doomed subscription.
+  const initialServerAddress = useMultiplayerStore.getState().serverAddress;
+  const [connectionMode, setConnectionMode] = useState<ConnectionMode>(
+    initialServerAddress ? "server" : "p2p",
+  );
   const [showSettings, setShowSettings] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction | null>(null);
   // Shown when `LobbyView` detects the server is unreachable. The user picks
@@ -110,6 +116,17 @@ export function MultiplayerPage() {
   useEffect(() => {
     setActiveDeckName(localStorage.getItem(ACTIVE_DECK_KEY));
   }, []);
+
+  // Follow the server-address sentinel one-way: if the user switches to
+  // "None" mid-session (via `ServerPicker`), flip to P2P so the lobby
+  // stops subscribing. The reverse transition (picking a real server
+  // from "None") is left to the user — auto-flipping back to server
+  // mode would fight a user who explicitly chose P2P.
+  useEffect(() => {
+    if (!serverAddress && connectionMode === "server") {
+      setConnectionMode("p2p");
+    }
+  }, [serverAddress, connectionMode]);
 
   // Live legality check: whenever the user is on host-setup with an active
   // deck and a chosen format, re-run the engine's compatibility check after
@@ -247,15 +264,13 @@ export function MultiplayerPage() {
         if (result.ok) {
           const gameId = crypto.randomUUID();
           useGameStore.setState({ gameId });
-          // GameProvider's p2p-join path calls `joinRoom(code)`, which
-          // re-prepends the `phase-` PeerJS prefix. The broker returns
-          // the *full* peer id (e.g. "phase-3FAHP"), so strip the prefix
-          // to pass the bare room code — otherwise `joinRoom` would dial
-          // `phase-phase-3FAHP` and fail with "peer not found".
-          const hostPeerId = result.peerInfo.host_peer_id;
-          const roomCode = hostPeerId.startsWith("phase-")
-            ? hostPeerId.slice("phase-".length)
-            : hostPeerId;
+          // Broker stores whatever peer id the host registered with
+          // (`PEER_ID_PREFIX + roomCode`). `joinRoom(code)` re-prepends
+          // the prefix itself, so strip to the bare 5-char code here.
+          // `stripPeerIdPrefix` is a no-op on already-bare values, which
+          // keeps us compatible with any legacy broker entry that
+          // happened to be registered without a prefix.
+          const roomCode = stripPeerIdPrefix(result.peerInfo.host_peer_id);
           navigate(`/game/${gameId}?mode=p2p-join&code=${roomCode}`);
           return;
         }
@@ -375,6 +390,14 @@ export function MultiplayerPage() {
           }
           navigateToP2PHost(action, /* useBroker */ mode === "LobbyOnly");
         } else {
+          // Server-mode host: if the server is unreachable, surface the
+          // offline prompt and offer a P2P fallback rather than handing
+          // the action off to `startHosting`, which would hang on the WS
+          // handshake and leave the user staring at the host-setup screen.
+          if (!socket) {
+            setBrokerOfflinePrompt({ action });
+            return false;
+          }
           startHosting(action.settings, deck);
           // Navigate to main menu — the HostingBanner takes over as the
           // hosting indicator. User can browse freely while waiting.

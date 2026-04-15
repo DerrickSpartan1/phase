@@ -3,6 +3,10 @@ import type { DataConnection } from "peerjs";
 import type { P2PMessage } from "./protocol";
 import { validateMessage } from "./protocol";
 
+function tracePeerSession(event: string, data?: Record<string, unknown>): void {
+  console.log("[PeerSession Trace]", performance.now().toFixed(1), event, data ?? {});
+}
+
 export interface PeerSession {
   /** Send a message. Returns false if the message was dropped (connection closed). */
   send(msg: P2PMessage): boolean;
@@ -27,6 +31,7 @@ export function createPeerSession(
   conn: DataConnection,
   options: PeerSessionOptions = {},
 ): PeerSession {
+  tracePeerSession("create-session", { connOpen: conn.open });
   const { onSessionEnd } = options;
   const messageHandlers = new Set<(msg: P2PMessage) => void>();
   const disconnectHandlers = new Set<(reason: string) => void>();
@@ -50,6 +55,7 @@ export function createPeerSession(
       if (msg.type !== "ping" && msg.type !== "pong") {
         const size = JSON.stringify(msg).length;
         console.log(`[PeerSession] sending "${msg.type}" (${(size / 1024).toFixed(1)} KB)`);
+        tracePeerSession("send", { type: msg.type, connOpen: conn.open, size });
       }
       conn.send(msg);
       return true;
@@ -89,6 +95,7 @@ export function createPeerSession(
     if (closed) return;
     closed = true;
     disconnectReason = reason;
+    tracePeerSession("disconnect", { reason, connOpen: conn.open });
     console.warn("[PeerSession] disconnected:", reason);
     clearKeepAlive();
     window.removeEventListener("beforeunload", beforeUnloadHandler);
@@ -116,6 +123,7 @@ export function createPeerSession(
       console.warn("Failed to decode message from peer:", e);
       return;
     }
+    tracePeerSession("data", { type: msg.type, buffered: messageHandlers.size === 0 });
 
     if (msg.type === "pong") {
       if (pongTimeout !== null) { clearTimeout(pongTimeout); pongTimeout = null; }

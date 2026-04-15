@@ -18,7 +18,6 @@ interface ServerPreset {
  */
 const PRESETS: ServerPreset[] = [
   { label: "US (default)", url: "wss://us.phase-rs.dev/ws" },
-  { label: "EU", url: "wss://eu.phase-rs.dev/ws" },
 ];
 
 interface ServerPickerProps {
@@ -104,6 +103,29 @@ export function ServerPicker({ onClose, onApply }: ServerPickerProps) {
               </button>
             );
           })}
+          {/* "None" bypasses the matchmaking broker entirely. Empty string is
+           * the sentinel: `ensureSubscriptionSocket` rejects it via
+           * `isValidWebSocketUrl` and `MultiplayerPage` forces P2P mode, so
+           * the UI lands directly on the direct-code flow without a round-
+           * trip through the offline prompt. */}
+          <button
+            type="button"
+            onClick={() => {
+              if (currentUrl !== "") onApply("");
+              onClose();
+            }}
+            className={
+              "flex w-full items-center justify-between rounded-[16px] border px-4 py-2.5 text-left text-sm transition-colors " +
+              (currentUrl === ""
+                ? "border-cyan-400/40 bg-cyan-500/10 text-cyan-100"
+                : "border-white/10 bg-black/18 text-gray-200 hover:border-white/18 hover:bg-white/6")
+            }
+          >
+            <span className="font-medium">None (P2P only)</span>
+            <span className="font-mono text-[10px] text-slate-500">
+              direct codes
+            </span>
+          </button>
         </div>
 
         <div className="mt-4 border-t border-white/8 pt-4">

@@ -705,7 +705,12 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
                 throw err;
               }),
             {
-              attempts: 3,
+              // One retry on the initial open (~500ms to "offline") so the
+              // user sees the `ServerOfflinePrompt` quickly when the server
+              // is down, rather than after 6.5s of exponential backoff. The
+              // prompt's "Keep trying" button remounts `LobbyView` and
+              // starts a fresh retry cycle — recovery stays available.
+              attempts: 1,
               onStateChange: (state) => {
                 if (state === "open") {
                   const socket = subscriptionReconnect?.current() ?? null;

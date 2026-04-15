@@ -81,6 +81,10 @@ const DEFAULT_GRACE_PERIOD_MS = 30_000;
 /** Guest auto-reconnect backoff schedule (ms). Stops after the last entry. */
 const RECONNECT_BACKOFF_MS = [1_000, 2_000, 4_000, 8_000, 15_000];
 
+function traceAdapter(side: "Host" | "Guest", event: string, data?: Record<string, unknown>): void {
+  console.log(`[P2P ${side} Adapter]`, performance.now().toFixed(1), event, data ?? {});
+}
+
 /**
  * Build the engine deck payload from per-seat decks.
  *
@@ -158,6 +162,16 @@ export class P2PHostAdapter implements EngineAdapter {
   constructor(
     private readonly hostDeckData: unknown,
     private readonly hostPeer: Peer,
+    /**
+     * Subscribe to inbound guest `DataConnection`s via `hostRoom()`'s
+     * documented API. Using this (instead of `hostPeer.on("connection")`
+     * directly) avoids double-dispatch with `hostRoom()`'s internal
+     * listener, and drains any connections that were buffered while the
+     * adapter was still under construction.
+     */
+    private readonly onGuestConnected: (
+      handler: (conn: DataConnection) => void,
+    ) => () => void,
     private readonly playerCount: number,
     private readonly formatConfig?: FormatConfig,
     private readonly matchConfig?: MatchConfig,
@@ -223,27 +237,25 @@ export class P2PHostAdapter implements EngineAdapter {
   }
 
   async initialize(): Promise<void> {
+    traceAdapter("Host", "initialize-start", {});
+    // Subscribe SYNCHRONOUSLY before any `await`. `hostRoom()` buffers
+    // inbound guest connections that arrived between peer-open and the
+    // first `onGuestConnected` subscribe, and flushes them into this
+    // handler on subscribe — so no guest is dropped, even if the broker
+    // registration + adapter construction held this call off for hundreds
+    // of ms while `wasm.initialize()` was cold-loading.
+    this.hostConnectionUnsub = this.onGuestConnected((conn) => {
+      traceAdapter("Host", "handle-connection-event", { connOpen: conn.open });
+      this.handleNewConnection(conn);
+    });
+
     await this.wasm.initialize();
-    // Flip the engine's multiplayer flag ON so any subsequent
-    // `restoreState` call on this WASM instance fails in the engine itself
-    // — defense in depth alongside this adapter's own `restoreState` throw.
     await this.wasm.setMultiplayerMode(true);
-    // Subscribe to incoming guest connections via the Peer directly. We don't
-    // route through `connection.ts` `onGuestConnected` here because the
-    // adapter owns the Peer reference and per-conn wiring needs the assigned
-    // PlayerId in scope.
-    const handleConnection = (conn: DataConnection) => {
-      conn.on("open", () => {
-        this.handleNewConnection(conn);
-      });
-    };
-    this.hostPeer.on("connection", handleConnection);
-    this.hostConnectionUnsub = () => {
-      this.hostPeer.off("connection", handleConnection);
-    };
+    traceAdapter("Host", "initialize-complete", {});
   }
 
   private handleNewConnection(conn: DataConnection): void {
+    traceAdapter("Host", "handle-new-connection", { connOpen: conn.open });
     // Reconnect path: the first message determines whether this is a fresh
     // join or a reconnect. We attach a one-shot pre-handler to peek at the
     // first message before wrapping in a PeerSession with full handlers.
@@ -267,10 +279,13 @@ export class P2PHostAdapter implements EngineAdapter {
       unsub();
 
       if (msg.type === "reconnect") {
+        traceAdapter("Host", "first-message", { type: msg.type });
         this.handleReconnect(session, msg.playerToken);
       } else if (msg.type === "guest_deck") {
+        traceAdapter("Host", "first-message", { type: msg.type });
         this.handleNewGuest(session, msg.deckData);
       } else {
+        traceAdapter("Host", "first-message", { type: msg.type });
         // Unexpected first message — reject.
         session.send({
           type: "reconnect_rejected",
@@ -903,15 +918,19 @@ export class P2PGuestAdapter implements EngineAdapter {
   }
 
   async initialize(): Promise<void> {
+    traceAdapter("Guest", "initialize-start", { hasPlayerToken: Boolean(this.playerToken) });
     this.attachSession(this.initialConn);
     if (this.playerToken) {
+      traceAdapter("Guest", "send-reconnect", { hostPeerId: this.hostPeerId });
       this.session!.send({ type: "reconnect", playerToken: this.playerToken });
     } else {
+      traceAdapter("Guest", "send-guest-deck", { hostPeerId: this.hostPeerId });
       this.session!.send({ type: "guest_deck", deckData: this.deckData });
     }
   }
 
   private attachSession(conn: DataConnection): void {
+    traceAdapter("Guest", "attach-session", { connOpen: conn.open });
     const session = createPeerSession(conn, {
       onSessionEnd: () => {
         this.handleHostDisconnect();
@@ -999,6 +1018,7 @@ export class P2PGuestAdapter implements EngineAdapter {
   }
 
   private handleHostMessage(msg: P2PMessage): void {
+    traceAdapter("Guest", "host-message", { type: msg.type });
     switch (msg.type) {
       case "game_setup": {
         this.assignedPlayerId = msg.assignedPlayerId;
