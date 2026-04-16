@@ -129,6 +129,10 @@ fn optional_cost_skipped_clears_flag() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_basic_land(P0, ManaColor::White);
+    // CR 601.2b: A creature must exist on the battlefield for blight to be
+    // payable; otherwise the OptionalCostChoice prompt is correctly skipped
+    // and there is no decision to make.
+    scenario.add_creature(P0, "Blight Target", 2, 2);
 
     let spell_id = scenario
         .add_creature_to_hand(P0, "Blight Bolt", 0, 0)
@@ -204,6 +208,9 @@ fn cancel_cast_at_optional_cost_choice() {
     let mut scenario = GameScenario::new();
     scenario.at_phase(Phase::PreCombatMain);
     scenario.add_basic_land(P0, ManaColor::White);
+    // CR 601.2b: A creature must exist for blight to be payable, so the
+    // OptionalCostChoice prompt is offered (not auto-skipped).
+    scenario.add_creature(P0, "Blight Target", 2, 2);
 
     let spell_id = scenario
         .add_creature_to_hand(P0, "Blight Bolt", 0, 0)
@@ -721,5 +728,160 @@ fn play_land_from_graveyard_respects_land_drop_limit() {
     assert!(
         result.is_err(),
         "Should not be able to play second land without additional land drops"
+    );
+}
+
+// ── CR 601.2b: Cost-payability pre-gate ─────────────────────────────────────
+
+/// CR 601.2b: An optional additional cost that requires a choice of object
+/// skips the OptionalCostChoice prompt entirely when no legal object exists.
+/// The spell proceeds as if the player declined to pay.
+#[test]
+fn optional_blight_with_no_creatures_skips_prompt() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_basic_land(P0, ManaColor::White);
+    // Deliberately no creatures on the battlefield.
+
+    let spell_id = scenario
+        .add_creature_to_hand(P0, "Blight Bolt", 0, 0)
+        .as_instant()
+        .with_ability(Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Any,
+            damage_source: None,
+        })
+        .with_additional_cost(AdditionalCost::Optional(AbilityCost::Blight { count: 1 }))
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell_id].card_id;
+
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: vec![],
+        })
+        .expect("cast should succeed");
+
+    handle_target_selection(&mut runner, &result);
+
+    // CR 601.2b: Prompt is bypassed when the optional cost is unpayable.
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice { .. }
+        ),
+        "optional cost prompt must be skipped when unpayable, got {:?}",
+        runner.state().waiting_for,
+    );
+
+    // additional_cost_paid remains false since the cost was not paid.
+    assert!(
+        !top_stack_cost_paid(&runner),
+        "additional_cost_paid must be false when optional cost is auto-skipped"
+    );
+}
+
+/// CR 601.2b: A required additional cost that requires a choice of object
+/// makes the spell uncastable when no legal object exists.
+#[test]
+fn required_blight_with_no_creatures_rejects_cast() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_basic_land(P0, ManaColor::White);
+    // No creatures on the battlefield.
+
+    let spell_id = scenario
+        .add_creature_to_hand(P0, "Required Blight Bolt", 0, 0)
+        .as_instant()
+        .with_ability(Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Any,
+            damage_source: None,
+        })
+        .with_additional_cost(AdditionalCost::Required(AbilityCost::Blight { count: 1 }))
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&spell_id].card_id;
+
+    let first = runner.act(GameAction::CastSpell {
+        object_id: spell_id,
+        card_id,
+        targets: vec![],
+    });
+
+    // CastSpell may enter TargetSelection first. The gate fires once the
+    // required cost is about to be paid — either at CastSpell time if no
+    // targets are required, or at SelectTargets time.
+    let final_result = match first {
+        Err(_) => first,
+        Ok(res) if matches!(res.waiting_for, WaitingFor::TargetSelection { .. }) => {
+            runner.act(GameAction::SelectTargets {
+                targets: vec![TargetRef::Player(P1)],
+            })
+        }
+        other => other,
+    };
+
+    assert!(
+        final_result.is_err(),
+        "cast must fail when required additional cost is unpayable, got {:?}",
+        final_result
+    );
+}
+
+/// CR 601.2b: When an `AdditionalCost::Choice(A, B)` has an unpayable
+/// preferred cost A, the fallback B is applied automatically with no prompt.
+#[test]
+fn choice_cost_falls_through_when_preferred_unpayable() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_basic_land(P0, ManaColor::White);
+    // No creatures — blight half is unpayable — but life is available.
+
+    let spell_id = scenario
+        .add_creature_to_hand(P0, "Choice Bolt", 0, 0)
+        .as_instant()
+        .with_ability(Effect::DealDamage {
+            amount: QuantityExpr::Fixed { value: 3 },
+            target: TargetFilter::Any,
+            damage_source: None,
+        })
+        .with_additional_cost(AdditionalCost::Choice(
+            AbilityCost::Blight { count: 1 },
+            AbilityCost::PayLife { amount: 2 },
+        ))
+        .id();
+
+    let mut runner = scenario.build();
+    let life_before = runner.state().players[0].life;
+    let card_id = runner.state().objects[&spell_id].card_id;
+
+    let result = runner
+        .act(GameAction::CastSpell {
+            object_id: spell_id,
+            card_id,
+            targets: vec![],
+        })
+        .expect("cast should succeed");
+
+    handle_target_selection(&mut runner, &result);
+
+    // CR 601.2b: No prompt; fallback was applied automatically.
+    assert!(
+        !matches!(
+            runner.state().waiting_for,
+            WaitingFor::OptionalCostChoice { .. }
+        ),
+        "no prompt expected when preferred cost is unpayable and fallback applies, got {:?}",
+        runner.state().waiting_for,
+    );
+    assert_eq!(
+        runner.state().players[0].life,
+        life_before - 2,
+        "fallback life cost should have been paid"
     );
 }

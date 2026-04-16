@@ -568,16 +568,61 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
     if let Some(additional_cost) = additional {
         match &additional_cost {
             AdditionalCost::Required(req_cost) => {
+                // CR 601.2b: Required additional cost whose choice-of-object is
+                // unavailable makes the spell uncastable.
+                if !req_cost.is_payable(state, player, object_id) {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Cannot pay required additional cost".to_string(),
+                    ));
+                }
                 // Required additional costs bypass the choice prompt — pay directly.
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.casting_variant = casting_variant;
                 pending.origin_zone = origin_zone;
                 return pay_additional_cost(state, player, req_cost.clone(), pending, events);
             }
-            AdditionalCost::Optional(_) | AdditionalCost::Choice(_, _) => {
+            AdditionalCost::Optional(opt_cost) => {
                 let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
                 pending.casting_variant = casting_variant;
                 pending.origin_zone = origin_zone;
+                // CR 601.2b: If the optional additional cost requires a choice
+                // of object and no legal object exists, skip the prompt and
+                // proceed as if the player declined to pay.
+                if !opt_cost.is_payable(state, player, object_id) {
+                    return pay_and_push(
+                        state,
+                        player,
+                        object_id,
+                        card_id,
+                        pending.ability,
+                        &pending.cost,
+                        casting_variant,
+                        distribute,
+                        origin_zone,
+                        events,
+                    );
+                }
+                return Ok(WaitingFor::OptionalCostChoice {
+                    player,
+                    cost: additional_cost,
+                    pending_cast: Box::new(pending),
+                });
+            }
+            AdditionalCost::Choice(preferred, fallback) => {
+                let mut pending = PendingCast::new(object_id, card_id, ability, cost.clone());
+                pending.casting_variant = casting_variant;
+                pending.origin_zone = origin_zone;
+                // CR 601.2b: If the preferred branch is unpayable, fall through
+                // to the fallback without prompting. If both are unpayable, the
+                // spell cannot be cast.
+                if !preferred.is_payable(state, player, object_id) {
+                    if !fallback.is_payable(state, player, object_id) {
+                        return Err(EngineError::ActionNotAllowed(
+                            "Cannot pay either alternative additional cost".to_string(),
+                        ));
+                    }
+                    return pay_additional_cost(state, player, fallback.clone(), pending, events);
+                }
                 return Ok(WaitingFor::OptionalCostChoice {
                     player,
                     cost: additional_cost,
@@ -861,6 +906,13 @@ fn pay_additional_cost(
                     })
                 })
                 .collect();
+            // CR 601.2b: Defense-in-depth — the upstream gate must have already
+            // caught an empty eligibility set. Never construct a dead WaitingFor.
+            if creatures.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough creatures to blight".to_string(),
+                ));
+            }
             return Ok(WaitingFor::BlightChoice {
                 player,
                 count: count as usize,
@@ -876,6 +928,12 @@ fn pay_additional_cost(
                 .copied()
                 .filter(|id| *id != pending.object_id)
                 .collect();
+            // CR 601.2b: Defense-in-depth — empty hand means no legal choice.
+            if eligible.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough cards in hand to discard".to_string(),
+                ));
+            }
             return Ok(WaitingFor::DiscardForCost {
                 player,
                 count: count as usize,

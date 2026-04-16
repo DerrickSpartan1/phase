@@ -7,6 +7,7 @@ pub mod combat;
 pub mod combat_damage;
 pub mod commander;
 pub mod companion;
+pub mod cost_payability;
 pub mod coverage;
 pub mod day_night;
 pub mod deck_loading;

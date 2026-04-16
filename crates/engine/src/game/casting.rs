@@ -2316,6 +2316,12 @@ fn can_pay_ability_cost_now(
     source_id: ObjectId,
     cost: &AbilityCost,
 ) -> bool {
+    // CR 601.2b: Unified choice-of-object + resource payability pre-gate. This
+    // keeps legal-action generation in sync with `handle_activate_ability`, so
+    // the AI never proposes an activation that the submit path would reject.
+    if !cost.is_payable(state, player, source_id) {
+        return false;
+    }
     // CR 118.3: Pre-check non-self sacrifice eligibility before simulation.
     // The simulation would give a false positive since pay_ability_cost's
     // non-self Sacrifice arm is a no-op (it's handled interactively).
@@ -2479,6 +2485,16 @@ pub fn handle_activate_ability(
 
     // CR 601.2f: Apply self-referential cost reduction before any cost payment.
     apply_cost_reduction(state, &mut ability_def, player, source_id);
+
+    // CR 601.2b: If the activation cost requires a choice of object and no
+    // legal object exists, the ability can't be activated.
+    if let Some(ref cost) = ability_def.cost {
+        if !cost.is_payable(state, player, source_id) {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot pay activation cost".to_string(),
+            ));
+        }
+    }
 
     restrictions::check_activation_restrictions(
         state,

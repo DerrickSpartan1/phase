@@ -25,7 +25,7 @@ fn total_mana_value(state: &GameState, cards: &[ObjectId]) -> u32 {
 }
 
 // CR 701.59b: Can't collect evidence if graveyard total mana value < N.
-fn can_collect_evidence(state: &GameState, player: PlayerId, amount: u32) -> bool {
+pub(crate) fn can_collect_evidence(state: &GameState, player: PlayerId, amount: u32) -> bool {
     total_mana_value(state, &graveyard_cards(state, player)) >= amount
 }
 
