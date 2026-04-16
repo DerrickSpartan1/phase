@@ -563,6 +563,8 @@ pub fn apply_create_token_after_replacement(
         return;
     };
 
+    let mut created_ids = Vec::with_capacity(final_count as usize);
+
     for _ in 0..final_count {
         let obj_id = zones::create_object(
             state,
@@ -631,6 +633,8 @@ pub fn apply_create_token_after_replacement(
         crate::game::restrictions::record_battlefield_entry(state, obj_id);
         crate::game::restrictions::record_token_created(state, obj_id);
 
+        created_ids.push(obj_id);
+
         events.push(GameEvent::TokenCreated {
             object_id: obj_id,
             name: spec.display_name.clone(),
@@ -658,6 +662,10 @@ pub fn apply_create_token_after_replacement(
             });
         }
     }
+
+    // CR 603.7: Record created token IDs for sub-abilities that reference
+    // TargetFilter::LastCreated (e.g., Job select, suspect).
+    state.last_created_token_ids = created_ids;
 }
 
 fn resolve_token_owner(
@@ -1565,5 +1573,52 @@ mod tests {
                 .effect,
             Effect::Explore
         ));
+    }
+
+    #[test]
+    fn apply_create_token_populates_last_created_token_ids() {
+        use crate::types::card_type::CoreType;
+        use crate::types::proposed_event::TokenSpec;
+        use std::collections::HashSet;
+
+        let mut state = GameState::new_two_player(42);
+        assert!(state.last_created_token_ids.is_empty());
+
+        let spec = TokenSpec {
+            display_name: "Hero".to_string(),
+            script_name: "c_1_1_hero".to_string(),
+            power: Some(1),
+            toughness: Some(1),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Hero".to_string()],
+            supertypes: vec![],
+            colors: vec![],
+            keywords: vec![],
+            static_abilities: vec![],
+            enter_with_counters: vec![],
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(100),
+            controller: PlayerId(0),
+        };
+
+        let event = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(spec),
+            count: 1,
+            applied: HashSet::new(),
+        };
+
+        let mut events = vec![];
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        assert_eq!(
+            state.last_created_token_ids.len(),
+            1,
+            "should record exactly one created token"
+        );
+        // The created token should be on the battlefield
+        assert!(state.objects.contains_key(&state.last_created_token_ids[0]));
     }
 }

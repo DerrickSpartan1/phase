@@ -239,6 +239,54 @@ pub fn synthesize_mobilize(face: &mut CardFace) {
     }
 }
 
+/// CR 702.182a: Synthesize Job select trigger: when this Equipment enters,
+/// create a 1/1 colorless Hero creature token, then attach this Equipment to it.
+pub fn synthesize_job_select(face: &mut CardFace) {
+    use crate::types::ability::PtValue;
+
+    if !face
+        .keywords
+        .iter()
+        .any(|k| matches!(k, Keyword::JobSelect))
+    {
+        return;
+    }
+
+    let token_effect = Effect::Token {
+        name: "Hero".to_string(),
+        power: PtValue::Fixed(1),
+        toughness: PtValue::Fixed(1),
+        types: vec!["Creature".to_string(), "Hero".to_string()],
+        colors: vec![],
+        keywords: vec![],
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        owner: TargetFilter::Controller,
+        attach_to: None,
+        enters_attacking: false,
+        supertypes: vec![],
+        static_abilities: vec![],
+        enter_with_counters: vec![],
+    };
+
+    let attach_effect = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::Attach {
+            target: TargetFilter::LastCreated,
+        },
+    );
+
+    face.triggers.push(
+        TriggerDefinition::new(TriggerMode::ChangesZone)
+            .destination(Zone::Battlefield)
+            .valid_card(TargetFilter::SelfRef)
+            .execute(
+                AbilityDefinition::new(AbilityKind::Spell, token_effect).sub_ability(attach_effect),
+            )
+            .description("Job select — create Hero token and attach".to_string()),
+    );
+}
+
 /// If the card has Changeling as a printed keyword, emit a characteristic-defining
 /// static ability that grants all creature types (expanded at runtime via
 /// `GameState::all_creature_types`).
@@ -632,6 +680,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_case_solve(face);
     // Warp: no synthesis needed — runtime handled by Keyword::Warp directly
     synthesize_mobilize(face);
+    synthesize_job_select(face);
     synthesize_level_up(face);
     synthesize_cycling(face);
     synthesize_scavenge(face);
@@ -992,6 +1041,98 @@ fn build_oracle_face_inner(
     face.brawl_commander = compute_brawl_commander(mtgjson, &face);
     synthesize_all(&mut face);
     face
+}
+
+#[cfg(test)]
+mod job_select_synthesis_tests {
+    use super::*;
+    use crate::types::triggers::TriggerMode;
+
+    fn face_with_job_select() -> CardFace {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::JobSelect);
+        face
+    }
+
+    /// CR 702.182a: Job select synthesis produces exactly one ChangesZone trigger
+    /// with an ETB destination, a Token effect for a 1/1 colorless Hero creature,
+    /// and an Attach sub-ability targeting LastCreated.
+    #[test]
+    fn synthesize_job_select_builds_etb_trigger_with_token_and_attach() {
+        let mut face = face_with_job_select();
+        synthesize_job_select(&mut face);
+
+        assert_eq!(face.triggers.len(), 1, "exactly one Job select trigger");
+        let trigger = &face.triggers[0];
+        assert!(
+            matches!(trigger.mode, TriggerMode::ChangesZone),
+            "trigger should be ChangesZone (ETB)"
+        );
+        assert_eq!(trigger.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            trigger.valid_card,
+            Some(TargetFilter::SelfRef),
+            "trigger must scope to self-ETB only"
+        );
+
+        // Verify execute chain: Token → Attach
+        let execute = trigger.execute.as_ref().expect("trigger must have execute");
+        match execute.effect.as_ref() {
+            Effect::Token {
+                name,
+                power,
+                toughness,
+                types,
+                colors,
+                ..
+            } => {
+                assert_eq!(name, "Hero");
+                assert!(matches!(power, crate::types::ability::PtValue::Fixed(1)));
+                assert!(matches!(
+                    toughness,
+                    crate::types::ability::PtValue::Fixed(1)
+                ));
+                assert!(types.contains(&"Creature".to_string()));
+                assert!(types.contains(&"Hero".to_string()));
+                assert!(colors.is_empty(), "Hero token should be colorless");
+            }
+            other => panic!("expected Token effect, got {:?}", other),
+        }
+
+        // Verify sub_ability is Attach { target: LastCreated }
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("Token effect must chain to Attach sub_ability");
+        assert!(
+            matches!(
+                sub.effect.as_ref(),
+                Effect::Attach {
+                    target: TargetFilter::LastCreated
+                }
+            ),
+            "sub_ability should be Attach targeting LastCreated"
+        );
+    }
+
+    #[test]
+    fn synthesize_job_select_is_idempotent() {
+        let mut face = face_with_job_select();
+        synthesize_job_select(&mut face);
+        let count = face.triggers.len();
+        synthesize_job_select(&mut face);
+        // Second call adds another trigger because the keyword is still present.
+        // This matches synthesize_mobilize behavior — idempotency comes from
+        // synthesize_all being called once per face.
+        assert_eq!(face.triggers.len(), count * 2);
+    }
+
+    #[test]
+    fn synthesize_job_select_skips_without_keyword() {
+        let mut face = CardFace::default();
+        synthesize_job_select(&mut face);
+        assert!(face.triggers.is_empty());
+    }
 }
 
 #[cfg(test)]

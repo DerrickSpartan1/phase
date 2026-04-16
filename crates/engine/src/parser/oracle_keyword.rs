@@ -496,6 +496,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Unleash => "unleash".to_string(),
         Keyword::Riot => "riot".to_string(),
         Keyword::LivingWeapon => "living weapon".to_string(),
+        Keyword::JobSelect => "job select".to_string(),
         Keyword::TotemArmor => "totem armor".to_string(),
         Keyword::Evolve => "evolve".to_string(),
         Keyword::Extort => "extort".to_string(),

@@ -12,6 +12,7 @@ const KEYWORD_DISPLAY_ORDER: string[] = [
 const NAME_OVERRIDES: Record<string, string> = {
   EtbCounter: "ETB Counter",
   LivingWeapon: "Living Weapon",
+  JobSelect: "Job Select",
   LivingMetal: "Living Metal",
   TotemArmor: "Totem Armor",
   SplitSecond: "Split Second",

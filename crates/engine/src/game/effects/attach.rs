@@ -1,4 +1,4 @@
-use crate::types::ability::{EffectError, EffectKind, ResolvedAbility};
+use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -11,13 +11,28 @@ pub fn resolve(
 ) -> Result<(), EffectError> {
     let source_id = ability.source_id;
 
-    // Determine target from ability targets
+    // Determine target: prefer explicit targets, fall back to LastCreated for
+    // synthesized sub-abilities (Job select, Living Weapon).
     let target_id = ability
         .targets
         .first()
         .and_then(|t| match t {
             crate::types::ability::TargetRef::Object(id) => Some(*id),
             _ => None,
+        })
+        .or_else(|| {
+            // CR 702.182a: Resolve TargetFilter::LastCreated from game state
+            // when no explicit targets exist (e.g., "then attach this to it").
+            if matches!(
+                &ability.effect,
+                Effect::Attach {
+                    target: TargetFilter::LastCreated
+                }
+            ) {
+                state.last_created_token_ids.first().copied()
+            } else {
+                None
+            }
         })
         .ok_or_else(|| EffectError::MissingParam("No target for Attach".to_string()))?;
 
@@ -309,6 +324,101 @@ mod tests {
         attach_to(&mut state, equipment, victim);
 
         assert_eq!(state.objects.get(&equipment).unwrap().attached_to, None);
+    }
+
+    #[test]
+    fn attach_resolves_last_created_target() {
+        // CR 702.182a: Attach sub-ability with TargetFilter::LastCreated resolves
+        // target from state.last_created_token_ids (Job select pattern).
+        let mut state = setup();
+        let equipment_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Rod".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&equipment_id)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Equipment".to_string());
+
+        let token_id = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Hero".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&token_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.last_created_token_ids = vec![token_id];
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                target: TargetFilter::LastCreated,
+            },
+            vec![], // No explicit targets — should fall back to LastCreated
+            equipment_id,
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&equipment_id).unwrap().attached_to,
+            Some(token_id)
+        );
+        assert!(state
+            .objects
+            .get(&token_id)
+            .unwrap()
+            .attachments
+            .contains(&equipment_id));
+    }
+
+    #[test]
+    fn attach_with_explicit_targets_ignores_last_created() {
+        // Regression: when explicit targets exist, LastCreated on the effect
+        // should NOT be used — explicit targets take precedence.
+        let mut state = setup();
+        let equipment_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Sword".to_string(),
+            Zone::Battlefield,
+        );
+        let creature_a = spawn_creature(&mut state, "Bear A");
+        let creature_b = spawn_creature(&mut state, "Bear B");
+        state.last_created_token_ids = vec![creature_b];
+
+        let ability = crate::types::ability::ResolvedAbility::new(
+            crate::types::ability::Effect::Attach {
+                target: TargetFilter::LastCreated,
+            },
+            vec![crate::types::ability::TargetRef::Object(creature_a)],
+            equipment_id,
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Should attach to creature_a (explicit target), not creature_b (LastCreated)
+        assert_eq!(
+            state.objects.get(&equipment_id).unwrap().attached_to,
+            Some(creature_a)
+        );
     }
 
     #[test]

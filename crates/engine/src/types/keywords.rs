@@ -81,6 +81,7 @@ pub enum KeywordKind {
     EtbCounter,
     Reconfigure,
     LivingWeapon,
+    JobSelect,
     TotemArmor,
     Bestow,
     Embalm,
@@ -367,6 +368,9 @@ pub enum Keyword {
     // Equipment / attachment
     Reconfigure(ManaCost),
     LivingWeapon,
+    /// CR 702.182a: Job select — "When this Equipment enters, create a 1/1
+    /// colorless Hero creature token, then attach this Equipment to it."
+    JobSelect,
     TotemArmor,
     Bestow(ManaCost),
 
@@ -631,6 +635,7 @@ impl Keyword {
             Keyword::EtbCounter { .. } => KeywordKind::EtbCounter,
             Keyword::Reconfigure(_) => KeywordKind::Reconfigure,
             Keyword::LivingWeapon => KeywordKind::LivingWeapon,
+            Keyword::JobSelect => KeywordKind::JobSelect,
             Keyword::TotemArmor => KeywordKind::TotemArmor,
             Keyword::Bestow(_) => KeywordKind::Bestow,
             Keyword::Embalm(_) => KeywordKind::Embalm,
@@ -1105,6 +1110,7 @@ impl FromStr for Keyword {
             "unleash" => Ok(Keyword::Unleash),
             "riot" => Ok(Keyword::Riot),
             "livingweapon" => Ok(Keyword::LivingWeapon),
+            "jobselect" => Ok(Keyword::JobSelect),
             "totemarmor" => Ok(Keyword::TotemArmor),
             "evolve" => Ok(Keyword::Evolve),
             "extort" => Ok(Keyword::Extort),
@@ -1311,6 +1317,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Unleash" => Ok(Keyword::Unleash),
         "Riot" => Ok(Keyword::Riot),
         "LivingWeapon" => Ok(Keyword::LivingWeapon),
+        "JobSelect" => Ok(Keyword::JobSelect),
         "TotemArmor" => Ok(Keyword::TotemArmor),
         "Exalted" => Ok(Keyword::Exalted),
         "Flanking" => Ok(Keyword::Flanking),
@@ -1599,6 +1606,7 @@ mod tests {
             Keyword::from_str("Living Weapon").unwrap(),
             Keyword::LivingWeapon
         );
+        assert_eq!(Keyword::from_str("Job Select").unwrap(), Keyword::JobSelect);
         assert_eq!(
             Keyword::from_str("Totem Armor").unwrap(),
             Keyword::TotemArmor
@@ -1997,6 +2005,7 @@ mod tests {
             "Unleash",
             "Riot",
             "Living Weapon",
+            "Job Select",
             "Totem Armor",
             "Evolve",
             "Extort",
