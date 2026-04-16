@@ -575,6 +575,10 @@ pub struct PlayerDeckPool {
     pub registered_sideboard: Vec<DeckEntry>,
     pub current_main: Vec<DeckEntry>,
     pub current_sideboard: Vec<DeckEntry>,
+    #[serde(default)]
+    pub registered_commander: Vec<DeckEntry>,
+    #[serde(default)]
+    pub current_commander: Vec<DeckEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

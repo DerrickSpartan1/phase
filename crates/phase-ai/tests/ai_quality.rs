@@ -549,6 +549,7 @@ fn threat_profile_influences_scoring_against_blue_deck() {
             registered_sideboard: Vec::new(),
             current_main: entries,
             current_sideboard: Vec::new(),
+            ..Default::default()
         });
         // Give opponent some cards in hand so threat profile is non-trivial
         state.players[1].hand = vec![
@@ -614,6 +615,7 @@ fn threat_profile_influences_scoring_against_control_deck() {
             registered_sideboard: Vec::new(),
             current_main: entries,
             current_sideboard: Vec::new(),
+            ..Default::default()
         });
         state.players[1].hand = vec![
             engine::types::identifiers::ObjectId(90),

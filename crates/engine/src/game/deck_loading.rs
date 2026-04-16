@@ -24,6 +24,8 @@ pub struct PlayerDeckPayload {
     pub main_deck: Vec<DeckEntry>,
     #[serde(default)]
     pub sideboard: Vec<DeckEntry>,
+    #[serde(default)]
+    pub commander: Vec<DeckEntry>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +80,7 @@ pub fn resolve_player_deck_list(db: &CardDatabase, list: &PlayerDeckList) -> Pla
     PlayerDeckPayload {
         main_deck: resolve_names(db, &list.main_deck),
         sideboard: resolve_names(db, &list.sideboard),
+        commander: resolve_names(db, &list.commander),
     }
 }
 
@@ -88,10 +91,12 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
         player: PlayerDeckPayload {
             main_deck: resolve_names(db, &list.player.main_deck),
             sideboard: resolve_names(db, &list.player.sideboard),
+            commander: resolve_names(db, &list.player.commander),
         },
         opponent: PlayerDeckPayload {
             main_deck: resolve_names(db, &list.opponent.main_deck),
             sideboard: resolve_names(db, &list.opponent.sideboard),
+            commander: resolve_names(db, &list.opponent.commander),
         },
         ai_decks: list
             .ai_decks
@@ -99,6 +104,7 @@ pub fn resolve_deck_list(db: &CardDatabase, list: &DeckList) -> DeckPayload {
             .map(|deck| PlayerDeckPayload {
                 main_deck: resolve_names(db, &deck.main_deck),
                 sideboard: resolve_names(db, &deck.sideboard),
+                commander: resolve_names(db, &deck.commander),
             })
             .collect(),
     }
@@ -148,6 +154,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             registered_sideboard: payload.player.sideboard.clone(),
             current_main: payload.player.main_deck.clone(),
             current_sideboard: payload.player.sideboard.clone(),
+            registered_commander: payload.player.commander.clone(),
+            current_commander: payload.player.commander.clone(),
         });
     state
         .deck_pools
@@ -157,6 +165,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
             registered_sideboard: payload.opponent.sideboard.clone(),
             current_main: payload.opponent.main_deck.clone(),
             current_sideboard: payload.opponent.sideboard.clone(),
+            registered_commander: payload.opponent.commander.clone(),
+            current_commander: payload.opponent.commander.clone(),
         });
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
@@ -168,6 +178,8 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
                 registered_sideboard: ai_deck.sideboard.clone(),
                 current_main: ai_deck.main_deck.clone(),
                 current_sideboard: ai_deck.sideboard.clone(),
+                registered_commander: ai_deck.commander.clone(),
+                current_commander: ai_deck.commander.clone(),
             });
     }
 
@@ -193,14 +205,44 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
         }
     }
 
+    // CR 903.6 + CR 408.1: Place commanders in the command zone at game start.
+    let commander_decks: Vec<(PlayerId, &[DeckEntry])> =
+        std::iter::once((PlayerId(0), payload.player.commander.as_slice()))
+            .chain(std::iter::once((
+                PlayerId(1),
+                payload.opponent.commander.as_slice(),
+            )))
+            .chain(
+                payload
+                    .ai_decks
+                    .iter()
+                    .enumerate()
+                    .map(|(i, d)| (PlayerId((2 + i) as u8), d.commander.as_slice())),
+            )
+            .collect();
+    for (owner, entries) in commander_decks {
+        for entry in entries {
+            for _ in 0..entry.count {
+                create_commander_from_card_face(state, &entry.card, owner);
+            }
+        }
+    }
+
     // Collect all creature subtypes for Changeling CDA expansion
     let mut creature_types: HashSet<String> = HashSet::new();
     let all_entries = payload
         .player
         .main_deck
         .iter()
+        .chain(&payload.player.commander)
         .chain(&payload.opponent.main_deck)
-        .chain(payload.ai_decks.iter().flat_map(|d| &d.main_deck));
+        .chain(&payload.opponent.commander)
+        .chain(
+            payload
+                .ai_decks
+                .iter()
+                .flat_map(|d| d.main_deck.iter().chain(d.commander.iter())),
+        );
     for entry in all_entries {
         if entry
             .card
@@ -412,6 +454,7 @@ mod tests {
                     },
                 ],
                 sideboard: vec![],
+                commander: vec![],
             },
             opponent: PlayerDeckPayload {
                 main_deck: vec![DeckEntry {
@@ -419,6 +462,7 @@ mod tests {
                     count: 3,
                 }],
                 sideboard: vec![],
+                commander: vec![],
             },
             ai_decks: vec![],
         };
@@ -449,10 +493,12 @@ mod tests {
             player: PlayerDeckPayload {
                 main_deck: entries,
                 sideboard: vec![],
+                commander: vec![],
             },
             opponent: PlayerDeckPayload {
                 main_deck: vec![],
                 sideboard: vec![],
+                commander: vec![],
             },
             ai_decks: vec![],
         };
@@ -568,10 +614,12 @@ mod tests {
                     count: 4,
                 }],
                 sideboard: vec![],
+                commander: vec![],
             },
             opponent: PlayerDeckPayload {
                 main_deck: vec![],
                 sideboard: vec![],
+                commander: vec![],
             },
             ai_decks: vec![],
         };
@@ -580,5 +628,92 @@ mod tests {
         assert_eq!(deserialized.player.main_deck.len(), 1);
         assert_eq!(deserialized.player.main_deck[0].count, 4);
         assert_eq!(deserialized.player.main_deck[0].card.name, "Grizzly Bears");
+    }
+
+    #[test]
+    fn load_deck_with_commanders_creates_command_zone_objects() {
+        let mut state = GameState::new_two_player(42);
+        let commander_face = CardFace {
+            name: "Kaalia".to_string(),
+            card_type: CardType {
+                supertypes: vec![crate::types::card_type::Supertype::Legendary],
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec!["Angel".to_string()],
+            },
+            ..make_creature_face()
+        };
+
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: make_creature_face(),
+                    count: 3,
+                }],
+                sideboard: vec![],
+                commander: vec![DeckEntry {
+                    card: commander_face,
+                    count: 1,
+                }],
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![DeckEntry {
+                    card: make_creature_face(),
+                    count: 3,
+                }],
+                sideboard: vec![],
+                commander: vec![],
+            },
+            ai_decks: vec![],
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        // Commander is in command zone, not library
+        assert_eq!(state.players[0].library.len(), 3);
+        assert_eq!(state.command_zone.len(), 1);
+
+        let cmd_id = state.command_zone[0];
+        let cmd = &state.objects[&cmd_id];
+        assert_eq!(cmd.name, "Kaalia");
+        assert_eq!(cmd.zone, Zone::Command);
+        assert!(cmd.is_commander);
+        assert_eq!(cmd.owner, PlayerId(0));
+    }
+
+    #[test]
+    fn load_deck_commander_subtypes_collected() {
+        let mut state = GameState::new_two_player(42);
+        let commander_face = CardFace {
+            name: "Kaalia".to_string(),
+            card_type: CardType {
+                supertypes: vec![],
+                core_types: vec![crate::types::card_type::CoreType::Creature],
+                subtypes: vec!["Angel".to_string(), "Cleric".to_string()],
+            },
+            ..make_creature_face()
+        };
+
+        let payload = DeckPayload {
+            player: PlayerDeckPayload {
+                main_deck: vec![],
+                sideboard: vec![],
+                commander: vec![DeckEntry {
+                    card: commander_face,
+                    count: 1,
+                }],
+            },
+            opponent: PlayerDeckPayload {
+                main_deck: vec![],
+                sideboard: vec![],
+                commander: vec![],
+            },
+            ai_decks: vec![],
+        };
+
+        load_deck_into_state(&mut state, &payload);
+
+        // Commander creature subtypes are collected for Changeling CDA
+        assert!(state.all_creature_types.contains(&"Angel".to_string()));
+        assert!(state.all_creature_types.contains(&"Cleric".to_string()));
     }
 }

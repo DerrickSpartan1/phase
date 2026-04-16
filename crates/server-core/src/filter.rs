@@ -195,6 +195,7 @@ mod tests {
                 registered_sideboard: vec![entry.clone()],
                 current_main: vec![entry.clone()],
                 current_sideboard: vec![entry.clone()],
+                ..Default::default()
             },
             engine::types::game_state::PlayerDeckPool {
                 player: PlayerId(1),
@@ -202,6 +203,7 @@ mod tests {
                 registered_sideboard: vec![entry.clone()],
                 current_main: vec![entry.clone()],
                 current_sideboard: vec![entry],
+                ..Default::default()
             },
         ];
 

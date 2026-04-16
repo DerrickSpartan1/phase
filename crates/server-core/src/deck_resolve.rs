@@ -43,6 +43,8 @@ pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayl
     let (main_deck, mut missing) = resolve_entries(db, &deck.main_deck, "main");
     let (sideboard, mut sideboard_missing) = resolve_entries(db, &deck.sideboard, "sideboard");
     missing.append(&mut sideboard_missing);
+    let (commander, mut commander_missing) = resolve_entries(db, &deck.commander, "commander");
+    missing.append(&mut commander_missing);
 
     if !missing.is_empty() {
         missing.sort();
@@ -56,5 +58,6 @@ pub fn resolve_deck(db: &CardDatabase, deck: &DeckData) -> Result<PlayerDeckPayl
     Ok(PlayerDeckPayload {
         main_deck,
         sideboard,
+        commander,
     })
 }

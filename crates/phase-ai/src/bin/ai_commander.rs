@@ -16,8 +16,7 @@ use std::time::Instant;
 
 use engine::database::CardDatabase;
 use engine::game::deck_loading::{
-    create_commander_from_card_face, load_deck_into_state, resolve_deck_list, DeckList,
-    DeckPayload, PlayerDeckList,
+    load_deck_into_state, resolve_deck_list, DeckList, DeckPayload, PlayerDeckList,
 };
 use engine::types::format::FormatConfig;
 use engine::types::game_state::{GameState, WaitingFor};
@@ -92,7 +91,8 @@ fn main() {
     println!();
 
     let mut deck_lists: Vec<PlayerDeckList> = Vec::new();
-    let mut commander_names: Vec<String> = Vec::new();
+    // Commander names are populated in PlayerDeckList.commander and resolved
+    // by the pipeline — no manual tracking needed.
     for deck in decks_json.iter() {
         if deck_lists.len() == 4 {
             break;
@@ -137,7 +137,6 @@ fn main() {
             sideboard: vec![],
             commander: cmd_names,
         });
-        commander_names.push(primary_cmd);
     }
 
     if deck_lists.len() < 4 {
@@ -154,13 +153,6 @@ fn main() {
 
     let mut state = GameState::new(FormatConfig::commander(), 4, seed);
     load_deck_into_state(&mut state, &payload);
-
-    for (i, cmd_name) in commander_names.iter().enumerate() {
-        let face = db
-            .get_face_by_name(cmd_name)
-            .unwrap_or_else(|| panic!("commander not found in card db: {cmd_name}"));
-        create_commander_from_card_face(&mut state, face, PlayerId(i as u8));
-    }
 
     engine::game::engine::start_game(&mut state);
     println!();

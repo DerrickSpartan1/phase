@@ -64,6 +64,7 @@ fn build_card_face_map(pool: &PlayerDeckPool) -> HashMap<String, crate::types::c
         .registered_main
         .iter()
         .chain(pool.registered_sideboard.iter())
+        .chain(pool.registered_commander.iter())
     {
         faces
             .entry(entry.card.name.clone())
@@ -88,10 +89,12 @@ fn deck_payload_from_current_pools(state: &GameState) -> Result<DeckPayload, Str
         player: PlayerDeckPayload {
             main_deck: p0.current_main.clone(),
             sideboard: p0.current_sideboard.clone(),
+            commander: p0.current_commander.clone(),
         },
         opponent: PlayerDeckPayload {
             main_deck: p1.current_main.clone(),
             sideboard: p1.current_sideboard.clone(),
+            commander: p1.current_commander.clone(),
         },
         ai_decks: vec![],
     })
@@ -373,6 +376,7 @@ mod tests {
             registered_sideboard: vec![entry("B", 1)],
             current_main: vec![entry("A", 2)],
             current_sideboard: vec![entry("B", 1)],
+            ..Default::default()
         }];
 
         let bad_main_size = handle_submit_sideboard(
@@ -437,10 +441,12 @@ mod tests {
             player: PlayerDeckPayload {
                 main_deck: vec![entry("P0", 7)],
                 sideboard: vec![entry("P0SB", 1)],
+                commander: vec![],
             },
             opponent: PlayerDeckPayload {
                 main_deck: vec![entry("P1", 7)],
                 sideboard: vec![entry("P1SB", 1)],
+                commander: vec![],
             },
             ai_decks: vec![],
         };

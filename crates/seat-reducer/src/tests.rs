@@ -10,6 +10,7 @@ impl DeckResolver for NoOpResolver {
         Ok(PlayerDeckPayload {
             main_deck: vec![],
             sideboard: vec![],
+            commander: vec![],
         })
     }
 }
