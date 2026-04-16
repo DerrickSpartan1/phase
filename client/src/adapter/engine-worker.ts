@@ -16,6 +16,7 @@ import init, {
   select_action_from_scores,
   get_legal_actions_js,
   restore_game_state,
+  resume_multiplayer_host_state,
   load_card_database,
   export_game_state_json,
   clear_game_state,
@@ -59,6 +60,7 @@ type EngineRequest =
       seed: number;
     }
   | { type: "restoreState"; id: number; stateJson: string }
+  | { type: "resumeMultiplayerHostState"; id: number; stateJson: string }
   | { type: "exportState"; id: number }
   | { type: "loadCardDbFromUrl"; id: number }
   | { type: "resetGame"; id: number }
@@ -216,6 +218,12 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
 
       case "restoreState": {
         restore_game_state(msg.stateJson);
+        result(msg.id, null);
+        break;
+      }
+
+      case "resumeMultiplayerHostState": {
+        resume_multiplayer_host_state(msg.stateJson);
         result(msg.id, null);
         break;
       }

@@ -373,11 +373,14 @@ export function GameProvider({
             signal.throwIfAborted();
 
             // Reconstruct the same peer id `joinRoom(code)` dialed — the
-            // sessionStorage key for auto-reconnect is keyed on the full
+            // IndexedDB session key for auto-reconnect is keyed on the full
             // prefixed id, and the guest adapter uses it on reconnect to
-            // call `peer.connect(hostPeerId)`.
+            // call `peer.connect(hostPeerId)`. IndexedDB (not sessionStorage)
+            // means a guest whose tab crashed can reopen and rejoin with
+            // their original seat.
             const hostPeerId = `phase-${code}`;
-            const existing = loadP2PSession(hostPeerId);
+            const existing = await loadP2PSession(hostPeerId);
+            signal.throwIfAborted();
             const adapter = new P2PGuestAdapter(
               deckList,
               peer,

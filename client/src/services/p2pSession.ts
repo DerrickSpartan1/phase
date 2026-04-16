@@ -1,15 +1,18 @@
 /**
- * Per-tab session token persistence for P2P games.
- *
- * Mirrors `multiplayerSession` but uses `sessionStorage` instead of
- * `localStorage` so tokens are scoped to the browser tab — closing the tab
- * clears the token, matching server-mode reconnect semantics.
+ * Persistent session token storage for P2P games.
  *
  * Tokens are issued by the host on `game_setup` / `reconnect_ack` and consumed
- * by the guest on auto-reconnect. Pre-game tokens (issued on lobby join but
- * before `game_setup`) are intentionally NOT persisted — a guest who drops
- * during the lobby must rejoin fresh.
+ * by the guest on auto-reconnect. Persisting to IndexedDB (not sessionStorage)
+ * means a guest whose tab crashed or was accidentally closed can reopen
+ * and still rejoin their original seat — the host recognizes the token and
+ * rebinds the PlayerId through `handleReconnect`.
+ *
+ * Pre-game tokens (issued on lobby join but before `game_setup`) are
+ * intentionally NOT persisted — a guest who drops during the lobby must
+ * rejoin fresh.
  */
+
+import { createStore, del, get, set } from "idb-keyval";
 
 const STORAGE_PREFIX = "phase-p2p-session:";
 const SESSION_TTL_MS = 60 * 60 * 1000;
@@ -21,6 +24,15 @@ export interface P2PSessionData {
   timestamp: number;
 }
 
+let _store: ReturnType<typeof createStore> | undefined;
+
+function getSessionStore(): ReturnType<typeof createStore> {
+  if (!_store) {
+    _store = createStore("phase-p2p-session", "phase-p2p-session");
+  }
+  return _store;
+}
+
 function storageKey(hostPeerId: string): string {
   return STORAGE_PREFIX + hostPeerId;
 }
@@ -29,36 +41,39 @@ function isFresh(session: P2PSessionData): boolean {
   return Date.now() - session.timestamp < SESSION_TTL_MS;
 }
 
-export function saveP2PSession(
+export async function saveP2PSession(
   hostPeerId: string,
   data: { playerToken: string; playerId: number },
-): void {
+): Promise<void> {
   const session: P2PSessionData = {
     hostPeerId,
     playerToken: data.playerToken,
     playerId: data.playerId,
     timestamp: Date.now(),
   };
-  sessionStorage.setItem(storageKey(hostPeerId), JSON.stringify(session));
+  try {
+    await set(storageKey(hostPeerId), session, getSessionStore());
+  } catch (err) {
+    console.warn("[p2pSession] IDB write failed:", err);
+  }
 }
 
-export function loadP2PSession(hostPeerId: string): P2PSessionData | null {
-  const raw = sessionStorage.getItem(storageKey(hostPeerId));
-  if (!raw) return null;
-
+export async function loadP2PSession(hostPeerId: string): Promise<P2PSessionData | null> {
   try {
-    const session = JSON.parse(raw) as P2PSessionData;
+    const session = await get<P2PSessionData>(storageKey(hostPeerId), getSessionStore());
+    if (!session) return null;
     if (!isFresh(session)) {
-      clearP2PSession(hostPeerId);
+      await clearP2PSession(hostPeerId);
       return null;
     }
     return session;
   } catch {
-    clearP2PSession(hostPeerId);
     return null;
   }
 }
 
-export function clearP2PSession(hostPeerId: string): void {
-  sessionStorage.removeItem(storageKey(hostPeerId));
+export async function clearP2PSession(hostPeerId: string): Promise<void> {
+  try {
+    await del(storageKey(hostPeerId), getSessionStore());
+  } catch { /* best-effort */ }
 }

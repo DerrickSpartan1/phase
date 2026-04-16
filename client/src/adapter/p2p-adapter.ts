@@ -1023,7 +1023,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       case "game_setup": {
         this.assignedPlayerId = msg.assignedPlayerId;
         this.playerToken = msg.playerToken;
-        saveP2PSession(this.hostPeerId, {
+        void saveP2PSession(this.hostPeerId, {
           playerToken: msg.playerToken,
           playerId: msg.assignedPlayerId,
         });
@@ -1039,7 +1039,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       case "reconnect_ack": {
         this.assignedPlayerId = msg.assignedPlayerId;
         if (this.playerToken) {
-          saveP2PSession(this.hostPeerId, {
+          void saveP2PSession(this.hostPeerId, {
             playerToken: this.playerToken,
             playerId: msg.assignedPlayerId,
           });

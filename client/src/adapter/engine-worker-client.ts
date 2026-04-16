@@ -179,6 +179,17 @@ export class EngineWorkerClient {
     await this.request<null>({ type: "restoreState", stateJson });
   }
 
+  /**
+   * Host-resume entry point. Unlike `restoreState` (undo semantics, stale
+   * RNG seed, refused when multiplayer is already on), this loads a
+   * persisted multiplayer-host state with a fresh RNG seed and atomically
+   * flips the engine's multiplayer flag. Mirrors server-core's
+   * `GameSession::from_persisted`.
+   */
+  async resumeMultiplayerHostState(stateJson: string): Promise<void> {
+    await this.request<null>({ type: "resumeMultiplayerHostState", stateJson });
+  }
+
   async resetGame(): Promise<void> {
     await this.request<null>({ type: "resetGame" });
   }

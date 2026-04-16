@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 
-use rand::SeedableRng;
+use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha20Rng;
 use serde::Serialize;
 use wasm_bindgen::prelude::*;
@@ -408,6 +408,68 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
     Ok(())
 }
 
+/// Resume a multiplayer host session from a persisted `GameState`.
+///
+/// Called when a P2P host returns after a crash/reload and needs to restore
+/// the authoritative game state from disk so returning guests (still in
+/// their reconnect backoff) can re-bind to their seats. Mirrors
+/// `server-core::GameSession::from_persisted` — the analogous pattern for
+/// the WebSocket-server authority.
+///
+/// Differs from `restore_game_state` in two load-bearing ways:
+///
+/// 1. **Fresh RNG seed.** `restore_game_state` re-seeds from the saved
+///    `rng_seed`, which rewinds the ChaCha20 stream to position 0 —
+///    correct for undo (replay from origin) but wrong for resume
+///    (subsequent draws would replay the pre-save sequence). This
+///    function stamps a fresh seed so continued play diverges.
+/// 2. **Atomic multiplayer-flag flip.** Sets `MULTIPLAYER_MODE` in the
+///    same call that loads state, so there's no window where a stray
+///    `restore_game_state` (undo) would be accepted on the resumed
+///    session.
+///
+/// Refuses when the engine is already in use — this is a fresh-instance
+/// entry point. Callers must clear any existing state first.
+#[wasm_bindgen]
+pub fn resume_multiplayer_host_state(json_str: &str) -> Result<(), JsValue> {
+    if MULTIPLAYER_MODE.with(|cell| cell.get()) {
+        return Err(JsValue::from_str(
+            "resume_multiplayer_host_state refused: multiplayer mode already set",
+        ));
+    }
+    let already_has_state = GAME_STATE.with(|cell| {
+        let s = cell.take();
+        let present = s.is_some();
+        cell.set(s);
+        present
+    });
+    if already_has_state {
+        return Err(JsValue::from_str(
+            "resume_multiplayer_host_state refused: engine already initialized; call clear_game_state first",
+        ));
+    }
+
+    let mut state: GameState = serde_json::from_str(json_str)
+        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {}", e)))?;
+
+    // Stale `rng_seed` replays the pre-save ChaCha20 sequence because
+    // stream position is `#[serde(skip)]`. Mirrors server-core.
+    let fresh_seed: u64 = rand::rng().random();
+    state.rng_seed = fresh_seed;
+    state.rng = ChaCha20Rng::seed_from_u64(fresh_seed);
+
+    CARD_DB.with(|cell| {
+        if let Some(db) = cell.borrow().as_ref() {
+            rehydrate_game_from_card_db(&mut state, db);
+        }
+    });
+    finalize_public_state(&mut state);
+
+    GAME_STATE.with(|cell| cell.set(Some(state)));
+    MULTIPLAYER_MODE.with(|cell| cell.set(true));
+    Ok(())
+}
+
 /// Get the AI's chosen action for the current game state.
 /// `difficulty` is one of: "VeryEasy", "Easy", "Medium", "Hard", "VeryHard".
 /// `player_id` is the seat index of the AI player (0-based).
@@ -665,6 +727,80 @@ mod tests {
         set_multiplayer_mode(false);
         assert!(!is_multiplayer_mode());
         assert!(restore_game_state(&json).is_ok());
+    }
+
+    #[test]
+    fn resume_multiplayer_host_state_refuses_if_already_initialized() {
+        // Must start from a clean slate — other tests may have populated the
+        // thread-local state.
+        clear_game_state();
+        set_multiplayer_mode(false);
+
+        // Seed a game so `resume_` sees it as "already initialized".
+        let state = GameState::new_two_player(7);
+        let json = serde_json::to_string(&state).unwrap();
+        restore_game_state(&json).unwrap();
+
+        let err = resume_multiplayer_host_state(&json)
+            .expect_err("should refuse when engine already has state");
+        let msg = err.as_string().unwrap_or_default();
+        assert!(
+            msg.contains("already initialized"),
+            "error should mention engine-in-use; got: {msg}"
+        );
+
+        // Cleanup so following tests start clean.
+        clear_game_state();
+        set_multiplayer_mode(false);
+    }
+
+    #[test]
+    fn resume_multiplayer_host_state_refuses_if_multiplayer_already_on() {
+        clear_game_state();
+        set_multiplayer_mode(true);
+
+        let state = GameState::new_two_player(7);
+        let json = serde_json::to_string(&state).unwrap();
+
+        let err = resume_multiplayer_host_state(&json)
+            .expect_err("should refuse when multiplayer mode is already set");
+        let msg = err.as_string().unwrap_or_default();
+        assert!(
+            msg.contains("multiplayer mode already set"),
+            "error should mention multiplayer flag state; got: {msg}"
+        );
+
+        set_multiplayer_mode(false);
+    }
+
+    #[test]
+    fn resume_multiplayer_host_state_stamps_fresh_rng_seed_and_enables_flag() {
+        clear_game_state();
+        set_multiplayer_mode(false);
+
+        let mut state = GameState::new_two_player(42);
+        // Force a known "stale" seed so we can prove it was replaced.
+        state.rng_seed = 0xDEAD_BEEF_0000_0001;
+        let json = serde_json::to_string(&state).unwrap();
+
+        resume_multiplayer_host_state(&json).unwrap();
+
+        // Flag flipped atomically with state load.
+        assert!(is_multiplayer_mode());
+
+        // RNG seed was replaced with a fresh random value — stale seed would
+        // replay the pre-save ChaCha20 stream from position 0 and cause
+        // deterministic redraws.
+        let restored: GameState =
+            serde_wasm_bindgen::from_value(get_game_state()).unwrap();
+        assert_ne!(
+            restored.rng_seed, 0xDEAD_BEEF_0000_0001,
+            "rng_seed should be freshly stamped, not preserved from the save"
+        );
+
+        // Cleanup.
+        clear_game_state();
+        set_multiplayer_mode(false);
     }
 
     #[test]

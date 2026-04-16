@@ -228,6 +228,35 @@ export class WasmAdapter implements EngineAdapter {
   }
 
   /**
+   * Resume a P2P host session from a persisted `GameState`. Stamps a fresh
+   * RNG seed (so continued play diverges from the pre-save sequence) and
+   * atomically flips the engine's multiplayer flag. The engine must be
+   * in its initial (post-`initialize()`) state — a prior game must be
+   * cleared via `clear_game_state` first.
+   *
+   * Distinct from `restoreState` (undo semantics, deterministic re-seed).
+   * Mirrors `server-core::GameSession::from_persisted`.
+   */
+  async resumeMultiplayerHostState(state: GameState): Promise<void> {
+    this.assertInitialized();
+    const json = JSON.stringify(state);
+    if (this.engine) {
+      // Ensure the card database is loaded before the engine rehydrates
+      // ability definitions on restore. Same sequential-queue guarantee
+      // as `restoreState`.
+      if (!this.cardDbLoaded) {
+        await this.engine.loadCardDbFromUrl().then(
+          () => { this.cardDbLoaded = true; },
+          () => { /* card DB is best-effort */ },
+        );
+      }
+      await this.engine.resumeMultiplayerHostState(json);
+    } else {
+      this.fallback!.resumeMultiplayerHostState(json);
+    }
+  }
+
+  /**
    * Clear the WASM game state without terminating the worker.
    *
    * Preserves the WASM instance (with V8 TurboFan optimizations), card database,
@@ -321,6 +350,7 @@ interface MainThreadFallback {
   getLegalActions(): Promise<LegalActionsResult>;
   getAiAction(difficulty: string, playerId: number): Promise<GameAction | null>;
   restoreState(stateJson: string): void;
+  resumeMultiplayerHostState(stateJson: string): void;
   setMultiplayerMode(enabled: boolean): void;
   ping(): string;
   initializeGame(
@@ -385,6 +415,10 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
 
     restoreState: (stateJson: string) => {
       enqueue(() => wasm.restore_game_state(stateJson));
+    },
+
+    resumeMultiplayerHostState: (stateJson: string) => {
+      enqueue(() => wasm.resume_multiplayer_host_state(stateJson));
     },
 
     setMultiplayerMode: (enabled: boolean) => {
