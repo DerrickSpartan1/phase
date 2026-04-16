@@ -320,6 +320,114 @@ mod tests {
         );
     }
 
+    /// CR 701.23b + CR 701.20a: End-to-end Ranging Raptors / Rampant Growth shape —
+    /// SearchLibrary(basic land) → ChangeZone(Library→Battlefield, Any) → Shuffle.
+    /// When the library contains no matching cards, the search fails to find,
+    /// the put-step must no-op (via the change_zone Library+Any+empty-targets
+    /// guard), and the trailing Shuffle MUST still fire. This locks down the
+    /// full chain traversal that the change_zone unit test alone cannot verify.
+    #[test]
+    fn search_fail_to_find_preserves_shuffle_tail() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::types::ability::Effect;
+
+        let mut state = GameState::new_two_player(42);
+        // Library has only non-basic cards; the search for a basic land will
+        // fail to find. Both players seeded so a regression that scans across
+        // libraries would have candidates to pull.
+        let p0_nonbasic = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Non-basic".to_string(),
+            Zone::Library,
+        );
+        let p1_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Card".to_string(),
+            Zone::Library,
+        );
+        let battlefield_before = state.battlefield.clone();
+
+        // Chain: Search(basic land) → ChangeZone(Library→Battlefield, Any) → Shuffle.
+        let shuffle_step = ResolvedAbility::new(
+            Effect::Shuffle {
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let put_step = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: true,
+                enters_attacking: false,
+                up_to: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(shuffle_step);
+        let search_step = ResolvedAbility::new(
+            Effect::SearchLibrary {
+                filter: TargetFilter::Typed(TypedFilter::land().properties(vec![
+                    crate::types::ability::FilterProp::HasSupertype {
+                        value: crate::types::card_type::Supertype::Basic,
+                    },
+                ])),
+                count: QuantityExpr::Fixed { value: 1 },
+                reveal: false,
+                target_player: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(put_step);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &search_step, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.battlefield, battlefield_before,
+            "Fail-to-find must NOT move any library card onto the battlefield"
+        );
+        assert_eq!(
+            state.objects[&p0_nonbasic].zone,
+            Zone::Library,
+            "Non-basic library card stays put on fail-to-find"
+        );
+        assert_eq!(
+            state.objects[&p1_card].zone,
+            Zone::Library,
+            "Opponent library card must not be reachable from a fail-to-find put-step"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "Fail-to-find must not prompt an EffectZoneChoice (the reported bug)"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::Shuffle,
+                    ..
+                }
+            )),
+            "Trailing Shuffle MUST fire even when the search found nothing \
+             (CR 701.20a: the 'then shuffle' tail is unconditional)"
+        );
+    }
+
     #[test]
     fn search_only_searches_controllers_library() {
         let mut state = GameState::new_two_player(42);

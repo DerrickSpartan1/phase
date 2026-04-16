@@ -286,6 +286,34 @@ pub fn resolve(
             return Ok(());
         }
 
+        // CR 701.23b + CR 401.2: Interactive library-step fail-to-find guard.
+        // The parser emits `origin=Library, target=Any` for the put-step of a
+        // chain where an earlier interactive step selects the card from the
+        // library (SearchLibrary for tutors/fetches, ChooseFromZone for the
+        // "look at the top N, choose one" patterns). On success, the relevant
+        // choice handler in `engine_resolution_choices` populates
+        // `ability.targets` with the chosen card before this handler runs.
+        // On fail-to-find (CR 701.23b: a player isn't required to find a card;
+        // analogous no-selection outcomes for other interactive steps), targets
+        // stay empty and this put-step must no-op so the subsequent sub-ability
+        // in the chain (e.g., Shuffle) still runs.
+        //
+        // The invariant: libraries are hidden zones (CR 401.2), so no untargeted
+        // resolution-time zone scan over a library is ever valid — reaching this
+        // branch with `Library + Any + empty targets` always means an earlier
+        // interactive step completed without producing a selection. Fall-through
+        // to the zone-scan below would incorrectly treat `Any` as a wildcard
+        // across every library in the game and let the player pick any card.
+        // Hand/Graveyard/Exile zone-scan semantics (Show-and-Tell, Regrowth,
+        // etc.) are unaffected.
+        if origin == Some(Zone::Library) && matches!(target_filter, TargetFilter::Any) {
+            events.push(GameEvent::EffectResolved {
+                kind: EffectKind::from(&ability.effect),
+                source_id: ability.source_id,
+            });
+            return Ok(());
+        }
+
         let scan_zone = origin
             .or_else(|| target_filter.extract_in_zone())
             .unwrap_or(Zone::Battlefield);
@@ -2089,5 +2117,84 @@ mod tests {
                 assert_eq!(state.players[0].hand.len(), 0);
             }
         }
+    }
+
+    /// CR 701.23b + CR 401.2: A search sub-ability chain ("search your library for X,
+    /// put it onto the battlefield, then shuffle") emits ChangeZone with
+    /// `origin: Library, target: Any` as a continuation of SearchLibrary. On
+    /// fail-to-find, `ability.targets` is empty and the put-step must no-op —
+    /// never fall through to a zone-scan (which would treat `Any` as a wildcard
+    /// over every library in the game and let the player pick any card, which
+    /// is the Ranging Raptors / Rampant Growth / Cultivate fail-to-find bug).
+    #[test]
+    fn search_fail_to_find_chain_continuation_does_not_scan_libraries() {
+        let mut state = GameState::new_two_player(42);
+
+        // Seed both libraries with cards so a fallback zone-scan would have
+        // candidates to pull from — proves the guard stops before the scan.
+        let p0_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "P0 Library Card".to_string(),
+            Zone::Library,
+        );
+        let p1_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "P1 Library Card".to_string(),
+            Zone::Library,
+        );
+        let battlefield_before = state.battlefield.clone();
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: true,
+                enters_attacking: false,
+                up_to: false,
+            },
+            vec![], // Empty targets: search failed to find, no card to put.
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.battlefield, battlefield_before,
+            "Fail-to-find put-step must NOT move any library card onto the battlefield"
+        );
+        assert_eq!(
+            state.objects[&p0_card].zone,
+            Zone::Library,
+            "P0's library card must stay in the library"
+        );
+        assert_eq!(
+            state.objects[&p1_card].zone,
+            Zone::Library,
+            "P1's library card must not be reachable from a fail-to-find put-step"
+        );
+        assert!(
+            !matches!(state.waiting_for, WaitingFor::EffectZoneChoice { .. }),
+            "Fail-to-find must not prompt an EffectZoneChoice (the bug symptom)"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::EffectResolved {
+                    kind: EffectKind::ChangeZone,
+                    ..
+                }
+            )),
+            "Fail-to-find put-step must emit EffectResolved so the chain advances to Shuffle"
+        );
     }
 }
