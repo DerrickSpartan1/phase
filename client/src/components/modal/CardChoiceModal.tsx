@@ -5,7 +5,7 @@ import { CardImage } from "../card/CardImage.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
-import type { GameObject, ManaCost, ObjectId, TargetFilter, WaitingFor } from "../../adapter/types.ts";
+import type { GameObject, ManaCost, ManaType, ObjectId, TargetFilter, WaitingFor } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "./ChoiceOverlay.tsx";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
@@ -163,6 +163,9 @@ export function CardChoiceModal() {
     case "ChooseDungeonRoom":
       if (!canActForWaitingState) return null;
       return <RoomChoiceModal data={waitingFor.data} />;
+    case "ChooseManaColor":
+      if (!canActForWaitingState) return null;
+      return <ManaColorChoiceModal data={waitingFor.data} />;
     default:
       return null;
   }
@@ -1475,6 +1478,79 @@ function ManifestDreadModal({ data }: { data: ManifestDreadChoice["data"] }) {
           );
         })}
       </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+// ── Mana Color Choice Modal ────────────────────────────────────────────────
+
+type ChooseManaColor = Extract<WaitingFor, { type: "ChooseManaColor" }>;
+
+const MANA_COLOR_STYLES: Record<ManaType, string> = {
+  White: "border-yellow-400 bg-yellow-400/20 text-yellow-200 hover:bg-yellow-400/40",
+  Blue: "border-blue-400 bg-blue-500/20 text-blue-200 hover:bg-blue-500/40",
+  Black: "border-gray-400 bg-gray-700/40 text-gray-200 hover:bg-gray-700/60",
+  Red: "border-red-400 bg-red-500/20 text-red-200 hover:bg-red-500/40",
+  Green: "border-green-400 bg-green-600/20 text-green-200 hover:bg-green-600/40",
+  Colorless: "border-gray-400 bg-gray-500/20 text-gray-200 hover:bg-gray-500/40",
+};
+
+const MANA_COLOR_SELECTED: Record<ManaType, string> = {
+  White: "border-yellow-300 bg-yellow-400/50 text-white",
+  Blue: "border-blue-300 bg-blue-500/50 text-white",
+  Black: "border-gray-300 bg-gray-600/60 text-white",
+  Red: "border-red-300 bg-red-500/50 text-white",
+  Green: "border-green-300 bg-green-500/50 text-white",
+  Colorless: "border-gray-300 bg-gray-500/50 text-white",
+};
+
+const MANA_COLOR_SYMBOLS: Record<ManaType, string> = {
+  White: "{W}",
+  Blue: "{U}",
+  Black: "{B}",
+  Red: "{R}",
+  Green: "{G}",
+  Colorless: "{C}",
+};
+
+function ManaColorChoiceModal({ data }: { data: ChooseManaColor["data"] }) {
+  const dispatch = useGameDispatch();
+  const [selected, setSelected] = useState<ManaType | null>(null);
+
+  const handleConfirm = useCallback(() => {
+    if (selected) {
+      dispatch({ type: "ChooseManaColor", data: { color: selected } });
+    }
+  }, [dispatch, selected]);
+
+  return (
+    <ChoiceOverlay
+      title="Choose Mana Color"
+      subtitle="Select which color of mana to produce"
+      widthClassName="w-fit max-w-full"
+      maxWidthClassName="max-w-md"
+      footer={<ConfirmButton onClick={handleConfirm} disabled={selected === null} />}
+    >
+      <div className="mx-auto mb-6 flex w-fit items-center justify-center gap-4 sm:mb-10">
+        {data.color_options.map((color, index) => {
+          const isSelected = selected === color;
+          return (
+            <motion.button
+              key={color}
+              className={`flex h-16 w-16 items-center justify-center rounded-full border-2 text-lg font-bold transition sm:h-20 sm:w-20 sm:text-xl ${
+                isSelected ? MANA_COLOR_SELECTED[color] : MANA_COLOR_STYLES[color]
+              }`}
+              initial={{ opacity: 0, y: 20, scale: 0.9 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              transition={{ delay: 0.05 + index * 0.05, duration: 0.25 }}
+              whileHover={{ scale: 1.1 }}
+              onClick={() => setSelected(isSelected ? null : color)}
+            >
+              {MANA_COLOR_SYMBOLS[color]}
+            </motion.button>
+          );
+        })}
+      </div>
     </ChoiceOverlay>
   );
 }

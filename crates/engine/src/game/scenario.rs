@@ -1067,6 +1067,7 @@ impl GameRunner {
             WaitingFor::SacrificeForCost { .. } => "SacrificeForCost",
             WaitingFor::TapCreaturesForSpellCost { .. } => "TapCreaturesForSpellCost",
             WaitingFor::TapCreaturesForManaAbility { .. } => "TapCreaturesForManaAbility",
+            WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
             WaitingFor::ExileFromGraveyardForCost { .. } => "ExileFromGraveyardForCost",
             WaitingFor::CollectEvidenceChoice { .. } => "CollectEvidenceChoice",
             WaitingFor::HarmonizeTapChoice { .. } => "HarmonizeTapChoice",

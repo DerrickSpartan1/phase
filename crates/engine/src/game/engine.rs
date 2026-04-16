@@ -722,6 +722,20 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             &chosen,
             &mut events,
         )?,
+        (
+            WaitingFor::ChooseManaColor {
+                color_options,
+                pending_mana_ability,
+                ..
+            },
+            GameAction::ChooseManaColor { color },
+        ) => engine_casting::handle_choose_mana_color(
+            state,
+            pending_mana_ability,
+            color_options,
+            color,
+            &mut events,
+        )?,
         // CR 702.138a: Player selected cards to exile from graveyard as escape cost.
         (
             WaitingFor::ExileFromGraveyardForCost {
@@ -4762,15 +4776,43 @@ mod tests {
         )
         .unwrap();
 
+        // AnyOneColor with 5 options chains into ChooseManaColor after creature tap.
+        assert!(
+            matches!(
+                result.waiting_for,
+                WaitingFor::ChooseManaColor {
+                    player: PlayerId(0),
+                    ..
+                }
+            ),
+            "expected ChooseManaColor, got {:?}",
+            result.waiting_for,
+        );
+        assert!(state.objects.get(&drum).unwrap().tapped);
+        assert!(state.objects.get(&creature).unwrap().tapped);
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+
+        // Choose green — mana should now be produced.
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ChooseManaColor {
+                color: crate::types::mana::ManaType::Green,
+            },
+        )
+        .unwrap();
         assert!(matches!(
             result.waiting_for,
             WaitingFor::Priority {
                 player: PlayerId(0)
             }
         ));
-        assert!(state.objects.get(&drum).unwrap().tapped);
-        assert!(state.objects.get(&creature).unwrap().tapped);
         assert_eq!(state.players[0].mana_pool.total(), 1);
+        assert_eq!(
+            state.players[0]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Green),
+            1
+        );
     }
 
     mod equip_tests {

@@ -220,6 +220,10 @@ pub enum GameAction {
     SubmitPhyrexianChoices {
         choices: Vec<ShardChoice>,
     },
+    /// CR 605.3b: Choose which color an AnyOneColor mana ability produces.
+    ChooseManaColor {
+        color: super::mana::ManaType,
+    },
     /// CR 104.3a: A player may concede the game at any time. That player leaves the game.
     /// CR 800.4a: When a player leaves a multiplayer game, all objects owned by that player
     /// leave the game and all spells/abilities controlled by that player cease to exist.

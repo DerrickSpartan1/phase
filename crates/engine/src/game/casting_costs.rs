@@ -1333,23 +1333,39 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     Ok(WaitingFor::Priority { player })
 }
 
-/// Find and mark the first unused land producing `needed` color. Returns true if found.
-fn tap_matching_land(
+/// Count distinct source objects that can produce any of the `acceptable` colors.
+fn count_available_sources(
     available: &[ManaSourceOption],
-    used_sources: &mut HashSet<ObjectId>,
-    to_tap: &mut Vec<ManaSourceOption>,
-    needed: ManaType,
-) -> bool {
-    let Some(option) = available
-        .iter()
-        .find(|option| option.mana_type == needed && !used_sources.contains(&option.object_id))
-    else {
-        return false;
-    };
+    used: &HashSet<ObjectId>,
+    acceptable: &[ManaType],
+) -> usize {
+    let mut seen = HashSet::new();
+    for opt in available {
+        if acceptable.contains(&opt.mana_type) && !used.contains(&opt.object_id) {
+            seen.insert(opt.object_id);
+        }
+    }
+    seen.len()
+}
 
-    used_sources.insert(option.object_id);
-    to_tap.push(*option);
-    true
+/// Pick the source with the fewest alternative color options (LCV heuristic).
+/// Among ties, the tier-sort order of `available` acts as tiebreaker (pure lands
+/// before dorks before land-creatures before sacrifice sources).
+fn find_least_flexible_source(
+    available: &[ManaSourceOption],
+    used: &HashSet<ObjectId>,
+    acceptable: &[ManaType],
+) -> Option<ManaSourceOption> {
+    available
+        .iter()
+        .filter(|opt| acceptable.contains(&opt.mana_type) && !used.contains(&opt.object_id))
+        .min_by_key(|opt| {
+            available
+                .iter()
+                .filter(|o| o.object_id == opt.object_id)
+                .count()
+        })
+        .copied()
 }
 
 /// Auto-tap mana sources controlled by `player` to produce enough mana for `cost`.
@@ -1429,44 +1445,60 @@ pub(super) fn auto_tap_mana_sources(
     let mut to_tap: Vec<ManaSourceOption> = Vec::new();
     let mut used_sources: HashSet<ObjectId> = HashSet::new();
 
-    // Phase 1: satisfy colored and hybrid shards by tapping matching sources
+    // Phase 1: Assign sources to colored shards using MCV/LCV constraint heuristic.
+    // The naive greedy approach (tap first matching source per shard) fails when
+    // a flexible source (dual land, multi-color dork) gets consumed for a color
+    // that a single-purpose source could have provided, leaving no source for
+    // a color only the flexible source can produce.
+    //
+    // MCV: process the most constrained shard first (fewest available sources).
+    // LCV: for each shard, prefer the least flexible source (fewest color options).
     let mut deferred_generic: usize = 0;
+    let mut needs: Vec<(Vec<ManaType>, bool)> = Vec::new();
     for shard in shards {
         use crate::game::mana_payment::{shard_to_mana_type, ShardRequirement};
         match shard_to_mana_type(*shard) {
             ShardRequirement::Single(color) | ShardRequirement::Phyrexian(color) => {
-                tap_matching_land(&available, &mut used_sources, &mut to_tap, color);
+                needs.push((vec![color], false));
             }
-            ShardRequirement::Hybrid(a, b) => {
-                if !tap_matching_land(&available, &mut used_sources, &mut to_tap, a) {
-                    tap_matching_land(&available, &mut used_sources, &mut to_tap, b);
-                }
+            ShardRequirement::Hybrid(a, b) | ShardRequirement::HybridPhyrexian(a, b) => {
+                needs.push((vec![a, b], false));
             }
             ShardRequirement::TwoGenericHybrid(color) => {
-                // Prefer 1 matching-color source over 2 generic sources
-                if !tap_matching_land(&available, &mut used_sources, &mut to_tap, color) {
-                    deferred_generic += 2;
-                }
+                needs.push((vec![color], true));
             }
             ShardRequirement::ColorlessHybrid(color) => {
-                if !tap_matching_land(
-                    &available,
-                    &mut used_sources,
-                    &mut to_tap,
-                    ManaType::Colorless,
-                ) {
-                    tap_matching_land(&available, &mut used_sources, &mut to_tap, color);
-                }
-            }
-            ShardRequirement::HybridPhyrexian(a, b) => {
-                if !tap_matching_land(&available, &mut used_sources, &mut to_tap, a) {
-                    tap_matching_land(&available, &mut used_sources, &mut to_tap, b);
-                }
+                needs.push((vec![ManaType::Colorless, color], false));
             }
             ShardRequirement::Snow | ShardRequirement::X => {
                 deferred_generic += 1;
             }
         }
+    }
+
+    let mut assigned = vec![false; needs.len()];
+    for _ in 0..needs.len() {
+        let mut best_idx = None;
+        let mut min_sources = usize::MAX;
+        for (i, (acceptable, _)) in needs.iter().enumerate() {
+            if assigned[i] {
+                continue;
+            }
+            let count = count_available_sources(&available, &used_sources, acceptable);
+            if count < min_sources {
+                min_sources = count;
+                best_idx = Some(i);
+            }
+        }
+        let Some(idx) = best_idx else { break };
+        let (ref acceptable, two_generic_fallback) = needs[idx];
+        if let Some(option) = find_least_flexible_source(&available, &used_sources, acceptable) {
+            used_sources.insert(option.object_id);
+            to_tap.push(option);
+        } else if two_generic_fallback {
+            deferred_generic += 2;
+        }
+        assigned[idx] = true;
     }
 
     // Phase 2: satisfy generic cost + deferred shards with any remaining sources
@@ -2606,6 +2638,160 @@ mod tests {
                 } if *player_id == PlayerId(0)
             )),
             "Should emit LifeChanged event"
+        );
+    }
+
+    #[test]
+    fn auto_tap_assigns_flexible_sources_optimally() {
+        // Reproduces the Spider Manifestation + Brightglass Gearhulk scenario:
+        // Cost {G}{G}{W}{W}, sources: Forest({G}), Spider({R}/{G}),
+        // Hushwood({G}/{W}), Air Temple({W}).
+        // Greedy approach taps Hushwood for {G} first, leaving no second {W}.
+        // MCV/LCV assigns: Forest→{G}, Spider→{G}, Air Temple→{W}, Hushwood→{W}.
+        let mut state = GameState::new_two_player(42);
+
+        let forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&forest)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Land);
+        state
+            .objects
+            .get_mut(&forest)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Forest".to_string());
+
+        let spider = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Spider Manifestation".to_string(),
+            Zone::Battlefield,
+        );
+        let spider_obj = state.objects.get_mut(&spider).unwrap();
+        spider_obj.card_types.core_types.push(CoreType::Creature);
+        spider_obj.entered_battlefield_turn = Some(1);
+        spider_obj.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: crate::types::ability::ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        color_options: vec![ManaColor::Red, ManaColor::Green],
+                        contribution: crate::types::ability::ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+
+        let hushwood = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Hushwood Verge".to_string(),
+            Zone::Battlefield,
+        );
+        let hushwood_obj = state.objects.get_mut(&hushwood).unwrap();
+        hushwood_obj.card_types.core_types.push(CoreType::Land);
+        hushwood_obj.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: crate::types::ability::ManaProduction::Fixed {
+                        colors: vec![ManaColor::Green],
+                        contribution: crate::types::ability::ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        hushwood_obj.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: crate::types::ability::ManaProduction::Fixed {
+                        colors: vec![ManaColor::White],
+                        contribution: crate::types::ability::ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+
+        let air_temple = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Abandoned Air Temple".to_string(),
+            Zone::Battlefield,
+        );
+        let air_obj = state.objects.get_mut(&air_temple).unwrap();
+        air_obj.card_types.core_types.push(CoreType::Land);
+        air_obj.abilities.push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: crate::types::ability::ManaProduction::Fixed {
+                        colors: vec![ManaColor::White],
+                        contribution: crate::types::ability::ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+
+        state.turn_number = 3;
+        let mut events = Vec::new();
+        auto_tap_mana_sources(
+            &mut state,
+            PlayerId(0),
+            &ManaCost::Cost {
+                shards: vec![
+                    ManaCostShard::Green,
+                    ManaCostShard::Green,
+                    ManaCostShard::White,
+                    ManaCostShard::White,
+                ],
+                generic: 0,
+            },
+            &mut events,
+            None,
+        );
+
+        let pool = &state.players[0].mana_pool;
+        assert_eq!(
+            pool.count_color(ManaType::Green),
+            2,
+            "should produce 2 green"
+        );
+        assert_eq!(
+            pool.count_color(ManaType::White),
+            2,
+            "should produce 2 white"
         );
     }
 }

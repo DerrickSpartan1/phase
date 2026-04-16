@@ -531,6 +531,7 @@ export type WaitingFor =
   | { type: "DiscardForCost"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
   | { type: "SacrificeForCost"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_cast: PendingCast } }
   | { type: "TapCreaturesForManaAbility"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_mana_ability: unknown } }
+  | { type: "ChooseManaColor"; data: { player: PlayerId; color_options: ManaType[]; pending_mana_ability: unknown } }
   | { type: "TapCreaturesForSpellCost"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "ExileFromGraveyardForCost"; data: { player: PlayerId; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
   | { type: "CollectEvidenceChoice"; data: { player: PlayerId; minimum_mana_value: number; cards: ObjectId[]; resume: unknown } }
@@ -690,7 +691,8 @@ export type GameAction =
   | { type: "ChooseDungeonRoom"; data: { room_index: number } }
   | { type: "SelectCategoryPermanents"; data: { choices: (ObjectId | null)[] } }
   | { type: "ChooseX"; data: { value: number } }
-  | { type: "SubmitPhyrexianChoices"; data: { choices: ShardChoice[] } };
+  | { type: "SubmitPhyrexianChoices"; data: { choices: ShardChoice[] } }
+  | { type: "ChooseManaColor"; data: { color: ManaType } };
 
 // CR 107.4f + CR 601.2f: Per-shard Phyrexian payment choice.
 export type ShardChoice =

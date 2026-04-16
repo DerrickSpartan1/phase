@@ -1,5 +1,5 @@
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, Effect, ResolvedAbility, TargetFilter,
+    AbilityCost, AbilityDefinition, Effect, ManaProduction, ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, ManaAbilityResume, PendingManaAbility, WaitingFor};
@@ -14,6 +14,7 @@ use super::filter::{matches_target_filter, FilterContext};
 use super::life_costs::{self, PayLifeCostResult};
 use super::mana_payment;
 use super::mana_sources;
+use super::mana_sources::mana_color_to_type;
 use super::sacrifice;
 
 /// Check if a typed ability definition represents a mana ability (CR 605).
@@ -170,13 +171,31 @@ pub fn resolve_mana_ability(
     // Pay the full ability cost (tap, sacrifice, etc.)
     pay_mana_ability_cost(state, source_id, player, &ability_def.cost, events)?;
 
-    // Produce mana — resolve the full count from the production descriptor,
-    // then apply color_override if present. This ensures dynamic-count producers
-    // (e.g., Priest of Titania: {G} per elf) produce the correct amount even
-    // when auto-tap specifies a color override.
+    produce_mana_from_ability(
+        state,
+        source_id,
+        player,
+        ability_def,
+        events,
+        color_override,
+    );
+    Ok(())
+}
+
+/// Produce mana from a resolved mana ability without paying costs.
+/// Shared by `resolve_mana_ability` (cost paid inline) and `handle_choose_mana_color`
+/// (cost already paid during the `TapCreaturesForManaAbility` phase).
+fn produce_mana_from_ability(
+    state: &mut GameState,
+    source_id: ObjectId,
+    player: PlayerId,
+    ability_def: &AbilityDefinition,
+    events: &mut Vec<GameEvent>,
+    color_override: Option<ManaType>,
+) {
     let produced_mana = match &*ability_def.effect {
         Effect::Mana { produced, .. } => {
-            let resolved = resolve_mana_types(produced, &*state, player, source_id);
+            let resolved = resolve_mana_types(produced, state, player, source_id);
             match color_override {
                 Some(color) => vec![color; resolved.len()],
                 None => resolved,
@@ -189,8 +208,6 @@ pub fn resolve_mana_ability(
     for mana_type in produced_mana {
         mana_payment::produce_mana(state, source_id, mana_type, player, tapped, events);
     }
-
-    Ok(())
 }
 
 /// CR 605.3b: Mana abilities resolve immediately unless paying the cost requires a choice.
@@ -227,6 +244,27 @@ pub fn activate_mana_ability(
         });
     }
 
+    // CR 605.3b: If the production has multiple color options and no override
+    // was provided (manual activation, not auto-tap), pay cost then pause for
+    // player choice. Cost is paid before the prompt so `handle_choose_mana_color`
+    // only needs to produce mana (consistent with the tap-creature chain path).
+    if color_override.is_none() {
+        if let Some(options) = mana_color_choice_options(&ability_def.effect, state, source_id) {
+            pay_mana_ability_cost(state, source_id, player, &ability_def.cost, events)?;
+            return Ok(WaitingFor::ChooseManaColor {
+                player,
+                color_options: options,
+                pending_mana_ability: Box::new(PendingManaAbility {
+                    player,
+                    source_id,
+                    ability_index,
+                    color_override: None,
+                    resume,
+                }),
+            });
+        }
+    }
+
     resolve_mana_ability(
         state,
         source_id,
@@ -236,6 +274,67 @@ pub fn activate_mana_ability(
         color_override,
     )?;
     Ok(resume_waiting_for(player, resume))
+}
+
+/// Extract the color options from a mana ability that requires a player choice.
+/// Returns `Some(colors)` when 2+ colors are available, `None` otherwise.
+fn mana_color_choice_options(
+    effect: &Effect,
+    state: &GameState,
+    source_id: ObjectId,
+) -> Option<Vec<ManaType>> {
+    let Effect::Mana { produced, .. } = effect else {
+        return None;
+    };
+    match produced {
+        ManaProduction::AnyOneColor { color_options, .. } if color_options.len() > 1 => {
+            Some(color_options.iter().map(mana_color_to_type).collect())
+        }
+        ManaProduction::ChoiceAmongExiledColors { source } => {
+            let options = super::effects::mana::exiled_color_options(state, *source, source_id);
+            if options.len() > 1 {
+                Some(options)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// CR 605.3b: Complete the mana color choice. Cost was already paid before the
+/// prompt (either in `activate_mana_ability` or `handle_tap_creatures_for_mana_ability`),
+/// so this only produces mana of the chosen color.
+pub fn handle_choose_mana_color(
+    state: &mut GameState,
+    pending: &PendingManaAbility,
+    color_options: &[ManaType],
+    chosen_color: ManaType,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if !color_options.contains(&chosen_color) {
+        return Err(EngineError::InvalidAction(
+            "Chosen color is not among the legal options".to_string(),
+        ));
+    }
+
+    let ability_def = state
+        .objects
+        .get(&pending.source_id)
+        .and_then(|obj| obj.abilities.get(pending.ability_index))
+        .cloned()
+        .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
+
+    produce_mana_from_ability(
+        state,
+        pending.source_id,
+        pending.player,
+        &ability_def,
+        events,
+        Some(chosen_color),
+    );
+
+    Ok(resume_waiting_for(pending.player, pending.resume.clone()))
 }
 
 /// CR 118.3 / CR 605.3b: Complete the tapped-creature choice, then resolve the mana ability.
@@ -268,6 +367,35 @@ pub fn handle_tap_creatures_for_mana_ability(
         .and_then(|obj| obj.abilities.get(pending.ability_index))
         .cloned()
         .ok_or_else(|| EngineError::InvalidAction("Mana ability no longer exists".to_string()))?;
+
+    // If no color_override and production needs a choice, pay cost then pause.
+    if pending.color_override.is_none() {
+        if let Some(options) =
+            mana_color_choice_options(&ability_def.effect, state, pending.source_id)
+        {
+            // Pay the tap-creature cost portion first, then pause for color choice.
+            let mut chosen_iter = chosen.iter().copied();
+            pay_mana_ability_cost_with_choices(
+                state,
+                pending.source_id,
+                pending.player,
+                &ability_def.cost,
+                events,
+                &mut chosen_iter,
+            )?;
+            return Ok(WaitingFor::ChooseManaColor {
+                player: pending.player,
+                color_options: options,
+                pending_mana_ability: Box::new(PendingManaAbility {
+                    player: pending.player,
+                    source_id: pending.source_id,
+                    ability_index: pending.ability_index,
+                    color_override: None,
+                    resume: pending.resume.clone(),
+                }),
+            });
+        }
+    }
 
     resolve_mana_ability_with_tapped_creatures(
         state,
@@ -1491,5 +1619,153 @@ mod tests {
         let mut head = mana_producing_resolved();
         head.else_ability = Some(Box::new(else_branch));
         assert!(!is_triggered_mana_ability(&head, Some(&mana_added_event())));
+    }
+
+    #[test]
+    fn activate_any_one_color_pauses_for_choice() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Spider Manifestation".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        obj.entered_battlefield_turn = Some(1);
+        let ability = make_mana_ability(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            color_options: vec![ManaColor::Red, ManaColor::Green],
+            contribution: ManaContribution::Base,
+        });
+        obj.abilities.push(ability.clone());
+        state.turn_number = 3;
+
+        let mut events = Vec::new();
+        let result = activate_mana_ability(
+            &mut state,
+            source,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            None,
+        )
+        .unwrap();
+
+        match &result {
+            WaitingFor::ChooseManaColor {
+                player,
+                color_options,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(color_options, &[ManaType::Red, ManaType::Green]);
+            }
+            _ => panic!("expected ChooseManaColor, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn handle_choose_mana_color_produces_chosen_color() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Spider Manifestation".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        let ability = make_mana_ability(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            color_options: vec![ManaColor::Red, ManaColor::Green],
+            contribution: ManaContribution::Base,
+        });
+        obj.abilities.push(ability);
+
+        let pending = PendingManaAbility {
+            player: PlayerId(0),
+            source_id: source,
+            ability_index: 0,
+            color_override: None,
+            resume: ManaAbilityResume::Priority,
+        };
+        let color_options = vec![ManaType::Red, ManaType::Green];
+        let mut events = Vec::new();
+
+        let result = handle_choose_mana_color(
+            &mut state,
+            &pending,
+            &color_options,
+            ManaType::Green,
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(
+            matches!(result, WaitingFor::Priority { .. }),
+            "should resume to Priority"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Green),
+            1,
+            "should have 1 green mana"
+        );
+        assert_eq!(
+            state.players[0].mana_pool.count_color(ManaType::Red),
+            0,
+            "should have 0 red mana"
+        );
+    }
+
+    #[test]
+    fn color_override_bypasses_choice() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Spider Manifestation".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&source).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+        obj.entered_battlefield_turn = Some(1);
+        let ability = make_mana_ability(ManaProduction::AnyOneColor {
+            count: QuantityExpr::Fixed { value: 1 },
+            color_options: vec![ManaColor::Red, ManaColor::Green],
+            contribution: ManaContribution::Base,
+        });
+        obj.abilities.push(ability.clone());
+        state.turn_number = 3;
+
+        let mut events = Vec::new();
+        let result = activate_mana_ability(
+            &mut state,
+            source,
+            PlayerId(0),
+            0,
+            &ability,
+            &mut events,
+            ManaAbilityResume::Priority,
+            Some(ManaType::Green),
+        )
+        .unwrap();
+
+        assert!(
+            matches!(result, WaitingFor::Priority { .. }),
+            "auto-tap with color_override should resolve immediately"
+        );
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
     }
 }

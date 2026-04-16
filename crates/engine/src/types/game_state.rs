@@ -1034,6 +1034,13 @@ pub enum WaitingFor {
         creatures: Vec<ObjectId>,
         pending_mana_ability: Box<PendingManaAbility>,
     },
+    /// CR 605.3b: AnyOneColor mana ability with multiple color options — player
+    /// must choose which color to produce before mana is added to the pool.
+    ChooseManaColor {
+        player: PlayerId,
+        color_options: Vec<crate::types::mana::ManaType>,
+        pending_mana_ability: Box<PendingManaAbility>,
+    },
     /// CR 702.138a: Player must choose cards to exile from graveyard as escape cost.
     ExileFromGraveyardForCost {
         player: PlayerId,
@@ -1319,6 +1326,7 @@ impl WaitingFor {
             | WaitingFor::SacrificeForCost { player, .. }
             | WaitingFor::TapCreaturesForSpellCost { player, .. }
             | WaitingFor::TapCreaturesForManaAbility { player, .. }
+            | WaitingFor::ChooseManaColor { player, .. }
             | WaitingFor::ExileFromGraveyardForCost { player, .. }
             | WaitingFor::CollectEvidenceChoice { player, .. }
             | WaitingFor::HarmonizeTapChoice { player, .. }
