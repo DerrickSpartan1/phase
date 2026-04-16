@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import type { AttackTarget, ObjectId, PlayerId } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
 
@@ -168,5 +169,5 @@ function attackTargetsEqual(a: AttackTarget, b: AttackTarget): boolean {
 function getPlayerLabel(playerId: PlayerId, myId: PlayerId, teamBased: boolean): string {
   if (playerId === myId) return "You";
   if (teamBased && Math.floor(playerId / 2) === Math.floor(myId / 2)) return "Ally";
-  return `Player ${playerId + 1}`;
+  return getPlayerDisplayName(playerId, myId);
 }

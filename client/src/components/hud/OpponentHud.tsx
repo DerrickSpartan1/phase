@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { PlayerId } from "../../adapter/types.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { useMultiplayerStore } from "../../stores/multiplayerStore.ts";
+import { getOpponentDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
@@ -95,7 +95,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     const isDisconnected = isOnline && disconnectedPlayers.has(opponentId);
     const isOpponentPhasedOut =
       gameState?.players[opponentId]?.status?.type === "PhasedOut";
-    const label = opponentName ?? `Opp ${opponentId + 1}`;
+    const label = opponentName ?? getOpponentDisplayName(opponentId);
 
     const hudTone = isValidTarget ? "cyan" : isOpponentTurn ? "rose" : "neutral";
 
@@ -131,7 +131,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
 
   // Multiplayer: tabbed opponent selector
   const focusedId = focusedOpponent ?? liveOpponents[0];
-  const targetLabel = kickTarget != null ? `Opp ${kickTarget + 1}` : "";
+  const targetLabel = kickTarget != null ? getOpponentDisplayName(kickTarget) : "";
 
   return (
     <div className="flex items-center justify-center gap-2 px-2 py-1">
@@ -221,7 +221,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
   const speed = player.speed ?? 0;
   const isPhasedOut = player.status?.type === "PhasedOut";
 
-  const label = ally ? "Ally" : `Opp ${playerId + 1}`;
+  const label = ally ? "Ally" : getOpponentDisplayName(playerId);
 
   const borderClass = isValidTarget
     ? "border-cyan-400/45 bg-cyan-950/45 ring-1 ring-cyan-300/45 shadow-[0_14px_28px_rgba(34,211,238,0.16)] cursor-pointer"

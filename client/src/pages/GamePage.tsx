@@ -74,6 +74,8 @@ import { useUiStore } from "../stores/uiStore.ts";
 import { usePreferencesStore } from "../stores/preferencesStore.ts";
 import {
   FORMAT_DEFAULTS,
+  getOpponentDisplayName,
+  getPlayerDisplayName,
   playerToastKey,
   useMultiplayerStore,
 } from "../stores/multiplayerStore.ts";
@@ -203,7 +205,7 @@ export function GamePage() {
         const myId = useMultiplayerStore.getState().activePlayerId ?? 0;
         const oppId = myId === 0 ? 1 : 0;
         useMultiplayerStore.getState().setPlayerDisconnected(oppId);
-        useMultiplayerStore.getState().showToast("Opponent disconnected", {
+        useMultiplayerStore.getState().showToast(`${getOpponentDisplayName(oppId)} disconnected`, {
           countdownSeconds: event.graceSeconds,
           key: playerToastKey(oppId),
         });
@@ -274,7 +276,7 @@ export function GamePage() {
         setOpponentDisconnected(true);
         useMultiplayerStore.getState().setPlayerDisconnected(event.playerId);
         useMultiplayerStore.getState().showToast(
-          `Player ${event.playerId + 1} disconnected`,
+          `${getPlayerDisplayName(event.playerId)} disconnected`,
           {
             countdownSeconds: event.graceSeconds,
             key: playerToastKey(event.playerId),
@@ -292,7 +294,7 @@ export function GamePage() {
         setOpponentDisconnected(true);
         useMultiplayerStore.getState().setPlayerDisconnected(event.disconnectedPlayer);
         useMultiplayerStore.getState().showToast(
-          `Game paused — Player ${event.disconnectedPlayer + 1} disconnected`,
+          `Game paused — ${getPlayerDisplayName(event.disconnectedPlayer)} disconnected`,
           {
             countdownSeconds: event.timeoutSeconds,
             key: playerToastKey(event.disconnectedPlayer),
@@ -336,7 +338,7 @@ export function GamePage() {
           playerId: event.playerId,
           gracePeriodMs: event.gracePeriodMs,
         });
-        setPauseReason(`Player ${event.playerId + 1} disconnected`);
+        setPauseReason(`${getPlayerDisplayName(event.playerId)} disconnected`);
         break;
       case "playerReconnected":
         // Dismiss the disconnect modal if it was waiting on this player.
@@ -1003,7 +1005,7 @@ function GamePageContent({
       {isP2PHost && disconnectChoice !== null && (
         <DisconnectChoiceDialog
           isOpen
-          playerLabel={`Opp ${disconnectChoice.playerId + 1}`}
+          playerLabel={getOpponentDisplayName(disconnectChoice.playerId)}
           gracePeriodMs={disconnectChoice.gracePeriodMs}
           onPauseAndWait={() => {
             const adapter = useGameStore.getState().adapter as

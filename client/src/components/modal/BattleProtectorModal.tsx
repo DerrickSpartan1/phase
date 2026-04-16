@@ -5,6 +5,7 @@ import type { PlayerId, WaitingFor } from "../../adapter/types.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 
 type BattleProtectorChoice = Extract<WaitingFor, { type: "BattleProtectorChoice" }>;
@@ -68,7 +69,7 @@ function BattleProtectorContent({ data }: { data: BattleProtectorChoice["data"] 
               whileHover={{ scale: 1.05 }}
               onClick={() => setSelected(isSelected ? null : candidateId)}
             >
-              {`Player ${candidateId + 1}`}
+              {getPlayerDisplayName(candidateId)}
             </motion.button>
           );
         })}

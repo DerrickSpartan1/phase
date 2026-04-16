@@ -2,6 +2,7 @@ import { useCallback, useState } from "react";
 
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import type { GameObject, TargetRef, WaitingFor } from "../../adapter/types.ts";
 import { ChoiceOverlay, ConfirmButton } from "./ChoiceOverlay.tsx";
 import { gameButtonClass } from "../ui/buttonStyles.ts";
@@ -12,7 +13,7 @@ function targetLabel(target: TargetRef, objects: Record<string, GameObject> | un
   if ("Object" in target) {
     return objects?.[String(target.Object)]?.name ?? `Object ${target.Object}`;
   }
-  return `Player ${target.Player}`;
+  return getPlayerDisplayName(target.Player);
 }
 
 function targetKey(target: TargetRef): string {

@@ -8,7 +8,7 @@ import { MAX_UNDO_HISTORY, UNDOABLE_ACTIONS } from "../constants/game";
 import { debugLog } from "./debugLog";
 import { useAnimationStore } from "../stores/animationStore";
 import { isMultiplayerMode, useGameStore, legalResultState, saveGame, saveCheckpoints } from "../stores/gameStore";
-import { useMultiplayerStore } from "../stores/multiplayerStore";
+import { getOpponentDisplayName } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useUiStore } from "../stores/uiStore";
 
@@ -112,16 +112,12 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   if (turnEvent && "data" in turnEvent) {
     const turnPlayerId = (turnEvent.data as { player_id: number }).player_id;
     const myId = getPlayerId();
-    const gamePlayerCount = useGameStore.getState().gameState?.players.length ?? 2;
     let bannerText: string;
     if (turnPlayerId === myId) {
       bannerText = "YOUR TURN";
-    } else if (gamePlayerCount > 2) {
-      const oppName = useMultiplayerStore.getState().opponentDisplayName;
-      bannerText = `${oppName ?? `OPP ${turnPlayerId + 1}`}'S TURN`;
     } else {
-      const oppName = useMultiplayerStore.getState().opponentDisplayName;
-      bannerText = oppName ? `${oppName}'S TURN` : "THEIR TURN";
+      const oppName = getOpponentDisplayName(turnPlayerId);
+      bannerText = `${oppName.toUpperCase()}'S TURN`;
     }
     useUiStore.getState().flashTurnBanner(bannerText);
   }
@@ -277,16 +273,12 @@ async function processRemoteUpdateInner(
   if (turnEvent && "data" in turnEvent) {
     const turnPlayerId = (turnEvent.data as { player_id: number }).player_id;
     const myId = getPlayerId();
-    const gamePlayerCount = useGameStore.getState().gameState?.players.length ?? 2;
     let bannerText: string;
     if (turnPlayerId === myId) {
       bannerText = "YOUR TURN";
-    } else if (gamePlayerCount > 2) {
-      const oppName = useMultiplayerStore.getState().opponentDisplayName;
-      bannerText = `${oppName ?? `OPP ${turnPlayerId + 1}`}'S TURN`;
     } else {
-      const oppName = useMultiplayerStore.getState().opponentDisplayName;
-      bannerText = oppName ? `${oppName}'S TURN` : "THEIR TURN";
+      const oppName = getOpponentDisplayName(turnPlayerId);
+      bannerText = `${oppName.toUpperCase()}'S TURN`;
     }
     useUiStore.getState().flashTurnBanner(bannerText);
   }

@@ -1,7 +1,7 @@
 import type { GameAction, GameEvent, GameState } from "../adapter/types";
 
 export type P2PMessage =
-  | { type: "guest_deck"; deckData: unknown }
+  | { type: "guest_deck"; deckData: unknown; displayName?: string }
   | {
       type: "game_setup";
       assignedPlayerId: number;
@@ -10,6 +10,7 @@ export type P2PMessage =
       events: GameEvent[];
       legalActions: GameAction[];
       autoPassRecommended?: boolean;
+      playerNames?: Record<number, string>;
     }
   | { type: "action"; senderPlayerId: number; action: GameAction }
   | {

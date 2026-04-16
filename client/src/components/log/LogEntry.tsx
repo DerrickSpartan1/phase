@@ -1,4 +1,5 @@
 import type { GameLogEntry, LogSegment } from "../../adapter/types.ts";
+import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { categoryColorClass } from "../../viewmodel/logFormatting.ts";
 
 const PLAYER_COLORS = [
@@ -29,7 +30,7 @@ function renderSegment(segment: LogSegment, index: number) {
     case "PlayerName":
       return (
         <span key={index} className={`font-semibold ${playerColor(segment.value.player_id)}`}>
-          {segment.value.name}
+          {getPlayerDisplayName(segment.value.player_id)}
         </span>
       );
     case "Number":

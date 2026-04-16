@@ -241,6 +241,9 @@ export function GameProvider({
 
     const isOnline = mode === "online";
     const isP2P = mode === "p2p-host" || mode === "p2p-join";
+    if (!isOnline && !isP2P) {
+      useMultiplayerStore.setState({ playerNames: new Map() });
+    }
     const hasSession = loadWsSession() !== null;
     const isReconnect = isOnline && !joinCode && hasSession;
 
@@ -281,6 +284,12 @@ export function GameProvider({
         p2pUnsubscribe = adapter.onEvent((event) => {
           if (event.type === "playerIdentity") {
             useMultiplayerStore.getState().setActivePlayerId(event.playerId);
+            if (event.playerNames) {
+              const names = new Map(Object.entries(event.playerNames).map(
+                ([k, v]) => [Number(k), v] as [number, string],
+              ));
+              useMultiplayerStore.setState({ playerNames: names });
+            }
           }
           if (event.type === "stateChanged") {
             processRemoteUpdate(event.state, event.events, event.legalResult);
@@ -400,6 +409,7 @@ export function GameProvider({
               {
                 gameId,
                 roomCode: host.roomCode,
+                hostDisplayName: useMultiplayerStore.getState().displayName || undefined,
                 resumeData: isResume && savedState && savedSession
                   ? { state: savedState, session: savedSession }
                   : undefined,
@@ -448,6 +458,7 @@ export function GameProvider({
               hostPeerId,
               conn,
               existing?.playerToken,
+              useMultiplayerStore.getState().displayName || undefined,
             );
             p2pAdapter = adapter;
             hostPeerHandle = null;

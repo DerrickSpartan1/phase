@@ -2,6 +2,7 @@ import { useCallback } from "react";
 
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
 import { PhaseIndicatorLeft, PhaseIndicatorRight } from "../controls/PhaseStopBar.tsx";
@@ -43,7 +44,7 @@ export function PlayerHud() {
     >
       <PhaseIndicatorLeft />
       <HudPlate
-        label={`Player ${playerId + 1}`}
+        label={getPlayerDisplayName(playerId)}
         tone={hudTone}
         onClick={isValidTarget ? handleTargetClick : undefined}
         trailing={

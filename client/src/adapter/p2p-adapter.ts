@@ -12,7 +12,6 @@ import type {
   PlayerId,
   SubmitResult,
 } from "./types";
-import { getPlayerDisplayName } from "../stores/multiplayerStore";
 
 import { AdapterError } from "./types";
 import { WasmAdapter } from "./wasm-adapter";
@@ -33,7 +32,7 @@ import { saveP2PSession } from "../services/p2pSession";
  * handlers — the UI never sees wire types.
  */
 export type P2PAdapterEvent =
-  | { type: "playerIdentity"; playerId: PlayerId }
+  | { type: "playerIdentity"; playerId: PlayerId; playerNames?: Record<number, string> }
   | { type: "roomCreated"; roomCode: string }
   | { type: "waitingForGuest" }
   | { type: "guestConnected" }
@@ -192,6 +191,8 @@ export class P2PHostAdapter implements EngineAdapter {
   private gameStarted = false;
   private guestDeckResolvers: Array<() => void> = [];
   private hostConnectionUnsub: (() => void) | null = null;
+  private guestNames = new Map<PlayerId, string>();
+  private hostDisplayName: string | null = null;
 
   /**
    * Identifier used as the key when this adapter writes its resume
@@ -257,6 +258,7 @@ export class P2PHostAdapter implements EngineAdapter {
     persistence?: {
       gameId: string;
       roomCode: string;
+      hostDisplayName?: string;
       resumeData?: { state: GameState; session: PersistedP2PHostSession };
     },
   ) {
@@ -276,6 +278,7 @@ export class P2PHostAdapter implements EngineAdapter {
     }
     this.gameId = persistence?.gameId ?? null;
     this.roomCode = persistence?.roomCode ?? null;
+    this.hostDisplayName = persistence?.hostDisplayName ?? null;
     this.isResume = persistence?.resumeData !== undefined;
 
     if (persistence?.resumeData) {
@@ -488,7 +491,7 @@ export class P2PHostAdapter implements EngineAdapter {
         this.handleReconnect(session, msg.playerToken);
       } else if (msg.type === "guest_deck") {
         traceAdapter("Host", "first-message", { type: msg.type });
-        this.handleNewGuest(session, msg.deckData);
+        this.handleNewGuest(session, msg.deckData, msg.displayName);
       } else {
         traceAdapter("Host", "first-message", { type: msg.type });
         // Unexpected first message — reject.
@@ -501,7 +504,7 @@ export class P2PHostAdapter implements EngineAdapter {
     });
   }
 
-  private handleNewGuest(session: PeerSession, deckData: unknown): void {
+  private handleNewGuest(session: PeerSession, deckData: unknown, displayName?: string): void {
     if (this.gameStarted) {
       // Lobby is closed; reject. (Reconnect should have been used instead.)
       session.send({ type: "kick", reason: "Game already in progress" });
@@ -523,6 +526,7 @@ export class P2PHostAdapter implements EngineAdapter {
     this.playerTokens.set(pid, token);
     this.guestSessions.set(pid, session);
     this.guestDecks.set(pid, deckData);
+    if (displayName) this.guestNames.set(pid, displayName);
     this.saveSession();
 
     // Route subsequent messages from this guest.
@@ -582,7 +586,10 @@ export class P2PHostAdapter implements EngineAdapter {
     // a reload can resume mid-game; before this, reload goes back to
     // the lobby and guests must rejoin fresh.
     this.saveSession();
-    this.emit({ type: "playerIdentity", playerId: 0 });
+    const allNames: Record<number, string> = {};
+    if (this.hostDisplayName) allNames[0] = this.hostDisplayName;
+    for (const [pid, name] of this.guestNames) allNames[pid] = name;
+    this.emit({ type: "playerIdentity", playerId: 0, playerNames: allNames });
 
     // Tear down the public lobby entry only *after* the engine is live.
     // If the earlier `initializeGame` had thrown (deck resolution, WASM
@@ -612,6 +619,7 @@ export class P2PHostAdapter implements EngineAdapter {
         events: result.events,
         legalActions: legal.actions,
         autoPassRecommended: legal.autoPassRecommended,
+        playerNames: allNames,
       });
     }
 
@@ -1152,6 +1160,7 @@ export class P2PGuestAdapter implements EngineAdapter {
     private readonly hostPeerId: string,
     private readonly initialConn: DataConnection,
     existingPlayerToken?: string,
+    private readonly displayName?: string,
   ) {
     if (existingPlayerToken) {
       this.playerToken = existingPlayerToken;
@@ -1182,7 +1191,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       this.session!.send({ type: "reconnect", playerToken: this.playerToken });
     } else {
       traceAdapter("Guest", "send-guest-deck", { hostPeerId: this.hostPeerId });
-      this.session!.send({ type: "guest_deck", deckData: this.deckData });
+      this.session!.send({ type: "guest_deck", deckData: this.deckData, displayName: this.displayName });
     }
   }
 
@@ -1289,7 +1298,7 @@ export class P2PGuestAdapter implements EngineAdapter {
           actions: msg.legalActions,
           autoPassRecommended: msg.autoPassRecommended ?? false,
         };
-        this.emit({ type: "playerIdentity", playerId: msg.assignedPlayerId });
+        this.emit({ type: "playerIdentity", playerId: msg.assignedPlayerId, playerNames: msg.playerNames });
         this.settleGameSetup({ events: msg.events });
         break;
       }
@@ -1375,7 +1384,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       case "player_disconnected": {
         this.emit({
           type: "opponentDisconnected",
-          reason: `${getPlayerDisplayName(msg.playerId)} disconnected`,
+          reason: `Player ${msg.playerId + 1} disconnected`,
         });
         break;
       }

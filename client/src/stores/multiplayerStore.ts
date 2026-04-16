@@ -169,6 +169,8 @@ interface MultiplayerState {
   playerSlots: PlayerSlot[];
   spectators: string[];
   isSpectator: boolean;
+  // PlayerId → display name, captured from playerSlots at game start (ephemeral — not persisted)
+  playerNames: Map<number, string>;
   // Per-player connection tracking (ephemeral — not persisted)
   disconnectedPlayers: Set<number>;
   // Action round-trip tracking (ephemeral — not persisted)
@@ -402,6 +404,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       playerSlots: [],
       spectators: [],
       isSpectator: false,
+      playerNames: new Map(),
       disconnectedPlayers: new Set(),
       actionPending: false,
       latencyMs: null,
@@ -417,7 +420,15 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       setServerAddress: (address) => set({ serverAddress: address }),
       setConnectionStatus: (status) => set({ connectionStatus: status }),
       setActivePlayerId: (id) => set({ activePlayerId: id }),
-      setOpponentDisplayName: (name) => set({ opponentDisplayName: name }),
+      setOpponentDisplayName: (name) => {
+        const activeId = get().activePlayerId;
+        const oppId = activeId != null ? (activeId === 0 ? 1 : 0) : null;
+        const next = new Map(get().playerNames);
+        if (name && oppId != null) next.set(oppId, name);
+        const selfName = get().displayName;
+        if (selfName && activeId != null) next.set(activeId, selfName);
+        set({ opponentDisplayName: name, playerNames: next });
+      },
       showToast: (message, opts) =>
         set((state) => {
           const key = opts?.key ?? GENERIC_TOAST_KEY;
@@ -523,11 +534,16 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
             const gameId = crypto.randomUUID();
             saveActiveGame({ id: gameId, mode: "online", difficulty: "" });
             useGameStore.setState({ gameId });
+            const names = new Map<number, string>();
+            for (const slot of get().playerSlots) {
+              if (slot.name) names.set(slot.playerId, slot.name);
+            }
             // Reset hosting state FIRST so tile hides, then set route
             set({
               hostGameCode: null,
               hostingStatus: "idle",
               hostSession: null,
+              playerNames: names,
               playerSlots: [],
               pendingGameRoute: `/game/${gameId}?mode=host`,
             });
@@ -851,3 +867,16 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
     },
   ),
 );
+
+export function getPlayerDisplayName(playerId: number, myId?: number): string {
+  if (playerId === myId) return "You";
+  const name = useMultiplayerStore.getState().playerNames.get(playerId);
+  if (name) return name;
+  return `Player ${playerId + 1}`;
+}
+
+export function getOpponentDisplayName(playerId: number): string {
+  const name = useMultiplayerStore.getState().playerNames.get(playerId);
+  if (name) return name;
+  return `Opp ${playerId + 1}`;
+}

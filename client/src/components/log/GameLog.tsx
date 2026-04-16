@@ -2,59 +2,60 @@ import { useEffect, useRef } from "react";
 
 import type { GameEvent } from "../../adapter/types.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
+import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 
 function formatEvent(event: GameEvent): string {
   switch (event.type) {
     case "GameStarted":
       return "Game started";
     case "TurnStarted":
-      return `Turn ${event.data.turn_number} -- Player ${event.data.player_id + 1}`;
+      return `Turn ${event.data.turn_number} -- ${getPlayerDisplayName(event.data.player_id)}`;
     case "PhaseChanged":
       return `Phase: ${event.data.phase}`;
     case "PriorityPassed":
-      return `Player ${event.data.player_id + 1} passed priority`;
+      return `${getPlayerDisplayName(event.data.player_id)} passed priority`;
     case "SpellCast":
-      return `Spell cast by Player ${event.data.controller + 1}`;
+      return `Spell cast by ${getPlayerDisplayName(event.data.controller)}`;
     case "AbilityActivated":
       return `Ability activated (source ${event.data.source_id})`;
     case "ZoneChanged":
       return `Object ${event.data.object_id} moved ${event.data.from} -> ${event.data.to}`;
     case "LifeChanged": {
       const prefix = event.data.amount >= 0 ? "+" : "";
-      return `Player ${event.data.player_id + 1} life: ${prefix}${event.data.amount}`;
+      return `${getPlayerDisplayName(event.data.player_id)} life: ${prefix}${event.data.amount}`;
     }
     case "ManaAdded":
-      return `Player ${event.data.player_id + 1} added ${event.data.mana_type} mana`;
+      return `${getPlayerDisplayName(event.data.player_id)} added ${event.data.mana_type} mana`;
     case "PermanentTapped":
       return `Permanent ${event.data.object_id} tapped`;
     case "PermanentUntapped":
       return `Permanent ${event.data.object_id} untapped`;
     case "PlayerLost":
-      return `Player ${event.data.player_id + 1} lost the game`;
+      return `${getPlayerDisplayName(event.data.player_id)} lost the game`;
     case "MulliganStarted":
       return "Mulligan phase";
     case "CardsDrawn":
-      return `Player ${event.data.player_id + 1} drew ${event.data.count} card(s)`;
+      return `${getPlayerDisplayName(event.data.player_id)} drew ${event.data.count} card(s)`;
     case "CardDrawn":
-      return `Player ${event.data.player_id + 1} drew a card`;
+      return `${getPlayerDisplayName(event.data.player_id)} drew a card`;
     case "LandPlayed":
-      return `Player ${event.data.player_id + 1} played a land`;
+      return `${getPlayerDisplayName(event.data.player_id)} played a land`;
     case "StackPushed":
       return `Object ${event.data.object_id} pushed to stack`;
     case "StackResolved":
       return `Stack entry ${event.data.object_id} resolved`;
     case "Discarded":
-      return `Player ${event.data.player_id + 1} discarded`;
+      return `${getPlayerDisplayName(event.data.player_id)} discarded`;
     case "DamageCleared":
       return `Damage cleared from ${event.data.object_id}`;
     case "GameOver":
       return event.data.winner != null
-        ? `Game over -- Player ${event.data.winner + 1} wins!`
+        ? `Game over -- ${getPlayerDisplayName(event.data.winner)} wins!`
         : "Game over -- Draw";
     case "DamageDealt": {
       const target =
         "Player" in event.data.target
-          ? `Player ${event.data.target.Player + 1}`
+          ? getPlayerDisplayName(event.data.target.Player)
           : `object ${event.data.target.Object}`;
       return `Source ${event.data.source_id} deals ${event.data.amount} damage to ${target}`;
     }
@@ -69,7 +70,7 @@ function formatEvent(event: GameEvent): string {
     case "CreatureDestroyed":
       return `Creature ${event.data.object_id} destroyed`;
     case "PermanentSacrificed":
-      return `Player ${event.data.player_id + 1} sacrificed ${event.data.object_id}`;
+      return `${getPlayerDisplayName(event.data.player_id)} sacrificed ${event.data.object_id}`;
     case "EffectResolved":
       return `Effect ${event.data.kind} resolved`;
     case "AttackersDeclared":
@@ -81,9 +82,9 @@ function formatEvent(event: GameEvent): string {
     case "ReplacementApplied":
       return `Replacement applied: ${event.data.event_type}`;
     case "CompanionRevealed":
-      return `Player ${event.data.player + 1} revealed companion: ${event.data.card_name}`;
+      return `${getPlayerDisplayName(event.data.player)} revealed companion: ${event.data.card_name}`;
     case "CompanionMovedToHand":
-      return `Player ${event.data.player + 1} put companion ${event.data.card_name} into hand`;
+      return `${getPlayerDisplayName(event.data.player)} put companion ${event.data.card_name} into hand`;
     case "PowerToughnessChanged": {
       const d = event.data;
       const sign = (n: number) => (n >= 0 ? `+${n}` : `${n}`);
