@@ -560,29 +560,28 @@ fn strip_article<'a>(text: &'a str, lower: &str) -> &'a str {
 /// "this artifact", "this creature from your hand". Returns the zone (if specified).
 /// Also handles `~` (normalized card name) variants.
 fn try_parse_self_exile_cost(rest: &str) -> Option<Option<Zone>> {
-    let rest = rest.trim();
+    let rest = rest.trim().trim_end_matches('.');
     let is_self = nom_on_lower(rest, rest, |i| {
         value((), alt((tag("this "), tag("~ ")))).parse(i)
     })
     .is_some();
-    // "~ from your graveyard" / "this card from your graveyard"
-    if is_self && rest.ends_with("from your graveyard") {
-        return Some(Some(Zone::Graveyard));
-    }
     // Bare "~" means exile self (normalized card name)
     if rest == "~" {
         return Some(None);
     }
-    // "this card from your hand" / "this creature from your hand"
-    if is_self && (rest.ends_with("from your hand") || rest.ends_with("from your hand.")) {
-        return Some(Some(Zone::Hand));
+    // "<self> from your <zone>" / "<self> in your <zone>" — delegate the trailing zone
+    // phrase to the shared scanner so hand/graveyard/library/exile are all supported
+    // via one combinator with word-boundary safety (rejects "from your graveyardkeeper").
+    if is_self {
+        if let Some((zone, _ctrl, _props)) = super::oracle_target::scan_zone_phrase(rest) {
+            return Some(Some(zone));
+        }
     }
     // "this artifact" / "this creature" / "this enchantment" / "this land" / "this permanent"
     // / "this card" / "this vehicle" (self-exile from battlefield)
     if let Some(((), after_this)) = nom_on_lower(rest, rest, |i| value((), tag("this ")).parse(i)) {
-        let type_word = after_this.trim_end_matches('.');
         if matches!(
-            type_word,
+            after_this,
             "artifact" | "creature" | "enchantment" | "land" | "permanent" | "card" | "vehicle"
         ) {
             return Some(None); // battlefield (implicit)

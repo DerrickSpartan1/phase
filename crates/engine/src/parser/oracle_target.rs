@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till};
-use nom::combinator::value;
+use nom::combinator::{opt, value};
 use nom::Parser;
 
 use crate::types::ability::{
@@ -21,8 +21,8 @@ use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_nom::target as nom_target;
 use super::oracle_quantity::capitalize_first;
 use super::oracle_util::{
-    merge_or_filters, parse_subtype, starts_with_possessive, strip_possessive, TextPair,
-    SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
+    merge_or_filters, parse_subtype, strip_possessive, TextPair, SELF_REF_PARSE_ONLY_PHRASES,
+    SELF_REF_TYPE_PHRASES,
 };
 use super::oracle_warnings::push_warning;
 
@@ -1053,8 +1053,8 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
     }
 
     // Check zone suffix: "card from a graveyard", "card in your graveyard", "from exile", etc.
-    if let Some((zone_prop, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
-        properties.push(zone_prop);
+    if let Some((zone_props, zone_ctrl, consumed)) = parse_zone_suffix(&lower[pos..]) {
+        properties.extend(zone_props);
         pos += consumed;
         // Apply zone-derived controller if we don't already have one
         if controller.is_none() {
@@ -2360,122 +2360,181 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
     None
 }
 
-/// Parse a zone suffix like "card from a graveyard", "from your graveyard", "from exile".
-/// Returns (FilterProp::InZone, optional ControllerRef, bytes consumed).
+/// Preposition introducing a zone phrase. `On` is only legal for `Zone::Battlefield`
+/// (CR 400.1: "on the battlefield"); other zones use `From` / `In`.
+#[derive(Copy, Clone, PartialEq)]
+enum ZonePrep {
+    From,
+    In,
+    On,
+}
+
+/// Qualifier preceding the zone word. Distinguishes ownership-bearing qualifiers
+/// ("an opponent's", "your") from plain determiners ("a", "the") and bare forms.
+/// The `Bare` variant is a zero-width match, so `parse_zone_qual` always succeeds.
+#[derive(Copy, Clone, PartialEq)]
+enum ZoneQual {
+    /// "an opponent's ", "each opponent's " — produces `Owned{Opponent}` per CR 404.2.
+    Opponent,
+    /// "your " — sets `ControllerRef::You` on the parent filter.
+    You,
+    /// "their ", "its owner's ", "that player's ", "defending player's ", "each player's ".
+    /// No ownership constraint emitted; referent is resolved by context upstream.
+    OtherPoss,
+    /// "a ", "the ", or nothing (e.g., "from exile").
+    Plain,
+}
+
+/// Scan `text` for the first zone phrase recognized by `parse_zone_suffix`, trying
+/// position 0 and each subsequent word boundary (space-separated). Returns
+/// `(Zone, Option<ControllerRef>, Vec<FilterProp>)` on the first successful parse.
 ///
-/// Handles:
-/// - Possessive: "from your graveyard", "from their graveyard", "from its owner's graveyard"
-/// - Indefinite: "from a graveyard", "in a graveyard"
-/// - Direct: "from exile", "in exile"
+/// Callers that already know the phrase is at the start should call `parse_zone_suffix`
+/// directly; this scanner is for callers whose input has a subject before the zone
+/// phrase (e.g., conditions like "this creature in your graveyard").
 ///
-/// Skips optional leading "card"/"cards" before zone detection.
-fn parse_zone_suffix(text: &str) -> Option<(FilterProp, Option<ControllerRef>, usize)> {
-    let trimmed = text.trim_start();
-    let leading_ws = text.len() - trimmed.len();
-
-    // Skip optional "card"/"cards" before zone preposition
-    let (after_card, card_skip) = if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("cards ").parse(trimmed)
-    {
-        (rest, "cards ".len())
-    } else if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("card ").parse(trimmed)
-    {
-        (rest, "card ".len())
-    } else {
-        (trimmed, 0)
-    };
-
-    let after_card_lower = after_card.to_lowercase();
-    let zones: &[(&str, &str, Zone)] = &[
-        ("battlefield", "battlefields", Zone::Battlefield),
-        ("graveyard", "graveyards", Zone::Graveyard),
-        ("exile", "exiles", Zone::Exile),
-        ("hand", "hands", Zone::Hand),
-        ("library", "libraries", Zone::Library),
-    ];
-
-    for prep in &["from", "in", "on"] {
-        for &(zone_word, zone_plural, ref zone) in zones {
-            // "on" is only valid for "on the battlefield" — skip other zones.
-            if *prep == "on" && *zone != Zone::Battlefield {
-                continue;
-            }
-            // Possessive: "from your graveyard", "from their graveyard"
-            // Use starts_with_possessive to avoid false matches where "in" is part of "into".
-            if starts_with_possessive(after_card, prep, zone_word) {
-                let pattern = format!("{prep} your {zone_word}");
-                let ctrl = if tag::<_, _, nom_language::error::VerboseError<&str>>(pattern.as_str())
-                    .parse(after_card_lower.as_str())
-                    .is_ok()
-                {
-                    Some(ControllerRef::You)
-                } else {
-                    None
-                };
-                // Find end of the zone word in after_card
-                let zone_end = after_card_lower
-                    .find(zone_word)
-                    .map(|i| i + zone_word.len())
-                    .unwrap_or(after_card.len());
-                return Some((
-                    FilterProp::InZone { zone: *zone },
-                    ctrl,
-                    leading_ws + card_skip + zone_end,
-                ));
-            }
-
-            // Indefinite: "from a graveyard", "in a graveyard"
-            let indef = format!("{prep} a {zone_word}");
-            if tag::<_, _, nom_language::error::VerboseError<&str>>(indef.as_str())
-                .parse(after_card_lower.as_str())
-                .is_ok()
-            {
-                return Some((
-                    FilterProp::InZone { zone: *zone },
-                    None,
-                    leading_ws + card_skip + indef.len(),
-                ));
-            }
-
-            let definite = format!("{prep} the {zone_word}");
-            if tag::<_, _, nom_language::error::VerboseError<&str>>(definite.as_str())
-                .parse(after_card_lower.as_str())
-                .is_ok()
-            {
-                return Some((
-                    FilterProp::InZone { zone: *zone },
-                    None,
-                    leading_ws + card_skip + definite.len(),
-                ));
-            }
-
-            // Direct (no article): "from exile", "in graveyards"
-            for direct in [
-                format!("{prep} {zone_word}"),
-                format!("{prep} {zone_plural}"),
-            ] {
-                if let Ok((rest, _)) =
-                    tag::<_, _, nom_language::error::VerboseError<&str>>(direct.as_str())
-                        .parse(after_card_lower.as_str())
-                {
-                    // Make sure it's not a possessive that we missed — check word boundary
-                    match rest.chars().next() {
-                        None | Some(' ' | ',' | '.') => {
-                            return Some((
-                                FilterProp::InZone { zone: *zone },
-                                None,
-                                leading_ws + card_skip + direct.len(),
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-            }
+/// The returned `Zone` is extracted from the `FilterProp::InZone` entry (always present
+/// in a successful parse), so callers that only need the zone don't have to pattern-match
+/// the returned `Vec<FilterProp>`.
+pub(crate) fn scan_zone_phrase(
+    text: &str,
+) -> Option<(Zone, Option<ControllerRef>, Vec<FilterProp>)> {
+    let mut offset = 0;
+    while offset <= text.len() {
+        if let Some((props, ctrl, _consumed)) = parse_zone_suffix(&text[offset..]) {
+            let zone = props.iter().find_map(|p| match p {
+                FilterProp::InZone { zone } => Some(*zone),
+                _ => None,
+            })?;
+            return Some((zone, ctrl, props));
+        }
+        match text[offset..].find(' ') {
+            Some(i) => offset += i + 1,
+            None => break,
         }
     }
-
     None
+}
+
+/// Parse a zone suffix like "card from a graveyard", "from your graveyard", "from exile".
+///
+/// Combinator structure (BNF): `[ "card" | "cards" ] prep qual zone_word`
+/// - `prep`     ∈ { from, in, on }
+/// - `qual`     ∈ { opponent-poss, your, other-poss, a, the, ε }
+/// - `zone_word`∈ { battlefield(s), graveyard(s), exile(s), hand(s), library/libraries }
+///
+/// Each axis is a single `alt()` — variants are never expanded combinatorially.
+///
+/// Handles (CR 404.2 for opponent/owner semantics):
+/// - Opponent possessive: "from an opponent's graveyard", "from each opponent's graveyard"
+///   → `[Owned{Opponent}, InZone]` so stolen creatures that died are still matched by owner.
+/// - Your: "from your graveyard" → `InZone` + `ControllerRef::You`.
+/// - Other possessive / indefinite / definite / bare: → `InZone` alone.
+pub(crate) fn parse_zone_suffix(
+    text: &str,
+) -> Option<(Vec<FilterProp>, Option<ControllerRef>, usize)> {
+    let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
+    let lower = trimmed.to_lowercase();
+
+    let (rest, (props, ctrl)) = parse_zone_suffix_nom(&lower).ok()?;
+    let consumed = lower.len() - rest.len();
+    Some((props, ctrl, leading_ws + consumed))
+}
+
+fn parse_zone_suffix_nom(
+    i: &str,
+) -> super::oracle_nom::error::OracleResult<'_, (Vec<FilterProp>, Option<ControllerRef>)> {
+    let (i, _) = opt(alt((tag("cards "), tag("card ")))).parse(i)?;
+    let (i, prep) = alt((
+        value(ZonePrep::From, tag("from ")),
+        value(ZonePrep::In, tag("in ")),
+        value(ZonePrep::On, tag("on ")),
+    ))
+    .parse(i)?;
+    let (i, qual) = parse_zone_qual(i)?;
+    let (i, zone) = parse_zone_word(i)?;
+    let (i, _) = peek_zone_boundary(i)?;
+
+    // CR 400.1: only the battlefield is referred to with "on"; "on <other zone>" is not
+    // valid Oracle text, so reject it here rather than emitting a misleading filter.
+    if prep == ZonePrep::On && zone != Zone::Battlefield {
+        return Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                i,
+                nom_language::error::VerboseErrorKind::Context("'on' requires battlefield"),
+            )],
+        }));
+    }
+
+    let out = match qual {
+        ZoneQual::Opponent => (
+            vec![
+                FilterProp::Owned {
+                    controller: ControllerRef::Opponent,
+                },
+                FilterProp::InZone { zone },
+            ],
+            None,
+        ),
+        ZoneQual::You => (vec![FilterProp::InZone { zone }], Some(ControllerRef::You)),
+        ZoneQual::OtherPoss | ZoneQual::Plain => (vec![FilterProp::InZone { zone }], None),
+    };
+    Ok((i, out))
+}
+
+fn parse_zone_qual(i: &str) -> super::oracle_nom::error::OracleResult<'_, ZoneQual> {
+    alt((
+        value(
+            ZoneQual::Opponent,
+            alt((tag("an opponent's "), tag("each opponent's "))),
+        ),
+        value(ZoneQual::You, tag("your ")),
+        value(
+            ZoneQual::OtherPoss,
+            alt((
+                tag("their "),
+                tag("its owner's "),
+                tag("that player's "),
+                tag("defending player's "),
+                tag("each player's "),
+            )),
+        ),
+        value(ZoneQual::Plain, alt((tag("a "), tag("the ")))),
+        // Bare form (e.g., "from exile"): zero-width match so the zone_word combinator runs next.
+        value(ZoneQual::Plain, tag("")),
+    ))
+    .parse(i)
+}
+
+fn parse_zone_word(i: &str) -> super::oracle_nom::error::OracleResult<'_, Zone> {
+    // Longer (plural) variants precede singular so `tag` doesn't prefix-match "graveyard"
+    // out of "graveyards" and leave a stray "s" that peek_zone_boundary would reject.
+    alt((
+        value(
+            Zone::Battlefield,
+            alt((tag("battlefields"), tag("battlefield"))),
+        ),
+        value(Zone::Graveyard, alt((tag("graveyards"), tag("graveyard")))),
+        value(Zone::Exile, alt((tag("exiles"), tag("exile")))),
+        value(Zone::Hand, alt((tag("hands"), tag("hand")))),
+        value(Zone::Library, alt((tag("libraries"), tag("library")))),
+    ))
+    .parse(i)
+}
+
+/// Peek that the next character is a word boundary (end-of-string, space, comma, period).
+/// Prevents matches like "graveyardkeeper" from succeeding as "graveyard".
+fn peek_zone_boundary(i: &str) -> super::oracle_nom::error::OracleResult<'_, ()> {
+    match i.chars().next() {
+        None | Some(' ' | ',' | '.') => Ok((i, ())),
+        _ => Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                i,
+                nom_language::error::VerboseErrorKind::Context("zone word boundary required"),
+            )],
+        })),
+    }
 }
 
 #[cfg(test)]
@@ -4893,6 +4952,85 @@ mod tests {
                     zone: Zone::Graveyard,
                 },
             ]))
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn target_card_from_an_opponents_graveyard() {
+        // Lord Skitter, Sewer King: "exile up to one target card from an opponent's graveyard"
+        // Uses Owned{Opponent} (checks obj.owner) so stolen creatures that died and went to
+        // their owner's graveyard are correctly included per CR 404.2.
+        let (filter, rest) = parse_target("target card from an opponent's graveyard");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Card],
+                controller: None,
+                properties: vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::Opponent,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ],
+            })
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn scan_zone_phrase_finds_trailing_zone_after_subject() {
+        // "this card is in your graveyard" — scanner must skip "this card is" and
+        // find the zone phrase at a later word boundary.
+        let (zone, ctrl, _props) = scan_zone_phrase("this card is in your graveyard").unwrap();
+        assert_eq!(zone, Zone::Graveyard);
+        assert_eq!(ctrl, Some(ControllerRef::You));
+    }
+
+    #[test]
+    fn scan_zone_phrase_finds_exile_and_hand() {
+        // Delegation from oracle_condition now picks up non-graveyard zones, which
+        // SourceInZone supports uniformly — lock in that behavior.
+        assert_eq!(
+            scan_zone_phrase("~ in exile").map(|(z, _, _)| z),
+            Some(Zone::Exile)
+        );
+        assert_eq!(
+            scan_zone_phrase("this card from your hand").map(|(z, _, _)| z),
+            Some(Zone::Hand)
+        );
+    }
+
+    #[test]
+    fn scan_zone_phrase_returns_none_without_zone() {
+        assert!(scan_zone_phrase("this creature is attacking").is_none());
+        assert!(scan_zone_phrase("you control a legendary creature").is_none());
+        // Word-boundary safety: "graveyardkeeper" must not match as "graveyard".
+        assert!(scan_zone_phrase("from your graveyardkeeper").is_none());
+    }
+
+    #[test]
+    fn target_card_from_each_opponents_graveyard() {
+        // Regression: "each opponent's" is in POSSESSIVES, so without the dedicated
+        // opponent branch it would fall through to the generic possessive arm with
+        // no ownership constraint. Mirrors the "an opponent's" case per CR 404.2.
+        let (filter, rest) = parse_target("target card from each opponent's graveyard");
+        assert_eq!(
+            filter,
+            TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Card],
+                controller: None,
+                properties: vec![
+                    FilterProp::Owned {
+                        controller: ControllerRef::Opponent,
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ],
+            })
         );
         assert_eq!(rest, "");
     }

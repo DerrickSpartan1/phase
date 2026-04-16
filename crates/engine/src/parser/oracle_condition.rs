@@ -88,20 +88,12 @@ fn parse_source_condition(text: &str) -> Option<ParsedCondition> {
     {
         return None;
     }
-    // Zone-based source conditions: "from your graveyard" or "[subject] in your graveyard"
-    if tag::<_, _, VerboseError<&str>>("from your")
-        .parse(text)
-        .is_ok()
-        && text.contains("graveyard")
-    {
-        return Some(ParsedCondition::SourceInZone {
-            zone: Zone::Graveyard,
-        });
-    }
-    if text.contains("in your graveyard") {
-        return Some(ParsedCondition::SourceInZone {
-            zone: Zone::Graveyard,
-        });
+    // Zone-based source conditions: "from your graveyard", "[subject] in your graveyard",
+    // "in exile", "from your hand", etc. Delegate to the shared zone-phrase scanner so
+    // the full zone vocabulary (graveyard/hand/exile/library/battlefield) is covered
+    // uniformly with word-boundary safety and the combinator-mandated parse path.
+    if let Some((zone, _ctrl, _props)) = super::oracle_target::scan_zone_phrase(text) {
+        return Some(ParsedCondition::SourceInZone { zone });
     }
     // Source state: scan for state keywords after the subject using nom at word boundaries
     if let Ok((_, condition)) = scan_source_state(text) {
