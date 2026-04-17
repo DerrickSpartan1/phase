@@ -4,7 +4,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 import { menuButtonClass } from "./buttonStyles";
 import { STORAGE_KEY_PREFIX, listSavedDeckNames, stampDeckMeta } from "../../constants/storage";
-import { detectAndParseDeck } from "../../services/deckParser";
+import { detectAndParseDeck, resolveCommander } from "../../services/deckParser";
 
 type ImportTab = "paste" | "file";
 
@@ -20,10 +20,10 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
   const [deckName, setDeckName] = useState("");
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handlePasteImport = () => {
+  const handlePasteImport = async () => {
     const name = deckName.trim();
     if (!name || !pasteText.trim()) return;
-    const deck = detectAndParseDeck(pasteText);
+    const deck = await resolveCommander(detectAndParseDeck(pasteText));
     localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(deck));
     stampDeckMeta(name);
     const names = listSavedDeckNames();
@@ -35,9 +35,9 @@ export function ImportDeckModal({ open, onClose, onImported }: ImportDeckModalPr
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       const content = reader.result as string;
-      const deck = detectAndParseDeck(content);
+      const deck = await resolveCommander(detectAndParseDeck(content));
       const name = file.name.replace(/\.(dck|dec|txt)$/i, "");
       localStorage.setItem(STORAGE_KEY_PREFIX + name, JSON.stringify(deck));
       stampDeckMeta(name);

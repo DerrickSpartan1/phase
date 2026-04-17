@@ -1,3 +1,5 @@
+import { isCardCommanderEligible } from "./engineRuntime";
+
 export interface DeckEntry {
   count: number;
   name: string;
@@ -14,29 +16,57 @@ type DeckSection = "main" | "sideboard" | "commander" | "companion";
 const SIMPLE_DECK_LINE_PATTERN = /^\d+x?\s+.+$/;
 const BASIC_LANDS = new Set(["Plains", "Island", "Swamp", "Mountain", "Forest"]);
 
+// Archidekt / Moxfield category annotations on an individual card line:
+//   "1 Zimone (SOC) 10 [Commander {top}]"  /  "1x Zimone *CMDR*"  /  "[Companion]"
+const COMMANDER_ANNOTATION_RE = /\s*(?:\[Commander(?:\s*\{[^}]*\})?\]|\*CMDR\*|\*Commander\*)\s*$/i;
+const COMPANION_ANNOTATION_RE = /\s*(?:\[Companion(?:\s*\{[^}]*\})?\]|\*Companion\*)\s*$/i;
+
+// "Commanders" is the section label Archidekt uses when exporting with categories.
 function getNamedSection(line: string): DeckSection | null {
   const normalized = line.trim().toLowerCase();
-  if (normalized === "deck" || normalized === "[main]") return "main";
+  if (normalized === "deck" || normalized === "[main]" || normalized === "mainboard") return "main";
   if (normalized === "sideboard" || normalized === "[sideboard]") return "sideboard";
-  if (normalized === "commander" || normalized === "[commander]") return "commander";
+  if (
+    normalized === "commander"
+    || normalized === "commanders"
+    || normalized === "[commander]"
+    || normalized === "[commanders]"
+  ) return "commander";
   if (normalized === "companion" || normalized === "[companion]") return "companion";
   return null;
 }
 
-function parseDeckEntryLine(line: string): DeckEntry | null {
-  const mtgaMatch = line.match(/^(\d+)\s+(.+?)\s+\([A-Z0-9]+\)\s+\d+$/);
+interface LineParseResult {
+  entry: DeckEntry;
+  annotation: "commander" | "companion" | null;
+}
+
+// MTGA set-code parens are now permissive: empty `()` appears in some exports
+// (e.g. Archidekt's "Three Visits () 315" when the printing has no set code).
+function parseDeckEntryLine(line: string): LineParseResult | null {
+  let remainder = line;
+  let annotation: LineParseResult["annotation"] = null;
+  if (COMMANDER_ANNOTATION_RE.test(remainder)) {
+    remainder = remainder.replace(COMMANDER_ANNOTATION_RE, "");
+    annotation = "commander";
+  } else if (COMPANION_ANNOTATION_RE.test(remainder)) {
+    remainder = remainder.replace(COMPANION_ANNOTATION_RE, "");
+    annotation = "companion";
+  }
+
+  const mtgaMatch = remainder.match(/^(\d+)\s+(.+?)\s+\([A-Z0-9]*\)\s+\d+$/);
   if (mtgaMatch) {
     return {
-      count: parseInt(mtgaMatch[1], 10),
-      name: mtgaMatch[2].trim(),
+      entry: { count: parseInt(mtgaMatch[1], 10), name: mtgaMatch[2].trim() },
+      annotation,
     };
   }
 
-  const simpleMatch = line.match(/^(\d+)x?\s+(.+)$/);
+  const simpleMatch = remainder.match(/^(\d+)x?\s+(.+)$/);
   if (simpleMatch) {
     return {
-      count: parseInt(simpleMatch[1], 10),
-      name: simpleMatch[2].trim(),
+      entry: { count: parseInt(simpleMatch[1], 10), name: simpleMatch[2].trim() },
+      annotation,
     };
   }
 
@@ -151,11 +181,13 @@ export function parseDeckFile(content: string): ParsedDeck {
       continue;
     }
 
-    const entry = parseDeckEntryLine(line);
-    if (entry) {
-      if (currentSection === "commander") {
+    const parsed = parseDeckEntryLine(line);
+    if (parsed) {
+      const { entry, annotation } = parsed;
+      if (annotation === "commander" || currentSection === "commander") {
         commanderEntries.push(entry);
-      } else if (currentSection === "companion") {
+        if (annotation === "commander") explicitCommander = true;
+      } else if (annotation === "companion" || currentSection === "companion") {
         // CR 702.139a: Record companion name only — the Sideboard section
         // will include the card. loadActiveDeck (storage.ts:98) ensures
         // companion is in sideboard if a source omits it.
@@ -166,7 +198,6 @@ export function parseDeckFile(content: string): ParsedDeck {
     }
   }
 
-  // If explicit [Commander] section found, extract commander names
   if (commanderEntries.length > 0) {
     deck.commander = commanderEntries.map((e) => e.name);
   }
@@ -177,7 +208,9 @@ export function parseDeckFile(content: string): ParsedDeck {
   });
 }
 
-const MTGA_LINE_PATTERN = /^\d+\s+.+\s+\([A-Z0-9]+\)\s+\d+$/;
+// MTGA format detection: count + name + (set) + collector#, with optional
+// trailing Archidekt category annotation (e.g. "[Commander {top}]").
+const MTGA_LINE_PATTERN = /^\d+\s+.+\s+\([A-Z0-9]*\)\s+\d+(\s+\S.*)?$/;
 
 /**
  * Parse an MTGA text format deck.
@@ -220,16 +253,18 @@ export function parseMtgaDeck(content: string): ParsedDeck {
       continue;
     }
 
-    const entry = parseDeckEntryLine(line);
-    if (entry) {
-      if (currentSection === "commander") {
+    const parsed = parseDeckEntryLine(line);
+    if (parsed) {
+      const { entry, annotation } = parsed;
+      if (annotation === "commander" || currentSection === "commander") {
         commanderEntries.push(entry);
-      } else if (currentSection === "companion") {
+        if (annotation === "commander") explicitCommander = true;
+      } else if (annotation === "companion" || currentSection === "companion") {
         // CR 702.139a: Record companion name only — the Sideboard section
         // will include the card. loadActiveDeck (storage.ts:98) ensures
         // companion is in sideboard if a source omits it.
         deck.companion = entry.name;
-        currentSection = "main"; // Reset after capturing companion
+        if (currentSection === "companion") currentSection = "main";
       } else {
         deck[currentSection].push(entry);
       }
@@ -344,4 +379,34 @@ export function exportMtgaDeck(deck: ParsedDeck): string {
  */
 export function exportDeck(deck: ParsedDeck, format: ExportFormat): string {
   return format === "mtga" ? exportMtgaDeck(deck) : exportDeckFile(deck);
+}
+
+/**
+ * Final step in the commander identification waterfall (semantic, async).
+ *
+ * Steps already applied during sync parsing:
+ *   1. Explicit `[Commander]` / `Commander` section header
+ *   2. Inline `[Commander]` / `*CMDR*` annotation on a card line
+ *   3. 99 main + 1–2 sideboard singletons in a 100-card deck
+ *
+ * This step:
+ *   4. 100-card singleton deck with no commander identified, where the first
+ *      card is commander-eligible per CR 903.3 (legendary creature, legendary
+ *      background, or "can be your commander"). Promotes the first card.
+ *
+ * The eligibility check is delegated to the engine via WASM — the frontend
+ * never replicates rules logic.
+ */
+export async function resolveCommander(deck: ParsedDeck): Promise<ParsedDeck> {
+  if (deck.commander?.length) return deck;
+  if (deck.sideboard.length > 0) return deck;
+  if (deck.main.length === 0) return deck;
+  if (totalCards(deck.main) !== 100) return deck;
+  if (!looksCommanderSingleton(deck.main)) return deck;
+  if (deck.main[0].count !== 1) return deck;
+
+  if (!(await isCardCommanderEligible(deck.main[0].name))) return deck;
+
+  const [first, ...rest] = deck.main;
+  return { ...deck, main: rest, commander: [first.name] };
 }

@@ -70,8 +70,9 @@ pub use deck_loading::{
     resolve_player_deck_list, DeckEntry, DeckList, DeckPayload, PlayerDeckList,
 };
 pub use deck_validation::{
-    evaluate_deck_compatibility, validate_deck_for_format, CompatibilityCheck,
-    DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage, UnsupportedCard,
+    evaluate_deck_compatibility, is_commander_eligible, validate_deck_for_format,
+    CompatibilityCheck, DeckCompatibilityRequest, DeckCompatibilityResult, DeckCoverage,
+    UnsupportedCard,
 };
 pub use engine::{
     apply, apply_as_current, new_game, start_game, start_game_skip_mulligan,

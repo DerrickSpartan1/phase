@@ -54,3 +54,11 @@ export async function evaluateDeckCompatibilityJs(request: unknown) {
   const engine = await loadEngineModule();
   return engine.evaluate_deck_compatibility_js(request);
 }
+
+/// CR 903.3: Whether the named card can be a commander
+/// (legendary creature, legendary background, or "can be your commander").
+export async function isCardCommanderEligible(name: string): Promise<boolean> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.is_card_commander_eligible(name);
+}

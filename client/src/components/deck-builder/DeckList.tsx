@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import type { ParsedDeck, DeckEntry } from "../../services/deckParser";
-import { detectAndParseDeck, exportDeck } from "../../services/deckParser";
+import { detectAndParseDeck, exportDeck, resolveCommander } from "../../services/deckParser";
 import type { ExportFormat } from "../../services/deckParser";
 import type { DeckCompatibilityResult, UnsupportedCard, ParsedItem } from "../../services/deckCompatibility";
 
@@ -217,15 +217,15 @@ export function DeckList({
     const file = e.target.files?.[0];
     if (!file) return;
     const content = await file.text();
-    const parsed = detectAndParseDeck(content);
+    const parsed = await resolveCommander(detectAndParseDeck(content));
     onImport(parsed);
     // Reset file input so same file can be re-imported
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
-  const handlePasteImport = () => {
+  const handlePasteImport = async () => {
     if (!pasteText.trim()) return;
-    const parsed = detectAndParseDeck(pasteText);
+    const parsed = await resolveCommander(detectAndParseDeck(pasteText));
     onImport(parsed);
     setPasteText("");
     setShowPasteModal(false);

@@ -103,6 +103,13 @@ export function init_panic_hook(): void;
 export function initialize_game(deck_data: any, seed: number | null | undefined, format_config_js: any, match_config_js: any, player_count?: number | null, first_player?: number | null): any;
 
 /**
+ * CR 903.3: Whether the named card can serve as a commander
+ * (legendary creature, legendary background, or "can be your commander").
+ * Returns false if the card database isn't loaded or the card isn't found.
+ */
+export function is_card_commander_eligible(name: string): boolean;
+
+/**
  * Read the multiplayer enforcement flag. Exposed primarily for tests and
  * adapters that need to defend their own paths (e.g., skip history pushes).
  */
@@ -201,6 +208,7 @@ export interface InitOutput {
     readonly get_card_parse_details: (a: number, b: number) => any;
     readonly get_filtered_game_state: (a: number) => any;
     readonly initialize_game: (a: any, b: number, c: number, d: any, e: any, f: number, g: number) => any;
+    readonly is_card_commander_eligible: (a: number, b: number) => number;
     readonly is_multiplayer_mode: () => number;
     readonly load_card_database: (a: number, b: number) => [number, number, number];
     readonly ping: () => [number, number];

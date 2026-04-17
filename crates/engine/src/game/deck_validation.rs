@@ -835,7 +835,9 @@ fn summarize_cards(prefix: &str, cards: &BTreeSet<String>, max_names: usize) -> 
     format!("{prefix}: {}", listed.join(", "))
 }
 
-fn is_commander_eligible(face: &CardFace) -> bool {
+/// CR 903.3: A card is eligible to be a commander if it is a legendary creature,
+/// a legendary background enchantment, or has "can be your commander" in its rules text.
+pub fn is_commander_eligible(face: &CardFace) -> bool {
     let is_legendary = face.card_type.supertypes.contains(&Supertype::Legendary);
     let is_creature = face.card_type.core_types.contains(&CoreType::Creature);
     let explicitly_allowed = face

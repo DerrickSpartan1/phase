@@ -10,8 +10,9 @@ use engine::database::CardDatabase;
 use engine::game::engine::apply;
 use engine::game::{
     evaluate_deck_compatibility, filter_state_for_viewer, finalize_public_state,
-    load_deck_into_state, rehydrate_game_from_card_db, resolve_deck_list, start_game,
-    start_game_with_starting_player, validate_deck_for_format, DeckCompatibilityRequest, DeckList,
+    is_commander_eligible, load_deck_into_state, rehydrate_game_from_card_db, resolve_deck_list,
+    start_game, start_game_with_starting_player, validate_deck_for_format,
+    DeckCompatibilityRequest, DeckList,
 };
 use engine::types::format::FormatConfig;
 use engine::types::identifiers::ObjectId;
@@ -166,6 +167,21 @@ pub fn get_card_face_data(name: &str) -> JsValue {
             Some(face) => to_js(face),
             None => JsValue::NULL,
         }
+    })
+}
+
+/// CR 903.3: Whether the named card can serve as a commander
+/// (legendary creature, legendary background, or "can be your commander").
+/// Returns false if the card database isn't loaded or the card isn't found.
+#[wasm_bindgen]
+pub fn is_card_commander_eligible(name: &str) -> bool {
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return false;
+        };
+        db.get_face_by_name(name)
+            .is_some_and(is_commander_eligible)
     })
 }
 

@@ -1,10 +1,15 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   parseDeckFile,
   exportDeckFile,
   parseMtgaDeck,
   detectAndParseDeck,
+  resolveCommander,
 } from '../deckParser';
+
+vi.mock('../engineRuntime', () => ({
+  isCardCommanderEligible: vi.fn(),
+}));
 
 describe('deckParser', () => {
   it('parses simple deck: "4 Lightning Bolt" -> { count: 4, name: "Lightning Bolt" }', () => {
@@ -279,5 +284,136 @@ Sideboard
     expect(result.sideboard).toEqual([
       { count: 3, name: 'Red Elemental Blast' },
     ]);
+  });
+
+  it('parses MTGA lines with empty set codes (Archidekt Three Visits export)', () => {
+    const content = '1 Three Visits () 315';
+    const result = detectAndParseDeck(content);
+    expect(result.main).toEqual([{ count: 1, name: 'Three Visits' }]);
+  });
+
+  it('routes inline [Commander] annotations to the commander slot', () => {
+    const content = `1 Zimone, Infinite Analyst (SOC) 10 [Commander {top}]
+1 Sol Ring (SOC) 128`;
+    const result = detectAndParseDeck(content);
+    expect(result.commander).toEqual(['Zimone, Infinite Analyst']);
+    expect(result.main).toEqual([{ count: 1, name: 'Sol Ring' }]);
+  });
+
+  it('routes inline *CMDR* annotations on simple lines to the commander slot', () => {
+    const content = `1 Atraxa, Praetors' Voice *CMDR*
+1 Sol Ring`;
+    const result = detectAndParseDeck(content);
+    expect(result.commander).toEqual(["Atraxa, Praetors' Voice"]);
+    expect(result.main).toEqual([{ count: 1, name: 'Sol Ring' }]);
+  });
+
+  it('routes inline [Companion] annotation to the companion field', () => {
+    const content = `1 Lurrus of the Dream-Den (IKO) 226 [Companion]
+1 Sol Ring (SOC) 128`;
+    const result = detectAndParseDeck(content);
+    expect(result.companion).toBe('Lurrus of the Dream-Den');
+    expect(result.main).toEqual([{ count: 1, name: 'Sol Ring' }]);
+  });
+
+  it('recognizes "Commanders" section header (Archidekt categorized export)', () => {
+    const content = `Commanders
+1 Zimone, Infinite Analyst (SOC) 10
+
+Deck
+1 Sol Ring (SOC) 128`;
+    const result = detectAndParseDeck(content);
+    expect(result.commander).toEqual(['Zimone, Infinite Analyst']);
+    expect(result.main).toEqual([{ count: 1, name: 'Sol Ring' }]);
+  });
+});
+
+describe('resolveCommander waterfall', () => {
+  it('promotes the first card when the deck is 100 singletons and that card is commander-eligible', async () => {
+    const { isCardCommanderEligible } = await import('../engineRuntime');
+    vi.mocked(isCardCommanderEligible).mockResolvedValue(true);
+
+    const main = [
+      { count: 1, name: 'Zimone, Infinite Analyst' },
+      ...Array.from({ length: 86 }, (_, i) => ({ count: 1, name: `Card ${i}` })),
+      { count: 7, name: 'Island' },
+      { count: 6, name: 'Forest' },
+    ];
+    const resolved = await resolveCommander({ main, sideboard: [] });
+
+    expect(resolved.commander).toEqual(['Zimone, Infinite Analyst']);
+    expect(resolved.main[0].name).toBe('Card 0');
+    expect(resolved.main).toHaveLength(86 + 2);
+    expect(isCardCommanderEligible).toHaveBeenCalledWith('Zimone, Infinite Analyst');
+  });
+
+  it('does not promote when the first card is not commander-eligible', async () => {
+    const { isCardCommanderEligible } = await import('../engineRuntime');
+    vi.mocked(isCardCommanderEligible).mockResolvedValue(false);
+
+    const main = [
+      { count: 1, name: 'Sol Ring' },
+      ...Array.from({ length: 86 }, (_, i) => ({ count: 1, name: `Card ${i}` })),
+      { count: 7, name: 'Island' },
+      { count: 6, name: 'Forest' },
+    ];
+    const resolved = await resolveCommander({ main, sideboard: [] });
+
+    expect(resolved.commander).toBeUndefined();
+    expect(resolved.main).toEqual(main);
+  });
+
+  it('skips lookup when the deck already has a commander', async () => {
+    const { isCardCommanderEligible } = await import('../engineRuntime');
+    vi.mocked(isCardCommanderEligible).mockReset();
+
+    const resolved = await resolveCommander({
+      main: [{ count: 1, name: 'Sol Ring' }],
+      sideboard: [],
+      commander: ['Zimone, Infinite Analyst'],
+    });
+
+    expect(resolved.commander).toEqual(['Zimone, Infinite Analyst']);
+    expect(isCardCommanderEligible).not.toHaveBeenCalled();
+  });
+
+  it('end-to-end: handles an unmarked Archidekt-style 100-card paste with empty set codes', async () => {
+    const { isCardCommanderEligible } = await import('../engineRuntime');
+    vi.mocked(isCardCommanderEligible).mockResolvedValue(true);
+
+    // 87 singletons + 7 Island + 6 Forest = 100 cards, no commander/sideboard headers.
+    // Includes "Three Visits () 315" with an empty set code (Archidekt edge case).
+    const singletons = Array.from({ length: 86 }, (_, i) =>
+      i === 30 ? '1 Three Visits () 315' : `1 Generic Card ${i} (SOC) ${i + 1}`
+    );
+    const content = [
+      '1 Zimone, Infinite Analyst (SOC) 10',
+      ...singletons,
+      '7 Island (SOS) 274',
+      '6 Forest (SOS) 280',
+    ].join('\n');
+
+    const parsed = detectAndParseDeck(content);
+    expect(parsed.commander).toBeUndefined();
+    expect(parsed.main).toContainEqual({ count: 1, name: 'Three Visits' });
+    expect(parsed.main[0]).toEqual({ count: 1, name: 'Zimone, Infinite Analyst' });
+
+    const resolved = await resolveCommander(parsed);
+    expect(resolved.commander).toEqual(['Zimone, Infinite Analyst']);
+    expect(resolved.main).not.toContainEqual({ count: 1, name: 'Zimone, Infinite Analyst' });
+    expect(resolved.main.reduce((s, e) => s + e.count, 0)).toBe(99);
+  });
+
+  it('skips lookup when the deck is not 100 cards', async () => {
+    const { isCardCommanderEligible } = await import('../engineRuntime');
+    vi.mocked(isCardCommanderEligible).mockReset();
+
+    const resolved = await resolveCommander({
+      main: [{ count: 60, name: 'Mountain' }],
+      sideboard: [],
+    });
+
+    expect(resolved.commander).toBeUndefined();
+    expect(isCardCommanderEligible).not.toHaveBeenCalled();
   });
 });
