@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
+import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -15,6 +16,7 @@ interface OpponentHandProps {
 
 export function OpponentHand({ showCards = false }: OpponentHandProps) {
   const myId = usePerspectivePlayerId();
+  const isCompactHeight = useIsCompactHeight();
   const focusedOpponent = useUiStore((s) => s.focusedOpponent);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
   const eliminatedPlayers = useGameStore((s) => s.gameState?.eliminated_players);
@@ -39,7 +41,9 @@ export function OpponentHand({ showCards = false }: OpponentHandProps) {
 
   return (
     <div
-      className="flex min-h-[calc(var(--card-h)*1.2)] shrink-0 items-start justify-center overflow-visible px-4 pb-1"
+      className={`flex shrink-0 items-start justify-center overflow-visible px-4 pb-1 ${
+        isCompactHeight ? "min-h-[32px]" : "min-h-[calc(var(--card-h)*1.2)]"
+      }`}
       style={{ perspective: "800px" }}
     >
       <AnimatePresence>

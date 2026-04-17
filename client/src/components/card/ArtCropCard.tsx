@@ -2,6 +2,7 @@ import { memo, useMemo } from "react";
 
 import type { PTColor } from "../../viewmodel/cardProps";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -23,6 +24,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
   const inspectObject = useUiStore((s) => s.inspectObject);
   const showKeywordStrip = usePreferencesStore((s) => s.showKeywordStrip) ?? true;
+  const isCompactHeight = useIsCompactHeight();
 
   const cardName = obj?.name ?? "";
   const isToken = obj?.card_id === 0;
@@ -100,8 +102,8 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
           <div className="absolute inset-x-0 top-0 h-[20px] bg-gradient-to-b from-white/40 to-transparent pointer-events-none z-10" />
 
           {/* 3. HEADER AREA: Uses isToken to make the background slightly translucent for tokens */}
-          <div className={`h-[20px] w-full flex items-center px-1.5 shrink-0 z-10 border-b border-black/40 shadow-[0_1px_2px_rgba(0,0,0,0.4)] ${isToken ? 'bg-black/10' : ''}`}>
-            <span className={`text-[11.5px] font-extrabold tracking-tight leading-none truncate mt-[1px] ${lightText ? 'text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]' : isToken ? 'text-[#1a1a1a] drop-shadow-[0_1px_1px_rgba(255,255,255,0.6)]' : 'text-[#111] drop-shadow-[0_1px_0_rgba(255,255,255,0.5)]'}`}>
+          <div className={`${isCompactHeight ? "h-[12px] px-1" : "h-[20px] px-1.5"} w-full flex items-center shrink-0 z-10 border-b border-black/40 shadow-[0_1px_2px_rgba(0,0,0,0.4)] ${isToken ? 'bg-black/10' : ''}`}>
+            <span className={`${isCompactHeight ? "text-[8px]" : "text-[11.5px]"} font-extrabold tracking-tight leading-none truncate mt-[1px] ${lightText ? 'text-white drop-shadow-[0_1px_1px_rgba(0,0,0,0.8)]' : isToken ? 'text-[#1a1a1a] drop-shadow-[0_1px_1px_rgba(255,255,255,0.6)]' : 'text-[#111] drop-shadow-[0_1px_0_rgba(255,255,255,0.5)]'}`}>
               {cardName}
             </span>
           </div>

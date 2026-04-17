@@ -1,8 +1,14 @@
+import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 
 export function FullControlToggle() {
   const fullControl = useUiStore((s) => s.fullControl);
   const toggleFullControl = useUiStore((s) => s.toggleFullControl);
+  const isCompactHeight = useIsCompactHeight();
+
+  // On landscape phones, only show when ON (so the user can turn it off);
+  // hide entirely when off so it doesn't eat horizontal space.
+  if (isCompactHeight && !fullControl) return null;
 
   return (
     <button

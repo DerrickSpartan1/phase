@@ -7,6 +7,8 @@ import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
+import { useIsMobile } from "../../hooks/useIsMobile.ts";
+import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import type { GameAction, ManaCost, ObjectId } from "../../adapter/types.ts";
@@ -29,6 +31,9 @@ export function PlayerHand() {
   // Use dispatchAction (animation pipeline) instead of store dispatch
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
+  const setMobileHandOpen = useUiStore((s) => s.setMobileHandOpen);
+  const isMobile = useIsMobile();
+  const isCompactHeight = useIsCompactHeight();
 
   const [expanded, setExpanded] = useState(false);
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null);
@@ -112,13 +117,16 @@ export function PlayerHand() {
 
   const handleCardClick = useCallback(
     (objectId: number) => {
+      if (isMobile) {
+        setMobileHandOpen(true);
+        return;
+      }
       if (!hasPriority) return;
 
-      // Single click: select and inspect only
       setSelectedCardId(objectId);
       inspectObject(objectId);
     },
-    [hasPriority, inspectObject],
+    [isMobile, hasPriority, inspectObject, setMobileHandOpen],
   );
 
   const handleCardDoubleClick = useCallback(
@@ -134,11 +142,15 @@ export function PlayerHand() {
     (e: React.MouseEvent) => {
       // Only handle clicks directly on the container (not bubbled from cards)
       if (e.target === e.currentTarget) {
-        setSelectedCardId(null);
-        setExpanded((prev) => !prev);
+        if (isMobile) {
+          setMobileHandOpen(true);
+        } else {
+          setSelectedCardId(null);
+          setExpanded((prev) => !prev);
+        }
       }
     },
-    [],
+    [isMobile, setMobileHandOpen],
   );
 
   const handleDragStart = useCallback((id: number) => setDraggingCardId(id), []);
@@ -157,7 +169,9 @@ export function PlayerHand() {
   return (
     <div
       ref={handContainerRef}
-      className="relative flex min-h-[calc(var(--card-h)*1.4)] shrink-0 items-end justify-center overflow-visible px-4 py-1"
+      className={`relative flex shrink-0 items-end justify-center overflow-visible px-4 py-1 ${
+        isCompactHeight ? "min-h-[40px]" : "min-h-[calc(var(--card-h)*1.4)]"
+      }`}
       style={{ perspective: "800px", zIndex: draggingCardId != null ? 30 : undefined }}
       onClick={handleContainerClick}
       onMouseLeave={() => {
@@ -165,6 +179,14 @@ export function PlayerHand() {
         setSelectedCardId(null);
       }}
     >
+      {isMobile && handObjects.length > 0 && (
+        <button
+          className="absolute -top-1 left-1/2 z-20 -translate-x-1/2 rounded-full bg-white/10 px-3 py-0.5 text-[10px] font-medium text-white/60 backdrop-blur-sm active:bg-white/20"
+          onClick={(e) => { e.stopPropagation(); setMobileHandOpen(true); }}
+        >
+          Tap to view hand ({handObjects.length})
+        </button>
+      )}
       <AnimatePresence>
         {handObjects.map((obj, i) => {
           const rotation = (i - center) * 6;
@@ -184,6 +206,7 @@ export function PlayerHand() {
               isPlayable={isPlayable}
               isSelected={selectedCardId === obj.id}
               hasPriority={hasPriority}
+              isMobile={isMobile}
               onDragEnd={handleDragEnd}
               onClick={handleCardClick}
               onDoubleClick={handleCardDoubleClick}
@@ -213,6 +236,7 @@ interface HandCardProps {
   isSelected: boolean;
   isDragging: boolean;
   hasPriority: boolean;
+  isMobile: boolean;
   onDragStart: (id: number) => void;
   onDragStop: () => void;
   onDragEnd: (objectId: number, event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => boolean;
@@ -235,6 +259,7 @@ const HandCard = memo(function HandCard({
   isSelected,
   isDragging,
   hasPriority,
+  isMobile,
   onDragStart: onDragStartProp,
   onDragStop,
   onDragEnd,
@@ -315,7 +340,7 @@ const HandCard = memo(function HandCard({
       onMouseLeave={onMouseLeave}
       className={`relative cursor-pointer rounded-lg leading-[0] select-none ${glowClass} ${
         isSelected ? "ring-2 ring-cyan-400" : ""
-      }`}
+      } ${isMobile ? "pointer-events-none" : ""}`}
       style={{
         marginLeft: index === 0 ? 0 : getHandOverlap(handSize),
         zIndex: isDragging ? 9999 : isSelected ? 20 : index,

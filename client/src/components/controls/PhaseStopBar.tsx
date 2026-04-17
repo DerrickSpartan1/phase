@@ -1,5 +1,6 @@
 import type { Phase } from "../../adapter/types";
 import type { ReactNode } from "react";
+import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useGameStore } from "../../stores/gameStore";
 import { usePreferencesStore } from "../../stores/preferencesStore";
 
@@ -158,6 +159,10 @@ export function PhaseIndicatorRight() {
 
 /** BeginCombat through EndCombat — placed near ActionButton on the right side */
 export function CombatPhaseIndicator() {
+  const isCompactHeight = useIsCompactHeight();
+  // Hide on landscape phones — non-essential and eats horizontal real estate
+  // next to the ActionButton. The phase pills along the top still convey phase.
+  if (isCompactHeight) return null;
   return (
     <div className="flex items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/64 px-1 py-1 backdrop-blur-xl lg:px-1.5">
       {COMBAT_PHASES.map((phase) => (

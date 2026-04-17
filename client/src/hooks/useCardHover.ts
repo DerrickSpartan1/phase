@@ -1,6 +1,7 @@
 import { useCallback } from "react";
 
 import { useLongPress } from "./useLongPress.ts";
+import { useIsMobile } from "./useIsMobile.ts";
 import { useUiStore } from "../stores/uiStore.ts";
 
 /**
@@ -16,6 +17,7 @@ import { useUiStore } from "../stores/uiStore.ts";
 export function useCardHover(objectId: number | null) {
   const inspectObject = useUiStore((s) => s.inspectObject);
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
+  const isMobile = useIsMobile();
 
   const { handlers: longPressHandlers, firedRef } = useLongPress(
     useCallback(() => {
@@ -34,12 +36,13 @@ export function useCardHover(objectId: number | null) {
     inspectObject(null);
   }, [inspectObject]);
 
+  // On mobile, skip mouse events — synthesized mouseenter from touch fires
+  // the preview every time the user touches a card, creating an
+  // un-dismissable loop. Long-press is the only mobile preview trigger.
   return {
-    handlers: {
-      onMouseEnter,
-      onMouseLeave,
-      ...longPressHandlers,
-    },
+    handlers: isMobile
+      ? longPressHandlers
+      : { onMouseEnter, onMouseLeave, ...longPressHandlers },
     firedRef,
   };
 }

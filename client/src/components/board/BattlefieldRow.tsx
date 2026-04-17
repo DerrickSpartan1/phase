@@ -1,5 +1,6 @@
 import { useRef, useState, useEffect } from "react";
 
+import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
 import type { GroupedPermanent } from "../../viewmodel/battlefieldProps";
 import { GroupedPermanentDisplay } from "./GroupedPermanent.tsx";
@@ -47,6 +48,7 @@ function getCreatureScale(groupCount: number, display: "art_crop" | "full_card")
 
 export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowProps) {
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
+  const isCompactHeight = useIsCompactHeight();
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState<{ width: number; height: number } | null>(null);
 
@@ -77,8 +79,10 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
     : "";
 
   let rowStyle: React.CSSProperties | undefined;
-  /** Minimum readable card height — below this, switch to multi-row wrapping */
-  const MIN_CARD_H = 70;
+  /** Minimum readable card height — below this, switch to multi-row wrapping.
+   *  Lowered on compact-height (landscape phones) so creatures stay single-row
+   *  in the limited vertical space rather than wrapping into a tiny grid. */
+  const MIN_CARD_H = isCompactHeight ? 40 : 70;
   /** Maximum creature card height — prevents oversized cards with few creatures */
   const MAX_CARD_H = 150;
   let creatureWrap = false;

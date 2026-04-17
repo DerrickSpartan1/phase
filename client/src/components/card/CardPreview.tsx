@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import type { GameObject } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useEngineCardData, useCardParseDetails, type ParsedItem } from "../../hooks/useEngineCardData.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -62,7 +63,7 @@ function CardPreviewInner({
   position?: { x: number; y: number };
 }) {
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
-  const inspectObject = useUiStore((s) => s.inspectObject);
+  const dismissPreview = useUiStore((s) => s.dismissPreview);
   const obj = useGameStore((s) =>
     inspectedObjectId != null ? s.gameState?.objects[inspectedObjectId] ?? null : null,
   );
@@ -105,17 +106,7 @@ function CardPreviewInner({
   const frameRef = useRef<number | null>(null);
   const altHeld = useUiStore((s) => s.altHeld);
   const [ctrlHeld, setCtrlHeld] = useState(false);
-  const [isMobile, setIsMobile] = useState(
-    typeof window !== "undefined" && window.innerWidth < 1024,
-  );
-
-  useEffect(() => {
-    function handleResize() {
-      setIsMobile(window.innerWidth < 1024);
-    }
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, []);
+  const isMobile = useIsMobile();
 
   useEffect(() => {
     if (typeof window === "undefined") return undefined;
@@ -233,7 +224,7 @@ function CardPreviewInner({
         backFaceName={backFaceName}
         faceIndex={faceIndex}
         obj={obj}
-        onDismiss={() => inspectObject(null)}
+        onDismiss={dismissPreview}
       />
     );
   }
@@ -277,12 +268,10 @@ function CardPreviewInner({
   );
 }
 
-/** Mobile/tablet: centered overlay with backdrop dismiss and side-by-side DFCs */
+/** Mobile/tablet: card anchored right (landscape) or center (portrait), whole card visible. */
 function MobilePreviewOverlay({
   cardName,
-  backFaceName,
   faceIndex,
-  obj,
   onDismiss,
 }: {
   cardName: string;
@@ -291,74 +280,25 @@ function MobilePreviewOverlay({
   obj: GameObject | null;
   onDismiss: () => void;
 }) {
-  const { src, isLoading } = useCardImage(cardName, { size: "normal", faceIndex });
-  const showInfoPanel = obj?.zone === "Battlefield";
-  const classLevel = obj?.class_level;
-  const hasDualFace = backFaceName != null;
+  const { src } = useCardImage(cardName, { size: "normal", faceIndex });
 
+  // pointerdown (not click): the touch-release that opened this overlay fires
+  // pointerup, not pointerdown, so a fresh tap is required to dismiss.
   return (
     <div
-      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 backdrop-blur-sm"
+      className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4 landscape:justify-end landscape:p-6"
       data-card-preview
-      onClick={(e) => {
-        // Dismiss when tapping the backdrop (not the card images)
-        if (e.target === e.currentTarget) onDismiss();
-      }}
+      onPointerDown={onDismiss}
     >
-      <div className={`flex ${hasDualFace ? "gap-3" : ""} items-start max-h-[85vh] max-w-[95vw]`}>
-        {/* Front face */}
-        <div className="shrink-0">
-          <CardImagePreview
-            cardName={cardName}
-            classLevel={classLevel}
-            showInfoPanel={showInfoPanel}
-            obj={obj}
-            isLoading={isLoading}
-            src={src}
-            backFaceHint={null}
-            altHint={null}
-            mobileMode
-          />
-        </div>
-
-        {/* Back face — shown side by side on mobile for DFCs */}
-        {hasDualFace && (
-          <div className="shrink-0">
-            <BackFaceImage cardName={backFaceName!} mobileMode />
-          </div>
-        )}
-      </div>
-
-      {/* Dismiss hint */}
-      <div className="absolute bottom-6 left-1/2 -translate-x-1/2 rounded-full bg-black/60 px-4 py-1.5 text-xs text-gray-300">
-        Tap outside to dismiss
-      </div>
-    </div>
-  );
-}
-
-/** Renders the back face image for side-by-side DFC display */
-function BackFaceImage({ cardName, mobileMode }: { cardName: string; mobileMode?: boolean }) {
-  const { src, isLoading } = useCardImage(cardName, { size: "normal", faceIndex: 1 });
-
-  const sizeClass = mobileMode
-    ? "max-h-[75vh] w-[40vw] max-w-[300px]"
-    : "max-h-[80vh] max-w-[42vw] w-[clamp(220px,26vw,472px)] md:max-w-[45vw]";
-
-  if (isLoading || !src) {
-    return (
-      <div className={`${sizeClass} aspect-[5/7] rounded-[4%] border border-gray-600 bg-gray-700 shadow-2xl animate-pulse`} />
-    );
-  }
-
-  return (
-    <div className="border border-gray-600 overflow-hidden shadow-2xl rounded-[4%]">
-      <img
-        src={src}
-        alt={cardName}
-        className={`${sizeClass} object-cover`}
-        draggable={false}
-      />
+      {src && (
+        <img
+          src={src}
+          alt={cardName}
+          draggable={false}
+          onPointerDown={(e) => e.stopPropagation()}
+          className="max-h-[calc(100dvh-2rem)] max-w-full rounded-lg object-contain shadow-2xl landscape:max-w-[45vw]"
+        />
+      )}
     </div>
   );
 }

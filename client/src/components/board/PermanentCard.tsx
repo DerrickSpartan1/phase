@@ -9,6 +9,7 @@ import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
 import { PTBox } from "./PTBox.tsx";
 import { useCardHover } from "../../hooks/useCardHover.ts";
+import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -30,6 +31,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
   const tapRotation = usePreferencesStore((s) => s.tapRotation);
+  const isCompactHeight = useIsCompactHeight();
   const showKeywordStrip = usePreferencesStore((s) => s.showKeywordStrip) ?? true;
   const {
     activatableObjectIds,
@@ -74,7 +76,11 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
   const cardRef = useRef<HTMLDivElement | null>(null);
 
-  const tapAngle = tapRotation === "mtga" ? 17 : 90;
+  // On compact-height (landscape phones), use a subtler 12° rotation:
+  // 17° (MTGA) widens the card's bounding box by ~26px on a 70px-wide
+  // creature, which crowds tightly-packed attacker rows. 12° widens by
+  // ~18px while still clearly reading as rotated.
+  const tapAngle = isCompactHeight ? 12 : tapRotation === "mtga" ? 17 : 90;
 
   const allExileLinks = useGameStore((s) => s.gameState?.exile_links);
   const exileLinks = useMemo(
@@ -158,12 +164,14 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
   // Filter out loyalty counters — shown separately as the loyalty badge
   const counters = Object.entries(obj.counters).filter((entry): entry is [string, number] => entry[1] != null && entry[0] !== "loyalty");
 
-  // Tap rotation: 17deg in MTGA mode, 90deg in classic mode
-  const tapOpacity = tapRotation === "mtga" && obj.tapped && !isAttacking ? 0.85 : 1;
+  // Tap rotation: 17deg in MTGA mode (or compact-height), 90deg in classic mode
+  const tapOpacity = (isCompactHeight || tapRotation === "mtga") && obj.tapped && !isAttacking ? 0.85 : 1;
   const isRotatedFull = isAttacking || obj.tapped;
 
-  // Attacker slide-forward: player creatures slide up, opponent creatures slide down
-  const attackSlide = isAttacking ? (obj.controller === playerId ? -30 : 30) : 0;
+  // Attacker slide-forward: player creatures slide up, opponent creatures slide down.
+  // Reduced on compact-height where 30px would overflow the small creature row.
+  const attackSlideMagnitude = isCompactHeight ? 12 : 30;
+  const attackSlide = isAttacking ? (obj.controller === playerId ? -attackSlideMagnitude : attackSlideMagnitude) : 0;
 
   const handleClick = () => {
     if (longPressFired.current) { longPressFired.current = false; return; }

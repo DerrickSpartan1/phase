@@ -33,6 +33,7 @@ interface UiStoreState {
   turnBannerText: string;
   focusedOpponent: number | null;
   pendingAbilityChoice: { objectId: ObjectId; actions: GameAction[] } | null;
+  mobileHandOpen: boolean;
   debugPanelOpen: boolean;
   logPanelOpen: boolean;
 }
@@ -41,6 +42,7 @@ interface UiStoreActions {
   selectObject: (id: ObjectId | null) => void;
   hoverObject: (id: ObjectId | null) => void;
   inspectObject: (id: ObjectId | null, faceIndex?: number) => void;
+  dismissPreview: () => void;
   setAltHeld: (held: boolean) => void;
   addSelectedCard: (cardId: ObjectId) => void;
   toggleSelectedCard: (cardId: ObjectId) => void;
@@ -59,6 +61,7 @@ interface UiStoreActions {
   flashTurnBanner: (text: string) => void;
   setFocusedOpponent: (id: number | null) => void;
   setPendingAbilityChoice: (choice: { objectId: ObjectId; actions: GameAction[] } | null) => void;
+  setMobileHandOpen: (open: boolean) => void;
   toggleDebugPanel: () => void;
   setLogPanelOpen: (open: boolean) => void;
   toggleLogPanel: () => void;
@@ -85,6 +88,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   turnBannerText: "",
   focusedOpponent: null,
   pendingAbilityChoice: null,
+  mobileHandOpen: false,
   debugPanelOpen: false,
   logPanelOpen: false,
 
@@ -114,6 +118,14 @@ export const useUiStore = create<UiStore>()((set) => ({
         set({ inspectedObjectId: null, inspectedFaceIndex: 0, previewSticky: false, altHeld: false });
       }, 50);
     }
+  },
+
+  dismissPreview: () => {
+    if (pendingClearTimer != null) {
+      clearTimeout(pendingClearTimer);
+      pendingClearTimer = null;
+    }
+    set({ inspectedObjectId: null, inspectedFaceIndex: 0, previewSticky: false, altHeld: false });
   },
 
   addSelectedCard: (cardId) =>
@@ -181,6 +193,7 @@ export const useUiStore = create<UiStore>()((set) => ({
   },
   setFocusedOpponent: (id) => set({ focusedOpponent: id }),
   setPendingAbilityChoice: (choice) => set({ pendingAbilityChoice: choice }),
+  setMobileHandOpen: (open) => set({ mobileHandOpen: open }),
   toggleDebugPanel: () => set((state) => ({ debugPanelOpen: !state.debugPanelOpen })),
   setLogPanelOpen: (open) => set({ logPanelOpen: open }),
   toggleLogPanel: () => set((state) => ({ logPanelOpen: !state.logPanelOpen })),
