@@ -1528,6 +1528,26 @@ mod tests {
         }
     }
 
+    /// CR 107.1: Comma-thousands-separator numeric literals must parse as a
+    /// single integer in conditions. Motivating card: A Good Thing ("if you
+    /// have 1,000 or more life, you lose the game").
+    #[test]
+    fn test_you_have_thousands_life() {
+        let (rest, c) = parse_inner_condition("you have 1,000 or more life").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeTotal,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1000 },
+            } => {}
+            other => panic!("expected LifeTotal GE 1000, got {other:?}"),
+        }
+    }
+
     /// CR 107.1a + CR 603.4: "there are N X" without "or more" → exact-value
     /// comparison (EQ). Motivating card: A-Nael, Avizoa Aeronaut ("Then if there
     /// are five basic land types among lands you control, draw a card").

@@ -1,10 +1,10 @@
 //! Atomic parsing combinators for numbers, mana symbols, colors, counters, and P/T modifiers.
 
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_until};
+use nom::bytes::complete::{tag, take_until, take_while_m_n};
 use nom::character::complete::{char, digit1, space0};
-use nom::combinator::{map, map_res, opt, value};
-use nom::multi::many1;
+use nom::combinator::{map, map_res, not, opt, peek, recognize, value};
+use nom::multi::{many0, many1};
 use nom::sequence::{delimited, preceded};
 use nom::Parser;
 
@@ -18,9 +18,45 @@ pub fn parse_number(input: &str) -> OracleResult<'_, u32> {
     alt((parse_digit_number, parse_english_number)).parse(input)
 }
 
-/// Parse one or more ASCII digits into a u32.
+/// Parse one or more ASCII digits into a u32, accepting English
+/// thousands-separator commas ("1,000", "1,000,000").
+///
+/// A comma is consumed only when it is followed by exactly three digits
+/// and no further digit after them — i.e. `DDD(,DDD)*` with the extra
+/// constraint that the group after a comma is exactly three digits.
+/// This ensures safe behavior at clause boundaries:
+///
+/// - "1,000" → 1000
+/// - "1,000,000" → 1000000
+/// - "10," (e.g. "deal 10, then ...") → 10, remainder ","
+/// - "1,50" (2-digit group) → 1, remainder ",50"
+/// - "1,0000" (4-digit group) → 1, remainder ",0000"
+///
+/// CR 107.1: Magic numbers are integers; Oracle text conventionally
+/// renders large constants with comma grouping (e.g. A Good Thing,
+/// Jumbo Cactuar, The Millennium Calendar).
 fn parse_digit_number(input: &str) -> OracleResult<'_, u32> {
-    map_res(digit1, |s: &str| s.parse::<u32>()).parse(input)
+    let (rest, matched) = recognize((
+        digit1,
+        many0((
+            tag(","),
+            take_while_m_n(3, 3, |c: char| c.is_ascii_digit()),
+            // Reject a 4th trailing digit — "1,0000" must leave ",0000".
+            peek(not(take_while_m_n(1, 1, |c: char| c.is_ascii_digit()))),
+        )),
+    ))
+    .parse(input)?;
+    // Strip commas before parsing.
+    let digits: String = matched.chars().filter(|c| *c != ',').collect();
+    match digits.parse::<u32>() {
+        Ok(n) => Ok((rest, n)),
+        Err(_) => Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Digit),
+            )],
+        })),
+    }
 }
 
 /// Parse an English number word (one through one hundred, plus "a"/"an").
@@ -800,6 +836,34 @@ mod tests {
         let (rest, n) = parse_number("42 damage").unwrap();
         assert_eq!(n, 42);
         assert_eq!(rest, " damage");
+    }
+
+    #[test]
+    fn test_parse_number_comma_thousands() {
+        // Basic thousands separator
+        let (rest, n) = parse_number("1,000 or more life").unwrap();
+        assert_eq!(n, 1000);
+        assert_eq!(rest, " or more life");
+
+        // Millions
+        let (rest, n) = parse_number("1,000,000 damage").unwrap();
+        assert_eq!(n, 1_000_000);
+        assert_eq!(rest, " damage");
+
+        // Trailing comma at a clause boundary must not be consumed
+        let (rest, n) = parse_number("10, then draw a card").unwrap();
+        assert_eq!(n, 10);
+        assert_eq!(rest, ", then draw a card");
+
+        // Invalid 2-digit group leaves the comma unconsumed
+        let (rest, n) = parse_number("1,50 damage").unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(rest, ",50 damage");
+
+        // Invalid 4-digit group leaves the comma unconsumed
+        let (rest, n) = parse_number("1,0000 damage").unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(rest, ",0000 damage");
     }
 
     #[test]

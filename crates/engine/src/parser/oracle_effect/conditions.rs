@@ -33,13 +33,14 @@ pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> 
 
     let mut paren_depth = 0u32;
     let mut in_quotes = false;
+    let bytes = text.as_bytes();
 
     for (idx, ch) in text.char_indices() {
         match ch {
             '"' => in_quotes = !in_quotes,
             '(' if !in_quotes => paren_depth += 1,
             ')' if !in_quotes => paren_depth = paren_depth.saturating_sub(1),
-            ',' if !in_quotes && paren_depth == 0 => {
+            ',' if !in_quotes && paren_depth == 0 && !is_thousands_separator_comma(bytes, idx) => {
                 let condition_text = text[..idx].trim().to_string();
                 let rest = text[idx + 1..].trim();
                 if !rest.is_empty() {
@@ -51,6 +52,27 @@ pub(crate) fn split_leading_conditional(text: &str) -> Option<(String, String)> 
     }
 
     None
+}
+
+/// True if the comma at `idx` is part of a numeric thousands-separator
+/// (digit before, exactly three digits after, no fourth digit). This mirrors
+/// the grouping that [`oracle_nom::primitives::parse_digit_number`] consumes,
+/// so the conditional splitter does not bisect numeric literals like
+/// "1,000" (e.g. A Good Thing's "if you have 1,000 or more life, ...").
+fn is_thousands_separator_comma(bytes: &[u8], idx: usize) -> bool {
+    // Need at least one preceding digit.
+    if idx == 0 || !bytes[idx - 1].is_ascii_digit() {
+        return false;
+    }
+    // Exactly three digits must follow.
+    for offset in 1..=3 {
+        match bytes.get(idx + offset) {
+            Some(b) if b.is_ascii_digit() => {}
+            _ => return false,
+        }
+    }
+    // A fourth following digit invalidates the grouping (e.g. "1,0000").
+    !matches!(bytes.get(idx + 4), Some(b) if b.is_ascii_digit())
 }
 
 pub(super) fn strip_leading_instead(text: &str) -> String {

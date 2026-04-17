@@ -222,6 +222,11 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         tag("whenever "),
         tag("for each "),
         tag("then if "),
+        // "then, if ..." (with comma after "then") — same scoping as "then if".
+        // Regression: A Good Thing ("Then, if you have 1,000 or more life, you
+        // lose the game") — without this, the splitter bisects the conditional
+        // at the comma between life and "you lose", orphaning the body.
+        tag("then, if "),
         tag("otherwise"),
         tag("if not"),
         tag("at the beginning "),
