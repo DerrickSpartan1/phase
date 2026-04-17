@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { motion, useReducedMotion } from "framer-motion";
 
 import type { PlayerId } from "../../adapter/types.ts";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
@@ -110,6 +111,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
         <HudPlate
           label={label}
           tone={hudTone}
+          active={isOpponentTurn}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
           trailing={opponentSpeed > 0 || opponentCompanion || isOnline || isOpponentPhasedOut ? (
             <>
@@ -200,6 +202,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
   const player = gameState?.players[playerId];
   const isDisconnected = useMultiplayerStore((s) => s.disconnectedPlayers.has(playerId));
   const isOnline = useMultiplayerStore((s) => s.connectionStatus) !== "disconnected";
+  const shouldReduceMotion = useReducedMotion();
 
   const counts = useMemo(() => {
     if (!gameState) return { creatures: 0, lands: 0, other: 0 };
@@ -226,7 +229,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
   const borderClass = isValidTarget
     ? "border-cyan-400/45 bg-cyan-950/45 ring-1 ring-cyan-300/45 shadow-[0_14px_28px_rgba(34,211,238,0.16)] cursor-pointer"
     : isTheirTurn
-      ? "border-rose-400/45 bg-rose-950/40 ring-1 ring-rose-300/35 shadow-[0_14px_28px_rgba(244,63,94,0.16)]"
+      ? "border-rose-400/45 bg-rose-950/40 ring-2 ring-rose-300/70 ring-offset-2 ring-offset-black/40 shadow-[0_14px_28px_rgba(244,63,94,0.22)]"
       : ally
         ? isFocused
           ? "border-emerald-400/40 bg-emerald-950/40 ring-1 ring-emerald-300/30"
@@ -241,8 +244,26 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       onClick={onClick}
       disabled={isEliminated}
       data-phased-out={isPhasedOut ? "true" : undefined}
-      className={`flex items-center gap-3 rounded-[18px] border px-3 py-2 backdrop-blur-xl transition-all duration-200 ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
+      className={`relative flex items-center gap-3 rounded-[18px] border px-3 py-2 backdrop-blur-xl transition-all duration-200 ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
     >
+      {isTheirTurn && !shouldReduceMotion && (
+        <motion.div
+          aria-hidden
+          className="pointer-events-none absolute -inset-0.5 rounded-[20px]"
+          animate={{
+            boxShadow: [
+              "0 0 0 0 rgba(251, 113, 133, 0.35), 0 0 14px 2px rgba(251, 113, 133, 0.35)",
+              "0 0 0 2px rgba(251, 113, 133, 0.65), 0 0 26px 6px rgba(251, 113, 133, 0.65)",
+            ],
+          }}
+          transition={{
+            duration: 1.2,
+            repeat: Infinity,
+            repeatType: "reverse",
+            ease: "easeInOut",
+          }}
+        />
+      )}
       <div className="flex min-w-[4.5rem] flex-col items-start leading-none">
         <span className="mb-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/48">
           {label}

@@ -46,6 +46,7 @@ export function PlayerHud() {
       <HudPlate
         label={getPlayerDisplayName(playerId)}
         tone={hudTone}
+        active={isMyTurn}
         onClick={isValidTarget ? handleTargetClick : undefined}
         trailing={
           <>

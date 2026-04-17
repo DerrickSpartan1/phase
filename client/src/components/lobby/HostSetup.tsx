@@ -21,13 +21,6 @@ interface HostSetupProps {
   hostDisabledReason?: string;
 }
 
-const TIMER_OPTIONS: { value: number | null; label: string }[] = [
-  { value: null, label: "None" },
-  { value: 30, label: "30s" },
-  { value: 60, label: "60s" },
-  { value: 120, label: "120s" },
-];
-
 // Descriptions are mirrored from `FormatPicker.tsx` so the two pickers
 // explain each format the same way. Shown as a `title` tooltip on each
 // button. Two-Headed Giant is intentionally omitted — the engine doesn't
@@ -76,7 +69,6 @@ export function HostSetup({
   const [isPublic, setIsPublic] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [password, setPassword] = useState("");
-  const [timerSeconds, setTimerSeconds] = useState<number | null>(null);
   const [selectedFormat, setSelectedFormat] = useState<GameFormat>(
     initialFormatConfig.format,
   );
@@ -165,7 +157,7 @@ export function HostSetup({
       displayName,
       public: isPublic,
       password: showPassword ? password : "",
-      timerSeconds,
+      timerSeconds: null,
       formatConfig: finalConfig,
       matchType: playerCount === 2 ? matchType : "Bo1",
       aiSeats,
@@ -451,28 +443,6 @@ export function HostSetup({
           )}
         </div>
 
-        {/* Timer select */}
-        <div>
-          <label className="mb-1.5 block text-xs font-medium uppercase tracking-wider text-gray-400">
-            Turn Timer
-          </label>
-          <div className="flex rounded-[14px] bg-black/18 p-0.5 ring-1 ring-white/10">
-            {TIMER_OPTIONS.map((opt) => (
-              <button
-                type="button"
-                key={opt.label}
-                onClick={() => setTimerSeconds(opt.value)}
-                className={`flex-1 rounded px-3 py-1 text-xs font-medium capitalize transition-colors ${
-                  timerSeconds === opt.value
-                    ? "bg-white/10 text-white"
-                    : "text-gray-400 hover:text-gray-200"
-                }`}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        </div>
       </div>
 
         <div className="flex justify-end gap-3">
