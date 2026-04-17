@@ -12403,6 +12403,33 @@ mod tests {
         );
     }
 
+    /// CR 701.20a: "puts those cards into their graveyard" — the entire revealed
+    /// pile (the matching land AND everything revealed before it) goes to the
+    /// graveyard. Distinct from the "put the rest" continuation which only
+    /// overrides rest_destination. Covers Balustrade Spy, Consuming Aberration,
+    /// Destroy the Evidence, and Undercity Informer.
+    #[test]
+    fn reveal_until_puts_those_cards_to_graveyard() {
+        let def = parse_effect_chain(
+            "Target player reveals cards from the top of their library until they reveal a land card, then puts those cards into their graveyard.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*def.effect,
+                Effect::RevealUntil {
+                    player: TargetFilter::Player,
+                    filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+                    kept_destination: Zone::Graveyard,
+                    rest_destination: Zone::Graveyard,
+                    enter_tapped: false,
+                } if type_filters.contains(&TypeFilter::Land)
+            ),
+            "expected RevealUntil(kept=Graveyard, rest=Graveyard), got: {:?}",
+            def.effect
+        );
+    }
+
     /// CR 701.20a: Polymorph end-to-end — "Its controller reveals cards from
     /// the top of their library until they reveal a creature card. The player
     /// puts that card onto the battlefield, then shuffles all other cards

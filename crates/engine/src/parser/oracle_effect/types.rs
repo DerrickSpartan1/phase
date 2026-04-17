@@ -208,6 +208,15 @@ pub(super) enum ContinuationAst {
         enter_tapped: bool,
         rest_destination: Option<Zone>,
     },
+    /// CR 701.20a: "puts those cards into [zone]" after RevealUntil — the entire
+    /// revealed pile (the matching card AND everything revealed before it) goes
+    /// to the same zone. Distinct from `PutRest`, which only overrides
+    /// `rest_destination`. Used by cards like Balustrade Spy, Consuming Aberration,
+    /// and Destroy the Evidence where "those cards" refers to all cards revealed
+    /// during the RevealUntil resolution, not only the non-matching ones.
+    RevealUntilAllToZone {
+        destination: Zone,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

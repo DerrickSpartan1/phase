@@ -797,6 +797,22 @@ pub(super) fn apply_clause_continuation(
                 *grant_extra_turn_after = true;
             }
         }
+        // CR 701.20a: "puts those cards into [zone]" — both the matching card and
+        // the non-matching cards go to the same zone.
+        ContinuationAst::RevealUntilAllToZone { destination } => {
+            let Some(previous) = defs.last_mut() else {
+                return;
+            };
+            if let Effect::RevealUntil {
+                kept_destination,
+                rest_destination,
+                ..
+            } = &mut *previous.effect
+            {
+                *kept_destination = destination;
+                *rest_destination = destination;
+            }
+        }
     }
 }
 
@@ -824,6 +840,7 @@ pub(super) fn continuation_absorbs_current(
         ContinuationAst::DigFromAmong { .. } => true,
         ContinuationAst::GrantExtraTurnAfterControlledTurn => true,
         ContinuationAst::RevealUntilKept { .. } => true,
+        ContinuationAst::RevealUntilAllToZone { .. } => true,
     }
 }
 
@@ -1154,9 +1171,31 @@ pub(super) fn parse_followup_continuation_ast(
         //     Transmogrify) — the engine's existing rest=Library destination already
         //     random-orders, satisfying the shuffle semantics.
         //   • Third-person "puts" verb form (Polymorph chain).
-        //   • "puts those cards" (Destroy the Evidence: "puts those cards into their
-        //     graveyard") — when no kept-card was specified separately, the entire
-        //     revealed pile is the rest.
+        // CR 701.20a: "puts those cards into [zone]" / "put those cards into [zone]"
+        // after RevealUntil — the entire revealed pile (matching card + everything
+        // revealed before it) goes to the same zone. Checked before the PutRest arm
+        // because "those cards" is a distinct semantic from "the rest" and must
+        // override both kept_destination and rest_destination. Used by Balustrade
+        // Spy, Consuming Aberration, Destroy the Evidence, Undercity Informer.
+        Effect::RevealUntil { .. }
+            if nom_primitives::scan_contains(&lower, "puts those cards")
+                || nom_primitives::scan_contains(&lower, "put those cards") =>
+        {
+            let destination = if nom_primitives::scan_contains(&lower, "into your graveyard")
+                || nom_primitives::scan_contains(&lower, "into their graveyard")
+            {
+                Zone::Graveyard
+            } else if nom_primitives::scan_contains(&lower, "into exile")
+                || nom_primitives::scan_contains(&lower, "on the bottom")
+            {
+                Zone::Library
+            } else {
+                Zone::Graveyard
+            };
+            Some(ContinuationAst::RevealUntilAllToZone { destination })
+        }
+        //   • "put the revealed cards" / "put them back" after RevealUntil — the
+        //     revealed pile's destination override for the non-matching cards only.
         Effect::RevealUntil { .. }
             if nom_primitives::scan_contains(&lower, "put the rest")
                 || nom_primitives::scan_contains(&lower, "puts the rest")
@@ -1164,8 +1203,6 @@ pub(super) fn parse_followup_continuation_ast(
                 || nom_primitives::scan_contains(&lower, "the rest into your graveyard")
                 || nom_primitives::scan_contains(&lower, "put the revealed cards")
                 || nom_primitives::scan_contains(&lower, "put them back")
-                || nom_primitives::scan_contains(&lower, "puts those cards")
-                || nom_primitives::scan_contains(&lower, "put those cards")
                 || (nom_primitives::scan_contains(&lower, "shuffle")
                     && nom_primitives::scan_contains(&lower, "library")) =>
         {
