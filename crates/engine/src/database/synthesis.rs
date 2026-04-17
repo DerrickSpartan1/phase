@@ -309,23 +309,38 @@ pub fn synthesize_job_select(face: &mut CardFace) {
 /// evaluates battlefield objects), matching CR 721.2c: while in any zone
 /// other than the battlefield, station cards do not have power or toughness.
 pub fn synthesize_station(face: &mut CardFace) {
-    if !face.keywords.iter().any(|k| matches!(k, Keyword::Station)) {
-        return;
-    }
-    let Some(oracle) = face.oracle_text.as_deref() else {
-        return;
-    };
-    let Some(threshold) = parse_station_creature_threshold(oracle) else {
-        return;
-    };
+    // CR 721.2b: Require printed P/T. Station Spacecraft without a printed P/T
+    // box (e.g. "The Eternity Elevator") are support-only; no creature-shift.
     let (Some(PtValue::Fixed(power)), Some(PtValue::Fixed(toughness))) =
         (face.power.as_ref(), face.toughness.as_ref())
     else {
-        // Station cards always have printed P/T per CR 721.1; skip variable P/T.
         return;
     };
     let power = *power;
     let toughness = *toughness;
+
+    // CR 721.1: Spacecraft is the marker subtype — no Spacecraft subtype, no
+    // station striations, so no creature shift applies.
+    if !face
+        .card_type
+        .subtypes
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("Spacecraft"))
+    {
+        return;
+    }
+
+    // CR 721.2b / CR 721.3: The striation containing the printed P/T box is the
+    // highest N+ threshold on the card. Reminder text ("It's an artifact
+    // creature at N+") has no rules force (CR 721.3) and is deliberately
+    // ignored.
+    let Some(oracle) = face.oracle_text.as_deref() else {
+        return;
+    };
+    let lines: Vec<&str> = oracle.lines().collect();
+    let Some(threshold) = crate::parser::oracle_spacecraft::max_spacecraft_threshold(&lines) else {
+        return;
+    };
 
     let condition = crate::types::ability::StaticCondition::HasCounters {
         counter_type: "charge".to_string(),
@@ -344,49 +359,9 @@ pub fn synthesize_station(face: &mut CardFace) {
                 ContinuousModification::SetToughness { value: toughness },
             ])
             .description(format!(
-                "CR 721.2b: It's an artifact creature at {threshold}+"
+                "CR 721.2b: Spacecraft is an artifact creature at {threshold}+"
             )),
     );
-}
-
-/// Parse `N` from the Station reminder clause "It's an artifact creature at N+."
-/// Uses `scan_at_word_boundaries` with a nom combinator over the apostrophe
-/// variants + `parse_number` + `tag("+")` so detection is fully composable.
-/// Returns `None` if the clause is missing (allowed — some Spacecraft omit
-/// the creature shift entirely, and their creature-at-N+ semantics come from
-/// striation P/T boxes not exposed in Oracle text).
-fn parse_station_creature_threshold(oracle: &str) -> Option<u32> {
-    use crate::parser::oracle_nom::primitives as nom_primitives;
-    use nom::branch::alt;
-    use nom::bytes::complete::tag;
-    use nom::combinator::value;
-    use nom::sequence::preceded;
-    use nom::Parser;
-
-    // Normalize the parenthesized reminder text to plain prose by replacing
-    // open/close parens with spaces. `scan_at_word_boundaries` advances on
-    // ASCII spaces, so this hoists the `It's an artifact creature at N+`
-    // phrase onto a word boundary regardless of whether it appeared inside
-    // a reminder paragraph.
-    let normalized: String = oracle
-        .chars()
-        .map(|c| if c == '(' || c == ')' { ' ' } else { c })
-        .collect();
-    let lower = normalized.to_lowercase();
-    nom_primitives::scan_at_word_boundaries(&lower, |i| {
-        preceded(
-            alt((
-                value((), tag("it's an artifact creature at ")),
-                value((), tag("it\u{2019}s an artifact creature at ")),
-            )),
-            |inner| {
-                let (rest, n) = nom_primitives::parse_number(inner)?;
-                let (rest, _) = tag("+")(rest)?;
-                Ok((rest, n))
-            },
-        )
-        .parse(i)
-    })
 }
 
 pub fn synthesize_changeling_cda(face: &mut CardFace) {
@@ -1673,41 +1648,92 @@ mod station_synthesis_tests {
             .any(|m| matches!(m, ContinuousModification::SetToughness { value: 8 })));
     }
 
+    /// CR 721.2b: Reminder text "It's an artifact creature at N+" has no
+    /// rules force (CR 721.3). The creature-shift threshold is derived from
+    /// the highest N+ striation containing the printed P/T box.
     #[test]
-    fn synthesize_station_no_op_without_keyword() {
+    fn station_creature_shift_derived_from_max_threshold_not_reminder_text() {
         let mut face = spacecraft_face_with_reminder();
-        face.keywords.clear();
-        let before = face.static_abilities.len();
+        // Original oracle has thresholds 3 and 12; max is 12 → creature-shift gates on 12.
         synthesize_station(&mut face);
-        assert_eq!(face.static_abilities.len(), before);
+        let sd = face
+            .static_abilities
+            .iter()
+            .find(|s| {
+                s.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddType {
+                            core_type: CoreType::Creature,
+                        }
+                    )
+                })
+            })
+            .expect("creature-shift static must derive from max striation");
+        assert!(matches!(
+            sd.condition,
+            Some(StaticCondition::HasCounters { minimum: 12, .. })
+        ));
     }
 
     #[test]
-    fn synthesize_station_no_op_without_reminder() {
+    fn station_creature_shift_ignores_reminder_text_absence() {
+        // Oracle without the "at N+" reminder phrase still emits creature-shift
+        // because the derivation reads N+ striations, not reminder text.
         let mut face = spacecraft_face_with_reminder();
         face.oracle_text = Some("Station\n8+ | Flying".to_string());
+        synthesize_station(&mut face);
+        let sd = face
+            .static_abilities
+            .iter()
+            .find(|s| {
+                s.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddType {
+                            core_type: CoreType::Creature,
+                        }
+                    )
+                })
+            })
+            .expect("creature-shift static must be emitted from striation alone");
+        assert!(matches!(
+            sd.condition,
+            Some(StaticCondition::HasCounters { minimum: 8, .. })
+        ));
+    }
+
+    #[test]
+    fn station_no_creature_shift_when_no_printed_pt() {
+        // CR 721.2b: support-only Spacecraft (null P/T) gets no creature-shift.
+        // Mirrors "the eternity elevator" — Station + 20+ threshold but no P/T.
+        let mut face = spacecraft_face_with_reminder();
+        face.power = None;
+        face.toughness = None;
         let before = face.static_abilities.len();
         synthesize_station(&mut face);
-        // No reminder phrase → no creature-shift static added.
         assert_eq!(face.static_abilities.len(), before);
     }
 
     #[test]
-    fn synthesize_station_supports_unicode_apostrophe() {
+    fn station_no_creature_shift_when_no_thresholds() {
+        // No N+ striations → no creature-shift static.
         let mut face = spacecraft_face_with_reminder();
-        face.oracle_text =
-            Some("Station (It\u{2019}s an artifact creature at 7+.)\n7+ | Flying".to_string());
+        face.oracle_text = Some("Station\nPlain rules text with no thresholds.".to_string());
+        let before = face.static_abilities.len();
         synthesize_station(&mut face);
-        let added = face.static_abilities.iter().any(|s| {
-            s.modifications.iter().any(|m| {
-                matches!(
-                    m,
-                    ContinuousModification::AddType {
-                        core_type: CoreType::Creature,
-                    }
-                )
-            })
-        });
-        assert!(added);
+        assert_eq!(face.static_abilities.len(), before);
+    }
+
+    #[test]
+    fn station_no_creature_shift_for_non_spacecraft_card() {
+        // Non-Spacecraft with charge counters and an N+ line in flavor must
+        // not trigger creature-shift derivation.
+        let mut face = spacecraft_face_with_reminder();
+        face.card_type.subtypes.clear();
+        face.card_type.subtypes.push("Vehicle".to_string());
+        let before = face.static_abilities.len();
+        synthesize_station(&mut face);
+        assert_eq!(face.static_abilities.len(), before);
     }
 }

@@ -42,6 +42,18 @@ use crate::types::ability::{
 /// Counter type gating Spacecraft threshold lines (CR 702.184a / CR 721).
 pub(crate) const STATION_COUNTER: &str = "charge";
 
+/// CR 721.2a / CR 721.2b: Return the highest `N+` station-symbol threshold
+/// printed on this Spacecraft, reading body lines that `parse_spacecraft_threshold_lines`
+/// would also recognize. Used by the synthesis layer to derive the
+/// creature-shift threshold from the striation with the printed P/T box,
+/// rather than from reminder text (CR 721.3).
+pub fn max_spacecraft_threshold(lines: &[&str]) -> Option<u32> {
+    lines
+        .iter()
+        .filter_map(|raw| parse_threshold_header(raw.trim()).map(|(n, _)| n))
+        .max()
+}
+
 /// Parse all `N+ | body` threshold lines in `lines`.
 ///
 /// Returns parsed statics / triggers / activated abilities, plus the set of
