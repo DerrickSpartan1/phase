@@ -207,29 +207,31 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
           abilityActions.push(action);
         }
       }
+      // Prefer ActivateAbility entries emitted by legal_actions — they carry the
+      // exact ability_index and let the engine prompt ChooseManaColor for
+      // multi-option productions (AnyOneColor, ChoiceAmongCombinations). The
+      // TapLandForMana shortcut is only used when the engine emitted no mana
+      // action (single-option basic lands pre-legalActions, edge cases).
+      const manaFallback: GameAction = manaActions.length === 0
+        ? { type: "TapLandForMana", data: { object_id: objectId } }
+        : manaActions[0];
+      const manaChoiceNeeded = manaActions.length > 1;
+
       if (abilityActions.length === 0 && canTapForMana) {
-        // No non-mana abilities — tap for mana directly
-        if (o && !o.card_types.core_types.includes("Land") && o.mana_ability_index != null) {
-          // Non-land mana source: dispatch ActivateAbility (handles tap + sacrifice etc.)
-          dispatchAction({ type: "ActivateAbility", data: { source_id: objectId, ability_index: o.mana_ability_index } });
-        } else if (manaActions.length > 1) {
-          // Multi-color land (e.g., shock lands, dual lands) — show choice modal
+        if (manaChoiceNeeded) {
           setPendingAbilityChoice({ objectId, actions: manaActions });
         } else {
-          dispatchAction({ type: "TapLandForMana", data: { object_id: objectId } });
+          dispatchAction(manaFallback);
         }
       } else if (abilityActions.length === 1 && !canTapForMana) {
         dispatchAction(abilityActions[0]);
       } else {
-        // Multiple abilities or both ability + mana — show choice modal
         const allActions: GameAction[] = [...abilityActions];
         if (canTapForMana) {
-          if (o && !o.card_types.core_types.includes("Land") && o.mana_ability_index != null) {
-            allActions.push({ type: "ActivateAbility", data: { source_id: objectId, ability_index: o.mana_ability_index } });
-          } else if (manaActions.length > 1) {
+          if (manaChoiceNeeded) {
             allActions.push(...manaActions);
           } else {
-            allActions.push({ type: "TapLandForMana", data: { object_id: objectId } });
+            allActions.push(manaFallback);
           }
         }
         if (allActions.length === 1) {
