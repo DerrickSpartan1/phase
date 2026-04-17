@@ -1475,6 +1475,13 @@ pub enum QuantityRef {
     OpponentHandSize,
     /// CR 309.7: Number of dungeons the controller has completed.
     DungeonsCompleted,
+    /// CR 107.3m: The value of X paid for the spell that produced the source
+    /// object. Survives the stack → battlefield transition (stored on the
+    /// GameObject as `cost_x_paid`), so ETB replacement effects ("enters with
+    /// X counters") and ETB triggered abilities referring to X resolve against
+    /// the actual paid amount. Distinct from `Variable { name: "X" }` which
+    /// only resolves while the ability is on the stack with `chosen_x` set.
+    CostXPaid,
 }
 
 /// CR 107.2: Rounding direction for "half X" expressions in Magic.

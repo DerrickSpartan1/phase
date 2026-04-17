@@ -4272,9 +4272,15 @@ pub(crate) fn parse_effect_chain_with_context(
 fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) -> AbilityDefinition {
     let full_text = text; // Bind before `text` is shadowed by strip helpers in the loop
     let chunks = split_clause_sequence(text);
+    // CR 107.3i: "Normally, all instances of X on an object have the same value."
+    // Build a per-chunk sentence-scoped `where X is <expr>` binding so that when
+    // one clause in a sentence binds X ("... and you gain X life, where X is <expr>"),
+    // sibling clauses in the same sentence ("Target player loses X life")
+    // substitute X with the same expression. Delimited by ClauseBoundary::Sentence.
+    let sentence_where_x = compute_sentence_where_x(&chunks);
     let mut defs: Vec<AbilityDefinition> = Vec::new();
 
-    for chunk in &chunks {
+    for (chunk_idx, chunk) in chunks.iter().enumerate() {
         let normalized_text = strip_leading_sequence_connector(&chunk.text).trim();
         if normalized_text.is_empty() {
             continue;
@@ -4589,8 +4595,17 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         // inner effect through the full pipeline and wrap in CreateDelayedTrigger.
         let (text_after_prefix, prefix_delayed) = strip_temporal_prefix(&text);
         let text_where_x_lower = text.to_lowercase();
-        let (_, where_x_expression) =
+        let (_, local_where_x_expression) =
             strip_trailing_where_x(TextPair::new(&text, &text_where_x_lower));
+        // CR 107.3i: If this chunk has no local "where X is" but a sibling clause
+        // in the same sentence binds X, propagate the sibling binding so "target
+        // player loses X life" and "you gain X life" in the same sentence share
+        // the same X expression (Essence Harvest, Debt to the Deathless, etc.).
+        let where_x_expression = local_where_x_expression.or_else(|| {
+            sentence_where_x
+                .get(chunk_idx)
+                .and_then(|expr| expr.clone())
+        });
         if let Some(prefix_condition) = prefix_delayed {
             let (inner_text, inner_multi_target) = strip_any_number_quantifier(text_after_prefix);
             let inner_clause = parse_effect_clause(&inner_text, ctx);
@@ -6232,6 +6247,39 @@ fn compose_pt_with_for_each(pt: PtValue, quantity: &QuantityExpr) -> PtValue {
     }
 }
 
+/// CR 107.3i + CR 107.3m: Compute, for each chunk, the `where X is <expr>`
+/// binding that applies to its enclosing sentence. Sibling clauses of the same
+/// sentence share the binding so that "target player loses X life and you gain
+/// X life, where X is the greatest power among creatures you control" resolves
+/// both X references to the same expression.
+///
+/// Groups chunks by `ClauseBoundary::Sentence` (Comma/Then/None continue the
+/// current sentence). The returned Vec has the same length as `chunks`; each
+/// entry is the binding of that chunk's sentence, or `None` if no sibling in
+/// the sentence contains a "where X is" suffix.
+fn compute_sentence_where_x(chunks: &[ClauseChunk]) -> Vec<Option<String>> {
+    let mut out = vec![None; chunks.len()];
+    let mut group_start = 0usize;
+    for (idx, chunk) in chunks.iter().enumerate() {
+        let ends_sentence = matches!(chunk.boundary_after, Some(ClauseBoundary::Sentence) | None);
+        if ends_sentence {
+            // Close the group [group_start..=idx]: scan for a where-X binding.
+            let binding = chunks[group_start..=idx].iter().find_map(|c| {
+                let lower = c.text.to_lowercase();
+                let (_, expr) = strip_trailing_where_x(TextPair::new(&c.text, &lower));
+                expr
+            });
+            if binding.is_some() {
+                for slot in &mut out[group_start..=idx] {
+                    *slot = binding.clone();
+                }
+            }
+            group_start = idx + 1;
+        }
+    }
+    out
+}
+
 pub(crate) fn strip_trailing_where_x<'a>(tp: TextPair<'a>) -> (TextPair<'a>, Option<String>) {
     for needle in [", where x is ", " where x is "] {
         if let Some((before, after)) = tp.split_around(needle) {
@@ -6699,6 +6747,41 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::zones::Zone;
+
+    #[test]
+    fn where_x_binds_siblings_in_same_sentence() {
+        // CR 107.3i: "all instances of X on an object have the same value".
+        // For "target player loses X life and you gain X life, where X is ~"
+        // both clauses must resolve X to the same expression, even though only
+        // the second clause textually carries the binding (Essence Harvest).
+        let def = parse_effect_chain(
+            "Target player loses X life and you gain X life, where X is the greatest power among creatures you control.",
+            AbilityKind::Spell,
+        );
+        // The first clause should be LoseLife with Aggregate(Max, Power, ...).
+        match &*def.effect {
+            Effect::LoseLife { amount, .. } => match amount {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Aggregate { .. },
+                } => {}
+                other => panic!(
+                    "expected LoseLife amount to be Aggregate (propagated from sibling where-X), got {other:?}"
+                ),
+            },
+            other => panic!("expected LoseLife, got {other:?}"),
+        }
+        // The sibling GainLife must also resolve to the same aggregate.
+        let sub = def.sub_ability.as_ref().expect("sibling gain_life");
+        match &*sub.effect {
+            Effect::GainLife { amount, .. } => match amount {
+                QuantityExpr::Ref {
+                    qty: QuantityRef::Aggregate { .. },
+                } => {}
+                other => panic!("expected GainLife Aggregate, got {other:?}"),
+            },
+            other => panic!("expected GainLife, got {other:?}"),
+        }
+    }
 
     #[test]
     fn effect_lightning_bolt() {

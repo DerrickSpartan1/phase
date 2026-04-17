@@ -287,7 +287,14 @@ fn parse_self_toughness_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 
 /// Parse life-lost references: "the life you've lost this turn", "life you've lost", etc.
 /// Includes duration-stripped forms (without "this turn") for post-duration-stripping contexts.
+/// Accepts an optional "(the) amount of " prefix so phrases like
+/// "the amount of life you lost this turn" (Hope Estheim class) parse uniformly.
 fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    // CR 119.3: Optional "the amount of " / "amount of " prefix before the base
+    // life-lost phrase. Shared combinator absorbs the prefix once so every
+    // downstream variant automatically supports it.
+    let (input, _) =
+        nom::combinator::opt(alt((tag("the amount of "), tag("amount of ")))).parse(input)?;
     alt((
         value(
             QuantityRef::LifeLostThisTurn,
@@ -324,7 +331,12 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 
 /// Parse life-gained references: "the life you've gained this turn", "life you've gained", etc.
 /// Includes duration-stripped forms (without "this turn") for post-duration-stripping contexts.
+/// Accepts an optional "(the) amount of " prefix so phrases like
+/// "the amount of life you gained this turn" (Hope Estheim class) parse uniformly.
 fn parse_life_gained_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    // CR 119.3: Optional "the amount of " / "amount of " prefix; see parse_life_lost_ref.
+    let (input, _) =
+        nom::combinator::opt(alt((tag("the amount of "), tag("amount of ")))).parse(input)?;
     alt((
         value(
             QuantityRef::LifeGainedThisTurn,
@@ -627,6 +639,21 @@ mod tests {
     #[test]
     fn test_parse_quantity_ref_life_lost() {
         let (rest, q) = parse_quantity_ref("the life you've lost this turn").unwrap();
+        assert_eq!(q, QuantityRef::LifeLostThisTurn);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_quantity_ref_amount_of_life_gained() {
+        // CR 119.3: Hope Estheim class — "the amount of life you gained this turn".
+        let (rest, q) = parse_quantity_ref("the amount of life you gained this turn").unwrap();
+        assert_eq!(q, QuantityRef::LifeGainedThisTurn);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_quantity_ref_amount_of_life_lost() {
+        let (rest, q) = parse_quantity_ref("the amount of life you lost this turn").unwrap();
         assert_eq!(q, QuantityRef::LifeLostThisTurn);
         assert_eq!(rest, "");
     }

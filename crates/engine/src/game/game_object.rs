@@ -171,6 +171,15 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ninjutsu_variant_paid: Option<(NinjutsuVariant, u32)>,
 
+    /// CR 107.3m: The value of X paid when the spell that produced this object
+    /// was cast. Populated by `finalize_cast` from the pending ability's
+    /// `chosen_x` and survives the stack → battlefield transition so that
+    /// ETB replacement effects ("enters with X counters") and ETB triggered
+    /// abilities that refer to X resolve against the actual paid amount.
+    /// Resolved via `QuantityRef::CostXPaid`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_x_paid: Option<u32>,
+
     // Coverage: lists unimplemented mechanics (computed for serialization, not persisted)
     #[serde(skip_deserializing, default, skip_serializing_if = "Vec::is_empty")]
     pub unimplemented_mechanics: Vec<String>,
@@ -448,6 +457,7 @@ impl GameObject {
             timestamp: 0,
             entered_battlefield_turn: None,
             ninjutsu_variant_paid: None,
+            cost_x_paid: None,
             unimplemented_mechanics: Vec::new(),
             has_summoning_sickness: false,
             has_mana_ability: false,
@@ -522,6 +532,10 @@ impl GameObject {
         // CR 701.60a / CR 702.112b: Suspect and renowned are battlefield designations.
         self.is_suspected = false;
         self.is_renowned = false;
+        // CR 107.3m: The paid-X value is tied to the spell-resolution that brought
+        // this permanent to the battlefield. When the permanent leaves, the value
+        // is no longer meaningful; a re-cast will re-populate it via `finalize_cast`.
+        self.cost_x_paid = None;
     }
 
     /// Check if this object has a specific keyword, using discriminant-based matching.

@@ -577,6 +577,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::OpponentHandSize => "opponent hand size".into(),
         QuantityRef::DungeonsCompleted => "dungeons completed".into(),
         QuantityRef::TargetZoneCardCount { .. } => "target zone card count".into(),
+        QuantityRef::CostXPaid => "X paid for this spell".into(),
     }
 }
 
@@ -3431,6 +3432,7 @@ fn quantity_ref_variant_name(qref: &QuantityRef) -> &'static str {
         QuantityRef::OpponentHandSize => "OpponentHandSize",
         QuantityRef::DungeonsCompleted => "DungeonsCompleted",
         QuantityRef::TargetZoneCardCount { .. } => "TargetZoneCardCount",
+        QuantityRef::CostXPaid => "CostXPaid",
     }
 }
 
@@ -3508,6 +3510,7 @@ fn resolver_handled_features() -> HashSet<&'static str> {
         "quantity_ref:EnteredThisTurn",
         "quantity_ref:CrimesCommittedThisTurn",
         "quantity_ref:LifeGainedThisTurn",
+        "quantity_ref:CostXPaid",
         // -- Static conditions handled by static_abilities / layers --
         "static_condition:QuantityComparison",
         "static_condition:DevotionGE",

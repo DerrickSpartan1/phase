@@ -637,6 +637,17 @@ fn resolve_ref(
             .dungeon_progress
             .get(&controller)
             .map_or(0, |p| p.completed.len() as i32),
+        // CR 107.3m: The X paid when the source was cast. Stashed on the object
+        // by `finalize_cast` so it survives stack → battlefield. Falls back to
+        // the resolving ability's `chosen_x` (for stack-resolution contexts
+        // where the object hasn't landed on the battlefield yet).
+        QuantityRef::CostXPaid => state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| obj.cost_x_paid)
+            .map(|x| x as i32)
+            .or_else(|| chosen_x.map(|x| x as i32))
+            .unwrap_or(0),
     }
 }
 

@@ -1347,6 +1347,14 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         events,
     );
 
+    // CR 107.3m: Stash the paid X value directly on the permanent so replacement
+    // effects ("enters with X counters") and ETB triggered abilities that
+    // reference the cost X (via `QuantityRef::CostXPaid`) can resolve after the
+    // spell leaves the stack. Set regardless of placeholder vs. real ability —
+    // permanent spells with no on-resolve ability still need this for ETB
+    // replacements on X-cost cards like Astral Cornucopia, Walking Ballista, etc.
+    let cost_x_paid = ability.chosen_x;
+
     // Determine whether this spell has a meaningful on-resolve ability.
     // Permanent spells with no Spell-kind AbilityDefinition get a placeholder
     // Unimplemented effect through the cost pipeline (from continue_with_no_ability).
@@ -1366,6 +1374,16 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         }
         None
     };
+
+    // CR 107.3m: Apply the paid-X snapshot to the object (after the placeholder
+    // branch has already taken a mutable borrow). Done unconditionally so that
+    // non-placeholder paths (permanents whose on-resolve ability also references
+    // CostXPaid, e.g. future cards) share the same source-of-truth lookup.
+    if let Some(x) = cost_x_paid {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.cost_x_paid = Some(x);
+        }
+    }
 
     // CR 601.2a + CR 601.2i: The spell was announced onto the stack earlier,
     // but the object's `zone` field stayed at its origin through cost payment

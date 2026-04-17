@@ -1567,7 +1567,7 @@ pub fn find_applicable_replacements(
                     // but it's tapping anyway — the player shouldn't be offered the
                     // dominated "pay 2 life to avoid a tap that isn't happening" choice.
                     if let ReplacementMode::Optional { decline } = &repl_def.mode {
-                        if optional_decline_is_noop(event, decline.as_deref()) {
+                        if optional_decline_is_noop(event, decline.as_deref(), state, obj.id) {
                             continue;
                         }
                     }
@@ -1656,7 +1656,11 @@ enum ReplacementBranch {
 
 /// Extract ETB counter data from a replacement ability's effect.
 /// Handles `PutCounter` and `AddCounter` effects, returning (counter_type, count) pairs.
-fn extract_etb_counters(ability: Option<&AbilityDefinition>) -> Vec<(String, u32)> {
+fn extract_etb_counters(
+    ability: Option<&AbilityDefinition>,
+    state: &GameState,
+    source_id: ObjectId,
+) -> Vec<(String, u32)> {
     let exec = match ability {
         Some(e) => e,
         None => return Vec::new(),
@@ -1672,9 +1676,20 @@ fn extract_etb_counters(ability: Option<&AbilityDefinition>) -> Vec<(String, u32
             count,
             ..
         } => {
+            // CR 107.3m + CR 614.1c: Resolve dynamic counts against the entering
+            // object. `CostXPaid` reads the spell's paid X (stashed by
+            // `finalize_cast`); other dynamic refs resolve against current state.
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,
-                _ => 1, // Dynamic counts fall back to 1 for ETB counters
+                other => {
+                    let controller = state
+                        .objects
+                        .get(&source_id)
+                        .map(|obj| obj.controller)
+                        .unwrap_or(PlayerId(0));
+                    crate::game::quantity::resolve_quantity(state, other, controller, source_id)
+                        .max(0) as u32
+                }
             };
             vec![(counter_type.clone(), n)]
         }
@@ -1719,7 +1734,11 @@ impl EventModifiers {
 }
 
 /// Compute the ProposedEvent modifications an ability would introduce.
-fn event_modifiers_for_ability(ability: Option<&AbilityDefinition>) -> EventModifiers {
+fn event_modifiers_for_ability(
+    ability: Option<&AbilityDefinition>,
+    state: &GameState,
+    source_id: ObjectId,
+) -> EventModifiers {
     let tapped = ability.is_some_and(|def| {
         matches!(
             *def.effect,
@@ -1728,7 +1747,7 @@ fn event_modifiers_for_ability(ability: Option<&AbilityDefinition>) -> EventModi
             }
         )
     });
-    let counters = extract_etb_counters(ability);
+    let counters = extract_etb_counters(ability, state, source_id);
     let redirect = ability.and_then(|def| match &*def.effect {
         Effect::ChangeZone { destination, .. } => Some(*destination),
         _ => None,
@@ -1756,7 +1775,12 @@ fn event_modifiers_for_ability(ability: Option<&AbilityDefinition>) -> EventModi
 /// has any non-modifier effect (e.g., a choice, a draw) or a modification not already
 /// present, the Optional remains applicable so the player can still be offered the
 /// choice when it is meaningful.
-fn optional_decline_is_noop(event: &ProposedEvent, decline: Option<&AbilityDefinition>) -> bool {
+fn optional_decline_is_noop(
+    event: &ProposedEvent,
+    decline: Option<&AbilityDefinition>,
+    state: &GameState,
+    source_id: ObjectId,
+) -> bool {
     // Dominance only applies to ZoneChange events — that's where enter_tapped /
     // etb_counters / redirect_zone live. For other event kinds, never skip.
     let ProposedEvent::ZoneChange {
@@ -1779,7 +1803,7 @@ fn optional_decline_is_noop(event: &ProposedEvent, decline: Option<&AbilityDefin
         return false;
     }
 
-    let mods = event_modifiers_for_ability(Some(def));
+    let mods = event_modifiers_for_ability(Some(def), state, source_id);
     let tap_already = !mods.enters_tapped || *enter_tapped;
     let counters_already = mods.etb_counters.iter().all(|(ct, n)| {
         enter_with_counters
@@ -1847,7 +1871,7 @@ fn apply_single_replacement(
             };
             (
                 repl_def.event.clone(),
-                event_modifiers_for_ability(ability),
+                event_modifiers_for_ability(ability, state, rid.source),
                 post_effect,
             )
         }

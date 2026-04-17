@@ -1081,6 +1081,13 @@ fn parse_enters_with_counters(
             Ok((rest, _)) => (Some(after_additional), rest),
             Err(_) => (None, after_additional),
         };
+    // CR 107.3m: Detect the X-cost case ("enters with X counters") before falling
+    // through to numeric parsing. The spell's paid X survives on the permanent as
+    // `cost_x_paid`; resolve via `QuantityRef::CostXPaid` so Astral Cornucopia,
+    // Walking Ballista, Hangarback Walker etc. enter with the actual paid amount.
+    let is_x_count = alt((tag::<_, _, VerboseError<&str>>("x "), tag("X ")))
+        .parse(after_prefix)
+        .is_ok();
     // Uses oracle_util::parse_number (not nom directly) because it handles "X" → 0
     // for X-cost cards like Endless One, Walking Ballista, Hangarback Walker, etc.
     let (count, rest) = parse_number(after_prefix).unwrap_or((1, after_prefix));
@@ -1094,8 +1101,15 @@ fn parse_enters_with_counters(
     };
 
     // Initialize count with fixed fallback, then override for dynamic "equal to" pattern
-    let mut count_expr = QuantityExpr::Fixed {
-        value: count as i32,
+    let mut count_expr = if is_x_count {
+        // CR 107.3m: X resolves against the spell's paid X via CostXPaid.
+        QuantityExpr::Ref {
+            qty: crate::types::ability::QuantityRef::CostXPaid,
+        }
+    } else {
+        QuantityExpr::Fixed {
+            value: count as i32,
+        }
     };
     // CR 122.6: For "a number of counters equal to [quantity]", parse the dynamic expression
     if dynamic_remainder.is_some() {
@@ -2574,6 +2588,64 @@ mod tests {
                 ..
             } if counter_type == "P1P1"
         ));
+    }
+
+    #[test]
+    fn enters_with_x_counters_uses_cost_x_paid() {
+        // CR 107.3m: "This artifact enters with X charge counters on it" — X is the
+        // paid value for the {X} cost. Must emit QuantityRef::CostXPaid (not Fixed 0).
+        let def = parse_replacement_line(
+            "This artifact enters with X charge counters on it.",
+            "Astral Cornucopia",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        match &*def.execute.as_ref().unwrap().effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(counter_type, "CHARGE");
+                assert!(
+                    matches!(
+                        count,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::CostXPaid,
+                        }
+                    ),
+                    "count should be CostXPaid, got {count:?}"
+                );
+            }
+            other => panic!("Expected PutCounter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enters_with_x_plus1_plus1_counters_uses_cost_x_paid() {
+        // CR 107.3m: Walking Ballista / Endless One / Hangarback Walker class —
+        // "enters with X +1/+1 counters on it".
+        let def = parse_replacement_line(
+            "Walking Ballista enters with X +1/+1 counters on it.",
+            "Walking Ballista",
+        )
+        .unwrap();
+        match &*def.execute.as_ref().unwrap().effect {
+            Effect::PutCounter {
+                counter_type,
+                count,
+                ..
+            } => {
+                assert_eq!(counter_type, "P1P1");
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    }
+                ));
+            }
+            other => panic!("Expected PutCounter, got {other:?}"),
+        }
     }
 
     #[test]
