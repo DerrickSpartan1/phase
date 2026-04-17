@@ -606,6 +606,22 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
+    // CR 603.4: Only a true intervening-if is hoisted to the trigger-level condition.
+    // A trigger-level `if` is one that IMMEDIATELY follows the trigger condition
+    // clause ("When X, if Y, Z"). When the `if` is introduced by "then"
+    // ("effect. Then if Y, effect2") the condition scopes only to the then-clause's
+    // sub_ability and is attached by `strip_leading_general_conditional` during
+    // per-clause effect parsing (parser/oracle_effect/conditions.rs).
+    //
+    // Guard: if the FIRST `if ` in the effect text belongs to a "then if" clause,
+    // skip hoisting entirely. A legitimate intervening-if will appear before any
+    // "then if" in effect order, so checking the first occurrence is sufficient.
+    if let Some(first_if) = tp.find("if ") {
+        if if_belongs_to_then_clause(&lower, first_if) {
+            return (text.to_string(), None);
+        }
+    }
+
     // --- Source-referential patterns (cannot be StaticConditions) ---
     // These require trigger-source context that StaticCondition can't express.
 
@@ -1044,6 +1060,35 @@ fn strip_condition_clause(text: &str, clause_start: usize, clause_len: usize) ->
     } else {
         format!("{before} {after}")
     }
+}
+
+/// CR 603.4: True when the `if` at `if_pos` belongs to a "then if ..." clause
+/// introduced by a preceding sentence boundary ("effect. Then if ..." or
+/// "effect, then if ...").
+///
+/// A genuine intervening-if (per CR 603.4) has its `if` **immediately following**
+/// the trigger condition clause, with no intervening "then". When `if` appears
+/// inside a "then if" sub-clause, the condition scopes only to that clause's
+/// sub_ability — not to the whole trigger — and is handled by the per-clause
+/// condition extractor `strip_leading_general_conditional` in
+/// `parser/oracle_effect/conditions.rs`.
+///
+/// Implementation: scan backward from `if_pos` to the last sentence boundary
+/// (". ") or inline "then " boundary. structural: punctuation scan, not parser
+/// dispatch.
+fn if_belongs_to_then_clause(lower: &str, if_pos: usize) -> bool {
+    // structural: find the last sentence boundary before if_pos
+    let before = &lower[..if_pos];
+    let sentence_start = before.rfind(". ").map_or(0, |i| i + 2);
+    let between = lower[sentence_start..if_pos].trim_start();
+    // A "then"-introduced clause: the segment between the last sentence boundary
+    // and the `if` is "then " or "then, " (Felidar Sovereign-style: "...double
+    // your life total. Then, if you have 1,000 or more life, you lose the game").
+    // Both forms scope the condition to the second clause, not the whole trigger.
+    alt((tag::<_, _, VerboseError<&str>>("then, "), tag("then ")))
+        .parse(between)
+        .map(|(rest, _)| rest.trim().is_empty())
+        .unwrap_or(false)
 }
 
 /// Parse "if you control N or more [type]" → (condition, end_byte_offset).
@@ -4465,6 +4510,144 @@ mod tests {
                 rhs: QuantityExpr::Fixed { value: 3 },
             })
         );
+    }
+
+    /// CR 603.4: "effect. Then if Y, effect2" — the `if` is introduced by "then"
+    /// and scopes only to the second clause's sub_ability. `extract_if_condition`
+    /// must NOT hoist this to the trigger-level condition.
+    #[test]
+    fn extract_if_skips_then_if_clause() {
+        let (cleaned, cond) = extract_if_condition(
+            "create a 1/1 black ninja creature token. then if you control five or more ninjas, that player loses half their life, rounded up.",
+        );
+        assert_eq!(
+            cond, None,
+            "then-if conditions must not be hoisted to trigger level",
+        );
+        assert_eq!(
+            cleaned,
+            "create a 1/1 black ninja creature token. then if you control five or more ninjas, that player loses half their life, rounded up.",
+            "effect text must be returned unchanged when the if belongs to a then-clause",
+        );
+    }
+
+    /// CR 603.4: Genuine leading intervening-if ("When X, if Y, Z" — here
+    /// `extract_if_condition` receives only the effect portion "if Y, Z") must
+    /// still be hoisted even if a later "then if" appears.
+    #[test]
+    fn extract_if_preserves_leading_intervening_if_with_later_then() {
+        // Only the FIRST `if ` is considered for the then-clause guard; a
+        // leading intervening-if (no preceding "then") is correctly hoisted.
+        let (_, cond) = extract_if_condition("if you control a creature, draw a card");
+        assert!(
+            cond.is_some(),
+            "leading intervening-if must still be hoisted, got {cond:?}",
+        );
+    }
+
+    /// CR 603.4: "effect. Then, if Y, ..." (with comma after "Then") — the
+    /// condition still belongs to the "then" clause and must not be hoisted.
+    /// Regression: A Good Thing ("double your life total. Then, if you have
+    /// 1,000 or more life, you lose the game.").
+    #[test]
+    fn extract_if_skips_then_comma_if_clause() {
+        let (_, cond) = extract_if_condition(
+            "double your life total. then, if you have 1,000 or more life, you lose the game.",
+        );
+        assert_eq!(
+            cond, None,
+            "\"then, if\" conditions must not be hoisted to trigger level",
+        );
+    }
+
+    /// CR 608.2k + CR 603.4: Full Dark Leo & Shredder parse — the if-condition
+    /// must attach to the sub_ability (not the trigger), the sub_ability target
+    /// must be TriggeringPlayer (not a new Player target), and the sub_ability
+    /// amount must resolve "half their life, rounded up".
+    #[test]
+    fn parse_dark_leo_trigger_structure() {
+        use crate::types::ability::{AbilityCondition, Effect, RoundingMode};
+
+        let def = parse_trigger_line(
+            "Whenever ~ deals combat damage to a player, create a 1/1 black Ninja creature token. Then if you control five or more Ninjas, that player loses half their life, rounded up.",
+            "Dark Leo & Shredder",
+        );
+
+        // Trigger-level condition must be None — the `if you control five or more`
+        // scopes only to the sub_ability.
+        assert_eq!(def.condition, None, "trigger.condition must be None");
+
+        // Outer effect is the token creation.
+        let execute = def.execute.as_ref().expect("execute must be Some");
+        assert!(
+            matches!(*execute.effect, Effect::Token { .. }),
+            "outer execute must be Token, got {:?}",
+            execute.effect,
+        );
+
+        // Sub-ability holds the conditional life-loss.
+        let sub = execute
+            .sub_ability
+            .as_deref()
+            .expect("sub_ability must be Some");
+        // Sub-ability condition is the Ninja count check.
+        assert!(
+            matches!(
+                &sub.condition,
+                Some(AbilityCondition::QuantityCheck {
+                    comparator: Comparator::GE,
+                    rhs: QuantityExpr::Fixed { value: 5 },
+                    ..
+                })
+            ),
+            "sub_ability.condition must be QuantityCheck ≥ 5, got {:?}",
+            sub.condition,
+        );
+        // Sub-ability effect is LoseLife targeting TriggeringPlayer with HalfRounded amount.
+        match &*sub.effect {
+            Effect::LoseLife { amount, target } => {
+                assert_eq!(
+                    target.as_ref(),
+                    Some(&TargetFilter::TriggeringPlayer),
+                    "sub_ability LoseLife.target must be TriggeringPlayer",
+                );
+                assert!(
+                    matches!(
+                        amount,
+                        QuantityExpr::HalfRounded {
+                            rounding: RoundingMode::Up,
+                            ..
+                        }
+                    ),
+                    "amount must be HalfRounded(Up), got {amount:?}",
+                );
+            }
+            other => panic!("sub_ability effect must be LoseLife, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2k: "that player discards a card" in a trigger effect must target
+    /// the triggering player (damaged player), not surface a fresh target prompt.
+    /// Abyssal-Specter-class regression test.
+    #[test]
+    fn parse_abyssal_specter_that_player_discard() {
+        use crate::types::ability::Effect;
+
+        let def = parse_trigger_line(
+            "Whenever ~ deals damage to a player, that player discards a card.",
+            "Abyssal Specter",
+        );
+        let execute = def.execute.as_ref().expect("execute must be Some");
+        match &*execute.effect {
+            Effect::Discard { target, .. } => {
+                assert_eq!(
+                    target,
+                    &TargetFilter::TriggeringPlayer,
+                    "Discard.target must be TriggeringPlayer",
+                );
+            }
+            other => panic!("execute effect must be Discard, got {other:?}"),
+        }
     }
 
     #[test]

@@ -16,6 +16,7 @@ use crate::types::game_state::DayNight;
 use crate::types::statics::StaticMode;
 
 use super::super::oracle_nom::primitives as nom_primitives;
+use super::super::oracle_nom::target::parse_event_context_ref;
 use super::super::oracle_static::parse_continuous_modifications;
 use super::super::oracle_target::{parse_target, parse_type_phrase};
 use super::super::oracle_util::{
@@ -472,9 +473,27 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
-    if lower == "that player" || lower == "the player" {
+    // CR 608.2k: "that player" / "the player" as subject.
+    // In trigger context (`ctx.subject` is Some — set exclusively by
+    // `oracle_trigger.rs::parse_trigger_line` via
+    // `extract_trigger_subject_for_context`; non-trigger parse entry points
+    // leave it as None), the phrase refers anaphorically to the player from the
+    // triggering event (damaged player, casting player, etc.) regardless of
+    // whether the trigger subject itself is SelfRef ("~ deals damage to a
+    // player") or a typed object. Delegate to the single-authority
+    // event-context combinator for the mapping.
+    // Outside trigger context, fall back to TargetFilter::Player (preserving
+    // pre-existing behavior for non-trigger phrasings).
+    if matches!(lower.as_str(), "that player" | "the player") {
+        let affected = if ctx.subject.is_some() {
+            parse_event_context_ref(lower.as_str())
+                .map(|(_, filter)| filter)
+                .unwrap_or(TargetFilter::Player)
+        } else {
+            TargetFilter::Player
+        };
         return Some(SubjectApplication {
-            affected: TargetFilter::Player,
+            affected,
             target: None,
             multi_target: None,
             inherits_parent: false,

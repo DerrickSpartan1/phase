@@ -602,6 +602,14 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::ChangeTargets { target, .. }
         | Effect::ExtraTurn { target, .. }
         | Effect::Double { target, .. }
+        // CR 608.2k + CR 603.7c: "that player" sub-effects carry an event-context
+        // target (TriggeringPlayer/DefendingPlayer/etc.) that auto-resolves from
+        // the current trigger event at resolution time — not a fresh target choice.
+        | Effect::Discard { target, .. }
+        | Effect::DiscardCard { target, .. }
+        | Effect::Mill { target, .. }
+        | Effect::Shuffle { target, .. }
+        | Effect::GivePlayerCounter { target, .. }
         | Effect::TargetOnly { target } => target,
         Effect::Token { owner, .. } => owner,
         Effect::RevealTop { player, .. } => player,
