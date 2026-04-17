@@ -18,6 +18,7 @@ import { COUNTER_COLORS, computePTDisplay, formatCounterTooltip, formatCounterTy
 import { getCardDisplayColors } from "../card/cardFrame.ts";
 import { useBoardInteractionState } from "./BoardInteractionContext.tsx";
 import { KeywordStrip } from "./KeywordStrip.tsx";
+import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 
 interface PermanentCardProps {
   objectId: number;
@@ -192,19 +193,32 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
       dispatchAction({ type: "ChooseTarget", data: { target: { Object: objectId } } });
     } else if (isActivatable) {
       const o = useGameStore.getState().gameState?.objects[objectId];
-      // Filter out mana abilities from non-mana ability actions — mana abilities
-      // are in legalActions for auto-pass awareness but handled by canTapForMana.
+      // Read the engine-provided action list for this permanent — the mapping
+      // from GameAction variant to source permanent is owned by the engine
+      // (GameAction::source_object), not reconstructed here. Partitioning by
+      // effect type (Mana vs other) is a display concern: mana abilities route
+      // through the mana-tap UI; everything else routes through the ability
+      // choice modal or auto-dispatches.
+      const objectActions = collectObjectActions(
+        useGameStore.getState().legalActionsByObject,
+        objectId,
+      );
       const abilityActions: Array<Extract<GameAction, { type: "ActivateAbility" }>> = [];
       const manaActions: Array<Extract<GameAction, { type: "ActivateAbility" }>> = [];
-      for (const action of useGameStore.getState().legalActions) {
-        if (action.type !== "ActivateAbility" || action.data.source_id !== objectId) {
-          continue;
-        }
-        const effectType = o?.abilities?.[action.data.ability_index]?.effect?.type;
-        if (effectType === "Mana") {
-          manaActions.push(action);
+      const keywordActions: GameAction[] = [];
+      for (const action of objectActions) {
+        if (action.type === "ActivateAbility") {
+          const effectType = o?.abilities?.[action.data.ability_index]?.effect?.type;
+          if (effectType === "Mana") {
+            manaActions.push(action);
+          } else {
+            abilityActions.push(action);
+          }
         } else {
-          abilityActions.push(action);
+          // CR 113.3b keyword activations (Crew/Station/Equip/Saddle) and any
+          // future per-permanent action are surfaced alongside activated
+          // abilities in the choice modal.
+          keywordActions.push(action);
         }
       }
       // Prefer ActivateAbility entries emitted by legal_actions — they carry the
@@ -217,16 +231,17 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
         : manaActions[0];
       const manaChoiceNeeded = manaActions.length > 1;
 
-      if (abilityActions.length === 0 && canTapForMana) {
+      const nonManaActions: GameAction[] = [...abilityActions, ...keywordActions];
+      if (nonManaActions.length === 0 && canTapForMana) {
         if (manaChoiceNeeded) {
           setPendingAbilityChoice({ objectId, actions: manaActions });
         } else {
           dispatchAction(manaFallback);
         }
-      } else if (abilityActions.length === 1 && !canTapForMana) {
-        dispatchAction(abilityActions[0]);
+      } else if (nonManaActions.length === 1 && !canTapForMana) {
+        dispatchAction(nonManaActions[0]);
       } else {
-        const allActions: GameAction[] = [...abilityActions];
+        const allActions: GameAction[] = [...nonManaActions];
         if (canTapForMana) {
           if (manaChoiceNeeded) {
             allActions.push(...manaActions);

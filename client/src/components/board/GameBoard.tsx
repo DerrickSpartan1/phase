@@ -16,7 +16,7 @@ import { PlayerArea } from "./PlayerArea.tsx";
 export function GameBoard() {
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
-  const legalActions = useGameStore((s) => s.legalActions);
+  const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   // Undo is a single-player affordance only — multiplayer games have
   // authoritative shared state and can't safely rewind one client.
   const canUndo = useGameStore(
@@ -125,28 +125,23 @@ export function GameBoard() {
       );
 
     if (waitingFor?.type === "Priority" && canActForWaitingState) {
-      for (const action of legalActions) {
-        // Standard ActivateAbility — exclude mana abilities (handled by the
-        // mana-tappable ring, not the cyan activatable ring).
-        if (action.type === "ActivateAbility") {
-          const object = gameState.objects[action.data.source_id];
-          const effectType = object?.abilities?.[action.data.ability_index]?.effect?.type;
-          if (effectType !== "Mana") {
-            activatableObjectIds.add(action.data.source_id);
-          }
-          continue;
-        }
-        // CR 113.3b: Activated keyword abilities — Crew/Station/Equip/Saddle
-        // are activations on a permanent and should surface the cyan
-        // activatable affordance the same way ActivateAbility does.
-        if (action.type === "CrewVehicle") {
-          activatableObjectIds.add(action.data.vehicle_id);
-        } else if (action.type === "ActivateStation") {
-          activatableObjectIds.add(action.data.spacecraft_id);
-        } else if (action.type === "SaddleMount") {
-          activatableObjectIds.add(action.data.mount_id);
-        } else if (action.type === "Equip") {
-          activatableObjectIds.add(action.data.equipment_id);
+      // The engine owns the "which permanent does this action act on" mapping
+      // via GameAction::source_object(), exposed as `legalActionsByObject`.
+      // The cyan activatable ring surfaces battlefield permanents with at
+      // least one non-mana action; mana abilities are handled by the separate
+      // mana-tappable ring below. This iteration is variant-agnostic — adding
+      // a future keyword activation requires zero frontend changes.
+      for (const [idStr, actions] of Object.entries(legalActionsByObject)) {
+        const objectId = Number(idStr);
+        const object = gameState.objects[objectId];
+        if (!object) continue;
+        const hasNonManaAction = actions.some((action) => {
+          if (action.type !== "ActivateAbility") return true;
+          const effectType = object.abilities?.[action.data.ability_index]?.effect?.type;
+          return effectType !== "Mana";
+        });
+        if (hasNonManaAction) {
+          activatableObjectIds.add(objectId);
         }
       }
     }
@@ -174,7 +169,7 @@ export function GameBoard() {
       validAttackerIds,
       validTargetObjectIds,
     };
-  }, [canActForWaitingState, gameState, legalActions, localPlayerId, myId, waitingFor]);
+  }, [canActForWaitingState, gameState, legalActionsByObject, localPlayerId, myId, waitingFor]);
 
   if (!gameState) {
     return (

@@ -762,7 +762,7 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_entwine(face);
     synthesize_siege_intrinsics(face);
     synthesize_tribute_intrinsics(face);
-    // CR 702.184a + CR 721: Spacecraft creature-shift at the reminder-text
+    // CR 721.2b: Spacecraft creature-shift at the max station-symbol striation
     // threshold. Must run after Oracle parsing so `face.power`/`face.toughness`
     // are in place and `Keyword::Station` has been normalized.
     synthesize_station(face);
@@ -1735,5 +1735,137 @@ mod station_synthesis_tests {
         let before = face.static_abilities.len();
         synthesize_station(&mut face);
         assert_eq!(face.static_abilities.len(), before);
+    }
+
+    /// CR 721.2b: End-to-end regression for every TDM Spacecraft in the
+    /// pre-built export. Locks in per-card expected creature-shift thresholds
+    /// against the ground-truth table derived from printed P/T + `N+ |`
+    /// striations (plan §C3). A future data edit (MTGJSON patch, Oracle text
+    /// change) that shifts any threshold will fail this test loudly.
+    ///
+    /// Scryfall-frame verification (plan §C5): Candela, Monoist Gravliner,
+    /// and Squadron Carrier are MTGJSON-reminder-text-missing cards. Their
+    /// printed card frames were manually confirmed on scryfall.com to have
+    /// the P/T box in the highest-N station striation:
+    ///   - Candela, Aegis of Adagia: P/T 3/3, single threshold 8 → 8+.
+    ///   - Monoist Gravliner:        P/T 2/3, single threshold 6 → 6+.
+    ///   - Squadron Carrier:         P/T 4/4, single threshold 10 → 10+
+    ///     (not support-only despite first-draft speculation).
+    #[test]
+    fn station_32_tdm_spacecraft_regression_suite() {
+        use crate::database::CardDatabase;
+        use std::path::PathBuf;
+
+        // CARGO_MANIFEST_DIR points at crates/engine; the workspace root is
+        // two levels up. Skip gracefully if the export has not been generated
+        // (fresh clone before setup.sh).
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..");
+        let path = workspace_root.join("client/public/card-data.json");
+        if !path.exists() {
+            eprintln!(
+                "skipping: {} not found (run ./scripts/gen-card-data.sh)",
+                path.display()
+            );
+            return;
+        }
+        let db = CardDatabase::from_export(&path).expect("card-data.json loads as a valid export");
+
+        // Ground truth: (card name, expected creature-shift). None = support-only
+        // or excluded (non-Station Spacecraft crossover).
+        let cases: &[(&str, Option<u32>)] = &[
+            ("Atmospheric Greenhouse", Some(8)),
+            ("Candela, Aegis of Adagia", Some(8)),
+            ("Dawnsire, Sunstar Dreadnought", Some(20)),
+            ("Debris Field Crusher", Some(8)),
+            ("Entropic Battlecruiser", Some(8)),
+            ("Exploration Broodship", Some(8)),
+            ("Extinguisher Battleship", Some(5)),
+            ("Fell Gravship", Some(8)),
+            ("Galvanizing Sawship", Some(3)),
+            ("Hearthhull, the Worldseed", Some(8)),
+            ("Hotel of Fears", None), // excluded (crossover)
+            ("Infinite Guideline Station", Some(12)),
+            ("Inspirit, Flagship Vessel", Some(8)),
+            ("Larval Scoutlander", Some(7)),
+            ("Lumen-Class Frigate", Some(12)),
+            ("Mondassian Colony Ship", None), // excluded (crossover)
+            ("Monoist Gravliner", Some(6)),
+            ("Pinnacle Kill-Ship", Some(7)),
+            ("Rescue Skiff", Some(10)),
+            ("Sledge-Class Seedship", Some(7)),
+            ("Specimen Freighter", Some(9)),
+            ("Squadron Carrier", Some(10)),
+            ("Susurian Dirgecraft", Some(7)),
+            ("Synthesizer Labship", Some(9)),
+            ("The Dining Car", None),        // excluded (crossover)
+            ("The Eternity Elevator", None), // support-only (null P/T)
+            ("The Seriema", Some(7)),
+            ("Uthros Research Craft", Some(12)),
+            ("Uthros Scanship", Some(8)),
+            ("Warmaker Gunship", Some(6)),
+            ("Wedgelight Rammer", Some(9)),
+            ("Wurmwall Sweeper", Some(4)),
+        ];
+
+        // Coverage sanity: 32 cards total (28 creature-shift + 1 support-only
+        // + 3 excluded). Locks the table size so accidental deletions fail.
+        assert_eq!(
+            cases.len(),
+            32,
+            "regression table must cover all 32 TDM Spacecraft"
+        );
+        let shifted = cases.iter().filter(|(_, n)| n.is_some()).count();
+        assert_eq!(shifted, 28, "28 cards must have a creature-shift threshold");
+
+        let mut missing: Vec<&str> = Vec::new();
+        let mut wrong: Vec<String> = Vec::new();
+        for (name, expected) in cases {
+            let Some(face) = db.get_face_by_name(name) else {
+                missing.push(name);
+                continue;
+            };
+            let creature_shift_min = face.static_abilities.iter().find_map(|s| {
+                let has_creature_add = s.modifications.iter().any(|m| {
+                    matches!(
+                        m,
+                        ContinuousModification::AddType {
+                            core_type: CoreType::Creature,
+                        }
+                    )
+                });
+                if !has_creature_add {
+                    return None;
+                }
+                match &s.condition {
+                    Some(StaticCondition::HasCounters {
+                        counter_type,
+                        minimum,
+                        ..
+                    }) if counter_type == "charge" => Some(*minimum),
+                    _ => None,
+                }
+            });
+            match (expected, creature_shift_min) {
+                (Some(exp), Some(got)) if *exp == got => {}
+                (None, None) => {}
+                (exp, got) => {
+                    wrong.push(format!("{name}: expected {exp:?}, got {got:?}"));
+                }
+            }
+        }
+
+        if !missing.is_empty() {
+            eprintln!(
+                "skipping regression for cards missing from export: {}",
+                missing.join(", ")
+            );
+        }
+        assert!(
+            wrong.is_empty(),
+            "synthesize_station produced wrong thresholds:\n  {}",
+            wrong.join("\n  ")
+        );
     }
 }

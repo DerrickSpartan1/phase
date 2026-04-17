@@ -35,8 +35,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // to validate and no zone-change routing (the source stays where it is).
     // Returning early keeps the keyword-action branch out of the targeting /
     // fizzle / permanent-spell pipeline below.
-    if let StackEntryKind::KeywordAction { source_id, action } = entry.kind {
-        resolve_keyword_action(state, source_id, action, events);
+    if let StackEntryKind::KeywordAction { action } = entry.kind {
+        resolve_keyword_action(state, action, events);
         events.push(GameEvent::StackResolved {
             object_id: entry.id,
         });
@@ -403,7 +403,6 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
 /// the `KeywordAction` payload (e.g. `Station::snapshot_power`).
 fn resolve_keyword_action(
     state: &mut GameState,
-    source_id: ObjectId,
     action: KeywordAction,
     events: &mut Vec<GameEvent>,
 ) {
@@ -514,10 +513,6 @@ fn resolve_keyword_action(
             });
         }
     }
-    // `source_id` is the stack-entry source anchor; most payloads carry their
-    // own object ids, so it's kept for symmetry with the other stack-resolve
-    // paths but not directly consumed here.
-    let _ = source_id;
 }
 
 fn execute_effect(

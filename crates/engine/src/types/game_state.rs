@@ -1633,11 +1633,11 @@ pub enum StackEntryKind {
     },
     /// CR 113.3b: Activated keyword abilities (Equip / Crew / Saddle / Station)
     /// enter the stack after cost-payment + target selection and resolve with
-    /// last-known information per CR 113.7a.
-    KeywordAction {
-        source_id: ObjectId,
-        action: KeywordAction,
-    },
+    /// last-known information per CR 113.7a. The source permanent id lives on
+    /// the enclosing `StackEntry.source_id` — each `KeywordAction` variant
+    /// additionally carries its own typed object ids (equipment_id, vehicle_id,
+    /// mount_id, spacecraft_id) needed at resolution.
+    KeywordAction { action: KeywordAction },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
