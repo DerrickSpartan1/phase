@@ -61,13 +61,15 @@ jobs:
           cache: pnpm
           cache-dependency-path: client/pnpm-lock.yaml
 
-      - name: Download card data from R2 (preview)
+      - name: Generate card data and coverage (from source)
         run: |
           mkdir -p data
-          curl -fSL -o client/public/card-data.json "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/preview/card-data.json?v=${{ github.sha }}"
-          curl -fSL -o client/public/coverage-data.json "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/preview/coverage-data.json?v=${{ github.sha }}"
-          curl -fSL -o client/public/coverage-summary.json "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/preview/coverage-summary.json?v=${{ github.sha }}"
-          cp client/public/card-data.json data/card-data.json
+          cargo run --release --bin oracle-gen --features cli -- data/ --stats > data/card-data.json
+          cargo run --release --bin coverage-report -- data/ --all > data/coverage-data.json
+          jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' data/coverage-data.json > data/coverage-summary.json
+          cp data/card-data.json client/public/card-data.json
+          cp data/coverage-data.json client/public/coverage-data.json
+          cp data/coverage-summary.json client/public/coverage-summary.json
 
       - name: Generate Scryfall data
         run: ./scripts/gen-scryfall-images.sh
