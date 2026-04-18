@@ -103,7 +103,7 @@ pub fn choose_attackers_with_targets_with_profile(
         let has_evasion = obj.has_keyword(&Keyword::Flying)
             || obj.has_keyword(&Keyword::Menace)
             || obj.has_keyword(&Keyword::Shadow)
-            || has_cant_be_blocked(obj);
+            || has_cant_be_blocked(state, obj);
         // CR 702.20b: Attacking with vigilance doesn't cause the creature to tap,
         // so it has zero defensive cost — always include vigilance creatures.
         let has_vigilance = obj.has_keyword(&Keyword::Vigilance);
@@ -985,9 +985,12 @@ fn can_attack(state: &GameState, obj_id: ObjectId) -> bool {
 /// Check if a creature has the absolute "can't be blocked" static ability.
 /// Intentionally excludes CantBeBlockedExceptBy / CantBeBlockedBy — those creatures
 /// can still be blocked by matching creatures and should go through normal evaluation.
-fn has_cant_be_blocked(obj: &engine::game::game_object::GameObject) -> bool {
-    obj.static_definitions
-        .iter_unchecked()
+///
+/// CR 702.26b + CR 114.4 + CR 604.1: route through the engine's single-authority
+/// `active_static_definitions` helper so a phased-out attacker with CantBeBlocked
+/// is not mis-evaluated by the combat AI.
+fn has_cant_be_blocked(state: &GameState, obj: &engine::game::game_object::GameObject) -> bool {
+    engine::game::functioning_abilities::active_static_definitions(state, obj)
         .any(|sd| sd.mode == StaticMode::CantBeBlocked)
 }
 

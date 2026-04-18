@@ -91,12 +91,18 @@ pub fn resolve(
                 continue;
             }
 
+            // CR 702.26b + CR 114.4 + CR 604.1: route through the single-authority
+            // helper so stack-resident spells (and any edge case that later
+            // lands these definitions in a gated zone) get the same gating as
+            // every other read site. Spells on the stack are not phased out
+            // and not in the command zone, so the gate is a no-op for the
+            // common path — this is about architectural consistency, not
+            // behavior change.
             let has_cant_be_countered = state
                 .objects
                 .get(obj_id)
                 .map(|obj| {
-                    obj.static_definitions
-                        .iter_all()
+                    super::super::functioning_abilities::active_static_definitions(state, obj)
                         .any(|sd| sd.mode == StaticMode::CantBeCountered)
                 })
                 .unwrap_or(false);
