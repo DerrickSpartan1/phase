@@ -3424,4 +3424,170 @@ mod tests {
             "should produce 2 white"
         );
     }
+
+    mod cascade_constraint {
+        use super::*;
+        use crate::types::ability::{CastPermissionConstraint, CastingPermission};
+        use crate::types::mana::ManaCostShard;
+
+        fn exile_card(state: &mut GameState, owner: PlayerId, name: &str) -> ObjectId {
+            let card_id = CardId(state.next_object_id);
+            create_object(state, card_id, owner, name.to_string(), Zone::Exile)
+        }
+
+        fn setup_x_cost_hit(source_mv: u32, chosen_x: u32) -> (GameState, ObjectId, Vec<ObjectId>) {
+            let mut state = GameState::new_two_player(42);
+            let miss_a = exile_card(&mut state, PlayerId(0), "Miss A");
+            let miss_b = exile_card(&mut state, PlayerId(0), "Miss B");
+
+            let hit = exile_card(&mut state, PlayerId(0), "X Spell Hit");
+            let hit_obj = state.objects.get_mut(&hit).unwrap();
+            hit_obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::X],
+                generic: 0,
+            };
+            hit_obj.cost_x_paid = Some(chosen_x);
+            hit_obj
+                .casting_permissions
+                .push(CastingPermission::ExileWithAltCost {
+                    cost: ManaCost::zero(),
+                    cast_transformed: false,
+                    constraint: Some(CastPermissionConstraint::CascadeResultingMvBelow {
+                        source_mv,
+                        exiled_misses: vec![miss_a, miss_b],
+                    }),
+                });
+
+            (state, hit, vec![miss_a, miss_b])
+        }
+
+        /// CR 702.85a + CR 202.3b + CR 107.3b: X=3 with source MV 4 — resulting
+        /// spell MV is 3, which is strictly less than 4, so the cast is
+        /// accepted. Misses bottom-shuffle; the cascade permission is consumed.
+        #[test]
+        fn accepts_when_resulting_mv_below_source() {
+            let (mut state, hit, misses) = setup_x_cost_hit(4, 3);
+            let mut events = Vec::new();
+            let outcome = evaluate_cascade_constraint(&mut state, hit, &mut events);
+            assert!(matches!(outcome, CascadeCheck::Accepted));
+
+            let hit_obj = state.objects.get(&hit).unwrap();
+            assert!(
+                hit_obj.casting_permissions.is_empty(),
+                "cascade permission must be consumed on accept"
+            );
+
+            for miss in &misses {
+                assert_eq!(
+                    state.objects.get(miss).map(|o| o.zone),
+                    Some(Zone::Library),
+                    "misses must be bottom-shuffled on accept"
+                );
+            }
+            assert_eq!(
+                state.objects.get(&hit).map(|o| o.zone),
+                Some(Zone::Exile),
+                "hit card continues through normal cast flow — not bottom-shuffled"
+            );
+        }
+
+        /// CR 702.85a: X=4 with source MV 4 — resulting MV is 4, which is NOT
+        /// strictly less than 4, so the cast is rejected. The permission is
+        /// still consumed, and the returned misses match the original set for
+        /// the caller to bottom-shuffle together with the hit.
+        #[test]
+        fn rejects_when_resulting_mv_equals_source() {
+            let (mut state, hit, misses) = setup_x_cost_hit(4, 4);
+            let mut events = Vec::new();
+            let outcome = evaluate_cascade_constraint(&mut state, hit, &mut events);
+            match outcome {
+                CascadeCheck::Rejected { exiled_misses } => {
+                    assert_eq!(exiled_misses, misses);
+                }
+                other => panic!("Expected Rejected, got {:?}", matches_name(&other)),
+            }
+
+            let hit_obj = state.objects.get(&hit).unwrap();
+            assert!(
+                hit_obj.casting_permissions.is_empty(),
+                "cascade permission must be consumed on reject too"
+            );
+
+            for miss in &misses {
+                assert_eq!(
+                    state.objects.get(miss).map(|o| o.zone),
+                    Some(Zone::Exile),
+                    "misses stay put until handle_cascade_rejection runs"
+                );
+            }
+        }
+
+        /// CR 702.85a: X=5 with source MV 4 — resulting MV exceeds source, so
+        /// the cast is rejected. Confirms strict inequality is enforced above
+        /// as well as at the equality boundary.
+        #[test]
+        fn rejects_when_resulting_mv_above_source() {
+            let (mut state, hit, _misses) = setup_x_cost_hit(4, 5);
+            let mut events = Vec::new();
+            let outcome = evaluate_cascade_constraint(&mut state, hit, &mut events);
+            assert!(matches!(outcome, CascadeCheck::Rejected { .. }));
+        }
+
+        /// CR 702.85a + CR 601.2a: The rejection handler pops the
+        /// announcement-time stack entry, bottom-shuffles misses + the hit in
+        /// random order, and returns priority to the caster.
+        #[test]
+        fn rejection_handler_pops_stack_and_bottom_shuffles_all() {
+            let (mut state, hit, misses) = setup_x_cost_hit(4, 4);
+
+            state.stack.push(StackEntry {
+                id: hit,
+                source_id: hit,
+                controller: PlayerId(0),
+                kind: StackEntryKind::Spell {
+                    card_id: CardId(0),
+                    ability: None,
+                    casting_variant: CastingVariant::Normal,
+                    actual_mana_spent: 0,
+                },
+            });
+            let stack_depth_before = state.stack.len();
+
+            let mut events = Vec::new();
+            let waiting_for =
+                handle_cascade_rejection(&mut state, PlayerId(0), hit, misses.clone(), &mut events)
+                    .expect("rejection handler must succeed");
+
+            assert_eq!(
+                state.stack.len(),
+                stack_depth_before - 1,
+                "announcement stack entry must be popped"
+            );
+            assert!(
+                !state.stack.iter().any(|e| e.id == hit),
+                "no stack entry for the rejected cast may remain"
+            );
+
+            for id in misses.iter().chain(std::iter::once(&hit)) {
+                assert_eq!(
+                    state.objects.get(id).map(|o| o.zone),
+                    Some(Zone::Library),
+                    "misses and hit must bottom-shuffle together on rejection"
+                );
+            }
+
+            match waiting_for {
+                WaitingFor::Priority { player } => assert_eq!(player, PlayerId(0)),
+                other => panic!("Expected Priority for caster, got {:?}", other),
+            }
+        }
+
+        fn matches_name(check: &CascadeCheck) -> &'static str {
+            match check {
+                CascadeCheck::NotApplicable => "NotApplicable",
+                CascadeCheck::Accepted => "Accepted",
+                CascadeCheck::Rejected { .. } => "Rejected",
+            }
+        }
+    }
 }
