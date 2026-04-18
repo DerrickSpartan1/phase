@@ -211,6 +211,48 @@ mod tests {
     }
 
     #[test]
+    fn battlefield_static_grants_sneak_to_graveyard_creature() {
+        // CR 702.190a: Ninja Teen Level 3 grants Sneak to creature cards in GY.
+        // Verifies the off-zone pipeline routes the static's AddKeyword::Sneak
+        // through to the GY object, so `effective_sneak_cost` (used by the cost
+        // substitution branch in casting.rs) will resolve correctly.
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_card(&mut state, PlayerId(0), "Ninja Teen", Zone::Battlefield);
+        let target_id = create_card(
+            &mut state,
+            PlayerId(0),
+            "Scrubland Mongoose",
+            Zone::Graveyard,
+        );
+
+        let sneak_cost = ManaCost::Cost {
+            generic: 3,
+            shards: vec![ManaCostShard::Black],
+        };
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::SpecificObject { id: target_id })
+                    .modifications(vec![ContinuousModification::AddKeyword {
+                        keyword: Keyword::Sneak(sneak_cost.clone()),
+                    }]),
+            );
+
+        assert_eq!(
+            effective_off_zone_keyword(&state, target_id, KeywordKind::Sneak),
+            Some(Keyword::Sneak(sneak_cost.clone()))
+        );
+        assert_eq!(
+            crate::game::keywords::effective_sneak_cost(&state, target_id),
+            Some(sneak_cost)
+        );
+    }
+
+    #[test]
     fn battlefield_static_grants_keyword_to_graveyard_card() {
         let mut state = GameState::new_two_player(42);
         let source_id = create_card(&mut state, PlayerId(0), "Lier", Zone::Battlefield);

@@ -794,6 +794,22 @@ fn prepare_spell_cast(
         None
     };
 
+    // CR 702.190a: Sneak alt-cost when casting from graveyard under a static
+    // permission gated on `HasKeywordKind{Sneak}` (e.g., Ninja Teen Level 3).
+    // The `effective_sneak_cost` lookup goes through `effective_keyword_for_object`
+    // so off-zone keyword grants (Sneak granted to GY creatures by a battlefield
+    // static) are visible. NOTE: CR 702.190b ("permanent enters tapped and
+    // attacking") + declare-blockers timing (CR 702.190a) are not yet applied to
+    // this cast path — follow-up phase will route `CastingVariant::GraveyardPermission`
+    // through the Ninjutsu-variant shared helpers. This commit delivers cost
+    // substitution + eligibility; resolution still goes through normal creature-spell
+    // flow.
+    let sneak_cost = if obj.zone == Zone::Graveyard {
+        super::keywords::effective_sneak_cost(state, object_id)
+    } else {
+        None
+    };
+
     // CR 702.34a: Split flashback into mana vs non-mana components.
     let flashback_mana_cost = flashback_cost.as_ref().and_then(|c| match c {
         FlashbackCost::Mana(mana) => Some(mana.clone()),
@@ -836,6 +852,7 @@ fn prepare_spell_cast(
             escape_cost
                 .or(harmonize_cost)
                 .or(flashback_mana_cost)
+                .or(sneak_cost)
                 .or(alt_cost_from_exile)
                 .or(warp_cost)
                 .unwrap_or_else(|| obj.mana_cost.clone())
