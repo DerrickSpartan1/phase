@@ -27,27 +27,35 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
   const [query, setQuery] = useState("");
   const [typeFilter, setTypeFilter] = useState<string>("All");
 
-  const deckTypes = useMemo(() => {
-    if (!decks) return ["All"];
-    const set = new Set<string>();
-    for (const d of Object.values(decks)) set.add(d.type);
-    return ["All", ...Array.from(set).sort()];
-  }, [decks]);
+  const matchesQuery = (d: DeckEntry, q: string): boolean => {
+    if (!q) return true;
+    return (
+      d.name.toLowerCase().includes(q) ||
+      d.code.toLowerCase().includes(q) ||
+      d.type.toLowerCase().includes(q)
+    );
+  };
+
+  // Per-type match counts under the current query — drives the dropdown
+  // so empty options don't appear as dead-end choices.
+  const typeCounts = useMemo(() => {
+    if (!decks) return new Map<string, number>();
+    const q = query.trim().toLowerCase();
+    const counts = new Map<string, number>();
+    for (const d of Object.values(decks)) {
+      if (!matchesQuery(d, q)) continue;
+      counts.set(d.type, (counts.get(d.type) ?? 0) + 1);
+    }
+    return counts;
+  }, [decks, query]);
 
   const filtered = useMemo(() => {
     if (!decks) return [];
     const q = query.trim().toLowerCase();
-    const all = Object.entries(decks);
-    const byTypeAndQuery = all.filter(([, d]) => {
+    const byTypeAndQuery = Object.entries(decks).filter(([, d]) => {
       if (typeFilter !== "All" && d.type !== typeFilter) return false;
-      if (!q) return true;
-      return (
-        d.name.toLowerCase().includes(q) ||
-        d.code.toLowerCase().includes(q) ||
-        d.type.toLowerCase().includes(q)
-      );
+      return matchesQuery(d, q);
     });
-    // Newest first — preconstructed decks are usually sought by recent release.
     byTypeAndQuery.sort(([, a], [, b]) =>
       (b.releaseDate ?? "").localeCompare(a.releaseDate ?? ""),
     );
@@ -112,11 +120,17 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
             onChange={(e) => setTypeFilter(e.target.value)}
             className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-white/30 focus:outline-none"
           >
-            {deckTypes.map((t) => (
-              <option key={t} value={t}>
-                {t}
-              </option>
-            ))}
+            <option value="All">
+              All ({Array.from(typeCounts.values()).reduce((a, b) => a + b, 0)})
+            </option>
+            {Array.from(typeCounts.entries())
+              .filter(([, n]) => n > 0)
+              .sort((a, b) => a[0].localeCompare(b[0]))
+              .map(([t, n]) => (
+                <option key={t} value={t}>
+                  {t} ({n})
+                </option>
+              ))}
           </select>
         </div>
 
