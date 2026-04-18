@@ -202,26 +202,40 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
-        // CR 702.85a: Cascade offers a binary cast/decline choice. Policy
-        // default: cast (free spells are almost always correct). The decline
-        // candidate is kept legal so a tactical policy can decline when the
-        // hit has no legal targets and would fizzle.
-        WaitingFor::CascadeChoice { player, .. } => vec![
-            candidate(
+        // CR 702.85a: Cascade offers a binary cast/decline choice. Tactical
+        // ordering: place Cast first when the hit has at least one legal
+        // target (or no targets at all — typically a permanent or untargeted
+        // spell). When the hit would fizzle (targeted spell with no legal
+        // targets), place Decline first so the bottom-shuffle outcome is
+        // preferred over a no-effect cast that still consumes the resource.
+        // Both candidates remain legal — the selector / search may still
+        // pick either based on deeper evaluation.
+        WaitingFor::CascadeChoice {
+            player, hit_card, ..
+        } => {
+            let cast_first = state.objects.get(hit_card).is_some_and(|obj| {
+                crate::game::casting::spell_has_legal_targets(state, obj, *player)
+            });
+            let cast = candidate(
                 GameAction::CascadeChoice {
                     choice: CastChoice::Cast,
                 },
                 TacticalClass::Selection,
                 Some(*player),
-            ),
-            candidate(
+            );
+            let decline = candidate(
                 GameAction::CascadeChoice {
                     choice: CastChoice::Decline,
                 },
                 TacticalClass::Selection,
                 Some(*player),
-            ),
-        ],
+            );
+            if cast_first {
+                vec![cast, decline]
+            } else {
+                vec![decline, cast]
+            }
+        }
         WaitingFor::LearnChoice { player, hand_cards } => {
             let mut actions: Vec<_> = hand_cards
                 .iter()
