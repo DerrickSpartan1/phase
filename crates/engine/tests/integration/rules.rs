@@ -39,6 +39,9 @@ pub fn run_combat(
         runner.pass_both_players();
     }
 
+    // CR 509.1: Interactive blocker declaration only when the defender has legal
+    // blockers. When none exist, the engine auto-submits empty blockers internally
+    // (CR 509.1 + CR 117.1c — the step still runs and AP still gets priority).
     if matches!(
         runner.state().waiting_for,
         WaitingFor::DeclareBlockers { .. }
@@ -48,11 +51,12 @@ pub fn run_combat(
                 assignments: blocker_assignments,
             })
             .expect("DeclareBlockers should succeed");
+    }
 
-        // CR 509.2: Active player gets priority after blockers — pass through it.
-        if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
-            runner.pass_both_players();
-        }
+    // CR 509.2 + CR 117.1c: Active player receives priority during the declare
+    // blockers step — always, even when no blockers were declared. Pass through.
+    if matches!(runner.state().waiting_for, WaitingFor::Priority { .. }) {
+        runner.pass_both_players();
     }
 
     // CR 510.1c: Handle interactive damage assignment for 2+ blocker scenarios.
