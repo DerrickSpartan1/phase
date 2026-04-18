@@ -774,6 +774,48 @@ mod tests {
     use crate::types::mana::ManaCost;
 
     #[test]
+    fn parse_keyword_from_oracle_cascade() {
+        // CR 702.85a: Cascade is a no-parameter keyword.
+        let kw = parse_keyword_from_oracle("cascade").unwrap();
+        assert_eq!(kw, Keyword::Cascade);
+    }
+
+    /// CR 702.85a: Full Oracle text for Bloodbraid Elf and Shardless Agent
+    /// must parse to include `Keyword::Cascade`. Locks in cascade keyword
+    /// extraction for the canonical reference cards so a future parser
+    /// regression cannot silently drop it.
+    #[test]
+    fn parse_oracle_text_extracts_cascade_for_canonical_cards() {
+        use crate::parser::oracle::parse_oracle_text;
+
+        let bloodbraid = parse_oracle_text(
+            "Haste\nCascade",
+            "Bloodbraid Elf",
+            &["Haste".to_string(), "Cascade".to_string()],
+            &["Creature".to_string()],
+            &["Elf".to_string(), "Berserker".to_string()],
+        );
+        assert!(
+            bloodbraid.extracted_keywords.contains(&Keyword::Cascade),
+            "Bloodbraid Elf must have Keyword::Cascade extracted, got {:?}",
+            bloodbraid.extracted_keywords
+        );
+
+        let shardless = parse_oracle_text(
+            "Cascade",
+            "Shardless Agent",
+            &["Cascade".to_string()],
+            &["Artifact".to_string(), "Creature".to_string()],
+            &["Human".to_string(), "Wizard".to_string()],
+        );
+        assert!(
+            shardless.extracted_keywords.contains(&Keyword::Cascade),
+            "Shardless Agent must have Keyword::Cascade extracted, got {:?}",
+            shardless.extracted_keywords
+        );
+    }
+
+    #[test]
     fn parse_keyword_from_oracle_toxic() {
         // CR 702.164: Toxic N — parameterized keyword from Oracle text
         let kw = parse_keyword_from_oracle("toxic 2").unwrap();
