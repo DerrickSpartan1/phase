@@ -217,6 +217,10 @@ export type CounterType =
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type Keyword = string | Record<string, any>;
 
+// ── CR 701.57a + CR 702.85a: Cast/decline choice for Discover and Cascade ──
+
+export type CastChoice = { type: "Cast" } | { type: "Decline" };
+
 // ── Casting Permission ───────────────────────────────────────────────────
 
 export type CastingPermission =
@@ -546,6 +550,7 @@ export type WaitingFor =
   | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } }
   | { type: "DiscoverChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[] } }
+  | { type: "CascadeChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number } }
   | { type: "TopOrBottomChoice"; data: { player: PlayerId; object_id: ObjectId } }
   | { type: "CompanionReveal"; data: { player: PlayerId; eligible_companions: [string, number][] } }
   | { type: "ChooseLegend"; data: { player: PlayerId; legend_name: string; candidates: ObjectId[] } }
@@ -684,7 +689,8 @@ export type GameAction =
   | { type: "HarmonizeTap"; data: { creature_id: ObjectId | null } }
   | { type: "DeclareCompanion"; data: { card_index: number | null } }
   | { type: "CompanionToHand" }
-  | { type: "DiscoverChoice"; data: { cast: boolean } }
+  | { type: "DiscoverChoice"; data: { choice: CastChoice } }
+  | { type: "CascadeChoice"; data: { choice: CastChoice } }
   | { type: "ChooseTopOrBottom"; data: { top: boolean } }
   | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
   | { type: "CancelAutoPass" }

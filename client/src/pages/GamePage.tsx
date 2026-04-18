@@ -32,6 +32,7 @@ import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
 import { ManaPaymentUI } from "../components/mana/ManaPaymentUI.tsx";
 import { CardDataMissingModal } from "../components/modal/CardDataMissingModal.tsx";
 import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
+import { CascadeChoiceModal } from "../components/modal/CascadeChoiceModal.tsx";
 import { ModalFaceModal } from "../components/modal/ModalFaceModal.tsx";
 import { WarpCostModal } from "../components/modal/WarpCostModal.tsx";
 import { CardChoiceModal } from "../components/modal/CardChoiceModal.tsx";
@@ -1147,6 +1148,7 @@ function GamePageContent({
       <CombatTaxModal />
       <ModeChoiceModal />
       <AdventureCastModal />
+      <CascadeChoiceModal />
       <ModalFaceModal />
       <WarpCostModal />
 
