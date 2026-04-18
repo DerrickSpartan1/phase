@@ -684,14 +684,12 @@ pub fn resolve_ability_chain(
             Some(AbilityCondition::AdditionalCostPaidInstead)
         ) {
             ability.context.additional_cost_paid
-        } else if let Some(AbilityCondition::NinjutsuVariantPaidInstead { ref variant }) =
-            sub.condition
-        {
-            // CR 608.2e + CR 702.49: Read from GameObject, not SpellContext
+        } else if let Some(AbilityCondition::CastVariantPaidInstead { variant }) = sub.condition {
+            // CR 608.2e + CR 702.49 + CR 702.190a: Read from GameObject, not SpellContext
             state
                 .objects
                 .get(&ability.source_id)
-                .map(|obj| obj.ninjutsu_variant_paid == Some((variant.clone(), state.turn_number)))
+                .map(|obj| obj.cast_variant_paid == Some((variant, state.turn_number)))
                 .unwrap_or(false)
         } else if let Some(AbilityCondition::TargetHasKeywordInstead { ref keyword }) =
             sub.condition
@@ -1079,7 +1077,7 @@ pub fn resolve_ability_chain(
             if matches!(
                 condition,
                 AbilityCondition::AdditionalCostPaidInstead
-                    | AbilityCondition::NinjutsuVariantPaidInstead { .. }
+                    | AbilityCondition::CastVariantPaidInstead { .. }
                     | AbilityCondition::TargetHasKeywordInstead { .. }
             ) {
                 if let Some(ref base_chain) = sub.else_ability {
@@ -1409,11 +1407,11 @@ fn evaluate_condition(
             .get(&ability.source_id)
             .map(|obj| obj.entered_battlefield_turn != Some(state.turn_number))
             .unwrap_or(true),
-        // CR 702.49 + CR 603.4: "if its sneak/ninjutsu cost was paid"
-        AbilityCondition::NinjutsuVariantPaid { variant } => state
+        // CR 702.49 + CR 702.190a + CR 603.4: "if its sneak/ninjutsu cost was paid"
+        AbilityCondition::CastVariantPaid { variant } => state
             .objects
             .get(&ability.source_id)
-            .map(|obj| obj.ninjutsu_variant_paid == Some((variant.clone(), state.turn_number)))
+            .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
             .unwrap_or(false),
         // CR 608.2c: General quantity comparison on trigger/effect context.
         AbilityCondition::QuantityCheck {
@@ -1440,10 +1438,10 @@ fn evaluate_condition(
         // Terminal control flow (early return from resolve_ability_chain) is the caller's
         // responsibility in the sub-ability context.
         AbilityCondition::AdditionalCostPaidInstead => ability.context.additional_cost_paid,
-        AbilityCondition::NinjutsuVariantPaidInstead { variant } => state
+        AbilityCondition::CastVariantPaidInstead { variant } => state
             .objects
             .get(&ability.source_id)
-            .map(|obj| obj.ninjutsu_variant_paid == Some((variant.clone(), state.turn_number)))
+            .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
             .unwrap_or(false),
         AbilityCondition::TargetHasKeywordInstead { ref keyword } => ability
             .targets

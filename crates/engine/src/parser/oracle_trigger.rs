@@ -23,7 +23,7 @@ use super::oracle_util::{
 };
 use crate::parser::oracle_warnings::{push_warning, take_warnings};
 use crate::types::ability::{
-    AbilityKind, Comparator, ControllerRef, DamageKindFilter, FilterProp, NinjutsuVariant,
+    AbilityKind, CastVariantPaid, Comparator, ControllerRef, DamageKindFilter, FilterProp,
     QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint,
     TriggerDefinition, TypeFilter, TypedFilter, UnlessCost, UnlessPayModifier,
 };
@@ -838,8 +838,8 @@ fn try_extract_ninjutsu_condition(
     text: &str,
 ) -> Option<(String, Option<TriggerCondition>)> {
     for (keyword, variant) in &[
-        ("sneak cost was paid", NinjutsuVariant::Sneak),
-        ("ninjutsu cost was paid", NinjutsuVariant::Ninjutsu),
+        ("sneak cost was paid", CastVariantPaid::Sneak),
+        ("ninjutsu cost was paid", CastVariantPaid::Ninjutsu),
     ] {
         if scan_contains(lower, keyword) && !scan_contains(lower, "instead") {
             let pos = tp.find("if ").unwrap_or(0);
@@ -853,9 +853,7 @@ fn try_extract_ninjutsu_condition(
             let end = kw_pos + keyword.len() + extra;
             return Some((
                 strip_condition_clause(text, pos, end - pos),
-                Some(TriggerCondition::NinjutsuVariantPaid {
-                    variant: variant.clone(),
-                }),
+                Some(TriggerCondition::CastVariantPaid { variant: *variant }),
             ));
         }
     }
@@ -6394,8 +6392,8 @@ mod tests {
     }
 
     #[test]
-    fn ninjutsu_variant_paid_sneak_condition() {
-        // CR 702.49: "if its sneak cost was paid" → NinjutsuVariantPaid { variant: Sneak }
+    fn cast_variant_paid_sneak_condition() {
+        // CR 702.190a: "if its sneak cost was paid" → CastVariantPaid { variant: Sneak }
         let def = parse_trigger_line(
             "When this creature enters, if its sneak cost was paid, draw a card.",
             "Test Ninja",
@@ -6404,23 +6402,23 @@ mod tests {
         assert_eq!(def.destination, Some(Zone::Battlefield));
         assert_eq!(
             def.condition,
-            Some(TriggerCondition::NinjutsuVariantPaid {
-                variant: NinjutsuVariant::Sneak,
+            Some(TriggerCondition::CastVariantPaid {
+                variant: CastVariantPaid::Sneak,
             })
         );
     }
 
     #[test]
-    fn ninjutsu_variant_paid_ninjutsu_condition() {
-        // CR 702.49: "if its ninjutsu cost was paid" → NinjutsuVariantPaid { variant: Ninjutsu }
+    fn cast_variant_paid_ninjutsu_condition() {
+        // CR 702.49: "if its ninjutsu cost was paid" → CastVariantPaid { variant: Ninjutsu }
         let def = parse_trigger_line(
             "When this creature enters, if its ninjutsu cost was paid, target opponent discards a card.",
             "Test Ninja",
         );
         assert_eq!(
             def.condition,
-            Some(TriggerCondition::NinjutsuVariantPaid {
-                variant: NinjutsuVariant::Ninjutsu,
+            Some(TriggerCondition::CastVariantPaid {
+                variant: CastVariantPaid::Ninjutsu,
             })
         );
     }

@@ -123,7 +123,16 @@ pub enum GameAction {
     /// CR 702.49: Activate a Ninjutsu-family keyword from hand or command zone during combat.
     ActivateNinjutsu {
         ninjutsu_card_id: CardId,
-        /// The creature to return — unblocked attacker (Ninjutsu/Sneak) or tapped creature (WebSlinging).
+        /// The creature to return — unblocked attacker (Ninjutsu) or tapped creature (WebSlinging).
+        creature_to_return: ObjectId,
+    },
+    /// CR 702.190a: Cast a creature card from graveyard via Sneak alt-cost.
+    /// Legal only during the declare-blockers step. The returned creature
+    /// must be an unblocked attacker controlled by the casting player; it is
+    /// bounced to its owner's hand as part of paying the Sneak cost.
+    CastSpellAsSneak {
+        gy_object: ObjectId,
+        card_id: CardId,
         creature_to_return: ObjectId,
     },
     /// CR 609.3: Accept or decline an optional effect ("You may X").
@@ -303,6 +312,7 @@ impl GameAction {
         match self {
             GameAction::PlayLand { object_id, .. } => Some(*object_id),
             GameAction::CastSpell { object_id, .. } => Some(*object_id),
+            GameAction::CastSpellAsSneak { gy_object, .. } => Some(*gy_object),
             GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
             GameAction::TapLandForMana { object_id } => Some(*object_id),
             GameAction::UntapLandForMana { object_id } => Some(*object_id),

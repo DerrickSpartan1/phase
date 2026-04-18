@@ -1958,17 +1958,58 @@ pub enum PaymentCost {
 // AbilityCost -- expanded typed variants
 // ---------------------------------------------------------------------------
 
-/// CR 702.49: Ninjutsu-family keyword variants that share the "swap creature in combat" pattern.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// CR 702.49: Ninjutsu-family keyword variants that share the "activate to swap
+/// a creature in combat" pattern. This enum is the *activation-family dispatch*
+/// layer — it is used only by `activate_ninjutsu` and its supporting helpers
+/// (`ninjutsu_timing_ok`, `returnable_creatures_for_variant`, etc.) to pick
+/// the correct activation behavior. Sneak (CR 702.190a) is NOT an activated
+/// ability and therefore does not appear here; see `CastVariantPaid` for the
+/// trigger-tag layer that does include it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NinjutsuVariant {
     /// CR 702.49a: Return unblocked attacker, declare blockers or later.
     Ninjutsu,
     /// CR 702.49d: Commander ninjutsu — activate from hand or command zone.
     CommanderNinjutsu,
-    /// CR 702.49 variant: Return unblocked attacker, declare blockers step only.
-    Sneak,
     /// CR 702.49 variant: Return any tapped creature you control.
     WebSlinging,
+}
+
+/// CR 702.49 + CR 702.190a + CR 603.4: Which alternative-cost cast/activation
+/// variant was paid to put this permanent onto the battlefield. This is the
+/// *trigger-tag / ability-condition* layer — separate from `NinjutsuVariant`
+/// (activation-family dispatch) because it legitimately includes Sneak, which
+/// is a cast alt-cost rather than an activated ability.
+///
+/// Populated by `casting::handle_cast_spell_as_sneak` (Sneak) and
+/// `keywords::activate_ninjutsu` (Ninjutsu / CommanderNinjutsu / WebSlinging)
+/// into `GameObject.cast_variant_paid` as the source permanent enters the
+/// battlefield. Read by `TriggerCondition::CastVariantPaid` and
+/// `AbilityCondition::CastVariantPaid` / `CastVariantPaidInstead`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CastVariantPaid {
+    /// CR 702.49a / CR 702.49d: Ninjutsu (incl. commander ninjutsu) cost was paid.
+    Ninjutsu,
+    /// CR 702.49d: Commander ninjutsu cost was paid (distinct from Ninjutsu for
+    /// parser fidelity; triggers referencing "ninjutsu cost" match either).
+    CommanderNinjutsu,
+    /// CR 702.190a: Sneak alternative cast cost was paid from graveyard.
+    Sneak,
+    /// CR 702.49 variant: Web-slinging cost was paid.
+    WebSlinging,
+}
+
+impl From<NinjutsuVariant> for CastVariantPaid {
+    /// CR 702.49: Lift an activation-family variant into the cast-variant-paid tag
+    /// used by trigger conditions. Sneak is intentionally NOT in `NinjutsuVariant`
+    /// (it is a cast alt-cost, not an activation), so this conversion is total.
+    fn from(v: NinjutsuVariant) -> Self {
+        match v {
+            NinjutsuVariant::Ninjutsu => CastVariantPaid::Ninjutsu,
+            NinjutsuVariant::CommanderNinjutsu => CastVariantPaid::CommanderNinjutsu,
+            NinjutsuVariant::WebSlinging => CastVariantPaid::WebSlinging,
+        }
+    }
 }
 
 /// CR 702.49: Identifies which dedicated engine path handles a RuntimeHandled ability.
@@ -4474,12 +4515,12 @@ pub enum AbilityCondition {
     SourceDidNotEnterThisTurn,
     /// CR 702.49 + CR 603.4: True when the source permanent entered via a ninjutsu-family
     /// activation of the specified variant this turn.
-    NinjutsuVariantPaid { variant: NinjutsuVariant },
-    /// CR 608.2e + CR 702.49: "Instead" override gated on the source permanent having
-    /// entered via a ninjutsu-family variant this turn. Unlike AdditionalCostPaidInstead
-    /// (which reads SpellContext.additional_cost_paid), this reads
-    /// GameObject.ninjutsu_variant_paid from the game state.
-    NinjutsuVariantPaidInstead { variant: NinjutsuVariant },
+    CastVariantPaid { variant: CastVariantPaid },
+    /// CR 608.2e + CR 702.49 + CR 702.190a: "Instead" override gated on the source
+    /// permanent having entered via a specified cast/activation variant this turn.
+    /// Unlike AdditionalCostPaidInstead (which reads SpellContext.additional_cost_paid),
+    /// this reads GameObject.cast_variant_paid from the game state.
+    CastVariantPaidInstead { variant: CastVariantPaid },
     /// CR 608.2d: "If a player does" / "if they do" — gates sub_ability on whether
     /// any prompted opponent accepted an "any opponent may" optional effect.
     IfAPlayerDoes,
@@ -4622,9 +4663,10 @@ pub enum TriggerCondition {
     /// CR 508.1: Used by ninjutsu ETB triggers (e.g., Thousand-Faced Shadow).
     SourceIsAttacking,
 
-    /// CR 702.49 + CR 603.4: "if its sneak/ninjutsu cost was paid this turn" — true when
-    /// the source permanent entered via the specified ninjutsu-family variant this turn.
-    NinjutsuVariantPaid { variant: NinjutsuVariant },
+    /// CR 702.49 + CR 702.190a + CR 603.4: "if its sneak/ninjutsu cost was paid this turn"
+    /// — true when the source permanent entered via the specified cast/activation variant
+    /// this turn.
+    CastVariantPaid { variant: CastVariantPaid },
 
     /// CR 601.2: "during each opponent's turn" — the trigger only fires when it is
     /// currently an opponent's turn. Used in conjunction with NthSpellThisTurn constraint.

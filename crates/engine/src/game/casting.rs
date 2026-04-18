@@ -282,6 +282,9 @@ fn has_effective_graveyard_cast_keyword(
             .iter()
             .any(|k| matches!(k, crate::types::keywords::Keyword::Harmonize(_)))
         || has_flashback_keyword(state, object_id)
+        // CR 702.190a: Sneak is a graveyard cast alt-cost (printed keyword or
+        // rider-granted via `effective_sneak_cost` → off-zone characteristic).
+        || super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Sneak)
 }
 
 fn upsert_keyword_by_kind(keywords: &mut Vec<Keyword>, keyword: Keyword) {
@@ -634,6 +637,18 @@ fn prepare_spell_cast(
     player: PlayerId,
     object_id: ObjectId,
 ) -> Result<PreparedSpellCast, EngineError> {
+    prepare_spell_cast_with_variant_override(state, player, object_id, None)
+}
+
+/// CR 702.190a: Variant-overriding entry point for cast paths that need a
+/// specific `CastingVariant` applied before timing/cost resolution (e.g., Sneak
+/// forces declare-blockers timing regardless of the cost the mana-path picked).
+fn prepare_spell_cast_with_variant_override(
+    state: &GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    variant_override: Option<CastingVariant>,
+) -> Result<PreparedSpellCast, EngineError> {
     let obj = state
         .objects
         .get(&object_id)
@@ -794,16 +809,15 @@ fn prepare_spell_cast(
         None
     };
 
-    // CR 702.190a: Sneak alt-cost when casting from graveyard under a static
-    // permission gated on `HasKeywordKind{Sneak}` (e.g., Ninja Teen Level 3).
-    // The `effective_sneak_cost` lookup goes through `effective_keyword_for_object`
-    // so off-zone keyword grants (Sneak granted to GY creatures by a battlefield
-    // static) are visible. NOTE: CR 702.190b ("permanent enters tapped and
-    // attacking") + declare-blockers timing (CR 702.190a) are not yet applied to
-    // this cast path — follow-up phase will route `CastingVariant::GraveyardPermission`
-    // through the Ninjutsu-variant shared helpers. This commit delivers cost
-    // substitution + eligibility; resolution still goes through normal creature-spell
-    // flow.
+    // CR 702.190a: Sneak alt-cost when casting from graveyard. The
+    // `effective_sneak_cost` lookup goes through `effective_keyword_for_object`
+    // so off-zone keyword grants (e.g., Ninja Teen Level 3 granting Sneak to
+    // GY creatures) are visible. Sneak is NOT auto-selected as the active
+    // `casting_variant` — it is opted into explicitly by
+    // `handle_cast_spell_as_sneak` via `variant_override`, which enforces
+    // declare-blockers timing (CR 702.190a), bounces the returned unblocked
+    // attacker as cost payment, and places the permanent tapped+attacking on
+    // resolution (CR 702.190b).
     let sneak_cost = if obj.zone == Zone::Graveyard {
         super::keywords::effective_sneak_cost(state, object_id)
     } else {
@@ -823,28 +837,46 @@ fn prepare_spell_cast(
     // Precedence: Escape > Harmonize > Flashback > GraveyardPermission > Warp > Normal.
     // No standard card has multiple graveyard-cast keywords; if one did, the card's own
     // keyword overrides an external source's grant (GraveyardPermission).
-    let casting_variant = if escape_cost.is_some() {
-        CastingVariant::Escape
-    } else if harmonize_cost.is_some() {
-        CastingVariant::Harmonize
-    } else if flashback_cost.is_some() {
-        CastingVariant::Flashback
-    } else if let Some((source, once_per_turn)) = graveyard_permission_src {
-        CastingVariant::GraveyardPermission {
-            source,
-            once_per_turn,
+    //
+    // CR 702.190a: Sneak is not auto-selected from the keyword-presence chain —
+    // it is opted into explicitly via `variant_override` by the
+    // `handle_cast_spell_as_sneak` entry point. This preserves Sneak's
+    // permission-aware eligibility (the HasKeywordKind filter on the granting
+    // rider) while keeping the default cast path for GY creatures under
+    // GraveyardCastPermission unchanged.
+    let casting_variant = variant_override.unwrap_or_else(|| {
+        if escape_cost.is_some() {
+            CastingVariant::Escape
+        } else if harmonize_cost.is_some() {
+            CastingVariant::Harmonize
+        } else if flashback_cost.is_some() {
+            CastingVariant::Flashback
+        } else if let Some((source, once_per_turn)) = graveyard_permission_src {
+            CastingVariant::GraveyardPermission {
+                source,
+                once_per_turn,
+            }
+        } else if warp_cost.is_some() {
+            CastingVariant::Warp
+        } else {
+            CastingVariant::Normal
         }
-    } else if warp_cost.is_some() {
-        CastingVariant::Warp
-    } else {
-        CastingVariant::Normal
-    };
+    });
     // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free casting from hand.
     let hand_cast_free =
         obj.zone == Zone::Hand && has_hand_cast_free_permission(state, player, obj);
 
     // CR 118.9: Energy replaces mana cost entirely when casting with ExileWithEnergyCost.
     // CR 702.34a: Non-mana flashback costs use NoCost for mana (cost is paid separately).
+    // CR 702.190a: sneak_cost only applies when the caster actually elected
+    // the Sneak path (variant_override == Some(Sneak{..})). Otherwise a GY
+    // creature with Sneak available plus another permission (e.g. Lurrus)
+    // would erroneously use the Sneak cost for a non-Sneak cast.
+    let effective_sneak_cost_for_path = if matches!(casting_variant, CastingVariant::Sneak { .. }) {
+        sneak_cost
+    } else {
+        None
+    };
     let mut mana_cost =
         if energy_cost_from_exile || hand_cast_free || flashback_non_mana_cost.is_some() {
             crate::types::mana::ManaCost::NoCost
@@ -852,7 +884,7 @@ fn prepare_spell_cast(
             escape_cost
                 .or(harmonize_cost)
                 .or(flashback_mana_cost)
-                .or(sneak_cost)
+                .or(effective_sneak_cost_for_path)
                 .or(alt_cost_from_exile)
                 .or(warp_cost)
                 .unwrap_or_else(|| obj.mana_cost.clone())
@@ -867,12 +899,20 @@ fn prepare_spell_cast(
         obj,
         ability_def.as_ref(),
         has_granted_flash,
+        casting_variant,
     ) {
         // CR 702.8a: Flash permits instant-speed casting.
         let Some(flash_cost) = flash_cost else {
             return Err(base_timing_error);
         };
-        restrictions::check_spell_timing(state, player, obj, ability_def.as_ref(), true)?;
+        restrictions::check_spell_timing(
+            state,
+            player,
+            obj,
+            ability_def.as_ref(),
+            true,
+            casting_variant,
+        )?;
         mana_cost = restrictions::add_mana_cost(&mana_cost, &flash_cost);
     }
     restrictions::check_casting_restrictions(state, player, object_id, &obj.casting_restrictions)?;
@@ -1386,6 +1426,93 @@ fn continue_cast_from_prepared(
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
     let prepared = prepare_spell_cast(state, player, object_id)?;
+    continue_with_prepared(state, player, prepared, events)
+}
+
+/// CR 702.190a + b: Cast a creature card from graveyard via the Sneak alt-cost.
+///
+/// Validates:
+/// - `gy_object` has an effective Sneak cost (printed keyword or rider-granted,
+///   via `effective_sneak_cost` which honors off-zone keyword grants).
+/// - `creature_to_return` is an unblocked attacker controlled by `player`.
+///
+/// Derives `(defender, attack_target)` from the returned creature's
+/// `AttackerInfo`, builds a `CastingVariant::Sneak { .. }` override, and routes
+/// through the standard casting pipeline. `prepare_spell_cast_with_variant_override`
+/// enforces declare-blockers timing and selects the Sneak mana cost.
+///
+/// The returned creature is bounced to its owner's hand at
+/// `finalize_cast_to_stack` as part of paying the Sneak cost (CR 702.190a).
+/// On resolution the Sneak-cast permanent enters tapped and attacking the
+/// same defender (CR 702.190b) via `place_attacking_alongside`.
+pub fn handle_cast_spell_as_sneak(
+    state: &mut GameState,
+    player: PlayerId,
+    gy_object: ObjectId,
+    card_id: CardId,
+    creature_to_return: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    // Sanity: object exists and card_id matches.
+    if !state
+        .objects
+        .get(&gy_object)
+        .is_some_and(|obj| obj.card_id == card_id)
+    {
+        return Err(EngineError::InvalidAction(format!(
+            "Object {:?} does not exist or does not match card_id {:?}",
+            gy_object, card_id
+        )));
+    }
+
+    // CR 702.190a: Must have an effective Sneak cost (intrinsic or granted).
+    if super::keywords::effective_sneak_cost(state, gy_object).is_none() {
+        return Err(EngineError::ActionNotAllowed(
+            "Card has no Sneak permission".to_string(),
+        ));
+    }
+
+    // CR 702.190a: The returned creature must be an unblocked attacker
+    // controlled by `player`. Defender is derived from its AttackerInfo.
+    let combat = state
+        .combat
+        .as_ref()
+        .ok_or_else(|| EngineError::ActionNotAllowed("No active combat".to_string()))?;
+    let attacker_info = combat
+        .attackers
+        .iter()
+        .find(|a| a.object_id == creature_to_return)
+        .cloned()
+        .ok_or_else(|| {
+            EngineError::ActionNotAllowed("Creature to return is not an attacker".to_string())
+        })?;
+    let is_blocked = combat
+        .blocker_assignments
+        .get(&creature_to_return)
+        .is_some_and(|blockers| !blockers.is_empty());
+    if is_blocked {
+        return Err(EngineError::ActionNotAllowed(
+            "Attacker is blocked".to_string(),
+        ));
+    }
+    let returned_obj = state
+        .objects
+        .get(&creature_to_return)
+        .ok_or_else(|| EngineError::InvalidAction("Creature to return not found".to_string()))?;
+    if returned_obj.controller != player {
+        return Err(EngineError::ActionNotAllowed(
+            "You don't control that creature".to_string(),
+        ));
+    }
+
+    let variant = CastingVariant::Sneak {
+        defender: attacker_info.defending_player,
+        attack_target: attacker_info.attack_target,
+        returned_creature: creature_to_return,
+    };
+
+    let prepared =
+        prepare_spell_cast_with_variant_override(state, player, gy_object, Some(variant))?;
     continue_with_prepared(state, player, prepared, events)
 }
 
@@ -8702,6 +8829,305 @@ mod tests {
                 crate::types::game_state::ShardOptions::ManaOnly
             ),
             "after life drop below 2, shard options must collapse to ManaOnly"
+        );
+    }
+
+    // --- CR 702.190 Sneak cast-path tests ---
+
+    /// Build: active player with
+    /// - an unblocked attacker on battlefield (creature_to_return candidate)
+    /// - a creature card in graveyard with intrinsic Sneak({3}{B})
+    /// - enough mana to pay {3}{B}
+    /// - phase set to DeclareBlockers with a non-empty combat state
+    fn setup_sneak_scenario() -> (GameState, ObjectId, ObjectId) {
+        let mut state = setup_game_at_main_phase();
+        state.turn_number = 2;
+        state.phase = Phase::DeclareBlockers;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        // Unblocked attacker controlled by player 0, already on battlefield
+        let attacker_id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&attacker_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(2);
+            obj.toughness = Some(2);
+            obj.tapped = true;
+            obj.entered_battlefield_turn = Some(1);
+        }
+        state.combat = Some(crate::game::combat::CombatState {
+            attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
+                attacker_id,
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+
+        // Creature card in graveyard with intrinsic Sneak({3}{B}) + mana cost {4}{B}{B}
+        // so we can distinguish sneak-cost from normal-cost payments.
+        let sneak_card_id = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Sneaky Beast".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&sneak_card_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+            obj.mana_cost = ManaCost::Cost {
+                generic: 4,
+                shards: vec![ManaCostShard::Black, ManaCostShard::Black],
+            };
+            obj.keywords.push(Keyword::Sneak(ManaCost::Cost {
+                generic: 3,
+                shards: vec![ManaCostShard::Black],
+            }));
+            obj.base_keywords = obj.keywords.clone();
+            // Ensure graveyard list is consistent.
+            if !state.players[0].graveyard.contains(&sneak_card_id) {
+                state.players[0].graveyard.push(sneak_card_id);
+            }
+        }
+
+        // Mana: {3}{B}
+        add_mana(&mut state, PlayerId(0), ManaType::Black, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+        (state, attacker_id, sneak_card_id)
+    }
+
+    #[test]
+    fn sneak_cast_rejected_outside_declare_blockers() {
+        let (mut state, attacker_id, sneak_card_id) = setup_sneak_scenario();
+        state.phase = Phase::PreCombatMain;
+        let card_id = state.objects.get(&sneak_card_id).unwrap().card_id;
+        let mut events = Vec::new();
+        let result = handle_cast_spell_as_sneak(
+            &mut state,
+            PlayerId(0),
+            sneak_card_id,
+            card_id,
+            attacker_id,
+            &mut events,
+        );
+        assert!(
+            result.is_err(),
+            "Sneak outside declare-blockers should fail"
+        );
+    }
+
+    #[test]
+    fn sneak_cast_succeeds_and_pays_sneak_cost() {
+        let (mut state, attacker_id, sneak_card_id) = setup_sneak_scenario();
+        let card_id = state.objects.get(&sneak_card_id).unwrap().card_id;
+        let pool_before = state.players[0].mana_pool.total();
+        let mut events = Vec::new();
+        handle_cast_spell_as_sneak(
+            &mut state,
+            PlayerId(0),
+            sneak_card_id,
+            card_id,
+            attacker_id,
+            &mut events,
+        )
+        .expect("Sneak cast should succeed");
+        let pool_after = state.players[0].mana_pool.total();
+        // Sneak cost {3}{B} = 4 units paid; normal cost is {4}{B}{B} = 6 units.
+        assert_eq!(
+            pool_before - pool_after,
+            4,
+            "Should pay Sneak cost ({{3}}{{B}}) not normal cost ({{4}}{{B}}{{B}})"
+        );
+        // Returned creature goes to hand.
+        let attacker = state.objects.get(&attacker_id).unwrap();
+        assert_eq!(
+            attacker.zone,
+            Zone::Hand,
+            "Returned creature should be bounced to hand"
+        );
+        // Spell on stack.
+        assert!(
+            !state.stack.is_empty(),
+            "Sneak-cast spell should be on the stack"
+        );
+    }
+
+    #[test]
+    fn sneak_cast_rejected_when_creature_not_an_attacker() {
+        let (mut state, _attacker_id, sneak_card_id) = setup_sneak_scenario();
+        // Create a non-attacking creature controlled by player 0.
+        let non_attacker = create_object(
+            &mut state,
+            CardId(300),
+            PlayerId(0),
+            "Idle Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&non_attacker).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+        }
+        let card_id = state.objects.get(&sneak_card_id).unwrap().card_id;
+        let mut events = Vec::new();
+        let result = handle_cast_spell_as_sneak(
+            &mut state,
+            PlayerId(0),
+            sneak_card_id,
+            card_id,
+            non_attacker,
+            &mut events,
+        );
+        assert!(
+            result.is_err(),
+            "Sneak with non-attacker should be rejected"
+        );
+    }
+
+    #[test]
+    fn sneak_cast_rejected_when_no_sneak_on_card() {
+        let (mut state, attacker_id, _sneak_card_id) = setup_sneak_scenario();
+        // Create a plain GY creature with no Sneak.
+        let plain_card = create_object(
+            &mut state,
+            CardId(400),
+            PlayerId(0),
+            "Plain Creature".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&plain_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                generic: 1,
+                shards: vec![],
+            };
+            if !state.players[0].graveyard.contains(&plain_card) {
+                state.players[0].graveyard.push(plain_card);
+            }
+        }
+        let card_id = state.objects.get(&plain_card).unwrap().card_id;
+        let mut events = Vec::new();
+        let result = handle_cast_spell_as_sneak(
+            &mut state,
+            PlayerId(0),
+            plain_card,
+            card_id,
+            attacker_id,
+            &mut events,
+        );
+        assert!(
+            result.is_err(),
+            "Sneak-cast of non-Sneak card should be rejected"
+        );
+    }
+
+    #[test]
+    fn sneak_cast_resolves_tapped_and_attacking() {
+        let (mut state, attacker_id, sneak_card_id) = setup_sneak_scenario();
+        let card_id = state.objects.get(&sneak_card_id).unwrap().card_id;
+        let mut events = Vec::new();
+        handle_cast_spell_as_sneak(
+            &mut state,
+            PlayerId(0),
+            sneak_card_id,
+            card_id,
+            attacker_id,
+            &mut events,
+        )
+        .expect("cast should succeed");
+
+        // Resolve the spell on the stack.
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        let obj = state.objects.get(&sneak_card_id).unwrap();
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "Resolved Sneak creature should be on battlefield"
+        );
+        assert!(
+            obj.tapped,
+            "Sneak creature should enter tapped (CR 702.190b)"
+        );
+        let combat = state.combat.as_ref().unwrap();
+        let placed = combat
+            .attackers
+            .iter()
+            .find(|a| a.object_id == sneak_card_id)
+            .expect("Sneak creature should be in attackers");
+        assert_eq!(
+            placed.defending_player,
+            PlayerId(1),
+            "Should attack same defender as returned creature"
+        );
+        assert_eq!(
+            obj.cast_variant_paid,
+            Some((
+                crate::types::ability::CastVariantPaid::Sneak,
+                state.turn_number
+            )),
+            "Sneak resolution should tag cast_variant_paid"
+        );
+        // No AttackersDeclared event for the Sneak creature.
+        let has_attackers_declared = events
+            .iter()
+            .any(|e| matches!(e, GameEvent::AttackersDeclared { .. }));
+        assert!(
+            !has_attackers_declared,
+            "Sneak resolution must not fire AttackersDeclared"
+        );
+    }
+
+    #[test]
+    fn sneak_cast_legal_action_in_declare_blockers() {
+        let (state, attacker_id, sneak_card_id) = setup_sneak_scenario();
+        let card_id = state.objects.get(&sneak_card_id).unwrap().card_id;
+        let actions = crate::ai_support::legal_actions(&state);
+        let has_sneak_cast = actions.iter().any(|a| {
+            matches!(
+                a,
+                GameAction::CastSpellAsSneak {
+                    gy_object,
+                    card_id: cid,
+                    creature_to_return,
+                } if *gy_object == sneak_card_id
+                    && *cid == card_id
+                    && *creature_to_return == attacker_id
+            )
+        });
+        assert!(
+            has_sneak_cast,
+            "legal_actions should include CastSpellAsSneak in DeclareBlockers"
+        );
+    }
+
+    #[test]
+    fn sneak_cast_not_legal_action_outside_declare_blockers() {
+        let (mut state, _attacker_id, _sneak_card_id) = setup_sneak_scenario();
+        state.phase = Phase::PreCombatMain;
+        state.combat = None;
+        let actions = crate::ai_support::legal_actions(&state);
+        let has_sneak_cast = actions
+            .iter()
+            .any(|a| matches!(a, GameAction::CastSpellAsSneak { .. }));
+        assert!(
+            !has_sneak_cast,
+            "CastSpellAsSneak should not be offered outside DeclareBlockers"
         );
     }
 }

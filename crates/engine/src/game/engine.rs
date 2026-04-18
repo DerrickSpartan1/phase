@@ -330,6 +330,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             GameAction::PassPriority
             | GameAction::PlayLand { .. }
             | GameAction::CastSpell { .. }
+            | GameAction::CastSpellAsSneak { .. }
             | GameAction::CancelCast
             | GameAction::PayUnlessCost { .. }
             | GameAction::PayCombatTax { .. } => {
@@ -1479,6 +1480,25 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             )
             .map_err(EngineError::InvalidAction)?;
             WaitingFor::Priority { player: p }
+        }
+        // CR 702.190a: Sneak — cast creature from graveyard during declare blockers.
+        (
+            WaitingFor::Priority { player },
+            GameAction::CastSpellAsSneak {
+                gy_object,
+                card_id,
+                creature_to_return,
+            },
+        ) => {
+            let p = *player;
+            super::casting::handle_cast_spell_as_sneak(
+                state,
+                p,
+                gy_object,
+                card_id,
+                creature_to_return,
+                &mut events,
+            )?
         }
         (waiting_for, action) if engine_resolution_choices::handles(waiting_for) => {
             match engine_resolution_choices::handle_resolution_choice(

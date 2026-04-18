@@ -173,6 +173,18 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 Zone::Battlefield,
                 None,
             );
+            // CR 702.190b: Sneak-cast permanent enters the battlefield tapped.
+            // Seed the ZoneChange so ETB-tapped goes through the replacement
+            // pipeline (CR 614.1c).
+            if matches!(casting_variant, CastingVariant::Sneak { .. }) {
+                if let crate::types::proposed_event::ProposedEvent::ZoneChange {
+                    enter_tapped,
+                    ..
+                } = &mut proposed
+                {
+                    *enter_tapped = true;
+                }
+            }
             // CR 712.14a + CR 310.11b: If this spell was cast via an
             // ExileWithAltCost permission with `cast_transformed`, the
             // permanent enters the battlefield transformed (resolving to its
@@ -381,6 +393,32 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 if has_warp {
                     create_warp_delayed_trigger(state, entry.id, entry.controller);
                 }
+            }
+
+            // CR 702.190b: Sneak-cast permanent enters tapped (already seeded on
+            // the ZoneChange replacement) AND attacking the same defender as the
+            // returned creature. Also tag `cast_variant_paid` so the
+            // `CastVariantPaid { variant: Sneak }` trigger/ability condition
+            // used by intrinsic-sneak cards fires on resolved Sneak casts.
+            if let CastingVariant::Sneak {
+                defender,
+                attack_target,
+                ..
+            } = casting_variant
+            {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::Sneak,
+                        state.turn_number,
+                    ));
+                }
+                super::combat::place_attacking_alongside(
+                    state,
+                    entry.id,
+                    defender,
+                    attack_target,
+                    events,
+                );
             }
         }
     }

@@ -1,6 +1,6 @@
 use std::str::FromStr;
 
-use crate::game::combat::{AttackTarget, AttackerInfo};
+use crate::game::combat::AttackTarget;
 use crate::game::game_object::GameObject;
 use crate::game::players;
 use crate::game::zones;
@@ -202,6 +202,10 @@ pub fn parse_keywords(keyword_strings: &[String]) -> Vec<Keyword> {
 }
 
 /// CR 702.49: Check if the current phase allows activation of a Ninjutsu-family variant.
+///
+/// CR 702.190a: Sneak is intentionally absent from `NinjutsuVariant` — it is a
+/// cast alt-cost handled in `casting::handle_cast_spell_as_sneak`, not an
+/// activated ability — so it cannot reach this function.
 pub fn ninjutsu_timing_ok(phase: &Phase, variant: &NinjutsuVariant) -> bool {
     match variant {
         // CR 702.49a/d: Ninjutsu/CommanderNinjutsu can be activated during declare blockers step or later
@@ -210,13 +214,11 @@ pub fn ninjutsu_timing_ok(phase: &Phase, variant: &NinjutsuVariant) -> bool {
         | NinjutsuVariant::WebSlinging => {
             matches!(phase, Phase::DeclareBlockers | Phase::CombatDamage)
         }
-        // Sneak: declare blockers step only
-        NinjutsuVariant::Sneak => matches!(phase, Phase::DeclareBlockers),
     }
 }
 
 /// CR 702.49: Return the creatures that can be returned for this variant.
-/// - Ninjutsu/Sneak: unblocked attackers controlled by `player`
+/// - Ninjutsu/CommanderNinjutsu: unblocked attackers controlled by `player`
 /// - WebSlinging: any tapped creature controlled by `player`
 pub fn returnable_creatures_for_variant(
     state: &GameState,
@@ -224,7 +226,7 @@ pub fn returnable_creatures_for_variant(
     variant: &NinjutsuVariant,
 ) -> Vec<ObjectId> {
     match variant {
-        NinjutsuVariant::Ninjutsu | NinjutsuVariant::CommanderNinjutsu | NinjutsuVariant::Sneak => {
+        NinjutsuVariant::Ninjutsu | NinjutsuVariant::CommanderNinjutsu => {
             super::combat::unblocked_attackers(state)
                 .into_iter()
                 .filter(|&id| {
@@ -305,9 +307,11 @@ pub fn activate_ninjutsu(
     // Validate: must be in combat
     let combat = state.combat.as_ref().ok_or("No active combat")?;
 
-    // Validate the creature to return based on variant
+    // Validate the creature to return based on variant (CR 702.190a: Sneak is
+    // intentionally absent from `NinjutsuVariant`, so this match is exhaustive
+    // without any guard against the cast-only path).
     let (defending_player, attack_target) = match variant {
-        NinjutsuVariant::Ninjutsu | NinjutsuVariant::CommanderNinjutsu | NinjutsuVariant::Sneak => {
+        NinjutsuVariant::Ninjutsu | NinjutsuVariant::CommanderNinjutsu => {
             // Must be an unblocked attacker
             let attacker_info = combat
                 .attackers
@@ -405,23 +409,22 @@ pub fn activate_ninjutsu(
     // 2. Move Ninjutsu-family card from hand/command zone to battlefield
     zones::move_to_zone(state, ninjutsu_obj_id, Zone::Battlefield, events);
 
-    // 3. Set tapped, entered_battlefield_turn (summoning sickness), ninjutsu variant tracking
+    // CR 702.49: Track which alt-cost variant was paid this turn on the
+    // cast-variant-paid tag (placement + tapped + summoning sickness is
+    // delegated to the shared helper).
     if let Some(obj) = state.objects.get_mut(&ninjutsu_obj_id) {
-        obj.tapped = true;
-        obj.entered_battlefield_turn = Some(state.turn_number);
-        // CR 702.49: Track which ninjutsu-family variant was paid this turn
-        obj.ninjutsu_variant_paid = Some((variant.clone(), state.turn_number));
+        obj.cast_variant_paid = Some((variant.into(), state.turn_number));
     }
 
-    // 4. CR 702.49c: Add to combat.attackers directly — do NOT use declare_attackers()
-    //    This ensures no AttackersDeclared event fires, so no "whenever ~ attacks" triggers.
-    if let Some(combat) = state.combat.as_mut() {
-        combat.attackers.push(AttackerInfo::new(
-            ninjutsu_obj_id,
-            attack_target,
-            defending_player,
-        ));
-    }
+    // CR 702.49c: Place onto combat.attackers alongside the returned creature's
+    // defender WITHOUT firing AttackersDeclared (no "whenever ~ attacks" triggers).
+    super::combat::place_attacking_alongside(
+        state,
+        ninjutsu_obj_id,
+        defending_player,
+        attack_target,
+        events,
+    );
 
     // CR 702.49a: Emit event for "whenever you activate a ninjutsu ability" triggers.
     events.push(GameEvent::NinjutsuActivated {
@@ -434,13 +437,15 @@ pub fn activate_ninjutsu(
     Ok(())
 }
 
-/// Detect which NinjutsuVariant a game object has, if any.
+/// Detect which activated-family `NinjutsuVariant` a game object has, if any.
+/// CR 702.190a: Sneak is a cast alt-cost handled in
+/// `casting::handle_cast_spell_as_sneak`, so it does not appear in
+/// `NinjutsuVariant` and is not matched here.
 fn ninjutsu_family_variant(obj: &GameObject) -> Option<NinjutsuVariant> {
     for kw in &obj.keywords {
         match kw {
             Keyword::Ninjutsu(_) => return Some(NinjutsuVariant::Ninjutsu),
             Keyword::CommanderNinjutsu(_) => return Some(NinjutsuVariant::CommanderNinjutsu),
-            Keyword::Sneak(_) => return Some(NinjutsuVariant::Sneak),
             Keyword::WebSlinging(_) => return Some(NinjutsuVariant::WebSlinging),
             _ => {}
         }
@@ -448,14 +453,14 @@ fn ninjutsu_family_variant(obj: &GameObject) -> Option<NinjutsuVariant> {
     None
 }
 
-/// CR 702.49b: Extract the mana cost for a ninjutsu-family keyword on this object.
+/// CR 702.49b: Extract the mana cost for a ninjutsu-family (activated)
+/// keyword on this object. Excludes Sneak (CR 702.190a — a cast alt-cost).
 fn ninjutsu_family_cost(obj: &GameObject) -> Option<ManaCost> {
     for kw in &obj.keywords {
         match kw {
-            Keyword::Ninjutsu(c)
-            | Keyword::CommanderNinjutsu(c)
-            | Keyword::Sneak(c)
-            | Keyword::WebSlinging(c) => return Some(c.clone()),
+            Keyword::Ninjutsu(c) | Keyword::CommanderNinjutsu(c) | Keyword::WebSlinging(c) => {
+                return Some(c.clone())
+            }
             _ => {}
         }
     }

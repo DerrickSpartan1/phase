@@ -484,6 +484,31 @@ fn apply_pending_spell_resolution(
             super::stack::create_warp_delayed_trigger(state, ctx.object_id, ctx.controller);
         }
     }
+
+    // CR 702.190b: Sneak-cast permanent also enters attacking alongside the
+    // returned creature's defender and gets the `cast_variant_paid` tag
+    // so intrinsic-sneak trigger conditions fire.
+    if let CastingVariant::Sneak {
+        defender,
+        attack_target,
+        ..
+    } = ctx.casting_variant
+    {
+        if let Some(obj) = state.objects.get_mut(&ctx.object_id) {
+            obj.cast_variant_paid = Some((
+                crate::types::ability::CastVariantPaid::Sneak,
+                state.turn_number,
+            ));
+        }
+        let mut events = Vec::new();
+        super::combat::place_attacking_alongside(
+            state,
+            ctx.object_id,
+            defender,
+            attack_target,
+            &mut events,
+        );
+    }
 }
 
 /// CR 614.1c: Apply counters accumulated on a `ProposedEvent::ZoneChange` to

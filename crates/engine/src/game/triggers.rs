@@ -1428,10 +1428,10 @@ pub(crate) fn check_trigger_condition(
                 .as_ref()
                 .is_some_and(|c| c.attackers.iter().any(|a| a.object_id == sid))
         }
-        // CR 702.49 + CR 603.4: "if its sneak/ninjutsu cost was paid this turn"
-        TriggerCondition::NinjutsuVariantPaid { variant } => source_id
+        // CR 702.49 + CR 702.190a + CR 603.4: "if its sneak/ninjutsu cost was paid this turn"
+        TriggerCondition::CastVariantPaid { variant } => source_id
             .and_then(|id| state.objects.get(&id))
-            .map(|obj| obj.ninjutsu_variant_paid == Some((variant.clone(), state.turn_number)))
+            .map(|obj| obj.cast_variant_paid == Some((*variant, state.turn_number)))
             .unwrap_or(false),
         // CR 601.2: True when the current turn's active player is an opponent.
         TriggerCondition::DuringOpponentsTurn => state.active_player != controller,

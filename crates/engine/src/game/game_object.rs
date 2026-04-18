@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
-    AbilityDefinition, AdditionalCost, BasicLandType, CastingPermission, CastingRestriction,
-    ChosenAttribute, ChosenSubtypeKind, ModalChoice, NinjutsuVariant, ReplacementDefinition,
+    AbilityDefinition, AdditionalCost, BasicLandType, CastVariantPaid, CastingPermission,
+    CastingRestriction, ChosenAttribute, ChosenSubtypeKind, ModalChoice, ReplacementDefinition,
     SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use crate::types::card::{LayoutKind, PrintedCardRef};
@@ -175,11 +175,11 @@ pub struct GameObject {
     // Summoning sickness
     pub entered_battlefield_turn: Option<u32>,
 
-    /// CR 702.49: Which ninjutsu-family variant was paid to put this permanent onto the
-    /// battlefield, and on which turn. Used by trigger conditions and ability conditions
-    /// that check "if its sneak/ninjutsu cost was paid this turn."
+    /// CR 702.49 + CR 702.190a: Which alt-cost cast/activation variant was paid to put this
+    /// permanent onto the battlefield, and on which turn. Used by trigger conditions and
+    /// ability conditions that check "if its sneak/ninjutsu cost was paid this turn."
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ninjutsu_variant_paid: Option<(NinjutsuVariant, u32)>,
+    pub cast_variant_paid: Option<(CastVariantPaid, u32)>,
 
     /// CR 107.3m: The value of X paid when the spell that produced this object
     /// was cast. Populated by `finalize_cast` from the pending ability's
@@ -473,7 +473,7 @@ impl GameObject {
             base_characteristics_initialized: false,
             timestamp: 0,
             entered_battlefield_turn: None,
-            ninjutsu_variant_paid: None,
+            cast_variant_paid: None,
             cost_x_paid: None,
             unimplemented_mechanics: Vec::new(),
             has_summoning_sickness: false,
@@ -525,7 +525,7 @@ impl GameObject {
         self.monstrous = false;
         self.is_saddled = false;
         self.chosen_attributes.clear();
-        self.ninjutsu_variant_paid = None;
+        self.cast_variant_paid = None;
         self.goaded_by.clear();
         self.detained_by.clear();
 

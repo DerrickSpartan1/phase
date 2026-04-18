@@ -6876,8 +6876,8 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        Comparator, ContinuousModification, ControllerRef, DoublePTMode, Duration, FilterProp,
-        GainLifePlayer, LinkedExileScope, ManaContribution, ManaProduction, NinjutsuVariant,
+        CastVariantPaid, Comparator, ContinuousModification, ControllerRef, DoublePTMode, Duration,
+        FilterProp, GainLifePlayer, LinkedExileScope, ManaContribution, ManaProduction,
         PaymentCost, TypeFilter,
     };
     use crate::types::keywords::Keyword;
@@ -10426,58 +10426,58 @@ mod tests {
     }
 
     #[test]
-    fn ninjutsu_variant_paid_instead_sneak() {
+    fn cast_variant_paid_instead_sneak() {
         let (cond, text) = strip_additional_cost_conditional(
             "if her sneak cost was paid this turn, instead return that card to the battlefield",
         );
         assert_eq!(
             cond,
-            Some(AbilityCondition::NinjutsuVariantPaidInstead {
-                variant: NinjutsuVariant::Sneak,
+            Some(AbilityCondition::CastVariantPaidInstead {
+                variant: CastVariantPaid::Sneak,
             })
         );
         assert_eq!(text, "return that card to the battlefield");
     }
 
     #[test]
-    fn ninjutsu_variant_paid_instead_ninjutsu() {
+    fn cast_variant_paid_instead_ninjutsu() {
         let (cond, text) = strip_additional_cost_conditional(
             "if its ninjutsu cost was paid this turn, instead draw a card",
         );
         assert_eq!(
             cond,
-            Some(AbilityCondition::NinjutsuVariantPaidInstead {
-                variant: NinjutsuVariant::Ninjutsu,
+            Some(AbilityCondition::CastVariantPaidInstead {
+                variant: CastVariantPaid::Ninjutsu,
             })
         );
         assert_eq!(text, "draw a card");
     }
 
     #[test]
-    fn ninjutsu_variant_paid_sneak_non_instead() {
-        // CR 702.49: "if this spell's sneak cost was paid, [effect]" without "instead"
+    fn cast_variant_paid_sneak_non_instead() {
+        // CR 702.190a: "if this spell's sneak cost was paid, [effect]" without "instead"
         let (cond, text) = strip_additional_cost_conditional(
             "if this spell's sneak cost was paid, they enter tapped and attacking",
         );
         assert_eq!(
             cond,
-            Some(AbilityCondition::NinjutsuVariantPaid {
-                variant: NinjutsuVariant::Sneak,
+            Some(AbilityCondition::CastVariantPaid {
+                variant: CastVariantPaid::Sneak,
             })
         );
         assert_eq!(text, "they enter tapped and attacking");
     }
 
     #[test]
-    fn ninjutsu_variant_paid_ninjutsu_non_instead() {
+    fn cast_variant_paid_ninjutsu_non_instead() {
         // CR 702.49: "if its ninjutsu cost was paid, [effect]" without "instead"
         let (cond, text) = strip_additional_cost_conditional(
             "if its ninjutsu cost was paid, those tokens enter tapped and attacking",
         );
         assert_eq!(
             cond,
-            Some(AbilityCondition::NinjutsuVariantPaid {
-                variant: NinjutsuVariant::Ninjutsu,
+            Some(AbilityCondition::CastVariantPaid {
+                variant: CastVariantPaid::Ninjutsu,
             })
         );
         assert_eq!(text, "those tokens enter tapped and attacking");
@@ -10509,10 +10509,10 @@ mod tests {
         }
         assert_eq!(
             def.condition,
-            Some(AbilityCondition::NinjutsuVariantPaid {
-                variant: NinjutsuVariant::Sneak,
+            Some(AbilityCondition::CastVariantPaid {
+                variant: CastVariantPaid::Sneak,
             }),
-            "Token should have NinjutsuVariantPaid condition"
+            "Token should have CastVariantPaid condition"
         );
         // else_ability should be the same Token without tapped/attacking
         let else_def = def.else_ability.as_ref().expect("Should have else_ability");

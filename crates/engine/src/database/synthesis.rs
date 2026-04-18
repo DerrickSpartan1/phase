@@ -165,8 +165,11 @@ pub fn synthesize_equip(face: &mut CardFace) {
 }
 
 /// CR 702.49: Synthesize marker activated abilities for the Ninjutsu family
-/// (Ninjutsu, Sneak, WebSlinging). The actual activation is handled by the
-/// GameAction::ActivateNinjutsu path, not by normal activated ability resolution.
+/// (Ninjutsu, CommanderNinjutsu, WebSlinging). The actual activation is handled
+/// by the GameAction::ActivateNinjutsu path, not by normal activated ability
+/// resolution. CR 702.190a: Sneak is NOT a ninjutsu-family activation — it is
+/// a cast alternative cost handled by the casting pipeline — so it does not
+/// synthesize an activated ability here.
 pub fn synthesize_ninjutsu_family(face: &mut CardFace) {
     let abilities: Vec<AbilityDefinition> = face
         .keywords
@@ -175,7 +178,6 @@ pub fn synthesize_ninjutsu_family(face: &mut CardFace) {
             let (variant, cost) = match kw {
                 Keyword::Ninjutsu(c) => (NinjutsuVariant::Ninjutsu, c),
                 Keyword::CommanderNinjutsu(c) => (NinjutsuVariant::CommanderNinjutsu, c),
-                Keyword::Sneak(c) => (NinjutsuVariant::Sneak, c),
                 Keyword::WebSlinging(c) => (NinjutsuVariant::WebSlinging, c),
                 _ => return None,
             };

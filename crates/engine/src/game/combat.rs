@@ -196,6 +196,33 @@ pub fn enter_attacking(
     }
 }
 
+/// CR 702.49c + CR 702.190b: Place an object onto `combat.attackers` alongside
+/// an existing attacker without firing `AttackersDeclared` (so "whenever ~
+/// attacks" triggers do not fire). Sets the tapped bit and
+/// `entered_battlefield_turn` for summoning-sickness tracking.
+///
+/// Shared authority for the Ninjutsu activation path (CR 702.49c) and the
+/// Sneak cast path (CR 702.190b).
+pub fn place_attacking_alongside(
+    state: &mut GameState,
+    object_id: ObjectId,
+    defending_player: PlayerId,
+    attack_target: AttackTarget,
+    _events: &mut Vec<GameEvent>,
+) {
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.tapped = true;
+        obj.entered_battlefield_turn = Some(state.turn_number);
+    }
+    if let Some(combat) = state.combat.as_mut() {
+        combat.attackers.push(AttackerInfo::new(
+            object_id,
+            attack_target,
+            defending_player,
+        ));
+    }
+}
+
 /// Validate attacker declarations per CR 508.1.
 pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Result<(), String> {
     let active = state.active_player;

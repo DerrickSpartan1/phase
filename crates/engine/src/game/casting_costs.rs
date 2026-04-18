@@ -1310,6 +1310,24 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         events,
     )?;
 
+    // CR 702.190a: Sneak alt-cost additionally requires returning an unblocked
+    // attacker to its owner's hand. The spell was announced to the stack above;
+    // the returned creature is paid here as part of cost payment, after mana
+    // but before the stack entry is finalized with its ResolvedAbility. Also
+    // scrub the returned creature from combat so it is no longer an attacker.
+    if let CastingVariant::Sneak {
+        returned_creature, ..
+    } = casting_variant
+    {
+        super::zones::move_to_zone(state, returned_creature, Zone::Hand, events);
+        if let Some(combat) = state.combat.as_mut() {
+            combat
+                .attackers
+                .retain(|a| a.object_id != returned_creature);
+            combat.blocker_assignments.remove(&returned_creature);
+        }
+    }
+
     // CR 700.14: Compute actual mana deducted from pool (not declared cost).
     let pool_after = state
         .players

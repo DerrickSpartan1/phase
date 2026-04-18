@@ -485,7 +485,10 @@ pub enum Keyword {
     /// Warp {cost}: alternative casting cost. Cast from hand for warp cost,
     /// exile at next end step, then may cast from exile later.
     Warp(ManaCost),
-    /// CR 702.49 variant: Sneak — return unblocked attacker, cast during declare blockers.
+    /// CR 702.190a: Sneak {cost} — alternative cost to cast this card from
+    /// graveyard during the declare-blockers step by returning an unblocked
+    /// attacker. CR 702.190b: the resulting permanent enters tapped and
+    /// attacking the same defender.
     Sneak(ManaCost),
     /// CR 702.49 variant: Web-slinging — return a tapped creature to cast.
     WebSlinging(ManaCost),

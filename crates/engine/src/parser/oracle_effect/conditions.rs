@@ -15,8 +15,8 @@ use super::counter::normalize_counter_type;
 use super::{parse_effect_chain, scan_contains_phrase};
 use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
-    AbilityCondition, AbilityDefinition, AbilityKind, Comparator, ControllerRef, Duration, Effect,
-    FilterProp, NinjutsuVariant, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
+    AbilityCondition, AbilityDefinition, AbilityKind, CastVariantPaid, Comparator, ControllerRef,
+    Duration, Effect, FilterProp, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
     TypedFilter,
 };
 use crate::types::card_type::CoreType;
@@ -165,18 +165,18 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
     if body.is_none() && scan_contains_phrase(&lower, "sneak cost was paid") {
         if let Some(after) = tp.strip_after("instead ") {
             return (
-                Some(AbilityCondition::NinjutsuVariantPaidInstead {
-                    variant: NinjutsuVariant::Sneak,
+                Some(AbilityCondition::CastVariantPaidInstead {
+                    variant: CastVariantPaid::Sneak,
                 }),
                 after.original.to_string(),
             );
         }
-        // CR 702.49: "if this spell's sneak cost was paid, [effect]" — non-"instead"
+        // CR 702.190a: "if this spell's sneak cost was paid, [effect]" — non-"instead"
         // variant that gates a sub-ability on sneak payment.
         if let Some(after) = tp.strip_after("sneak cost was paid, ") {
             return (
-                Some(AbilityCondition::NinjutsuVariantPaid {
-                    variant: NinjutsuVariant::Sneak,
+                Some(AbilityCondition::CastVariantPaid {
+                    variant: CastVariantPaid::Sneak,
                 }),
                 after.original.to_string(),
             );
@@ -185,8 +185,8 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
     if body.is_none() && scan_contains_phrase(&lower, "ninjutsu cost was paid") {
         if let Some(after) = tp.strip_after("instead ") {
             return (
-                Some(AbilityCondition::NinjutsuVariantPaidInstead {
-                    variant: NinjutsuVariant::Ninjutsu,
+                Some(AbilityCondition::CastVariantPaidInstead {
+                    variant: CastVariantPaid::Ninjutsu,
                 }),
                 after.original.to_string(),
             );
@@ -195,8 +195,8 @@ pub(super) fn strip_additional_cost_conditional(text: &str) -> (Option<AbilityCo
         // variant that gates a sub-ability on ninjutsu payment.
         if let Some(after) = tp.strip_after("ninjutsu cost was paid, ") {
             return (
-                Some(AbilityCondition::NinjutsuVariantPaid {
-                    variant: NinjutsuVariant::Ninjutsu,
+                Some(AbilityCondition::CastVariantPaid {
+                    variant: CastVariantPaid::Ninjutsu,
                 }),
                 after.original.to_string(),
             );

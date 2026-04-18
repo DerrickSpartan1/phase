@@ -25,7 +25,7 @@ use super::player::{Player, PlayerId};
 use super::proposed_event::{ProposedEvent, ReplacementId};
 use super::zones::Zone;
 
-use crate::game::combat::CombatState;
+use crate::game::combat::{AttackTarget, CombatState};
 use crate::game::deck_loading::DeckEntry;
 
 use crate::game::game_object::GameObject;
@@ -1594,6 +1594,16 @@ pub enum CastingVariant {
         source: ObjectId,
         /// When true, casting consumes this source's once-per-turn permission.
         once_per_turn: bool,
+    },
+    /// CR 702.190a: Cast from graveyard via Sneak alt-cost. Legal only during
+    /// the declare-blockers step. The returned unblocked attacker is part of
+    /// the cost (bounced at `finalize_cast_to_stack`). CR 702.190b: on
+    /// resolution the permanent enters tapped and attacking the same defender
+    /// as the returned creature.
+    Sneak {
+        defender: PlayerId,
+        attack_target: AttackTarget,
+        returned_creature: ObjectId,
     },
 }
 
