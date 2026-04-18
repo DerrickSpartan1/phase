@@ -27,6 +27,7 @@ pub(crate) mod engine_replacement;
 pub(crate) mod engine_resolution_choices;
 pub(crate) mod engine_stack;
 pub mod filter;
+pub mod functioning_abilities;
 pub mod game_object;
 pub mod gap_analysis;
 pub mod keywords;
