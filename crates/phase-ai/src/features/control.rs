@@ -400,6 +400,7 @@ mod tests {
             Effect::DamageAll {
                 amount: QuantityExpr::Fixed { value: 3 },
                 target: TargetFilter::Any,
+                player_filter: None,
             },
         )
     }

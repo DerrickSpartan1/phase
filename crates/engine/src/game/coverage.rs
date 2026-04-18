@@ -844,12 +844,24 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::DestroyAll { target, .. }
         | Effect::TapAll { target }
         | Effect::UntapAll { target }
-        | Effect::DamageAll { amount: _, target } => {
+        | Effect::DamageAll {
+            amount: _,
+            target,
+            player_filter: _,
+        } => {
             if !matches!(target, TargetFilter::None) {
                 d.push(("filter".into(), fmt_target(target)));
             }
-            if let Effect::DamageAll { amount, .. } = effect {
+            if let Effect::DamageAll {
+                amount,
+                player_filter,
+                ..
+            } = effect
+            {
                 d.push(("amount".into(), fmt_quantity(amount)));
+                if let Some(pf) = player_filter {
+                    d.push(("player_filter".into(), format!("{pf:?}")));
+                }
             }
         }
         Effect::DamageEachPlayer {

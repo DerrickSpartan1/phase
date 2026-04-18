@@ -2485,10 +2485,22 @@ pub enum Effect {
         #[serde(default = "default_target_filter_none")]
         target: TargetFilter,
     },
+    /// CR 120.3: Deal uniform damage to every matching object and optionally every
+    /// matching player, as one simultaneous damage event from a single source.
+    /// The object set (`target`) and player set (`player_filter`) resolve within
+    /// the same effect resolution, so replacement effects (CR 614) and prevention
+    /// shields (CR 615) that watch "the next damage dealt by [this source]"
+    /// observe a single coherent event across both sets.
     DamageAll {
         amount: QuantityExpr,
         #[serde(default = "default_target_filter_none")]
         target: TargetFilter,
+        /// CR 120.3: When `Some`, each non-eliminated player matching this filter
+        /// is also dealt `amount` damage from the same source in the same event.
+        /// Models "deals N damage to each opponent and each creature they control"
+        /// as a single effect instead of two chained resolutions.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        player_filter: Option<PlayerFilter>,
     },
     /// CR 120.3: Deal damage to each player matching a filter, with per-player quantity.
     /// Unlike `DamageAll` (which iterates battlefield objects with a fixed amount),

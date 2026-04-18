@@ -526,60 +526,83 @@ pub fn resolve(
     Ok(())
 }
 
-/// Deal damage to all permanents (and optionally players) matching the filter.
-/// Reads amount and filter from `Effect::DamageAll { amount, target }`.
-/// CR 120.3: Damage is dealt simultaneously to all affected objects.
+/// Deal uniform damage to every matching object and (optionally) every matching
+/// player as a single simultaneous damage event from one source.
+///
+/// Reads amount, object filter, and optional player filter from
+/// `Effect::DamageAll { amount, target, player_filter }`.
+///
+/// CR 120.3: Damage is dealt simultaneously to all affected objects and players
+/// from a single source. The batch is one effect resolution, so prevention and
+/// replacement shields that watch "the next damage dealt by [this source]"
+/// (CR 609.7, CR 614, CR 615) observe one coherent event across the full set.
 /// CR 120.3e: Non-combat damage from an effect is marked on each matching creature.
+/// CR 120.3a: Damage dealt to a player causes that player to lose that much life.
+/// CR 120.4b: Each per-target damage instance is routed through the replacement
+/// pipeline individually (see `apply_damage_to_target`), but all share the same
+/// `DamageContext` (single source, single set of keywords) and the same effect.
 pub fn resolve_all(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (num_dmg, target_filter): (u32, TargetFilter) = match &ability.effect {
-        Effect::DamageAll { amount, target } => {
-            // CR 107.1b: Ability-context resolve so X-damage-to-all ("Deal X damage to each...")
-            // reads the caster-chosen X.
-            let dmg = resolve_quantity_with_targets(state, amount, ability).max(0) as u32;
-            (dmg, target.clone())
-        }
-        _ => return Err(EffectError::MissingParam("DamageAll amount".to_string())),
-    };
+    let (num_dmg, target_filter, player_filter): (u32, TargetFilter, Option<PlayerFilter>) =
+        match &ability.effect {
+            Effect::DamageAll {
+                amount,
+                target,
+                player_filter,
+            } => {
+                // CR 107.1b: Ability-context resolve so X-damage-to-all ("Deal X damage to each...")
+                // reads the caster-chosen X.
+                let dmg = resolve_quantity_with_targets(state, amount, ability).max(0) as u32;
+                (dmg, target.clone(), *player_filter)
+            }
+            _ => return Err(EffectError::MissingParam("DamageAll amount".to_string())),
+        };
 
     let target_filter = crate::game::effects::resolved_object_filter(ability, &target_filter);
 
     // Collect matching object IDs.
     // CR 107.3a + CR 601.2b: ability-context filter evaluation.
     let ctx = filter::FilterContext::from_ability(ability);
-    let matching: Vec<_> = state
+    let matching_objects: Vec<_> = state
         .battlefield
         .iter()
         .filter(|id| filter::matches_target_filter(state, **id, &target_filter, &ctx))
         .copied()
         .collect();
 
-    // CR 120.3h: Damage to a battle in `matching` is routed through
-    // `apply_damage_to_target` below, which now removes defense counters rather
-    // than marking damage. Player damage uses the separate `DamageEachPlayer`
-    // effect (PlayerFilter + per-player quantity). `DamageAll` is object-only.
+    // CR 120.3: Collect matching player IDs when the effect also targets players.
+    // The player set is part of the same damage event as the object set.
+    let matching_players: Vec<PlayerId> = match player_filter {
+        Some(pf) => collect_matching_players(state, pf, ability.controller),
+        None => Vec::new(),
+    };
+
+    // CR 120.3h: Damage to a battle in `matching_objects` is routed through
+    // `apply_damage_to_target` below, which removes defense counters rather
+    // than marking damage.
     let ctx = DamageContext::from_source(state, ability.source_id)
         .unwrap_or_else(|| DamageContext::fallback(ability.source_id, ability.controller));
 
-    for (i, &obj_id) in matching.iter().enumerate() {
-        match apply_damage_to_target(
-            state,
-            &ctx,
-            TargetRef::Object(obj_id),
-            num_dmg,
-            false,
-            events,
-        )? {
+    // CR 120.3 + CR 609.7: Assemble the full simultaneous recipient list as a
+    // uniform stream of `TargetRef`s. Objects first, then players — CR 120.3
+    // does not specify an order within a simultaneous batch, but consistency
+    // matters for replacement-drain resumption ordering.
+    let mut recipients: Vec<TargetRef> =
+        Vec::with_capacity(matching_objects.len() + matching_players.len());
+    recipients.extend(matching_objects.iter().map(|&id| TargetRef::Object(id)));
+    recipients.extend(matching_players.iter().map(|&pid| TargetRef::Player(pid)));
+
+    for (i, target) in recipients.iter().enumerate() {
+        match apply_damage_to_target(state, &ctx, target.clone(), num_dmg, false, events)? {
             DamageResult::Applied(_) => {}
             DamageResult::NeedsChoice => {
-                // CR 120.3 + CR 616.1e: Remaining batch targets must resume after the
-                // replacement choice resolves — chain them as DealDamage continuations.
-                let remaining = matching[i + 1..]
-                    .iter()
-                    .map(|&id| (TargetRef::Object(id), num_dmg));
+                // CR 120.3 + CR 616.1e: Remaining batch recipients must resume after
+                // the replacement choice resolves — chain them as DealDamage
+                // continuations keyed to the same damage-source id.
+                let remaining = recipients[i + 1..].iter().map(|t| (t.clone(), num_dmg));
                 stash_remaining_damage_chain(state, ability, ctx.source_id, remaining);
                 // Tag the stashed chain with the parent `EffectKind::DamageAll` so the
                 // drain re-emits the parent event the non-pause tail fires.
@@ -595,6 +618,49 @@ pub fn resolve_all(
     });
 
     Ok(())
+}
+
+/// CR 120.3: Collect non-eliminated players matching the filter for simultaneous
+/// damage from a single source. Mirrors the filter evaluation used by
+/// `resolve_each_player` but returns only the matching ids.
+fn collect_matching_players(
+    state: &GameState,
+    player_filter: PlayerFilter,
+    source_controller: PlayerId,
+) -> Vec<PlayerId> {
+    state
+        .players
+        .iter()
+        .filter(|p| {
+            !p.is_eliminated
+                && match player_filter {
+                    PlayerFilter::Controller => p.id == source_controller,
+                    PlayerFilter::All => true,
+                    PlayerFilter::Opponent => p.id != source_controller,
+                    PlayerFilter::OpponentLostLife => {
+                        p.id != source_controller && p.life_lost_this_turn > 0
+                    }
+                    PlayerFilter::OpponentGainedLife => {
+                        p.id != source_controller && p.life_gained_this_turn > 0
+                    }
+                    PlayerFilter::HighestSpeed => {
+                        let highest_speed = state
+                            .players
+                            .iter()
+                            .filter(|player| !player.is_eliminated)
+                            .map(|player| player.speed.unwrap_or(0))
+                            .max()
+                            .unwrap_or(0);
+                        p.speed.unwrap_or(0) == highest_speed
+                    }
+                    PlayerFilter::ZoneChangedThisWay => state
+                        .last_zone_changed_ids
+                        .iter()
+                        .any(|id| state.objects.get(id).is_some_and(|obj| obj.owner == p.id)),
+                }
+        })
+        .map(|p| p.id)
+        .collect()
 }
 
 /// CR 120.3: Deal damage to each player matching a filter, with per-player quantity.
@@ -866,6 +932,7 @@ mod tests {
                     controller: None,
                     properties: vec![],
                 }),
+                player_filter: None,
             },
             vec![],
             ObjectId(100),
@@ -1130,6 +1197,7 @@ mod tests {
                     controller: None,
                     properties: vec![],
                 }),
+                player_filter: None,
             },
             vec![],
             ObjectId(100),
@@ -1180,6 +1248,7 @@ mod tests {
                     controller: None,
                     properties: vec![],
                 }),
+                player_filter: None,
             },
             vec![],
             source_id,
@@ -1596,6 +1665,7 @@ mod tests {
                     controller: None,
                     properties: vec![],
                 }),
+                player_filter: None,
             },
             vec![],
             source_id,
@@ -1792,6 +1862,7 @@ mod tests {
                     controller: None,
                     properties: vec![],
                 }),
+                player_filter: None,
             },
             vec![],
             ogre,
@@ -1914,6 +1985,162 @@ mod tests {
         assert!(
             state.pending_continuation.is_none(),
             "continuation must be consumed after drain"
+        );
+    }
+
+    /// CR 120.3 + CR 609.7: Goblin Chainwhirler-style mixed damage — a single
+    /// `DamageAll` with both `target` (objects) and `player_filter` (players)
+    /// populated must deal damage to the full recipient set from ONE source as
+    /// one simultaneous effect. This is what allows replacement/prevention
+    /// shields like Awe Strike ("the next time a source would deal damage …")
+    /// to observe the whole batch as one coherent event.
+    #[test]
+    fn damage_all_mixed_players_and_objects_single_source() {
+        use crate::types::ability::PlayerFilter;
+        use crate::types::ability::TypedFilter;
+
+        let mut state = GameState::new_two_player(42);
+
+        // Source controlled by PlayerId(0); opponents are just PlayerId(1) here.
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chainwhirler".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Opponent's creature and planeswalker — both must take damage.
+        let opp_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opp Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opp_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        let opp_pw = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opp Jace".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&opp_pw).unwrap();
+            obj.card_types.core_types.push(CoreType::Planeswalker);
+            obj.loyalty = Some(5);
+            obj.counters.insert(CounterType::Loyalty, 5);
+        }
+
+        // Controller's own creature MUST NOT take damage — controller=Opponent.
+        let own_creature = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Own Bear".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&own_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        // Mirror the parser output for "deals 1 damage to each opponent and each
+        // creature and planeswalker they control".
+        use crate::types::ability::{ControllerRef, TypeFilter};
+        let ability = ResolvedAbility::new(
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Or {
+                    filters: vec![
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: Some(ControllerRef::Opponent),
+                            properties: vec![],
+                        }),
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Planeswalker],
+                            controller: Some(ControllerRef::Opponent),
+                            properties: vec![],
+                        }),
+                    ],
+                },
+                player_filter: Some(PlayerFilter::Opponent),
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+
+        let life_before = state.players[1].life;
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).expect("mixed DamageAll resolves");
+
+        // CR 120.3a: opponent lost 1 life.
+        assert_eq!(state.players[1].life, life_before - 1);
+        // CR 120.3e: opponent's creature marked 1.
+        assert_eq!(state.objects[&opp_creature].damage_marked, 1);
+        // CR 120.3c: opponent's planeswalker lost 1 loyalty (5 - 1).
+        assert_eq!(state.objects[&opp_pw].loyalty, Some(4));
+        // controller's own creature untouched.
+        assert_eq!(state.objects[&own_creature].damage_marked, 0);
+
+        // CR 609.7: ALL damage events must share one source_id — the single
+        // damage source that replacement shields (Awe Strike et al.) watch.
+        let damage_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                GameEvent::DamageDealt { source_id, .. } => Some(*source_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            damage_events.len(),
+            3,
+            "expected 3 DamageDealt events (opponent player + creature + planeswalker), got {damage_events:?}",
+        );
+        for src in &damage_events {
+            assert_eq!(
+                *src, source_id,
+                "every damage event in the batch must carry the single source id",
+            );
+        }
+
+        // CR 120.3: exactly ONE `EffectResolved { DamageAll }` — the whole batch
+        // is one effect resolution, not two.
+        let effect_resolved_count = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    GameEvent::EffectResolved {
+                        kind: EffectKind::DamageAll,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            effect_resolved_count, 1,
+            "mixed DamageAll must produce exactly one EffectResolved event",
         );
     }
 }

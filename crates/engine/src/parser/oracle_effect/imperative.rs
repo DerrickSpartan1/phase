@@ -2184,7 +2184,11 @@ pub(super) fn parse_cost_resource_ast(
                 target,
                 all: false,
             }),
-            Effect::DamageAll { amount, target } => Some(CostResourceImperativeAst::Damage {
+            Effect::DamageAll {
+                amount,
+                target,
+                player_filter: None,
+            } => Some(CostResourceImperativeAst::Damage {
                 amount,
                 target,
                 all: true,
@@ -2219,7 +2223,11 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
             all,
         } => {
             if all {
-                Effect::DamageAll { amount, target }
+                Effect::DamageAll {
+                    amount,
+                    target,
+                    player_filter: None,
+                }
             } else {
                 Effect::DealDamage {
                     amount,

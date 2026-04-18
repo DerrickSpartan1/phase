@@ -2146,9 +2146,14 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
                 amount: replace_fixed_quantity(amount, quantity.clone()),
                 player_filter,
             },
-            Effect::DamageAll { amount, target } => Effect::DamageAll {
+            Effect::DamageAll {
+                amount,
+                target,
+                player_filter,
+            } => Effect::DamageAll {
                 amount: replace_fixed_quantity(amount, quantity),
                 target,
+                player_filter,
             },
             other => other,
         };
@@ -2862,8 +2867,17 @@ fn try_split_targeted_compound(text: &str, ctx: &ParseContext) -> Option<ParsedE
 /// because `parse_target` consumes them as part of the target filter.
 /// Detect "deals N damage to each [opponent/player] and each [type] they control".
 ///
-/// This compound target pattern deals damage to BOTH players and objects with a single
-/// amount. It produces DamageEachPlayer as the primary effect with a DamageAll sub_ability.
+/// CR 120.3 + CR 609.7: This compound target pattern deals damage to BOTH players
+/// and objects from a single source as one simultaneous damage event. Producing
+/// two chained effects (DamageEachPlayer + DamageAll sub_ability) would split
+/// the event in two, breaking replacement/prevention shields like Awe Strike
+/// ("the next time a source would deal damage ... prevent that damage"), which
+/// must observe the full batch as one event from one source.
+///
+/// Emits a single `Effect::DamageAll` carrying both the object `target` filter
+/// and a `player_filter` populated — the resolver iterates the combined
+/// recipient set under one `DamageContext`.
+///
 /// Cards: Goblin Chainwhirler, Kumano Faces Kakkazan, etc.
 fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectClause> {
     // Extract the damage verb + amount using the same entry logic as try_parse_damage_with_remainder.
@@ -2930,21 +2944,17 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
     }
     set_opponent_controller(&mut object_filter);
 
-    let sub_ability = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::DamageAll {
-            amount: qty.clone(),
-            target: object_filter,
-        },
-    );
-
+    // CR 120.3: Single effect, one damage source, simultaneous batch across both
+    // the player set and the object set. Replacement effects observe this as one
+    // coherent damage event — see `resolve_all` in game/effects/deal_damage.rs.
     Some(ParsedEffectClause {
-        effect: Effect::DamageEachPlayer {
+        effect: Effect::DamageAll {
             amount: qty,
-            player_filter,
+            target: object_filter,
+            player_filter: Some(player_filter),
         },
         duration: None,
-        sub_ability: Some(Box::new(sub_ability)),
+        sub_ability: None,
         distribute: None,
         multi_target: None,
         condition: None,
@@ -6132,6 +6142,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
                         Effect::DamageAll {
                             amount: qty,
                             target: filter,
+                            player_filter: None,
                         },
                         "",
                     ));
@@ -6207,7 +6218,14 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
             ));
         }
         let (target, rem) = parse_target(after_to);
-        return Some((Effect::DamageAll { amount, target }, rem));
+        return Some((
+            Effect::DamageAll {
+                amount,
+                target,
+                player_filter: None,
+            },
+            rem,
+        ));
     }
 
     // CR 120.3: "itself" — the source creature is both damage source and recipient.
@@ -7102,8 +7120,12 @@ mod tests {
 
     #[test]
     fn try_split_damage_compound_player_and_object_target() {
-        // Goblin Chainwhirler: "deals 1 damage to each opponent and each creature
-        // and planeswalker they control" → DamageEachPlayer + DamageAll(Creature|Planeswalker)
+        // CR 120.3 + CR 609.7: Goblin Chainwhirler — "deals 1 damage to each opponent
+        // and each creature and planeswalker they control" must parse to a SINGLE
+        // `DamageAll` carrying both the object filter and a `player_filter`, so the
+        // resolver treats the full recipient set as one simultaneous damage event
+        // from one source. Splitting into two effects would break replacement
+        // effects like Awe Strike that watch damage from a single source.
         let ctx = ParseContext::default();
         let result = try_split_damage_compound(
             "deal 1 damage to each opponent and each creature and planeswalker they control",
@@ -7111,26 +7133,24 @@ mod tests {
         );
         let clause = result.expect("compound player+object damage should parse");
         assert!(
-            matches!(
-                clause.effect,
-                Effect::DamageEachPlayer {
-                    amount: QuantityExpr::Fixed { value: 1 },
-                    player_filter: PlayerFilter::Opponent,
-                }
-            ),
-            "primary should be DamageEachPlayer(Opponent), got: {:?}",
-            clause.effect
+            clause.sub_ability.is_none(),
+            "unified effect must not emit a sub_ability (single simultaneous event)",
         );
-        let sub = clause
-            .sub_ability
-            .expect("should have DamageAll sub_ability");
-        match &*sub.effect {
-            Effect::DamageAll { amount, target } => {
+        match &clause.effect {
+            Effect::DamageAll {
+                amount,
+                target,
+                player_filter,
+            } => {
                 assert!(matches!(amount, QuantityExpr::Fixed { value: 1 }));
+                assert_eq!(
+                    *player_filter,
+                    Some(PlayerFilter::Opponent),
+                    "player_filter must encode 'each opponent'",
+                );
                 match target {
                     TargetFilter::Or { filters } => {
                         assert_eq!(filters.len(), 2);
-                        // Both inner filters should have controller=Opponent
                         for f in filters {
                             match f {
                                 TargetFilter::Typed(tf) => {
@@ -7143,32 +7163,37 @@ mod tests {
                     other => panic!("expected Or filter, got: {other:?}"),
                 }
             }
-            other => panic!("sub_ability should be DamageAll, got: {other:?}"),
+            other => panic!("expected unified DamageAll, got: {other:?}"),
         }
     }
 
     #[test]
     fn try_split_damage_compound_player_and_planeswalker() {
-        // Kumano Faces Kakkazan: "deals 1 damage to each opponent and each planeswalker they control"
+        // CR 120.3: Kumano Faces Kakkazan — "deals 1 damage to each opponent and
+        // each planeswalker they control" — same class, single planeswalker type.
         let ctx = ParseContext::default();
         let result = try_split_damage_compound(
             "deal 1 damage to each opponent and each planeswalker they control",
             &ctx,
         );
         let clause = result.expect("compound player+object damage should parse");
-        assert!(matches!(clause.effect, Effect::DamageEachPlayer { .. }));
-        let sub = clause
-            .sub_ability
-            .expect("should have DamageAll sub_ability");
-        match &*sub.effect {
-            Effect::DamageAll { target, .. } => match target {
-                TargetFilter::Typed(tf) => {
-                    assert!(tf.type_filters.contains(&TypeFilter::Planeswalker));
-                    assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+        assert!(clause.sub_ability.is_none());
+        match &clause.effect {
+            Effect::DamageAll {
+                target,
+                player_filter,
+                ..
+            } => {
+                assert_eq!(*player_filter, Some(PlayerFilter::Opponent));
+                match target {
+                    TargetFilter::Typed(tf) => {
+                        assert!(tf.type_filters.contains(&TypeFilter::Planeswalker));
+                        assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                    }
+                    other => panic!("expected Typed filter, got: {other:?}"),
                 }
-                other => panic!("expected Typed filter, got: {other:?}"),
-            },
-            other => panic!("sub_ability should be DamageAll, got: {other:?}"),
+            }
+            other => panic!("expected unified DamageAll, got: {other:?}"),
         }
     }
 
