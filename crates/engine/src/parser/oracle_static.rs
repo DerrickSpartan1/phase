@@ -1641,8 +1641,77 @@ pub fn parse_static_line_multi(text: &str) -> Vec<StaticDefinition> {
         return defs;
     }
 
+    // CR 702.3b + CR 611.3a + CR 613: Cross-mode conjunctions of the form
+    // "<predicate_1> and can attack as though <pronoun> didn't have defender
+    // [as long as <cond>]" combine a Continuous modification (keyword grant,
+    // +N/+M, assigns-damage-from-toughness) with a `CanAttackWithDefender`
+    // permission. A single `StaticDefinition` cannot carry both static modes,
+    // so decompose: strip the conjunction phrase, re-parse the remainder, then
+    // emit a companion `CanAttackWithDefender` inheriting `affected` + `condition`.
+    // Corpus: Arcades, the Strategist; Colossus of Akros; Spire Serpent.
+    if let Some(defs) = try_split_and_can_attack_despite_defender(&stripped) {
+        return defs;
+    }
+
     // Fall back to the single-return parser.
     parse_static_line(text).into_iter().collect()
+}
+
+/// CR 702.3b + CR 611.3a + CR 613: Decompose `"<predicate_1> and can attack
+/// as though <pronoun> didn't have defender[ as long as <cond>]"` into two
+/// independent `StaticDefinition`s sharing the same `affected` + `condition`.
+///
+/// Strategy: locate the conjunction phrase at a word boundary via
+/// `scan_preceded`, splice it out of the text, and re-parse the remainder
+/// via `parse_static_line_multi`. Recursion is safe — the spliced text no
+/// longer contains the conjunction marker. The first conjunct's `affected`
+/// and `condition` are cloned onto a companion `CanAttackWithDefender`
+/// definition. All emitted definitions share the original full-line
+/// description, matching the convention used by other compound handlers
+/// (e.g., `CantBeEquipped` + `CantBeEnchanted`).
+fn try_split_and_can_attack_despite_defender(text: &str) -> Option<Vec<StaticDefinition>> {
+    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    let lower = text.to_lowercase();
+
+    let (before, matched, _rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
+        alt((
+            tag::<_, _, VE>(" and can attack as though it didn't have defender"),
+            tag::<_, _, VE>(" and can attack as though they didn't have defender"),
+        ))
+        .parse(i)
+    })?;
+
+    // ASCII lowercasing preserves byte lengths, so `before`/`matched` byte
+    // offsets into `lower` also index into the original-case `text`.
+    let before_len = before.len();
+    let matched_len = matched.len();
+    let line_a = format!(
+        "{}{}",
+        &text[..before_len],
+        &text[before_len + matched_len..]
+    );
+
+    let mut defs = parse_static_line_multi(&line_a);
+    if defs.is_empty() {
+        return None;
+    }
+
+    // Restore descriptions to the original full-line text on every conjunct.
+    for def in &mut defs {
+        def.description = Some(text.to_string());
+    }
+
+    let template = &defs[0];
+    let mut companion =
+        StaticDefinition::new(StaticMode::CanAttackWithDefender).description(text.to_string());
+    if let Some(affected) = template.affected.clone() {
+        companion = companion.affected(affected);
+    }
+    if let Some(cond) = template.condition.clone() {
+        companion = companion.condition(cond);
+    }
+    defs.push(companion);
+    Some(defs)
 }
 
 /// CR 105.2c / CR 205.4a: Parse property-based creature descriptors that are not subtypes.
