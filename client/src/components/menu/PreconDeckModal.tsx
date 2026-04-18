@@ -1,8 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
-import { STORAGE_KEY_PREFIX } from "../../constants/storage";
 import { useDecks, type DeckEntry } from "../../hooks/useDecks";
-import type { ParsedDeck } from "../../services/deckParser";
+import { preconExists, savePreconDeck } from "../../services/preconDecks";
 import { menuButtonClass } from "./buttonStyles";
 
 interface PreconDeckModalProps {
@@ -11,33 +10,41 @@ interface PreconDeckModalProps {
   onImported: (name: string) => void;
 }
 
-function deckEntryToParsedDeck(deck: DeckEntry): ParsedDeck {
-  return {
-    main: deck.mainBoard.map((c) => ({ name: c.name, count: c.count })),
-    sideboard: (deck.sideBoard ?? []).map((c) => ({ name: c.name, count: c.count })),
-    commander:
-      deck.commander && deck.commander.length > 0
-        ? deck.commander.map((c) => c.name)
-        : undefined,
-  };
+/** Cap on rendered rows. Prevents 250+ node lists becoming a perf cliff;
+ * users narrow further with the search input. */
+const MAX_RESULTS = 500;
+const ALL_TYPES = "All" as const;
+
+function matchesQuery(deck: DeckEntry, q: string): boolean {
+  if (!q) return true;
+  return (
+    deck.name.toLowerCase().includes(q) ||
+    deck.code.toLowerCase().includes(q) ||
+    deck.type.toLowerCase().includes(q)
+  );
+}
+
+function mainBoardCount(deck: DeckEntry): number {
+  return deck.mainBoard.reduce((n, c) => n + c.count, 0);
 }
 
 export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalProps) {
   const decks = useDecks();
   const [query, setQuery] = useState("");
-  const [typeFilter, setTypeFilter] = useState<string>("All");
+  const [typeFilter, setTypeFilter] = useState<string>(ALL_TYPES);
 
-  const matchesQuery = (d: DeckEntry, q: string): boolean => {
-    if (!q) return true;
-    return (
-      d.name.toLowerCase().includes(q) ||
-      d.code.toLowerCase().includes(q) ||
-      d.type.toLowerCase().includes(q)
-    );
-  };
+  // Esc-to-close, bound only while the modal is open.
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [open, onClose]);
 
-  // Per-type match counts under the current query — drives the dropdown
-  // so empty options don't appear as dead-end choices.
+  // Per-type match counts against the current query. Drives the dropdown so
+  // types with zero matches don't appear as dead-end options.
   const typeCounts = useMemo(() => {
     if (!decks) return new Map<string, number>();
     const q = query.trim().toLowerCase();
@@ -49,36 +56,45 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
     return counts;
   }, [decks, query]);
 
+  const totalMatches = useMemo(
+    () => Array.from(typeCounts.values()).reduce((a, b) => a + b, 0),
+    [typeCounts],
+  );
+
   const filtered = useMemo(() => {
     if (!decks) return [];
     const q = query.trim().toLowerCase();
-    const byTypeAndQuery = Object.entries(decks).filter(([, d]) => {
-      if (typeFilter !== "All" && d.type !== typeFilter) return false;
-      return matchesQuery(d, q);
-    });
-    byTypeAndQuery.sort(([, a], [, b]) =>
-      (b.releaseDate ?? "").localeCompare(a.releaseDate ?? ""),
-    );
-    return byTypeAndQuery.slice(0, 500);
+    return Object.entries(decks)
+      .filter(([, d]) => {
+        if (typeFilter !== ALL_TYPES && d.type !== typeFilter) return false;
+        return matchesQuery(d, q);
+      })
+      .sort(([, a], [, b]) => (b.releaseDate ?? "").localeCompare(a.releaseDate ?? ""))
+      .slice(0, MAX_RESULTS);
   }, [decks, query, typeFilter]);
 
   if (!open) return null;
 
-  const handlePick = (id: string, deck: DeckEntry) => {
+  const handlePick = (deck: DeckEntry) => {
     const suggested = `${deck.name} (${deck.code})`;
     const chosen = prompt("Save preconstructed deck as:", suggested);
     if (!chosen) return;
-    const key = STORAGE_KEY_PREFIX + chosen;
-    if (localStorage.getItem(key) && !confirm(`"${chosen}" already exists. Overwrite?`)) return;
-    localStorage.setItem(key, JSON.stringify(deckEntryToParsedDeck(deck)));
+    if (preconExists(chosen) && !confirm(`"${chosen}" already exists. Overwrite?`)) return;
+    savePreconDeck(chosen, deck);
     onImported(chosen);
     onClose();
-    void id;
   };
+
+  const typeOptions = Array.from(typeCounts.entries())
+    .filter(([, n]) => n > 0)
+    .sort((a, b) => a[0].localeCompare(b[0]));
 
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="precon-modal-title"
       onClick={onClose}
     >
       <div
@@ -87,7 +103,9 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
       >
         <div className="flex items-start justify-between gap-4">
           <div>
-            <h2 className="text-xl font-semibold text-white">Preconstructed Decks</h2>
+            <h2 id="precon-modal-title" className="text-xl font-semibold text-white">
+              Preconstructed Decks
+            </h2>
             <p className="mt-1 text-xs text-slate-400">
               Sourced from MTGJSON. Filtered to decks the engine can play fully
               {decks && (
@@ -120,17 +138,12 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
             onChange={(e) => setTypeFilter(e.target.value)}
             className="rounded-lg border border-white/10 bg-black/30 px-3 py-2 text-sm text-white focus:border-white/30 focus:outline-none"
           >
-            <option value="All">
-              All ({Array.from(typeCounts.values()).reduce((a, b) => a + b, 0)})
-            </option>
-            {Array.from(typeCounts.entries())
-              .filter(([, n]) => n > 0)
-              .sort((a, b) => a[0].localeCompare(b[0]))
-              .map(([t, n]) => (
-                <option key={t} value={t}>
-                  {t} ({n})
-                </option>
-              ))}
+            <option value={ALL_TYPES}>All ({totalMatches})</option>
+            {typeOptions.map(([t, n]) => (
+              <option key={t} value={t}>
+                {t} ({n})
+              </option>
+            ))}
           </select>
         </div>
 
@@ -144,7 +157,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
               {filtered.map(([id, deck]) => (
                 <li key={id}>
                   <button
-                    onClick={() => handlePick(id, deck)}
+                    onClick={() => handlePick(deck)}
                     className="flex w-full items-center justify-between gap-3 px-4 py-2 text-left transition hover:bg-white/5"
                   >
                     <div className="min-w-0 flex-1">
@@ -156,7 +169,7 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
                       </div>
                     </div>
                     <span className="shrink-0 text-[11px] text-slate-600">
-                      {deck.mainBoard.reduce((n, c) => n + c.count, 0)} cards
+                      {mainBoardCount(deck)} cards
                       {deck.commander && deck.commander.length > 0 && " · cmdr"}
                     </span>
                   </button>
@@ -168,12 +181,11 @@ export function PreconDeckModal({ open, onClose, onImported }: PreconDeckModalPr
 
         <div className="flex items-center justify-between text-xs text-slate-500">
           <span>
-            {decks && filtered.length === 500 && "Showing first 500 — refine search to narrow."}
+            {decks && filtered.length === MAX_RESULTS
+              ? `Showing first ${MAX_RESULTS} — refine search to narrow.`
+              : null}
           </span>
-          <button
-            onClick={onClose}
-            className={menuButtonClass({ tone: "neutral", size: "sm" })}
-          >
+          <button onClick={onClose} className={menuButtonClass({ tone: "neutral", size: "sm" })}>
             Close
           </button>
         </div>

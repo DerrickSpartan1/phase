@@ -730,39 +730,20 @@ export function MyDecks({
               )}
             </h3>
             <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
-              <button
+              <AddDeckTile
+                label="Import Deck"
                 onClick={() => setShowImport(true)}
-                className="group relative flex aspect-[4/3] flex-col items-center justify-center gap-2 overflow-hidden rounded-xl ring-1 ring-white/10 transition hover:bg-white/5 hover:ring-white/20"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 20 20"
-                  fill="currentColor"
-                  className="h-8 w-8 text-gray-500 transition-colors group-hover:text-gray-300"
-                >
+                icon={
                   <path d="M10.75 4.75a.75.75 0 0 0-1.5 0v4.5h-4.5a.75.75 0 0 0 0 1.5h4.5v4.5a.75.75 0 0 0 1.5 0v-4.5h4.5a.75.75 0 0 0 0-1.5h-4.5v-4.5Z" />
-                </svg>
-                <span className="text-xs font-medium text-gray-500 transition-colors group-hover:text-gray-300">
-                  Import Deck
-                </span>
-              </button>
-
-              <button
+                }
+              />
+              <AddDeckTile
+                label="Preconstructed"
                 onClick={() => setShowPrecon(true)}
-                className="group relative flex aspect-[4/3] flex-col items-center justify-center gap-2 overflow-hidden rounded-xl ring-1 ring-white/10 transition hover:bg-white/5 hover:ring-white/20"
-              >
-                <svg
-                  xmlns="http://www.w3.org/2000/svg"
-                  viewBox="0 0 20 20"
-                  fill="currentColor"
-                  className="h-8 w-8 text-gray-500 transition-colors group-hover:text-gray-300"
-                >
+                icon={
                   <path d="M3 3.5A1.5 1.5 0 0 1 4.5 2h7A1.5 1.5 0 0 1 13 3.5v13a1.5 1.5 0 0 1-1.5 1.5h-7A1.5 1.5 0 0 1 3 16.5v-13Zm11.25.5a.75.75 0 0 1 .75.75v11.5a.75.75 0 0 1-1.5 0V4.75a.75.75 0 0 1 .75-.75Zm2.5 1.5a.75.75 0 0 1 .75.75v8.5a.75.75 0 0 1-1.5 0v-8.5a.75.75 0 0 1 .75-.75Z" />
-                </svg>
-                <span className="text-xs font-medium text-gray-500 transition-colors group-hover:text-gray-300">
-                  Preconstructed
-                </span>
-              </button>
+                }
+              />
 
               {userDecks.map((deckName) => (
                 <DeckTile
@@ -848,11 +829,7 @@ export function MyDecks({
       <PreconDeckModal
         open={showPrecon}
         onClose={() => setShowPrecon(false)}
-        onImported={(name) => {
-          const names = listSavedDeckNames();
-          setDeckNames(names);
-          if (mode === "select") onSelectDeck?.(name);
-        }}
+        onImported={(name) => handleImported(name, listSavedDeckNames())}
       />
       <FeedManagerModal
         open={showFeedManager}
@@ -933,5 +910,35 @@ function SubscriptionsView({
         );
       })}
     </div>
+  );
+}
+
+interface AddDeckTileProps {
+  label: string;
+  icon: ReactNode;
+  onClick: () => void;
+}
+
+/** Shared call-to-action tile used for "Import Deck" and "Preconstructed" in
+ * the deck grid. Keeps the two entry points visually identical so the only
+ * thing that differs is the icon + label. */
+function AddDeckTile({ label, icon, onClick }: AddDeckTileProps) {
+  return (
+    <button
+      onClick={onClick}
+      className="group relative flex aspect-[4/3] flex-col items-center justify-center gap-2 overflow-hidden rounded-xl ring-1 ring-white/10 transition hover:bg-white/5 hover:ring-white/20"
+    >
+      <svg
+        xmlns="http://www.w3.org/2000/svg"
+        viewBox="0 0 20 20"
+        fill="currentColor"
+        className="h-8 w-8 text-gray-500 transition-colors group-hover:text-gray-300"
+      >
+        {icon}
+      </svg>
+      <span className="text-xs font-medium text-gray-500 transition-colors group-hover:text-gray-300">
+        {label}
+      </span>
+    </button>
   );
 }
