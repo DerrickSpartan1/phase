@@ -225,7 +225,7 @@ fn any_doubler_on_battlefield(state: &GameState, player: PlayerId) -> bool {
         .filter(|obj| obj.controller == player && obj.zone == Zone::Battlefield)
         .any(|obj| {
             obj.replacement_definitions
-                .iter()
+                .iter_unchecked()
                 .any(replacement_modifies_p1p1_counters_parts)
         })
 }

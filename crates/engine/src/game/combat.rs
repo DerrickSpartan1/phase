@@ -750,7 +750,12 @@ pub fn compute_combat_tax(
             continue;
         }
 
-        for def in &source_obj.static_definitions {
+        // CR 118.12a: UnlessPay conditions are data-carrying — the combat tax
+        // code specifically inspects them, so iterating with `iter_all` (no
+        // condition gate) is intentional here. Phased-out / command-zone
+        // gates are enforced by the outer `if obj.is_phased_out()` / command-
+        // zone check above this loop.
+        for def in source_obj.static_definitions.iter_all() {
             let mode_matches = match context {
                 CombatTaxContext::Attacking => matches!(
                     def.mode,

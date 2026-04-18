@@ -1143,7 +1143,7 @@ mod tests {
             "Contamination".to_string(),
             Zone::Battlefield,
         );
-        contamination.replacement_definitions = vec![repl];
+        contamination.replacement_definitions = vec![repl].into();
         state.objects.insert(contamination_id, contamination);
         state.battlefield.push(contamination_id);
 

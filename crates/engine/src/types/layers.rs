@@ -180,9 +180,9 @@ mod tests {
                     loyalty: None,
                     keywords: vec![],
                     abilities: vec![],
-                    trigger_definitions: vec![],
-                    replacement_definitions: vec![],
-                    static_definitions: vec![],
+                    trigger_definitions: Default::default(),
+                    replacement_definitions: Default::default(),
+                    static_definitions: Default::default(),
                 })
             }
             .layer(),

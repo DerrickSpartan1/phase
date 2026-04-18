@@ -556,7 +556,7 @@ mod tests {
             .objects
             .get_mut(&anthem_id)
             .unwrap()
-            .static_definitions = vec![anthem_static.clone()];
+            .static_definitions = vec![anthem_static.clone()].into();
         state
             .objects
             .get_mut(&anthem_id)

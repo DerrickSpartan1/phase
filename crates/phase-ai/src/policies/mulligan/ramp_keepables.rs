@@ -68,7 +68,7 @@ impl MulliganPolicy for RampKeepablesMulligan {
             if is_ramp_piece_parts(
                 &obj.card_types.core_types,
                 &obj.abilities,
-                &obj.static_definitions,
+                obj.static_definitions.as_slice(),
             ) {
                 ramp_count += 1;
             }

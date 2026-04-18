@@ -71,7 +71,7 @@ impl TacticalPolicy for SpellslingerCastingPolicy {
         let mana_cost = &obj.mana_cost;
         let abilities = &obj.abilities;
         let keywords = &obj.keywords;
-        let triggers = &obj.trigger_definitions;
+        let triggers = obj.trigger_definitions.as_slice();
         let features = &ctx
             .context
             .session

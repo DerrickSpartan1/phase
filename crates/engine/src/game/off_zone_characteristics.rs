@@ -262,7 +262,8 @@ mod tests {
             .unwrap()
             .base_static_definitions
             .clone();
-        state.objects.get_mut(&card_id).unwrap().static_definitions = base_static_definitions;
+        state.objects.get_mut(&card_id).unwrap().static_definitions =
+            base_static_definitions.into();
 
         assert_eq!(
             effective_off_zone_keyword(&state, card_id, KeywordKind::Flashback),

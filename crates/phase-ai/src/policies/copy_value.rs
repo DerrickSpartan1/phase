@@ -193,7 +193,7 @@ fn copy_effect_for_object(
 ) -> Option<&AbilityDefinition> {
     object
         .replacement_definitions
-        .iter()
+        .iter_unchecked()
         .filter_map(|replacement| replacement.execute.as_deref())
         .find(|effect_def| copy_target_filter(effect_def).is_some())
 }
@@ -229,7 +229,7 @@ fn legal_copy_targets(
 }
 
 fn target_has_etb_value(object: &engine::game::game_object::GameObject) -> bool {
-    object.trigger_definitions.iter().any(|trigger| {
+    object.trigger_definitions.iter_unchecked().any(|trigger| {
         trigger.mode == TriggerMode::ChangesZone && trigger.destination == Some(Zone::Battlefield)
     })
 }

@@ -2188,7 +2188,7 @@ mod tests {
     ) -> GameState {
         let mut state = GameState::new_two_player(42);
         let mut obj = GameObject::new(obj_id, CardId(1), PlayerId(0), "Test".to_string(), zone);
-        obj.replacement_definitions = replacements;
+        obj.replacement_definitions = replacements.into();
         state.objects.insert(obj_id, obj);
         if zone == Zone::Battlefield {
             state.battlefield.push(obj_id);
@@ -2264,7 +2264,7 @@ mod tests {
             "Obj1".to_string(),
             Zone::Battlefield,
         );
-        obj1.replacement_definitions = vec![repl.clone()];
+        obj1.replacement_definitions = vec![repl.clone()].into();
 
         let mut obj2 = GameObject::new(
             ObjectId(20),
@@ -2273,7 +2273,7 @@ mod tests {
             "Obj2".to_string(),
             Zone::Battlefield,
         );
-        obj2.replacement_definitions = vec![repl];
+        obj2.replacement_definitions = vec![repl].into();
 
         state.objects.insert(ObjectId(10), obj1);
         state.objects.insert(ObjectId(20), obj2);
@@ -2946,7 +2946,7 @@ mod tests {
             "Test".to_string(),
             Zone::Battlefield,
         );
-        obj.replacement_definitions = repls;
+        obj.replacement_definitions = repls.into();
         state.objects.insert(obj_id, obj);
         state.battlefield.push(obj_id);
         state
@@ -3363,12 +3363,12 @@ mod tests {
         let obj = state.objects.get(&bear_id).unwrap();
         let consumed_count = obj
             .replacement_definitions
-            .iter()
+            .iter_all()
             .filter(|r| r.is_consumed)
             .count();
         let active_count = obj
             .replacement_definitions
-            .iter()
+            .iter_all()
             .filter(|r| r.shield_kind.is_shield() && !r.is_consumed)
             .count();
         assert_eq!(consumed_count, 1, "One shield should be consumed");
@@ -3387,7 +3387,7 @@ mod tests {
         let obj = state.objects.get(&bear_id).unwrap();
         let all_consumed = obj
             .replacement_definitions
-            .iter()
+            .iter_all()
             .filter(|r| r.shield_kind.is_shield())
             .all(|r| r.is_consumed);
         assert!(all_consumed, "Both shields should be consumed now");

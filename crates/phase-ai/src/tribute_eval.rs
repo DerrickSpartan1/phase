@@ -85,7 +85,7 @@ fn estimate_decline_trigger_harm(state: &GameState, source_id: ObjectId) -> f64 
     };
 
     let mut harm = 0.0;
-    for trigger in &source.trigger_definitions {
+    for trigger in source.trigger_definitions.iter_unchecked() {
         let gated_on_tribute = matches!(trigger.condition, Some(TriggerCondition::TributeNotPaid));
         if !gated_on_tribute {
             continue;

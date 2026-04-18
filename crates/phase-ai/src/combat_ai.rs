@@ -987,7 +987,7 @@ fn can_attack(state: &GameState, obj_id: ObjectId) -> bool {
 /// can still be blocked by matching creatures and should go through normal evaluation.
 fn has_cant_be_blocked(obj: &engine::game::game_object::GameObject) -> bool {
     obj.static_definitions
-        .iter()
+        .iter_unchecked()
         .any(|sd| sd.mode == StaticMode::CantBeBlocked)
 }
 
@@ -1082,7 +1082,7 @@ fn evaluate_block_outcome(
 /// Returns true if blocking with this creature causes its controller to take the same
 /// damage the creature receives.
 fn has_damage_reflection_to_controller(object: &engine::game::game_object::GameObject) -> bool {
-    object.trigger_definitions.iter().any(|trigger| {
+    object.trigger_definitions.iter_unchecked().any(|trigger| {
         if trigger.mode != TriggerMode::DamageReceived {
             return false;
         }

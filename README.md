@@ -7,8 +7,8 @@
 </p>
 
 <p align="center">
-  <a href="https://phase-rs.dev"><img alt="Play Online" src="https://img.shields.io/badge/▶_Play_Online-Alpha-6366f1?style=for-the-badge"></a>
   <a href="https://preview.phase-rs.dev"><img alt="Play Preview" src="https://img.shields.io/badge/⚡_Play_Preview-Latest-f59e0b?style=for-the-badge"></a>
+  <a href="https://phase-rs.dev"><img alt="Play Online" src="https://img.shields.io/badge/▶_Play_Online-Alpha-6366f1?style=for-the-badge"></a>
   <a href="https://github.com/phase-rs/phase/releases/latest"><img alt="Download" src="https://img.shields.io/badge/⬇_Download-Desktop-10b981?style=for-the-badge"></a>
 </p>
 
@@ -31,55 +31,6 @@
   <img alt="Commander" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fpub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev%2Fbadges%2Fformat-commander.json">
 </p>
 <!-- coverage-badges:end -->
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 ---
 

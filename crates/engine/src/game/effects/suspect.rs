@@ -150,7 +150,7 @@ mod tests {
         assert!(obj.keywords.iter().any(|k| matches!(k, Keyword::Menace)));
         assert!(obj
             .static_definitions
-            .iter()
+            .iter_all()
             .any(|s| s.mode == StaticMode::CantBlock));
     }
 
@@ -191,7 +191,7 @@ mod tests {
         assert!(!obj.keywords.iter().any(|k| matches!(k, Keyword::Menace)));
         assert!(!obj
             .static_definitions
-            .iter()
+            .iter_all()
             .any(|s| s.mode == StaticMode::CantBlock));
     }
 

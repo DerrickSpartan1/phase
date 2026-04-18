@@ -342,9 +342,9 @@ pub fn evaluate_layers(state: &mut GameState) {
             obj.mana_cost = obj.base_mana_cost.clone();
             obj.keywords = obj.base_keywords.clone();
             obj.abilities = obj.base_abilities.clone();
-            obj.trigger_definitions = obj.base_trigger_definitions.clone();
-            obj.replacement_definitions = obj.base_replacement_definitions.clone();
-            obj.static_definitions = obj.base_static_definitions.clone();
+            obj.trigger_definitions = obj.base_trigger_definitions.clone().into();
+            obj.replacement_definitions = obj.base_replacement_definitions.clone().into();
+            obj.static_definitions = obj.base_static_definitions.clone().into();
             obj.color = obj.base_color.clone();
             // CR 613.1b: Reset controller to owner; Layer 2 re-applies control-changing effects.
             obj.controller = obj.owner;
@@ -519,7 +519,7 @@ pub(crate) fn active_continuous_effects_from_static_source(
         source.id,
         source.controller,
         source.timestamp,
-        &source.static_definitions,
+        source.static_definitions.as_slice(),
     )
 }
 
@@ -1003,7 +1003,7 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
             }
             ContinuousModification::AddStaticMode { mode } => {
                 let def = StaticDefinition::new(mode.clone()).affected(TargetFilter::SelfRef);
-                if !obj.static_definitions.iter().any(|sd| sd.mode == *mode) {
+                if !obj.static_definitions.iter_all().any(|sd| sd.mode == *mode) {
                     obj.static_definitions.push(def);
                 }
             }
@@ -2509,7 +2509,8 @@ mod tests {
             .modifications(vec![
                 ContinuousModification::AddPower { value: 1 },
                 ContinuousModification::AddToughness { value: 1 },
-            ])];
+            ])]
+        .into();
 
         // Mark layers dirty and evaluate
         state.layers_dirty = true;

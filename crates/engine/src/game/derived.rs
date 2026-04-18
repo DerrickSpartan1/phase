@@ -71,7 +71,7 @@ pub fn derive_display_state(state: &mut GameState) {
             .filter_map(|(&id, obj)| {
                 let has_devotion_static =
                     obj.static_definitions
-                        .iter()
+                        .iter_all()
                         .any(|def| match &def.condition {
                             Some(StaticCondition::DevotionGE { .. }) => true,
                             Some(StaticCondition::Not { condition })

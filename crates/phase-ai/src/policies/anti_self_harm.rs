@@ -232,7 +232,7 @@ fn score_optional_effect_accept(ctx: &PolicyContext<'_>) -> f64 {
 fn optional_effect_life_cost(ctx: &PolicyContext<'_>, source_id: ObjectId) -> Option<i32> {
     let obj = ctx.state.objects.get(&source_id)?;
     obj.replacement_definitions
-        .iter()
+        .iter_unchecked()
         .filter(|r| matches!(r.mode, ReplacementMode::Optional { .. }))
         .find_map(|r| {
             let mut node = r.execute.as_deref();

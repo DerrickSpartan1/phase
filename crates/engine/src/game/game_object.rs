@@ -10,6 +10,7 @@ use crate::types::ability::{
 use crate::types::card::{LayoutKind, PrintedCardRef};
 use crate::types::card_type::{CardType, CoreType};
 use crate::types::counter::CounterType;
+use crate::types::definitions::Definitions;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost};
@@ -67,9 +68,9 @@ pub struct BackFaceData {
     pub mana_cost: ManaCost,
     pub keywords: Vec<Keyword>,
     pub abilities: Vec<AbilityDefinition>,
-    pub trigger_definitions: Vec<TriggerDefinition>,
-    pub replacement_definitions: Vec<ReplacementDefinition>,
-    pub static_definitions: Vec<StaticDefinition>,
+    pub trigger_definitions: Definitions<TriggerDefinition>,
+    pub replacement_definitions: Definitions<ReplacementDefinition>,
+    pub static_definitions: Definitions<StaticDefinition>,
     pub color: Vec<ManaColor>,
     pub printed_ref: Option<PrintedCardRef>,
     pub modal: Option<ModalChoice>,
@@ -128,9 +129,9 @@ pub struct GameObject {
     pub mana_cost: ManaCost,
     pub keywords: Vec<Keyword>,
     pub abilities: Vec<AbilityDefinition>,
-    pub trigger_definitions: Vec<TriggerDefinition>,
-    pub replacement_definitions: Vec<ReplacementDefinition>,
-    pub static_definitions: Vec<StaticDefinition>,
+    pub trigger_definitions: Definitions<TriggerDefinition>,
+    pub replacement_definitions: Definitions<ReplacementDefinition>,
+    pub static_definitions: Definitions<StaticDefinition>,
     pub color: Vec<ManaColor>,
     pub printed_ref: Option<PrintedCardRef>,
 
@@ -399,14 +400,15 @@ impl GameObject {
             self.base_abilities = self.abilities.clone();
         }
         if self.base_trigger_definitions.is_empty() && !self.trigger_definitions.is_empty() {
-            self.base_trigger_definitions = self.trigger_definitions.clone();
+            self.base_trigger_definitions = self.trigger_definitions.iter_all().cloned().collect();
         }
         if self.base_replacement_definitions.is_empty() && !self.replacement_definitions.is_empty()
         {
-            self.base_replacement_definitions = self.replacement_definitions.clone();
+            self.base_replacement_definitions =
+                self.replacement_definitions.iter_all().cloned().collect();
         }
         if self.base_static_definitions.is_empty() && !self.static_definitions.is_empty() {
-            self.base_static_definitions = self.static_definitions.clone();
+            self.base_static_definitions = self.static_definitions.iter_all().cloned().collect();
         }
         if self.base_color.is_empty() && !self.color.is_empty() {
             self.base_color = self.color.clone();
@@ -440,9 +442,9 @@ impl GameObject {
             mana_cost: ManaCost::default(),
             keywords: Vec::new(),
             abilities: Vec::new(),
-            trigger_definitions: Vec::new(),
-            replacement_definitions: Vec::new(),
-            static_definitions: Vec::new(),
+            trigger_definitions: Definitions::default(),
+            replacement_definitions: Definitions::default(),
+            static_definitions: Definitions::default(),
             color: Vec::new(),
             printed_ref: None,
             back_face: None,
@@ -455,9 +457,9 @@ impl GameObject {
             base_mana_cost: ManaCost::default(),
             base_keywords: Vec::new(),
             base_abilities: Vec::new(),
-            base_trigger_definitions: Vec::new(),
-            base_replacement_definitions: Vec::new(),
-            base_static_definitions: Vec::new(),
+            base_trigger_definitions: Default::default(),
+            base_replacement_definitions: Default::default(),
+            base_static_definitions: Default::default(),
             base_color: Vec::new(),
             base_characteristics_initialized: false,
             timestamp: 0,
@@ -624,8 +626,10 @@ impl GameObject {
         if !self.card_types.subtypes.iter().any(|s| s == "Saga") {
             return None;
         }
+        // Structural scan of this Saga's own triggers — intrinsic to the
+        // card, not subject to functioning gates. `iter_all` is pub(crate).
         self.trigger_definitions
-            .iter()
+            .iter_all()
             .filter_map(|t| t.counter_filter.as_ref().and_then(|f| f.threshold))
             .max()
     }
@@ -797,7 +801,8 @@ mod tests {
                     threshold: Some(3),
                 },
             ),
-        ];
+        ]
+        .into();
         assert_eq!(obj.final_chapter_number(), Some(3));
     }
 

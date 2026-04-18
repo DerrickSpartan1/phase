@@ -96,7 +96,7 @@ impl TacticalPolicy for TribalLordPriorityPolicy {
         if on_tribe {
             // CR 613.4c: lords grant P/T (or ability) modifications to other tribe members
             // in layer 7c. Detect via the object's runtime static_abilities.
-            if statics_are_lord_for(&obj.static_definitions, dominant_tribe) {
+            if statics_are_lord_for(obj.static_definitions.as_slice(), dominant_tribe) {
                 return PolicyVerdict::Score {
                     delta: DELTA_LORD,
                     reason: PolicyReason::new("tribal_lord_prioritized")

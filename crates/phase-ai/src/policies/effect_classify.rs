@@ -283,7 +283,7 @@ fn quantity_weight(quantity: &QuantityExpr, factor: f64) -> f64 {
 /// both static modes (CantAttack, CantBeBlocked, etc.) and continuous modifications.
 pub(crate) fn aura_polarity(source: &GameObject) -> EffectPolarity {
     // First check static modes — these carry clear polarity independent of modifications.
-    for sd in &source.static_definitions {
+    for sd in source.static_definitions.iter_unchecked() {
         match static_mode_polarity(&sd.mode) {
             EffectPolarity::Contextual => continue,
             polarity => return polarity,
@@ -291,7 +291,7 @@ pub(crate) fn aura_polarity(source: &GameObject) -> EffectPolarity {
     }
 
     // Then check continuous modifications (AddPower, AddKeyword, etc.).
-    for sd in &source.static_definitions {
+    for sd in source.static_definitions.iter_unchecked() {
         for m in &sd.modifications {
             match modification_polarity(m) {
                 EffectPolarity::Contextual => continue,

@@ -54,9 +54,9 @@ pub fn apply_card_face_to_object(obj: &mut GameObject, card_face: &CardFace) {
     obj.mana_cost = card_face.mana_cost.clone();
     obj.keywords = keywords.clone();
     obj.abilities = card_face.abilities.clone();
-    obj.trigger_definitions = card_face.triggers.clone();
-    obj.replacement_definitions = card_face.replacements.clone();
-    obj.static_definitions = card_face.static_abilities.clone();
+    obj.trigger_definitions = card_face.triggers.clone().into();
+    obj.replacement_definitions = card_face.replacements.clone().into();
+    obj.static_definitions = card_face.static_abilities.clone().into();
     obj.color = color.clone();
     obj.base_power = power;
     obj.base_toughness = toughness;
@@ -122,9 +122,9 @@ pub fn apply_card_face_to_back_face(back_face: &mut BackFaceData, card_face: &Ca
     back_face.mana_cost = card_face.mana_cost.clone();
     back_face.keywords = card_face.keywords.clone();
     back_face.abilities = card_face.abilities.clone();
-    back_face.trigger_definitions = card_face.triggers.clone();
-    back_face.replacement_definitions = card_face.replacements.clone();
-    back_face.static_definitions = card_face.static_abilities.clone();
+    back_face.trigger_definitions = card_face.triggers.clone().into();
+    back_face.replacement_definitions = card_face.replacements.clone().into();
+    back_face.static_definitions = card_face.static_abilities.clone().into();
     back_face.color = color;
     back_face.printed_ref = printed_ref_from_face(card_face);
     back_face.modal = card_face.modal.clone();
@@ -157,9 +157,13 @@ pub fn apply_back_face_to_object(obj: &mut GameObject, back_face: BackFaceData) 
     obj.base_mana_cost = back_face.mana_cost.clone();
     obj.base_keywords = back_face.keywords;
     obj.base_abilities = back_face.abilities;
-    obj.base_trigger_definitions = back_face.trigger_definitions;
-    obj.base_replacement_definitions = back_face.replacement_definitions;
-    obj.base_static_definitions = back_face.static_definitions;
+    obj.base_trigger_definitions = back_face.trigger_definitions.iter_all().cloned().collect();
+    obj.base_replacement_definitions = back_face
+        .replacement_definitions
+        .iter_all()
+        .cloned()
+        .collect();
+    obj.base_static_definitions = back_face.static_definitions.iter_all().cloned().collect();
     obj.base_color = back_face.color;
     obj.base_characteristics_initialized = true;
     obj.printed_ref = back_face.printed_ref;
@@ -223,9 +227,9 @@ pub fn apply_copiable_values(obj: &mut GameObject, values: &CopiableValues) {
     obj.loyalty = values.loyalty;
     obj.keywords = values.keywords.clone();
     obj.abilities = values.abilities.clone();
-    obj.trigger_definitions = values.trigger_definitions.clone();
-    obj.replacement_definitions = values.replacement_definitions.clone();
-    obj.static_definitions = values.static_definitions.clone();
+    obj.trigger_definitions = values.trigger_definitions.clone().into();
+    obj.replacement_definitions = values.replacement_definitions.clone().into();
+    obj.static_definitions = values.static_definitions.clone().into();
 }
 
 pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
@@ -241,7 +245,7 @@ pub fn snapshot_object_face(obj: &GameObject) -> BackFaceData {
         abilities: obj.abilities.clone(),
         trigger_definitions: obj.trigger_definitions.clone(),
         replacement_definitions: obj.replacement_definitions.clone(),
-        static_definitions: obj.base_static_definitions.clone(),
+        static_definitions: obj.base_static_definitions.clone().into(),
         color: obj.color.clone(),
         printed_ref: obj.printed_ref.clone(),
         modal: obj.modal.clone(),
@@ -354,9 +358,9 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
                         mana_cost: Default::default(),
                         keywords: Vec::new(),
                         abilities: Vec::new(),
-                        trigger_definitions: Vec::new(),
-                        replacement_definitions: Vec::new(),
-                        static_definitions: Vec::new(),
+                        trigger_definitions: crate::types::definitions::Definitions::default(),
+                        replacement_definitions: crate::types::definitions::Definitions::default(),
+                        static_definitions: crate::types::definitions::Definitions::default(),
                         color: Vec::new(),
                         printed_ref: None,
                         modal: None,

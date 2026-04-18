@@ -66,7 +66,8 @@ impl MulliganPolicy for TribalDensityMulligan {
                     .any(|s| canonicalize_subtype_name(s) == dominant_tribe);
                 // Lord/payoff check: has a lord-class static ability for the dominant tribe.
                 // CR 613.4c: lords benefit the tribe at layer 7c.
-                let is_lord_like = statics_are_lord_for(&obj.static_definitions, dominant_tribe);
+                let is_lord_like =
+                    statics_are_lord_for(obj.static_definitions.as_slice(), dominant_tribe);
                 is_member || is_lord_like
             })
             .count() as i64;

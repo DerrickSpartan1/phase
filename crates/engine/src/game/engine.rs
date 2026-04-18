@@ -7838,7 +7838,7 @@ mod phase_trigger_regression_tests {
                         },
                     )),
             );
-            obj.base_trigger_definitions = obj.trigger_definitions.clone();
+            obj.base_trigger_definitions = obj.trigger_definitions.iter_all().cloned().collect();
         }
 
         // Leyline of Hope analog: "If you would gain life, gain that much + 1 instead"
@@ -7863,7 +7863,8 @@ mod phase_trigger_regression_tests {
                     ),
                 ),
             );
-            obj.base_replacement_definitions = obj.replacement_definitions.clone();
+            obj.base_replacement_definitions =
+                obj.replacement_definitions.iter_all().cloned().collect();
         }
 
         // Declare bat as attacker
@@ -10405,9 +10406,9 @@ mod mdfc_land_tests {
             mana_cost: ManaCost::default(),
             keywords: Vec::new(),
             abilities: Vec::new(),
-            trigger_definitions: Vec::new(),
-            replacement_definitions: Vec::new(),
-            static_definitions: Vec::new(),
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
             color: Vec::new(),
             printed_ref: None,
             modal: None,

@@ -89,11 +89,11 @@ pub fn resolve(
     token.base_abilities = values.abilities.clone();
     token.abilities = values.abilities.clone();
     token.base_trigger_definitions = values.trigger_definitions.clone();
-    token.trigger_definitions = values.trigger_definitions.clone();
+    token.trigger_definitions = values.trigger_definitions.clone().into();
     token.base_replacement_definitions = values.replacement_definitions.clone();
-    token.replacement_definitions = values.replacement_definitions.clone();
+    token.replacement_definitions = values.replacement_definitions.clone().into();
     token.base_static_definitions = values.static_definitions.clone();
-    token.static_definitions = values.static_definitions.clone();
+    token.static_definitions = values.static_definitions.clone().into();
     token.base_characteristics_initialized = true;
     token.entered_battlefield_turn = Some(state.turn_number);
 

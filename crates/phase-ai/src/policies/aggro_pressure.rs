@@ -131,7 +131,7 @@ fn score_cast_spell(
 
     let core_types = &obj.card_types.core_types;
     let keywords = &obj.keywords;
-    let static_defs = &obj.static_definitions;
+    let static_defs = obj.static_definitions.as_slice();
     let abilities = &obj.abilities;
     let mana_cost = &obj.mana_cost;
 

@@ -181,12 +181,12 @@ pub fn cast_facts_for_object(object: &GameObject) -> CastFacts<'_> {
         .collect();
     let immediate_etb_triggers: Vec<_> = object
         .trigger_definitions
-        .iter()
+        .iter_unchecked()
         .filter(|trigger| qualifies_immediate_etb(object, trigger))
         .collect();
     let immediate_replacements: Vec<_> = object
         .replacement_definitions
-        .iter()
+        .iter_unchecked()
         .filter(|replacement| qualifies_immediate_replacement(replacement))
         .collect();
 

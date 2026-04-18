@@ -1977,7 +1977,7 @@ mod tests {
         if let Some(cond) = condition {
             def = def.condition(cond);
         }
-        obj.replacement_definitions = vec![def];
+        obj.replacement_definitions = vec![def].into();
         state.objects.insert(obj_id, obj);
         state.battlefield.push(obj_id);
     }
@@ -2089,7 +2089,8 @@ mod tests {
         );
         obj.replacement_definitions = vec![ReplacementDefinition::new(
             crate::types::replacements::ReplacementEvent::BeginPhase,
-        )];
+        )]
+        .into();
         state.objects.insert(ObjectId(200), obj);
         state.battlefield.push(ObjectId(200));
 

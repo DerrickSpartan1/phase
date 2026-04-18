@@ -28,7 +28,7 @@ pub fn resolve(
     let obj = state.objects.get_mut(&emblem_id).unwrap();
     // CR 114.5: An emblem is neither a card nor a permanent. Emblem isn't a card type.
     obj.is_emblem = true;
-    obj.static_definitions = statics.clone();
+    obj.static_definitions = statics.clone().into();
     obj.base_static_definitions = statics.clone();
 
     state.layers_dirty = true;

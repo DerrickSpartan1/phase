@@ -96,7 +96,7 @@ pub fn resolve(
                 .get(obj_id)
                 .map(|obj| {
                     obj.static_definitions
-                        .iter()
+                        .iter_all()
                         .any(|sd| sd.mode == StaticMode::CantBeCountered)
                 })
                 .unwrap_or(false);

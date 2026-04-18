@@ -66,8 +66,11 @@ impl MulliganPolicy for AggroKeepablesMulligan {
             }
 
             // Evasion creature or burn spell — pressure and reach. CR 702.9+ / CR 120.3.
-            if is_evasion_creature_parts(core_types, &obj.keywords, &obj.static_definitions)
-                || is_burn_spell_parts(core_types, &obj.abilities)
+            if is_evasion_creature_parts(
+                core_types,
+                &obj.keywords,
+                obj.static_definitions.as_slice(),
+            ) || is_burn_spell_parts(core_types, &obj.abilities)
             {
                 evasion_or_burn += 1;
             }

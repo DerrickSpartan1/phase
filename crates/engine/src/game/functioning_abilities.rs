@@ -60,7 +60,7 @@ fn object_functions(obj: &GameObject) -> bool {
 /// the CR 702.26b / CR 114.4 gate and the per-static CR 604.1 / CR 613.1
 /// `condition` gate applied.
 ///
-/// This is the authoritative replacement for `obj.static_definitions.iter()`
+/// This is the authoritative replacement for `obj.static_definitions.iter_all()`
 /// at every read site in the engine.
 pub fn active_static_definitions<'a>(
     state: &'a GameState,
@@ -74,7 +74,7 @@ pub fn active_static_definitions<'a>(
     // CR 604.1 / CR 613.1: a static's `condition` must hold for the effect
     // to apply continuously — re-evaluated every time the layers pipeline
     // (or any reader of statics) runs.
-    Box::new(obj.static_definitions.iter().filter(move |def| {
+    Box::new(obj.static_definitions.iter_all().filter(move |def| {
         def.condition
             .as_ref()
             .is_none_or(|cond| evaluate_condition(state, cond, controller, source_id))
@@ -123,7 +123,7 @@ pub fn active_trigger_definitions<'a>(
     if !object_functions(obj) {
         return Box::new(std::iter::empty());
     }
-    Box::new(obj.trigger_definitions.iter().enumerate())
+    Box::new(obj.trigger_definitions.iter_all().enumerate())
 }
 
 /// Whole-battlefield iteration of `(index, source_obj, trigger_def)`
@@ -161,7 +161,7 @@ pub fn active_replacements(
         // replacements are not battlefield-scoped.
         let functioning = object_functions(obj);
         obj.replacement_definitions
-            .iter()
+            .iter_all()
             .enumerate()
             .filter(move |_| functioning)
             .map(move |(idx, def)| (idx, obj, def))
@@ -207,7 +207,7 @@ mod tests {
     fn phased_out_object_returns_no_active_statics() {
         let state = new_state();
         let mut obj = make_obj(1, Zone::Battlefield);
-        obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)];
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)].into();
         obj.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
             cause: crate::game::game_object::PhaseOutCause::Directly,
         };
@@ -218,7 +218,7 @@ mod tests {
     fn phased_out_object_returns_no_active_triggers() {
         let state = new_state();
         let mut obj = make_obj(1, Zone::Battlefield);
-        obj.trigger_definitions = vec![TriggerDefinition::new(TriggerMode::ChangesZone)];
+        obj.trigger_definitions = vec![TriggerDefinition::new(TriggerMode::ChangesZone)].into();
         obj.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
             cause: crate::game::game_object::PhaseOutCause::Directly,
         };
@@ -230,7 +230,7 @@ mod tests {
         let mut state = new_state();
         let mut obj = make_obj(1, Zone::Battlefield);
         obj.replacement_definitions =
-            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)];
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)].into();
         obj.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
             cause: crate::game::game_object::PhaseOutCause::Directly,
         };
@@ -243,7 +243,7 @@ mod tests {
         let state = new_state();
         let mut obj = make_obj(1, Zone::Command);
         obj.is_emblem = false;
-        obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)];
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)].into();
         assert_eq!(active_static_definitions(&state, &obj).count(), 0);
     }
 
@@ -252,7 +252,7 @@ mod tests {
         let state = new_state();
         let mut obj = make_obj(1, Zone::Command);
         obj.is_emblem = true;
-        obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)];
+        obj.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)].into();
         assert_eq!(active_static_definitions(&state, &obj).count(), 1);
     }
 
@@ -264,7 +264,8 @@ mod tests {
         let mut obj = make_obj(1, Zone::Battlefield);
         obj.static_definitions = vec![
             StaticDefinition::new(StaticMode::Continuous).condition(StaticCondition::IsMonarch)
-        ];
+        ]
+        .into();
         assert_eq!(active_static_definitions(&state, &obj).count(), 0);
     }
 
@@ -275,7 +276,8 @@ mod tests {
         let mut obj = make_obj(1, Zone::Battlefield);
         obj.static_definitions = vec![
             StaticDefinition::new(StaticMode::Continuous).condition(StaticCondition::IsMonarch)
-        ];
+        ]
+        .into();
         assert_eq!(active_static_definitions(&state, &obj).count(), 1);
     }
 
@@ -290,7 +292,7 @@ mod tests {
             condition: Some(crate::types::ability::TriggerCondition::IsMonarch),
             ..TriggerDefinition::new(TriggerMode::ChangesZone)
         };
-        obj.trigger_definitions = vec![trig];
+        obj.trigger_definitions = vec![trig].into();
         // Helper yields it despite controller not being monarch.
         assert_eq!(active_trigger_definitions(&state, &obj).count(), 1);
     }
@@ -305,7 +307,7 @@ mod tests {
             condition: Some(crate::types::ability::ReplacementCondition::UnlessMultipleOpponents),
             ..ReplacementDefinition::new(ReplacementEvent::DamageDone)
         };
-        obj.replacement_definitions = vec![repl];
+        obj.replacement_definitions = vec![repl].into();
         put_on_battlefield(&mut state, obj);
         assert_eq!(active_replacements(&state).count(), 1);
     }
@@ -314,14 +316,14 @@ mod tests {
     fn battlefield_active_statics_scans_all_battlefield_objects_with_gating() {
         let mut state = new_state();
         let mut a = make_obj(1, Zone::Battlefield);
-        a.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)];
+        a.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)].into();
         let mut b = make_obj(2, Zone::Battlefield);
-        b.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)];
+        b.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)].into();
         b.phase_status = crate::game::game_object::PhaseStatus::PhasedOut {
             cause: crate::game::game_object::PhaseOutCause::Directly,
         };
         let mut c = make_obj(3, Zone::Battlefield);
-        c.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)];
+        c.static_definitions = vec![StaticDefinition::new(StaticMode::Continuous)].into();
         put_on_battlefield(&mut state, a);
         put_on_battlefield(&mut state, b);
         put_on_battlefield(&mut state, c);
@@ -339,9 +341,11 @@ mod tests {
         // visible to the iterator — replacements are not battlefield-scoped.
         let mut state = new_state();
         let mut gy = make_obj(1, Zone::Graveyard);
-        gy.replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)];
+        gy.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)].into();
         let mut ex = make_obj(2, Zone::Exile);
-        ex.replacement_definitions = vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)];
+        ex.replacement_definitions =
+            vec![ReplacementDefinition::new(ReplacementEvent::DamageDone)].into();
         state.objects.insert(gy.id, gy);
         state.objects.insert(ex.id, ex);
         let ids: Vec<u64> = active_replacements(&state)
@@ -349,5 +353,122 @@ mod tests {
             .collect();
         assert!(ids.contains(&1));
         assert!(ids.contains(&2));
+    }
+
+    // --- Regression tests for the three shipped BLOCKER bugs + commander
+    // command-zone trigger gating + static condition filtering ---
+
+    fn phase_out_by_id(state: &mut GameState, id: ObjectId) {
+        let mut events = Vec::new();
+        crate::game::phasing::phase_out_object(
+            state,
+            id,
+            crate::game::game_object::PhaseOutCause::Directly,
+            &mut events,
+        );
+    }
+
+    #[test]
+    fn phased_out_torpor_orb_does_not_suppress_etb_triggers() {
+        use crate::types::ability::{TargetFilter, TypedFilter};
+        use crate::types::statics::SuppressedTriggerEvent;
+        let mut state = new_state();
+        let mut torpor = make_obj(1, Zone::Battlefield);
+        torpor.static_definitions = vec![StaticDefinition::new(StaticMode::SuppressTriggers {
+            source_filter: TargetFilter::Typed(TypedFilter::creature()),
+            events: vec![SuppressedTriggerEvent::EntersBattlefield],
+        })]
+        .into();
+        let id = put_on_battlefield(&mut state, torpor);
+        phase_out_by_id(&mut state, id);
+        // `battlefield_active_statics` gates by `object_functions`, which
+        // returns false for phased-out permanents, so the Torpor-class static
+        // must not appear in the iterator.
+        let n = battlefield_active_statics(&state)
+            .filter(|(_, def)| matches!(def.mode, StaticMode::SuppressTriggers { .. }))
+            .count();
+        assert_eq!(
+            n, 0,
+            "Phased-out Torpor Orb must not be visible to the suppress-triggers scan"
+        );
+    }
+
+    #[test]
+    fn phased_out_grafdiggers_cage_allows_reanimation() {
+        let mut state = new_state();
+        let mut cage = make_obj(1, Zone::Battlefield);
+        cage.static_definitions =
+            vec![StaticDefinition::new(StaticMode::CantEnterBattlefieldFrom)].into();
+        let id = put_on_battlefield(&mut state, cage);
+        phase_out_by_id(&mut state, id);
+        // The helper must suppress the phased-out Cage so ETB-from-graveyard
+        // is not blocked.
+        let n = battlefield_active_statics(&state)
+            .filter(|(_, def)| def.mode == StaticMode::CantEnterBattlefieldFrom)
+            .count();
+        assert_eq!(
+            n, 0,
+            "Phased-out Grafdigger's Cage must not block ETB-from-graveyard"
+        );
+    }
+
+    #[test]
+    fn phased_out_azusa_does_not_grant_extra_land_drops() {
+        let mut state = new_state();
+        let mut azusa = make_obj(1, Zone::Battlefield);
+        azusa.static_definitions = vec![StaticDefinition::new(StaticMode::AdditionalLandDrop {
+            count: 2,
+        })]
+        .into();
+        let id = put_on_battlefield(&mut state, azusa);
+        phase_out_by_id(&mut state, id);
+        // additional_land_drops now routes through battlefield_active_statics
+        // so phased-out Azusa contributes zero.
+        let drops = crate::game::static_abilities::additional_land_drops(&state, PlayerId(0));
+        assert_eq!(
+            drops, 0,
+            "Phased-out Azusa must not grant any extra land drops"
+        );
+    }
+
+    #[test]
+    fn commander_in_command_zone_does_not_fire_etb_trigger_on_other_permanent() {
+        // CR 114.4: A non-emblem object in the command zone (e.g., a commander
+        // waiting to be cast) has no functioning abilities — its ETB observer
+        // trigger must NOT fire when some other permanent enters.
+        let mut state = new_state();
+        let mut commander = make_obj(1, Zone::Command);
+        commander.is_emblem = false;
+        commander.trigger_definitions =
+            vec![TriggerDefinition::new(TriggerMode::ChangesZone)].into();
+        state.objects.insert(commander.id, commander);
+        state.command_zone.push(ObjectId(1));
+        // active_trigger_definitions must yield nothing for a non-emblem
+        // command-zone object.
+        let obj = state.objects.get(&ObjectId(1)).unwrap();
+        assert_eq!(
+            active_trigger_definitions(&state, obj).count(),
+            0,
+            "A non-emblem commander in the command zone must not have functioning triggers"
+        );
+    }
+
+    #[test]
+    fn condition_false_static_does_not_apply() {
+        // CR 604.1 / CR 613.1: A static whose `condition` evaluates false is
+        // filtered out by the helper — verified end-to-end with a condition
+        // that is false by default (IsMonarch when no monarch).
+        let state = new_state();
+        assert!(state.monarch.is_none());
+        let mut obj = make_obj(1, Zone::Battlefield);
+        obj.static_definitions = vec![
+            StaticDefinition::new(StaticMode::Continuous).condition(StaticCondition::IsMonarch)
+        ]
+        .into();
+        assert_eq!(
+            active_static_definitions(&state, &obj).count(),
+            0,
+            "Static with false condition must not be yielded"
+        );
     }
 }

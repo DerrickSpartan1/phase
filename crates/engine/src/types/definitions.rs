@@ -32,17 +32,19 @@ use serde::{Deserialize, Serialize};
 /// External iteration is deliberately not exposed — callers must go through
 /// `crate::game::functioning_abilities` so the CR 702.26b / CR 114.4 /
 /// CR 604.1 gates are applied consistently.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Definitions<T>(pub(crate) Vec<T>);
 
-#[allow(dead_code)] // Methods wired in across commits 2–5 of the migration.
-impl<T> Definitions<T> {
-    /// Create an empty collection.
-    pub(crate) fn new() -> Self {
+// Manual Default impl — the derive would require T: Default, but an empty
+// Definitions<T> is sensible for any T.
+impl<T> Default for Definitions<T> {
+    fn default() -> Self {
         Self(Vec::new())
     }
+}
 
+impl<T> Definitions<T> {
     /// Number of definitions (including any that do not currently function).
     pub fn len(&self) -> usize {
         self.0.len()
@@ -59,6 +61,13 @@ impl<T> Definitions<T> {
         self.0.get(i)
     }
 
+    /// Positional mutable access — crate-visible so effects that need to
+    /// mutate a specific existing definition (regeneration shield consumption,
+    /// prevention-amount updates) can do so without bypassing the gated reads.
+    pub(crate) fn get_mut(&mut self, i: usize) -> Option<&mut T> {
+        self.0.get_mut(i)
+    }
+
     /// First definition, if any. Does not apply CR gating.
     pub fn first(&self) -> Option<&T> {
         self.0.first()
@@ -69,30 +78,43 @@ impl<T> Definitions<T> {
         self.0.last()
     }
 
-    /// Append a new definition. Crate-visible — mutation happens only inside
-    /// the engine crate (load, layer recomputation, copy effects, etc.).
-    pub(crate) fn push(&mut self, item: T) {
+    /// Append a new definition. Public because mutation is a legitimate cross-
+    /// crate operation (test fixtures, card construction, copy effects). The
+    /// single-authority invariant is guarded by the absence of public
+    /// iteration, not by restricting writes.
+    pub fn push(&mut self, item: T) {
         self.0.push(item);
     }
 
-    /// Append several definitions.
-    pub(crate) fn extend<I: IntoIterator<Item = T>>(&mut self, it: I) {
-        self.0.extend(it);
-    }
-
     /// Remove every definition.
-    pub(crate) fn clear(&mut self) {
+    pub fn clear(&mut self) {
         self.0.clear();
     }
 
     /// Keep only definitions matching `f`.
-    pub(crate) fn retain<F: FnMut(&T) -> bool>(&mut self, f: F) {
+    pub fn retain<F: FnMut(&T) -> bool>(&mut self, f: F) {
         self.0.retain(f);
     }
 
     /// Iterate all definitions without applying any CR gate. Crate-visible —
     /// callers at the engine boundary must use `functioning_abilities` helpers.
     pub(crate) fn iter_all(&self) -> std::slice::Iter<'_, T> {
+        self.0.iter()
+    }
+
+    /// Borrow the underlying slice without applying any CR gate. Exposed so
+    /// engine-internal helpers and consumer crates (phase-ai, coverage) that
+    /// take `&[T]` parameters can bridge from a `Definitions<T>` without
+    /// reallocating. Runtime game paths must go through `functioning_abilities`
+    /// instead — this is a classification-side escape hatch.
+    pub fn as_slice(&self) -> &[T] {
+        self.0.as_slice()
+    }
+
+    /// Public iteration over every definition regardless of functioning
+    /// status. Classification/reporting only — runtime game logic in the
+    /// engine crate uses `functioning_abilities` helpers.
+    pub fn iter_unchecked(&self) -> std::slice::Iter<'_, T> {
         self.0.iter()
     }
 
@@ -110,9 +132,21 @@ impl<T> std::ops::Index<usize> for Definitions<T> {
     }
 }
 
+impl<T> std::ops::IndexMut<usize> for Definitions<T> {
+    fn index_mut(&mut self, i: usize) -> &mut T {
+        &mut self.0[i]
+    }
+}
+
 impl<T> From<Vec<T>> for Definitions<T> {
     fn from(v: Vec<T>) -> Self {
         Self(v)
+    }
+}
+
+impl<T> FromIterator<T> for Definitions<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        Self(Vec::from_iter(iter))
     }
 }
 
@@ -122,7 +156,7 @@ mod tests {
 
     #[test]
     fn len_and_is_empty() {
-        let mut d: Definitions<i32> = Definitions::new();
+        let mut d: Definitions<i32> = Definitions::default();
         assert!(d.is_empty());
         assert_eq!(d.len(), 0);
         d.push(1);

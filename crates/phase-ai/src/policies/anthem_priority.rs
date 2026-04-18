@@ -60,7 +60,7 @@ impl TacticalPolicy for AnthemPriorityPolicy {
         };
 
         // Only anthem cards get scored by this policy. CR 613.4c.
-        if !is_anthem_parts(&obj.static_definitions) {
+        if !is_anthem_parts(obj.static_definitions.as_slice()) {
             return PolicyVerdict::Score {
                 delta: 0.0,
                 reason: PolicyReason::new("anthem_priority_na"),

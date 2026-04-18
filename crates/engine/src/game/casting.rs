@@ -2054,7 +2054,7 @@ fn apply_mana_spell_grants(
             // Only add if not already present (idempotent).
             if !obj
                 .static_definitions
-                .iter()
+                .iter_all()
                 .any(|sd| sd.mode == StaticMode::CantBeCountered)
             {
                 obj.static_definitions
@@ -5713,9 +5713,9 @@ mod tests {
                     damage_source: None,
                 },
             )],
-            trigger_definitions: Vec::new(),
-            replacement_definitions: Vec::new(),
-            static_definitions: Vec::new(),
+            trigger_definitions: Default::default(),
+            replacement_definitions: Default::default(),
+            static_definitions: Default::default(),
             color: vec![ManaColor::Red],
             printed_ref: None,
             modal: None,
@@ -7259,7 +7259,7 @@ mod tests {
                     },
                 ]),
         );
-        source.base_static_definitions = source.static_definitions.clone();
+        source.base_static_definitions = source.static_definitions.iter_all().cloned().collect();
 
         let available = spell_objects_available_to_cast(&state, PlayerId(0));
         assert!(available.contains(&obj_id));
@@ -7302,7 +7302,7 @@ mod tests {
         let source = state.objects.get_mut(&source_id).unwrap();
         source.card_types.core_types.push(CoreType::Enchantment);
         source.base_card_types = source.card_types.clone();
-        source.static_definitions = parsed.statics.clone();
+        source.static_definitions = parsed.statics.clone().into();
         source.base_static_definitions = parsed.statics;
 
         for idx in 0..3 {
@@ -7365,7 +7365,7 @@ mod tests {
         let source = state.objects.get_mut(&source_id).unwrap();
         source.card_types.core_types.push(CoreType::Enchantment);
         source.base_card_types = source.card_types.clone();
-        source.static_definitions = parsed.statics.clone();
+        source.static_definitions = parsed.statics.clone().into();
         source.base_static_definitions = parsed.statics;
 
         for idx in 0..3 {
@@ -7527,7 +7527,7 @@ mod tests {
                     },
                 ]),
         );
-        obj.base_static_definitions = obj.static_definitions.clone();
+        obj.base_static_definitions = obj.static_definitions.iter_all().cloned().collect();
         state.players[1].poison_counters = 3;
 
         let available = spell_objects_available_to_cast(&state, PlayerId(0));
@@ -7723,7 +7723,7 @@ mod tests {
                 parse_static_line("Noncreature spells cost {1} more to cast.")
                     .expect("Thalia RaiseCost should parse"),
             );
-            obj.base_static_definitions = obj.static_definitions.clone();
+            obj.base_static_definitions = obj.static_definitions.iter_all().cloned().collect();
         }
 
         // One Mountain for player 0 — enough for {R} but not {1}{R}
@@ -7804,7 +7804,7 @@ mod tests {
                 parse_static_line("Noncreature spells cost {1} more to cast.")
                     .expect("Thalia RaiseCost should parse"),
             );
-            obj.base_static_definitions = obj.static_definitions.clone();
+            obj.base_static_definitions = obj.static_definitions.iter_all().cloned().collect();
         }
 
         // Two Mountains — enough for {1}{R}
