@@ -66,6 +66,16 @@ pub fn effective_escape_data(state: &GameState, object_id: ObjectId) -> Option<(
     }
 }
 
+/// CR 702.190a: Effective Sneak alt-cost for an object, honoring off-zone characteristic
+/// grants (e.g., Ninja Teen's "creature cards in your graveyard have sneak {cost}").
+pub fn effective_sneak_cost(state: &GameState, object_id: ObjectId) -> Option<ManaCost> {
+    let keyword = effective_keyword_for_object(state, object_id, KeywordKind::Sneak)?;
+    match keyword {
+        Keyword::Sneak(cost) => Some(resolve_keyword_mana_cost(state, object_id, &cost)),
+        _ => None,
+    }
+}
+
 fn effective_keyword_for_object(
     state: &GameState,
     object_id: ObjectId,
@@ -343,7 +353,7 @@ pub fn activate_ninjutsu(
                 .attackers
                 .iter()
                 .find(|a| a.object_id == creature_to_return)
-                .map(|a| (a.defending_player, a.attack_target.clone()))
+                .map(|a| (a.defending_player, a.attack_target))
                 .unwrap_or_else(|| {
                     // CR 702.49c + CR 508.4: Ninjutsu enters attacking same defender;
                     // fallback to first opponent in seat order (multiplayer-aware).

@@ -9,6 +9,7 @@ use nom::sequence::{delimited, preceded};
 use nom::Parser;
 
 use super::error::OracleResult;
+use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
 
 /// Parse a number from Oracle text: digit string OR English words (one through twenty).
@@ -448,6 +449,27 @@ pub fn parse_keyword_name(input: &str) -> OracleResult<'_, &str> {
             nom_language::error::VerboseErrorKind::Context("keyword name"),
         )],
     }))
+}
+
+/// Parse an alt-cost keyword name (lowercase Oracle text) into its `KeywordKind`
+/// discriminant. Used by rider parsers that refer to a named alt-cost keyword
+/// (e.g., "using its blitz ability", "using their sneak abilities"). Extend the
+/// `alt` below with new keyword names as new alt-cost mechanics are supported.
+///
+/// CR 118.9: alternative costs are often named via keywords; this combinator
+/// bridges Oracle-text names to the engine's `KeywordKind` enum.
+pub fn parse_alt_cost_keyword_name_to_kind(input: &str) -> OracleResult<'_, KeywordKind> {
+    alt((
+        value(KeywordKind::Flashback, tag("flashback")),
+        value(KeywordKind::Escape, tag("escape")),
+        value(KeywordKind::Sneak, tag("sneak")),
+        value(KeywordKind::Blitz, tag("blitz")),
+        value(KeywordKind::Warp, tag("warp")),
+        value(KeywordKind::Mutate, tag("mutate")),
+        value(KeywordKind::Bestow, tag("bestow")),
+        value(KeywordKind::Harmonize, tag("harmonize")),
+    ))
+    .parse(input)
 }
 
 /// Parse an imperative verb from Oracle text.
@@ -1105,5 +1127,24 @@ mod tests {
         let (rest2, f2) = parse_phrase_fragment("each opponent loses").unwrap();
         assert_eq!(f2, "each opponent");
         assert_eq!(rest2, " loses");
+    }
+
+    #[test]
+    fn test_parse_alt_cost_keyword_name_to_kind() {
+        let cases = [
+            ("flashback ability", KeywordKind::Flashback),
+            ("escape ability", KeywordKind::Escape),
+            ("sneak abilities", KeywordKind::Sneak),
+            ("blitz ability", KeywordKind::Blitz),
+            ("warp ability", KeywordKind::Warp),
+            ("mutate ability", KeywordKind::Mutate),
+            ("bestow ability", KeywordKind::Bestow),
+            ("harmonize ability", KeywordKind::Harmonize),
+        ];
+        for (input, expected) in cases {
+            let (_, kind) = parse_alt_cost_keyword_name_to_kind(input).unwrap();
+            assert_eq!(kind, expected, "input: {input:?}");
+        }
+        assert!(parse_alt_cost_keyword_name_to_kind("unknown").is_err());
     }
 }

@@ -250,7 +250,7 @@ fn collect_damage_assignments(state: &mut GameState, sub_step: SubStep) -> Optio
                 assignment_modes,
                 trample,
                 defending_player: attacker_info.defending_player,
-                attack_target: attacker_info.attack_target.clone(),
+                attack_target: attacker_info.attack_target,
                 pw_loyalty,
                 pw_controller,
             });

@@ -435,12 +435,12 @@ mod tests {
         use crate::types::player::PlayerId;
 
         let target = AttackTarget::Player(PlayerId(1));
-        let json = serde_json::to_value(&target).unwrap();
+        let json = serde_json::to_value(target).unwrap();
         assert_eq!(json["type"], "Player");
         assert_eq!(json["data"], 1);
 
         let target = AttackTarget::Planeswalker(ObjectId(42));
-        let json = serde_json::to_value(&target).unwrap();
+        let json = serde_json::to_value(target).unwrap();
         assert_eq!(json["type"], "Planeswalker");
         assert_eq!(json["data"], 42);
     }

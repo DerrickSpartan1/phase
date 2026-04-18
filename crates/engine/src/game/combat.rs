@@ -26,7 +26,7 @@ pub enum TrampleKind {
 }
 
 /// Represents who a creature is attacking: a player, planeswalker, or battle (CR 506.3).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum AttackTarget {
     Player(PlayerId),
@@ -168,7 +168,7 @@ pub fn enter_attacking(
             c.attackers
                 .iter()
                 .find(|a| a.object_id == source_id)
-                .map(|a| (a.defending_player, a.attack_target.clone()))
+                .map(|a| (a.defending_player, a.attack_target))
         })
         .or_else(|| {
             state
@@ -1123,7 +1123,7 @@ pub fn declare_attackers(
                     .and_then(|b| b.protector())
                     .unwrap_or(PlayerId(0)),
             };
-            AttackerInfo::new(*object_id, target.clone(), defending_player)
+            AttackerInfo::new(*object_id, *target, defending_player)
         })
         .collect();
     state.players_attacked_this_step = combat

@@ -1715,7 +1715,7 @@ fn attacker_actions(
     for &id in valid_attacker_ids {
         actions.push(candidate(
             GameAction::DeclareAttackers {
-                attacks: vec![(id, target.clone())],
+                attacks: vec![(id, target)],
             },
             TacticalClass::Attack,
             Some(player),
@@ -1728,7 +1728,7 @@ fn attacker_actions(
                 attacks: valid_attacker_ids
                     .iter()
                     .copied()
-                    .map(|id| (id, target.clone()))
+                    .map(|id| (id, target))
                     .collect(),
             },
             TacticalClass::Attack,
