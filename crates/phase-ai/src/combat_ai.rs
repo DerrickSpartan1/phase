@@ -232,10 +232,7 @@ pub fn choose_attackers_with_targets_with_profile(
     // Single opponent: all attackers go to the same target
     if opponents.len() == 1 {
         let target = AttackTarget::Player(opponents[0]);
-        return attacking_ids
-            .into_iter()
-            .map(|id| (id, target.clone()))
-            .collect();
+        return attacking_ids.into_iter().map(|id| (id, target)).collect();
     }
 
     // Multi-opponent: assign attack targets
@@ -318,14 +315,14 @@ fn assign_attack_targets(
 
             for (id, power) in sorted_attackers {
                 if allocated_power < weak_life {
-                    result.push((id, target_weak.clone()));
+                    result.push((id, target_weak));
                     allocated_power += power;
                 } else {
                     // If weakest IS the highest threat, keep sending there
                     let target = if weak_opp == threat_ranked[0].0 {
-                        target_weak.clone()
+                        target_weak
                     } else {
-                        primary_target.clone()
+                        primary_target
                     };
                     result.push((id, target));
                 }
@@ -336,10 +333,7 @@ fn assign_attack_targets(
 
     // Default: send all to highest-threat opponent
     let primary = AttackTarget::Player(threat_ranked[0].0);
-    attacking_ids
-        .into_iter()
-        .map(|id| (id, primary.clone()))
-        .collect()
+    attacking_ids.into_iter().map(|id| (id, primary)).collect()
 }
 
 /// Backward-compatible wrapper: returns just attacker IDs (all targeting first opponent).
