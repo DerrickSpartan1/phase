@@ -6964,6 +6964,10 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
         (" into your graveyard", Zone::Graveyard),
         (" into its owner's graveyard", Zone::Graveyard),
         (" into their owner's graveyard", Zone::Graveyard),
+        // CR 701.14: "into that player's graveyard" — "that player" refers back to the owner
+        // named earlier in the clause (e.g. Eldrazi Processors: "a card an opponent owns").
+        (" into that player's graveyard", Zone::Graveyard),
+        (" into their graveyard", Zone::Graveyard),
         (" on the bottom of", Zone::Library),
         (" on top of", Zone::Library),
     ] {

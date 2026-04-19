@@ -1926,6 +1926,18 @@ fn parse_ownership_or_controller_suffix(
         });
         return own_ctrl_offset + "you own".len();
     }
+    // CR 108.3: "an opponent owns" — the card belongs to an opponent, used by Eldrazi Processors.
+    for phrase in ["an opponent owns", "opponents own"] {
+        if tag::<_, _, nom_language::error::VerboseError<&str>>(phrase)
+            .parse(own_ctrl)
+            .is_ok()
+        {
+            properties.push(FilterProp::Owned {
+                controller: ControllerRef::Opponent,
+            });
+            return own_ctrl_offset + phrase.len();
+        }
+    }
 
     let (ctrl, ctrl_len) =
         parse_controller_suffix(text).map_or((None, 0), |(ctrl, len)| (Some(ctrl), len));
