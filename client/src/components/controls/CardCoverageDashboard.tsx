@@ -484,7 +484,7 @@ function DetailEmptyState({ coverage }: { coverage: CoverageSummary }) {
 // --- By Set View ---
 
 const MIN_SET_CARDS = 20;
-const MIN_SET_COVERAGE = 90;
+const MIN_SET_COVERAGE = 80;
 
 interface SetCoverage {
   set_code: string;
