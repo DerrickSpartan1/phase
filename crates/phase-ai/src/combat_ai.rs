@@ -895,25 +895,25 @@ fn crackback_damage(
         tb.cmp(&ta)
     });
 
-    // Opponent's creatures that could attack next turn. Identity (who's a
-    // creature, who controls them) comes from the current state; effective
-    // power/keywords come from the projection when available — this is how
-    // we see the opponent's scaled P/T before they actually swing.
+    // Opponent's creatures that could attack next turn. When a projection
+    // is available, read identity AND `tapped`/keywords from the projected
+    // state — creatures untap during the opponent's upcoming untap step, so
+    // reading `tapped` from the current state would incorrectly exclude them
+    // whenever the AI is evaluating an attack on the turn after a user swing.
+    // Without a projection, fall back to current-state filtering.
     let projected_state = projection.map(|p| &p.state);
+    let attacker_source = projected_state.unwrap_or(state);
     let mut opp_attackers: Vec<(ObjectId, i32)> = opponents
         .iter()
         .flat_map(|&opp| {
-            state.battlefield.iter().filter_map(move |&id| {
-                let obj = state.objects.get(&id)?;
+            attacker_source.battlefield.iter().filter_map(move |&id| {
+                let obj = attacker_source.objects.get(&id)?;
                 if obj.controller == opp
                     && obj.card_types.core_types.contains(&CoreType::Creature)
                     && !obj.tapped
                     && !obj.has_keyword(&Keyword::Defender)
                 {
-                    let effective_power = projected_state
-                        .and_then(|ps| ps.objects.get(&id).and_then(|po| po.power))
-                        .unwrap_or_else(|| obj.power.unwrap_or(0));
-                    Some((id, effective_power))
+                    Some((id, obj.power.unwrap_or(0)))
                 } else {
                     None
                 }
