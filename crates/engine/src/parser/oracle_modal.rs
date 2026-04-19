@@ -387,6 +387,7 @@ pub(super) fn strip_ability_word_with_name(line: &str) -> Option<(String, String
 /// Scan for modal count override phrases at word boundaries using nom combinators.
 /// Returns (min_choices, max_choices) for matching phrases.
 fn scan_modal_count_override(text: &str) -> Option<(usize, usize)> {
+    use nom::sequence::preceded;
     super::oracle_nom::primitives::scan_at_word_boundaries(text, |input| {
         alt((
             value(
@@ -401,6 +402,10 @@ fn scan_modal_count_override(text: &str) -> Option<(usize, usize)> {
                 (1, usize::MAX),
                 alt((tag("one or more"), tag("any number"))),
             ),
+            // CR 700.2a / CR 700.2d: "choose up to N —" is a modal header where
+            // min_choices = 0 (decline all modes) and max_choices = N.
+            preceded(tag("choose up to "), nom_primitives::parse_number)
+                .map(|n: u32| (0usize, n as usize)),
         ))
         .parse(input)
     })
@@ -424,6 +429,21 @@ mod tests {
         assert_eq!(
             parse_modal_choose_count("choose any number of —"),
             (1, usize::MAX)
+        );
+    }
+
+    // B3: "choose up to N —" must parse as (0, N), not fall through to the
+    // default (1, 1). Without this, players are forced to pick exactly one
+    // mode when the CR allows zero. Affects Biblioplex Tomekeeper and ~96
+    // other cards in the corpus (grep "choose up to" card-data.json).
+    #[test]
+    fn parse_modal_choose_count_up_to_variants() {
+        assert_eq!(parse_modal_choose_count("choose up to one —"), (0, 1));
+        assert_eq!(parse_modal_choose_count("choose up to two —"), (0, 2));
+        assert_eq!(parse_modal_choose_count("choose up to seven —"), (0, 7));
+        assert_eq!(
+            parse_modal_choose_count("you may choose up to two."),
+            (0, 2)
         );
     }
 
