@@ -6623,4 +6623,25 @@ mod tests {
         }
         walk_no_unimpl(ability);
     }
+
+    /// CR 702.94a + CR 400.3: End-to-end reproduction of Sliver Weftwinder's
+    /// hand-grant line through the full `parse_oracle_text` pipeline.
+    #[test]
+    fn hand_grant_reaches_statics_through_full_pipeline() {
+        let oracle = "Sliver cards in your hand have warp {3}.";
+        let parsed = parse(oracle, "Sliver Weftwinder", &[], &["Creature"], &["Sliver"]);
+        let hand_grant = parsed.statics.iter().find(|s| {
+            s.mode == StaticMode::Continuous
+                && s.affected
+                    .as_ref()
+                    .map(|a| a.extract_in_zone() == Some(Zone::Hand))
+                    .unwrap_or(false)
+        });
+        assert!(
+            hand_grant.is_some(),
+            "hand-zone static should reach result.statics, got statics={:?}, abilities={:?}",
+            parsed.statics,
+            parsed.abilities,
+        );
+    }
 }

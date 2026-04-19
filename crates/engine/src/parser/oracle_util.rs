@@ -1283,11 +1283,18 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
                 if replaced != result {
                     // Guard: Don't replace subtype references like "Sliver creatures"
                     // when "Sliver" is a prefix of the card name "Sliver Hivelord".
-                    // The word before "creatures/creature" is a subtype, not a self-ref.
+                    // The word before "creatures/creature/cards/card/spells/spell" is a
+                    // subtype qualifier, not a self-ref. Same for "~ permanent(s)".
                     // Also guard against "non-~" — a card name prefix after "non-" is always
                     // a type/subtype qualifier (e.g., "non-Phyrexian" on Phyrexian Censor).
                     if replaced.contains("~ creatures")
                         || replaced.contains("~ creature")
+                        || replaced.contains("~ cards")
+                        || replaced.contains("~ card")
+                        || replaced.contains("~ spells")
+                        || replaced.contains("~ spell")
+                        || replaced.contains("~ permanents")
+                        || replaced.contains("~ permanent")
                         || replaced.contains("non-~")
                     {
                         continue;

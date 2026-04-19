@@ -11709,4 +11709,65 @@ mod tests {
             other => panic!("expected Unrecognized condition via fallback, got {other:?}"),
         }
     }
+
+    // --- Hand-zone keyword grant statics (CR 702.94a + CR 400.3) ---
+
+    /// CR 702.94a: "Each instant and sorcery card in your hand has miracle {2}"
+    /// (Lorehold, the Historian) must parse as a Continuous static whose
+    /// affected filter carries `InZone { zone: Hand }` and whose modification
+    /// is `AddKeyword(Miracle({2}))`.
+    #[test]
+    fn hand_grant_lorehold_miracle() {
+        let text = "Each instant and sorcery card in your hand has miracle {2}.";
+        let def = parse_static_line(text).expect("Lorehold text must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        let affected = def.affected.expect("should have affected filter");
+        assert!(
+            affected.extract_in_zone() == Some(Zone::Hand),
+            "affected filter should carry InZone: Hand, got {affected:?}"
+        );
+        assert!(
+            def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: crate::types::keywords::Keyword::Miracle(_)
+                }
+            )),
+            "modifications should include AddKeyword(Miracle), got {:?}",
+            def.modifications,
+        );
+    }
+
+    /// CR 400.3: "Sliver cards in your hand have warp {3}" (Sliver Weftwinder)
+    /// — single-subtype hand-grant keyword. Confirms the parser covers the
+    /// typed-subtype class beyond Lorehold's instant/sorcery pair.
+    #[test]
+    fn hand_grant_sliver_weftwinder_warp() {
+        let text = "Sliver cards in your hand have warp {3}.";
+        let defs = parse_static_line_multi(text);
+        assert!(
+            !defs.is_empty(),
+            "parse_static_line_multi returned empty for: {text}"
+        );
+        let def = defs
+            .into_iter()
+            .find(|d| {
+                d.mode == StaticMode::Continuous
+                    && d.affected
+                        .as_ref()
+                        .map(|a| a.extract_in_zone() == Some(Zone::Hand))
+                        .unwrap_or(false)
+            })
+            .expect("expected a hand-zone Continuous static in output");
+        assert!(
+            def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: crate::types::keywords::Keyword::Warp(_)
+                }
+            )),
+            "modifications should include AddKeyword(Warp), got {:?}",
+            def.modifications,
+        );
+    }
 }
