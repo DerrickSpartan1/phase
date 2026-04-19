@@ -6,6 +6,7 @@ use engine::types::keywords::Keyword;
 use engine::types::player::PlayerId;
 
 use crate::features::DeckFeatures;
+use crate::projection::{ProjectionHorizon, VelocitySample};
 
 use super::activation::turn_only;
 use super::context::PolicyContext;
@@ -14,6 +15,15 @@ use super::registry::{DecisionKind, PolicyId, PolicyReason, PolicyVerdict, Tacti
 use super::strategy_helpers::ai_can_block;
 
 pub struct EvasionRemovalPriorityPolicy;
+
+/// Scaling factor applied to projected growth when ranking removal targets.
+/// Empirically calibrated so a creature that grows by +3/+3 between now and
+/// opponent's next combat gets ~1.0 of extra removal score — comparable to
+/// the evasion bonus for a mid-sized flyer.
+const VELOCITY_BONUS_MULT: f64 = 0.3;
+/// Cap on the velocity contribution so a single runaway Ouroboroid doesn't
+/// completely drown out other signals.
+const VELOCITY_BONUS_MAX: f64 = 3.0;
 
 impl EvasionRemovalPriorityPolicy {
     pub fn score(&self, ctx: &PolicyContext<'_>) -> f64 {
@@ -38,47 +48,92 @@ impl EvasionRemovalPriorityPolicy {
             return 0.0;
         }
 
-        let power = target.power.unwrap_or(0) as f64;
-        let mult = ctx.penalties().evasion_removal_bonus_mult;
+        let evasion_bonus = evasion_score(ctx, target, *target_id);
+        let velocity_bonus = velocity_score(ctx, target, *target_id);
 
-        let has_flying = target.has_keyword(&Keyword::Flying);
-        let has_shadow = target.has_keyword(&Keyword::Shadow);
-        let has_menace = target.has_keyword(&Keyword::Menace);
+        evasion_bonus + velocity_bonus
+    }
+}
 
-        if !has_flying && !has_shadow && !has_menace {
-            return 0.0;
-        }
+/// Score contribution from evasion keywords (original behavior).
+fn evasion_score(
+    ctx: &PolicyContext<'_>,
+    target: &engine::game::game_object::GameObject,
+    target_id: engine::types::identifiers::ObjectId,
+) -> f64 {
+    let power = target.power.unwrap_or(0) as f64;
+    let mult = ctx.penalties().evasion_removal_bonus_mult;
 
-        // Check if AI can block this evasive creature
-        let can_block = ai_can_block(ctx.state, ctx.ai_player, *target_id);
+    let has_flying = target.has_keyword(&Keyword::Flying);
+    let has_shadow = target.has_keyword(&Keyword::Shadow);
+    let has_menace = target.has_keyword(&Keyword::Menace);
 
-        if !can_block {
-            // AI has no answer for this creature in combat — high removal priority
-            (power * mult).min(3.0)
-        } else if has_menace {
-            // Menace: AI might have a blocker but needs 2 legal blockers — count
-            // only creatures that can actually block this attacker (full blocking check)
-            let legal_blocker_count = ctx
-                .state
-                .battlefield
-                .iter()
-                .filter(|&&id| {
-                    ctx.state.objects.get(&id).is_some_and(|obj| {
-                        obj.controller == ctx.ai_player
-                            && !obj.tapped
-                            && obj.card_types.core_types.contains(&CoreType::Creature)
-                            && engine::game::combat::can_block_pair(ctx.state, id, *target_id)
-                    })
+    if !has_flying && !has_shadow && !has_menace {
+        return 0.0;
+    }
+
+    let can_block = ai_can_block(ctx.state, ctx.ai_player, target_id);
+
+    if !can_block {
+        (power * mult).min(3.0)
+    } else if has_menace {
+        let legal_blocker_count = ctx
+            .state
+            .battlefield
+            .iter()
+            .filter(|&&id| {
+                ctx.state.objects.get(&id).is_some_and(|obj| {
+                    obj.controller == ctx.ai_player
+                        && !obj.tapped
+                        && obj.card_types.core_types.contains(&CoreType::Creature)
+                        && engine::game::combat::can_block_pair(ctx.state, id, target_id)
                 })
-                .count();
-            if legal_blocker_count < 2 {
-                (power * mult * 0.5).min(3.0)
-            } else {
-                0.0
-            }
+            })
+            .count();
+        if legal_blocker_count < 2 {
+            (power * mult * 0.5).min(3.0)
         } else {
             0.0
         }
+    } else {
+        0.0
+    }
+}
+
+/// Score contribution from projected-turn growth. Creatures that scale
+/// significantly before their controller's next combat (Ouroboroid, sagas,
+/// Predator Ooze, tokens-spawning engines) become high-priority removal
+/// targets automatically — no per-card AI code. Failure to project or
+/// non-opponent target → 0.
+fn velocity_score(
+    ctx: &PolicyContext<'_>,
+    target: &engine::game::game_object::GameObject,
+    target_id: engine::types::identifiers::ObjectId,
+) -> f64 {
+    // AI should not remove its own creatures based on their growth.
+    if target.controller == ctx.ai_player {
+        return 0.0;
+    }
+
+    // Project against the target's controller so the growth we read is
+    // specifically what THAT player will do on their next turn.
+    let Ok(projection) = ctx.context.session.get_or_project(
+        ctx.state,
+        ctx.ai_player,
+        target.controller,
+        ProjectionHorizon::OpponentBeginCombat,
+    ) else {
+        return 0.0;
+    };
+
+    let samples =
+        crate::projection::threat_velocity(ctx.state, &projection, target.controller);
+
+    match samples.get(&target_id) {
+        Some(VelocitySample::Changed { delta }) if *delta > 0 => {
+            (*delta as f64 * VELOCITY_BONUS_MULT).min(VELOCITY_BONUS_MAX)
+        }
+        _ => 0.0,
     }
 }
 

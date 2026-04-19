@@ -9,7 +9,7 @@
 //! cheap (a refcount bump).
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use engine::game::DeckEntry;
 use engine::types::game_state::GameState;
@@ -21,7 +21,11 @@ use crate::features::{
     spellslinger_prowess, tokens_wide, tribal, DeckFeatures,
 };
 use crate::plan::{derive_snapshot, PlanSnapshot};
+use crate::planner::quick_state_hash;
 use crate::policies::registry::PolicyId;
+use crate::projection::{
+    project_to, BailReason, Projection, ProjectionHorizon, ProjectionKey,
+};
 use crate::strategy_profile::StrategyProfile;
 use crate::synergy::SynergyGraph;
 
@@ -54,6 +58,10 @@ pub struct AiSession {
     pub plan: HashMap<PlayerId, PlanSnapshot>,
     pub synergy: HashMap<PlayerId, SynergyGraph>,
     pub memory: PolicyMemory,
+    /// Turn-scoped cache for opponent-turn projections. Key includes
+    /// `turn_number` + `active_player`, so stale entries from prior turns
+    /// never match — no explicit invalidation needed.
+    pub projection_cache: Arc<RwLock<HashMap<ProjectionKey, Arc<Projection>>>>,
 }
 
 impl AiSession {
@@ -85,6 +93,7 @@ impl AiSession {
             plan,
             synergy,
             memory: PolicyMemory::default(),
+            projection_cache: Arc::default(),
         }
     }
 
@@ -104,6 +113,40 @@ impl AiSession {
     /// Convenience constructor returning an `Arc<AiSession>` directly.
     pub fn arc_from_game(state: &GameState) -> Arc<Self> {
         Arc::new(Self::from_game(state))
+    }
+
+    /// Retrieve a cached projection, computing it on miss. Turn-scoped
+    /// key means stale entries never match. Read-path is lock-free;
+    /// write-path briefly acquires a write lock.
+    pub fn get_or_project(
+        &self,
+        base: &GameState,
+        ai_player: PlayerId,
+        target_opponent: PlayerId,
+        horizon: ProjectionHorizon,
+    ) -> Result<Arc<Projection>, BailReason> {
+        let key = ProjectionKey {
+            state_hash: quick_state_hash(base),
+            turn_number: base.turn_number,
+            active_player: base.active_player,
+            ai_player,
+            target_opponent,
+            horizon,
+        };
+
+        if let Ok(cache) = self.projection_cache.read() {
+            if let Some(hit) = cache.get(&key) {
+                return Ok(Arc::clone(hit));
+            }
+        }
+
+        let projection = Arc::new(project_to(base, ai_player, target_opponent, horizon)?);
+
+        if let Ok(mut cache) = self.projection_cache.write() {
+            cache.insert(key, Arc::clone(&projection));
+        }
+
+        Ok(projection)
     }
 }
 

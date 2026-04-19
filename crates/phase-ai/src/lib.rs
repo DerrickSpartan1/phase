@@ -34,7 +34,7 @@ pub use config::{
 pub use deck_profile::ArchetypeMultipliers;
 pub use eval::{
     evaluate_creature, evaluate_creature_with_bonuses, evaluate_for_planner, evaluate_state,
-    evaluate_state_breakdown, strategic_intent, threat_level, EvalWeightSet, EvalWeights,
-    EvaluationBreakdown, KeywordBonuses, StrategicIntent,
+    evaluate_state_breakdown, strategic_intent, threat_level, threat_level_projected,
+    EvalWeightSet, EvalWeights, EvaluationBreakdown, KeywordBonuses, StrategicIntent,
 };
 pub use search::{choose_action, score_candidates, softmax_select_pairs};

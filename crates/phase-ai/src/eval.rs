@@ -7,6 +7,7 @@ use engine::types::player::PlayerId;
 use serde::{Deserialize, Serialize};
 
 use crate::planner::ValueEstimate;
+use crate::projection::Projection;
 
 /// Weights for board evaluation heuristics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,11 +201,29 @@ pub fn strategic_intent(state: &GameState, player: PlayerId) -> StrategicIntent 
 /// Factors: board presence (creature count/total power), life ratio, hand size,
 /// commander damage dealt to evaluator.
 pub fn threat_level(state: &GameState, evaluator: PlayerId, target: PlayerId) -> f64 {
+    threat_level_projected(state, evaluator, target, None)
+}
+
+/// Projection-aware variant of `threat_level`. When `projection` is provided,
+/// the target's board power is read from the projected state — capturing
+/// scaling threats like Ouroboroid before they actually swing. The rest of
+/// the score (life ratio, hand size, commander damage) uses the current
+/// state because those are orthogonal to combat-trigger projection.
+pub fn threat_level_projected(
+    state: &GameState,
+    evaluator: PlayerId,
+    target: PlayerId,
+    projection: Option<&Projection>,
+) -> f64 {
     let target_player = &state.players[target.0 as usize];
     let starting_life = state.format_config.starting_life.max(1) as f64;
 
-    // Board presence: creature count and total power
-    let (creatures, power, _toughness, _nc) = board_stats(state, target);
+    // Board presence: creature count from current state; power from projected
+    // state when available (catches growth velocity in the strategic signal).
+    let (creatures, base_power, _toughness, _nc) = board_stats(state, target);
+    let power = projection
+        .map(|p| projected_power(&p.state, target))
+        .unwrap_or(base_power);
     let board_score = (creatures as f64 * 0.3 + power as f64 * 0.7).min(10.0) / 10.0;
 
     // Life ratio: higher life = more threatening
@@ -382,6 +401,22 @@ pub fn evaluate_state_breakdown(
 }
 
 /// Board statistics: (creature_count, total_power, total_toughness, non_creature_permanents).
+/// Total creature power controlled by `player` in `state`. Unlike
+/// `board_stats`, this only computes the power dimension — used by
+/// `threat_level_projected` to read power from a projected state without
+/// recomputing creature counts that are frame-invariant.
+fn projected_power(state: &GameState, player: PlayerId) -> i32 {
+    state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| {
+            obj.controller == player && obj.card_types.core_types.contains(&CoreType::Creature)
+        })
+        .map(|obj| obj.power.unwrap_or(0))
+        .sum()
+}
+
 pub fn board_stats(state: &GameState, player: PlayerId) -> (i32, i32, i32, i32) {
     let mut creatures = 0;
     let mut total_power = 0;

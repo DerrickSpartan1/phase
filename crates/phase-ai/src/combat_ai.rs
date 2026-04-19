@@ -14,6 +14,7 @@ use engine::types::zones::Zone;
 
 use crate::config::AiProfile;
 use crate::eval::{evaluate_creature, threat_level};
+use crate::projection::{project_to, Projection, ProjectionHorizon};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CombatObjective {
@@ -187,7 +188,19 @@ pub fn choose_attackers_with_targets_with_profile(
     // hold back non-vigilance creatures (highest-value first) until we survive.
     if !attacking_ids.is_empty() && !matches!(objective, CombatObjective::PushLethal) {
         let my_life = state.players[player.0 as usize].life;
-        let cb_damage = crackback_damage(state, player, &opponents, &attacking_ids);
+        // Project opponent's upcoming begin-combat + attacker declaration so
+        // crackback_damage sees scaled creatures (Ouroboroid class) and
+        // attack-trigger pumps (Battle Cry, Mentor). Failure to project
+        // falls through to current state — matches pre-projection behavior.
+        let projection = project_to(
+            state,
+            player,
+            opponents[0],
+            ProjectionHorizon::OpponentAttackersDeclared,
+        )
+        .ok();
+        let cb_damage =
+            crackback_damage(state, player, &opponents, &attacking_ids, projection.as_ref());
         if cb_damage >= my_life {
             // Sort non-vigilance attackers by value descending — hold back most valuable first
             let mut non_vigilance: Vec<(usize, f64)> = attacking_ids
@@ -214,7 +227,8 @@ pub fn choose_attackers_with_targets_with_profile(
                     .filter(|(i, _)| !to_remove.contains(i))
                     .map(|(_, &id)| id)
                     .collect();
-                let cb = crackback_damage(state, player, &opponents, &remaining);
+                let cb =
+                    crackback_damage(state, player, &opponents, &remaining, projection.as_ref());
                 if cb < my_life {
                     break;
                 }
@@ -837,11 +851,20 @@ fn race_clock(state: &GameState, attacker: PlayerId, defender: PlayerId) -> u32 
 /// Compute the maximum damage an opponent can deal on the crackback,
 /// assuming the given set of `tapped_attackers` are tapped and unavailable
 /// to block. Vigilance creatures in `tapped_attackers` are still available.
+///
+/// When a `projection` is provided, opponent creature power/keywords are
+/// read from the projected state (after their upcoming phase-triggers and
+/// attack-triggers have resolved). This catches Ouroboroid-class scaling,
+/// Battle Cry / Mentor / Hellrider pumps, saga advances, and similar
+/// growth that would otherwise be invisible to the snapshot heuristic.
+/// Creatures removed during projection fall back to the current state's
+/// power for a conservative read.
 fn crackback_damage(
     state: &GameState,
     player: PlayerId,
     opponents: &[PlayerId],
     tapped_attackers: &[ObjectId],
+    projection: Option<&Projection>,
 ) -> i32 {
     let mut our_blockers: Vec<ObjectId> = state
         .battlefield
@@ -867,6 +890,11 @@ fn crackback_damage(
         tb.cmp(&ta)
     });
 
+    // Opponent's creatures that could attack next turn. Identity (who's a
+    // creature, who controls them) comes from the current state; effective
+    // power/keywords come from the projection when available — this is how
+    // we see the opponent's scaled P/T before they actually swing.
+    let projected_state = projection.map(|p| &p.state);
     let mut opp_attackers: Vec<(ObjectId, i32)> = opponents
         .iter()
         .flat_map(|&opp| {
@@ -877,7 +905,10 @@ fn crackback_damage(
                     && !obj.tapped
                     && !obj.has_keyword(&Keyword::Defender)
                 {
-                    Some((id, obj.power.unwrap_or(0)))
+                    let effective_power = projected_state
+                        .and_then(|ps| ps.objects.get(&id).and_then(|po| po.power))
+                        .unwrap_or_else(|| obj.power.unwrap_or(0));
+                    Some((id, effective_power))
                 } else {
                     None
                 }
@@ -890,7 +921,12 @@ fn crackback_damage(
     let mut unblocked_damage = 0i32;
     let mut blocker_idx = 0;
     for &(opp_id, opp_power) in &opp_attackers {
-        let opp_obj = match state.objects.get(&opp_id) {
+        // Keyword lookup mirrors the power lookup: prefer the projected view
+        // (e.g., Battle Cry / Mentor pumps, newly-granted Trample).
+        let opp_obj = match projected_state
+            .and_then(|ps| ps.objects.get(&opp_id))
+            .or_else(|| state.objects.get(&opp_id))
+        {
             Some(o) => o,
             None => continue,
         };
