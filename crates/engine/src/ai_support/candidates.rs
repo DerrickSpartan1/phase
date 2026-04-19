@@ -1525,6 +1525,18 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                         ));
                     }
                 }
+                // CR 702.xxx: Prepare (Strixhaven) — priority-time offer to
+                // cast a copy of the prepare-spell face. Gated on
+                // `prepared.is_some()` (single-authority state flag managed
+                // by `game::effects::prepare`). Assign when WotC publishes
+                // SOS CR update.
+                if obj.prepared.is_some() {
+                    actions.push(candidate(
+                        GameAction::CastPreparedCopy { source: obj_id },
+                        TacticalClass::Spell,
+                        Some(player),
+                    ));
+                }
             }
         }
     }
@@ -2364,6 +2376,71 @@ mod tests {
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaColor, ManaCostShard};
     use crate::types::zones::Zone;
+
+    // CR 702.xxx: Prepare (Strixhaven) — the AI candidate enumerator must
+    // surface a `CastPreparedCopy` action for every prepared creature under
+    // the acting player's control while they hold priority. Without this an
+    // AI opponent will never cast Prepared copies. Assign when WotC
+    // publishes SOS CR update.
+    #[test]
+    fn priority_actions_enumerate_cast_prepared_copy_for_prepared_creatures() {
+        use crate::game::game_object::PreparedState;
+
+        let mut state = GameState::new_two_player(42);
+        let p0 = PlayerId(0);
+        // Create a prepared creature on battlefield.
+        let prepared_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Prepared One".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&prepared_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state.objects.get_mut(&prepared_id).unwrap().prepared = Some(PreparedState);
+
+        // Create an unprepared creature on battlefield (must NOT appear).
+        let plain_id = create_object(
+            &mut state,
+            CardId(2),
+            p0,
+            "Plain One".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&plain_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        state.waiting_for = WaitingFor::Priority { player: p0 };
+        state.priority_player = p0;
+
+        let actions = candidate_actions(&state);
+        let has_prepared_cast = actions.iter().any(|c| {
+            matches!(c.action, GameAction::CastPreparedCopy { source } if source == prepared_id)
+        });
+        assert!(
+            has_prepared_cast,
+            "expected CastPreparedCopy for the prepared creature"
+        );
+        // Unprepared creatures must not produce an offer.
+        let has_plain_cast = actions.iter().any(
+            |c| matches!(c.action, GameAction::CastPreparedCopy { source } if source == plain_id),
+        );
+        assert!(
+            !has_plain_cast,
+            "must not offer CastPreparedCopy for unprepared creatures"
+        );
+    }
 
     #[test]
     fn target_selection_uses_current_slot_legality() {
