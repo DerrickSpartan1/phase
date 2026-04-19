@@ -131,17 +131,32 @@ jobs:
           # Content-addressed copy: immutable, year-long cache. Each WASM
           # bundle is baked with its own hashed URL, so old browser caches
           # keep resolving the old hash even after this deploy publishes a new one.
-          npx wrangler r2 object put "phase-rs-data/staging/$CARD_DATA_FILENAME" --file "client/public/$CARD_DATA_FILENAME" --content-type application/json --cache-control "public, max-age=31536000, immutable"
+          npx wrangler r2 object put "phase-rs-data/staging/$CARD_DATA_FILENAME" --file "client/public/$CARD_DATA_FILENAME" --remote --content-type application/json --cache-control "public, max-age=31536000, immutable"
           # Legacy unhashed copy: kept for local dev parity and any consumer that
           # still resolves `/card-data.json` directly. Short cache.
-          npx wrangler r2 object put phase-rs-data/staging/card-data.json --file client/public/card-data.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          npx wrangler r2 object put phase-rs-data/staging/coverage-data.json --file client/public/coverage-data.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          npx wrangler r2 object put phase-rs-data/staging/coverage-summary.json --file client/public/coverage-summary.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          npx wrangler r2 object put phase-rs-data/staging/scryfall-data.json --file client/public/scryfall-data.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          npx wrangler r2 object put phase-rs-data/staging/card-data.json --file client/public/card-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          npx wrangler r2 object put phase-rs-data/staging/coverage-data.json --file client/public/coverage-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          npx wrangler r2 object put phase-rs-data/staging/coverage-summary.json --file client/public/coverage-summary.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          npx wrangler r2 object put phase-rs-data/staging/scryfall-data.json --file client/public/scryfall-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           for f in data/badges/*.json; do
             name=$(basename "$f")
-            npx wrangler r2 object put "phase-rs-data/badges/$name" --file "$f" --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+            npx wrangler r2 object put "phase-rs-data/badges/$name" --file "$f" --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           done
+
+      - name: Verify R2 uploads landed
+        # Wrangler v4 silently writes to a local emulator unless --remote is
+        # passed. This step fails the deploy if the hashed card-data URL the
+        # WASM bundle will be pinned to is not actually fetchable from R2.
+        env:
+          CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
+        run: |
+          URL="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/$CARD_DATA_FILENAME"
+          status=$(curl -s -o /dev/null -w "%{http_code}" "$URL")
+          if [ "$status" != "200" ]; then
+            echo "::error::R2 upload verification failed: $URL returned $status"
+            exit 1
+          fi
+          echo "Verified $URL ($status)"
 
       - name: Build WASM
         run: ./scripts/build-wasm.sh release

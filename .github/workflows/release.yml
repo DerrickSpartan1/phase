@@ -115,12 +115,12 @@ jobs:
         run: |
           jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' client/public/coverage-data.json > client/public/coverage-summary.json
           # Immutable, year-long cache for the content-addressed copy.
-          npx wrangler r2 object put "phase-rs-data/$CARD_DATA_FILENAME" --file "client/public/$CARD_DATA_FILENAME" --content-type application/json --cache-control "public, max-age=31536000, immutable"
+          npx wrangler r2 object put "phase-rs-data/$CARD_DATA_FILENAME" --file "client/public/$CARD_DATA_FILENAME" --remote --content-type application/json --cache-control "public, max-age=31536000, immutable"
           # Legacy unhashed copy for any consumer still resolving /card-data.json.
-          npx wrangler r2 object put phase-rs-data/card-data.json --file client/public/card-data.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          npx wrangler r2 object put phase-rs-data/coverage-data.json --file client/public/coverage-data.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          npx wrangler r2 object put phase-rs-data/coverage-summary.json --file client/public/coverage-summary.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          npx wrangler r2 object put phase-rs-data/scryfall-data.json --file client/public/scryfall-data.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          npx wrangler r2 object put phase-rs-data/card-data.json --file client/public/card-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          npx wrangler r2 object put phase-rs-data/coverage-data.json --file client/public/coverage-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          npx wrangler r2 object put phase-rs-data/coverage-summary.json --file client/public/coverage-summary.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          npx wrangler r2 object put phase-rs-data/scryfall-data.json --file client/public/scryfall-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
       - name: Remove large data files from dist (served from R2)
         # Hex glob keeps `card-data-meta.json` (consumed by `useCardDataMeta`).
         run: |
