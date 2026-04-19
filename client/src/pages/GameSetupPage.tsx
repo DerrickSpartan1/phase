@@ -4,7 +4,7 @@ import { useNavigate, useSearchParams } from "react-router";
 import type { FormatConfig, GameFormat, MatchType } from "../adapter/types";
 import { useAudioContext } from "../audio/useAudioContext";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
-import { AiDifficultyDropdown } from "../components/menu/AiDifficultyDropdown";
+import { AiOpponentConfig } from "../components/menu/AiOpponentConfig";
 import { MenuParticles } from "../components/menu/MenuParticles";
 import { MenuPanel } from "../components/menu/MenuShell";
 import { MyDecks, StatusBadge } from "../components/menu/MyDecks";
@@ -16,7 +16,7 @@ import {
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import { ACTIVE_DECK_KEY, touchDeckPlayed } from "../constants/storage";
 import { useCardImage } from "../hooks/useCardImage";
-import { FORMAT_DEFAULTS, useMultiplayerStore } from "../stores/multiplayerStore";
+import { FORMAT_DEFAULTS } from "../stores/multiplayerStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { saveActiveGame, useGameStore } from "../stores/gameStore";
 import type { DeckCompatibilityResult } from "../services/deckCompatibility";
@@ -68,15 +68,12 @@ export function GameSetupPage() {
 
   // Preferences (persisted)
   const difficulty = usePreferencesStore((s) => s.aiDifficulty);
-  const setDifficulty = usePreferencesStore((s) => s.setAiDifficulty);
   const lastFormat = usePreferencesStore((s) => s.lastFormat);
   const lastMatchType = usePreferencesStore((s) => s.lastMatchType);
   const lastPlayerCount = usePreferencesStore((s) => s.lastPlayerCount);
   const setLastFormat = usePreferencesStore((s) => s.setLastFormat);
   const setLastMatchType = usePreferencesStore((s) => s.setLastMatchType);
   const setLastPlayerCount = usePreferencesStore((s) => s.setLastPlayerCount);
-
-  const setFormatConfigStore = useMultiplayerStore((s) => s.setFormatConfig);
 
   // Restore last session on mount
   useEffect(() => {
@@ -126,15 +123,6 @@ export function GameSetupPage() {
     navigate(
       `/game/${gameId}?mode=ai&difficulty=${difficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${firstParam}`,
     );
-  };
-
-  const handlePlayOnline = () => {
-    if (formatConfig) setFormatConfigStore(formatConfig);
-    navigate("/multiplayer");
-  };
-
-  const handlePlayP2P = () => {
-    navigate("/multiplayer");
   };
 
   // Sidebar deck preview
@@ -359,44 +347,25 @@ export function GameSetupPage() {
               {/* Separator */}
               <div className="border-t border-white/8" />
 
-              {/* Play actions */}
-              <div className="flex flex-col gap-2">
-                <div className="flex overflow-hidden rounded-[14px] border border-indigo-300/18 shadow-[0_10px_28px_rgba(49,46,129,0.24)]">
-                  <button
-                    onClick={handleStartAI}
-                    disabled={cannotStartAi}
-                    className={`min-h-10 flex-1 px-4 text-sm font-medium transition-colors ${
-                      cannotStartAi
-                        ? "cursor-not-allowed bg-white/5 text-white/30"
-                        : "bg-indigo-400/10 text-indigo-100 hover:bg-indigo-400/14"
-                    }`}
-                  >
-                    Play vs AI{playerCount > 2 ? ` (${playerCount - 1} opp.)` : ""}
-                  </button>
-                  <div className="border-l border-indigo-300/18">
-                    <AiDifficultyDropdown
-                      difficulty={difficulty}
-                      onChange={setDifficulty}
-                      compact
-                      className="h-full"
-                    />
-                  </div>
-                </div>
+              {/* AI opponent configuration */}
+              <AiOpponentConfig format={formatConfig?.format} />
 
-                <button
-                  onClick={handlePlayOnline}
-                  className={menuButtonClass({ tone: "emerald", size: "sm" })}
-                >
-                  Play Online
-                </button>
+              {/* Separator */}
+              <div className="border-t border-white/8" />
 
-                <button
-                  onClick={handlePlayP2P}
-                  className={menuButtonClass({ tone: "cyan", size: "sm" })}
-                >
-                  Play P2P
-                </button>
-              </div>
+              {/* Primary CTA — single dominant action on this page */}
+              <button
+                onClick={handleStartAI}
+                disabled={cannotStartAi}
+                className={menuButtonClass({
+                  tone: "emerald",
+                  size: "lg",
+                  disabled: cannotStartAi,
+                  className: "w-full",
+                })}
+              >
+                Start Match{playerCount > 2 ? ` (${playerCount - 1} opp.)` : ""}
+              </button>
             </MenuPanel>
           </div>
         </div>

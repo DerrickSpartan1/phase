@@ -8,8 +8,12 @@ import { WebSocketAdapter } from "../adapter/ws-adapter";
 import { audioManager } from "../audio/AudioManager";
 import type { DeckData, WsAdapterEvent } from "../adapter/ws-adapter";
 import { STORAGE_KEY_PREFIX, loadActiveDeck, loadSavedDeck } from "../constants/storage";
-import { getCachedFeed, listSubscriptions } from "../services/feedService";
+import { getCachedFeed, feedDeckToParsedDeck, listSubscriptions } from "../services/feedService";
 import type { FeedDeck } from "../types/feed";
+import { evaluateDeckCompatibility } from "../services/deckCompatibility";
+import { classifyDeck } from "../services/engineRuntime";
+import { AI_DECK_RANDOM, usePreferencesStore } from "../stores/preferencesStore";
+import type { AiArchetypeFilter } from "../stores/preferencesStore";
 import { createGameLoopController } from "../game/controllers/gameLoopController";
 import { dispatchAction, processRemoteUpdate } from "../game/dispatch";
 import { hostRoom, joinRoom } from "../network/connection";
@@ -47,46 +51,102 @@ function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
   return { main_deck: names, sideboard: sbNames, commander: deck.commander ?? [] };
 }
 
-function pickOpponentDeck(playerDeck: ParsedDeck, formatConfig?: FormatConfig): Array<{ name: string; count: number }> {
-  // 1. Try format-specific feeds first (e.g., mtggoldfish-standard for Standard)
-  if (formatConfig) {
-    const formatKey = formatConfig.format.toLowerCase();
-    const formatDecks: FeedDeck[] = [];
-    for (const sub of listSubscriptions()) {
-      const feed = getCachedFeed(sub.sourceId);
-      if (feed?.format === formatKey) {
-        formatDecks.push(...feed.decks);
-      }
-    }
-    if (formatDecks.length > 0) {
-      const playerNames = new Set(playerDeck.main.map((e) => e.name));
-      const candidates = formatDecks.filter(
-        (d) => !d.main.every((c) => playerNames.has(c.name)),
-      );
-      const pick = candidates.length > 0
-        ? candidates[Math.floor(Math.random() * candidates.length)]
-        : formatDecks[Math.floor(Math.random() * formatDecks.length)];
-      return pick.main;
+function collectFormatFeedDecks(formatConfig?: FormatConfig): FeedDeck[] {
+  if (!formatConfig) return [];
+  const formatKey = formatConfig.format.toLowerCase();
+  const formatDecks: FeedDeck[] = [];
+  for (const sub of listSubscriptions()) {
+    const feed = getCachedFeed(sub.sourceId);
+    if (feed?.format === formatKey) {
+      formatDecks.push(...feed.decks);
     }
   }
+  return formatDecks;
+}
 
-  // 2. Fall back to starter-decks feed
+async function applyAiFilters(
+  decks: FeedDeck[],
+  archetypeFilter: AiArchetypeFilter,
+  coverageFloor: number,
+): Promise<FeedDeck[]> {
+  if (archetypeFilter === "Any" && coverageFloor <= 50) return decks;
+  const keep: FeedDeck[] = [];
+  for (const d of decks) {
+    if (coverageFloor > 50) {
+      try {
+        const compat = await evaluateDeckCompatibility(feedDeckToParsedDeck(d));
+        const cov = compat.coverage;
+        if (cov && cov.total_unique > 0) {
+          const pct = Math.round((cov.supported_unique / cov.total_unique) * 100);
+          if (pct < coverageFloor) continue;
+        }
+      } catch {
+        // If coverage can't be computed, don't exclude the deck.
+      }
+    }
+    if (archetypeFilter !== "Any") {
+      const names: string[] = [];
+      for (const entry of d.main) {
+        for (let i = 0; i < entry.count; i++) names.push(entry.name);
+      }
+      try {
+        const profile = await classifyDeck(names);
+        if (profile.archetype !== archetypeFilter) continue;
+      } catch {
+        continue;
+      }
+    }
+    keep.push(d);
+  }
+  return keep;
+}
+
+async function pickOpponentDeck(
+  playerDeck: ParsedDeck,
+  formatConfig?: FormatConfig,
+): Promise<Array<{ name: string; count: number }>> {
+  const { aiDeckName, aiArchetypeFilter, aiCoverageFloor } = usePreferencesStore.getState();
+
+  // 1. Honor an explicit named selection — bypass all filters and feed fallbacks.
+  if (aiDeckName !== AI_DECK_RANDOM) {
+    const pool = collectFormatFeedDecks(formatConfig);
+    const starter = getCachedFeed("starter-decks")?.decks ?? [];
+    const match =
+      pool.find((d) => d.name === aiDeckName) ?? starter.find((d) => d.name === aiDeckName);
+    if (match) return match.main;
+    // Selection no longer exists — fall through to Random.
+  }
+
+  // 2. Format-specific feeds, filtered by archetype + coverage preferences.
+  const formatDecks = collectFormatFeedDecks(formatConfig);
+  if (formatDecks.length > 0) {
+    const filtered = await applyAiFilters(formatDecks, aiArchetypeFilter, aiCoverageFloor);
+    const pool = filtered.length > 0 ? filtered : formatDecks;
+    const playerNames = new Set(playerDeck.main.map((e) => e.name));
+    const candidates = pool.filter((d) => !d.main.every((c) => playerNames.has(c.name)));
+    const pick = candidates.length > 0
+      ? candidates[Math.floor(Math.random() * candidates.length)]
+      : pool[Math.floor(Math.random() * pool.length)];
+    return pick.main;
+  }
+
+  // 3. Fall back to starter-decks feed.
   const feed = getCachedFeed("starter-decks");
   const feedDecks = feed?.decks ?? [];
 
   if (feedDecks.length > 0) {
+    const filtered = await applyAiFilters(feedDecks, aiArchetypeFilter, aiCoverageFloor);
+    const pool = filtered.length > 0 ? filtered : feedDecks;
     const playerNames = new Set(playerDeck.main.map((e) => e.name));
-    const candidates = feedDecks.filter(
-      (d) => !d.main.every((c) => playerNames.has(c.name)),
-    );
+    const candidates = pool.filter((d) => !d.main.every((c) => playerNames.has(c.name)));
     const pick = candidates.length > 0
       ? candidates[Math.floor(Math.random() * candidates.length)]
-      : feedDecks[Math.floor(Math.random() * feedDecks.length)];
+      : pool[Math.floor(Math.random() * pool.length)];
     return pick.main;
   }
 
-  // 3. Fallback: pick a random 60-card deck from localStorage
-  const candidates: ParsedDeck[] = [];
+  // 4. Local deck storage fallback (no AI filter applied — no metadata available).
+  const savedCandidates: ParsedDeck[] = [];
   for (let i = 0; i < localStorage.length; i++) {
     const key = localStorage.key(i);
     if (key?.startsWith(STORAGE_KEY_PREFIX)) {
@@ -95,24 +155,24 @@ function pickOpponentDeck(playerDeck: ParsedDeck, formatConfig?: FormatConfig): 
       if (!deck) continue;
       const cardCount = deck.main.reduce((s, e) => s + e.count, 0);
       if (cardCount >= 40 && cardCount <= 80 && !deck.commander?.length) {
-        candidates.push(deck);
+        savedCandidates.push(deck);
       }
     }
   }
-  if (candidates.length > 0) {
-    return candidates[Math.floor(Math.random() * candidates.length)].main;
+  if (savedCandidates.length > 0) {
+    return savedCandidates[Math.floor(Math.random() * savedCandidates.length)].main;
   }
 
-  // 4. Last resort: mirror the player's deck
+  // 5. Last resort: mirror the player's deck.
   return playerDeck.main;
 }
 
 /** Build a DeckList (name-only) for the WASM engine to resolve. */
-function buildDeckList(deck: ParsedDeck, formatConfig?: FormatConfig): {
+async function buildDeckList(deck: ParsedDeck, formatConfig?: FormatConfig): Promise<{
   player: { main_deck: string[]; sideboard: string[]; commander: string[] };
   opponent: { main_deck: string[]; sideboard: string[]; commander: string[] };
   ai_decks: Array<{ main_deck: string[]; sideboard: string[]; commander: string[] }>;
-} {
+}> {
   const playerNames: string[] = [];
   for (const entry of deck.main) {
     for (let i = 0; i < entry.count; i++) {
@@ -125,7 +185,7 @@ function buildDeckList(deck: ParsedDeck, formatConfig?: FormatConfig): {
       playerSideboard.push(entry.name);
     }
   }
-  const opponentCards = pickOpponentDeck(deck, formatConfig);
+  const opponentCards = await pickOpponentDeck(deck, formatConfig);
   const opponentNames: string[] = [];
   for (const entry of opponentCards) {
     for (let i = 0; i < entry.count; i++) {
@@ -277,8 +337,6 @@ export function GameProvider({
         return;
       }
 
-      const deckList = buildDeckList(parsedDeck, formatConfig);
-
       const wireP2PEvents = (adapter: P2PHostAdapter | P2PGuestAdapter) => {
         p2pUnsubscribe = adapter.onEvent((event) => {
           if (event.type === "playerIdentity") {
@@ -299,6 +357,8 @@ export function GameProvider({
 
       const setupP2P = async () => {
         const effectivePlayerCount = playerCount ?? 2;
+        const deckList = await buildDeckList(parsedDeck, formatConfig);
+        signal.throwIfAborted();
 
         // Resources that may need undoing on abort/error. `broker` is
         // closed unconditionally when set; `serverGameCode` gates the
@@ -697,7 +757,7 @@ export function GameProvider({
             onNoDeckRef.current?.();
             return;
           }
-          const deckList = buildDeckList(parsedDeck, formatConfig);
+          const deckList = await buildDeckList(parsedDeck, formatConfig);
           try {
             await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
             if (cancelled) return;
@@ -722,7 +782,7 @@ export function GameProvider({
         return;
       }
 
-      const deckList = buildDeckList(parsedDeck, formatConfig);
+      const deckList = await buildDeckList(parsedDeck, formatConfig);
       try {
         await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
         if (cancelled) return;

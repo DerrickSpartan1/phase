@@ -23,6 +23,7 @@ use engine::types::{GameAction, GameState, PlayerId};
 use engine::game::deck_loading::PlayerDeckPayload;
 use engine::game::{resolve_player_deck_list, PlayerDeckList};
 use engine::starter_decks;
+use phase_ai::deck_profile::{ArchetypeClassification, DeckArchetype, DeckProfile};
 use seat_reducer::types::{DeckChoice, DeckResolver, ReducerCtx, SeatMutation, SeatState};
 
 /// Result of `get_legal_actions_js` — bundles actions with the engine's auto-pass
@@ -221,6 +222,74 @@ pub fn get_card_parse_details(name: &str) -> JsValue {
             None => JsValue::NULL,
         }
     })
+}
+
+/// Classify a deck's archetype (Aggro / Midrange / Control / Combo / Ramp) using
+/// `phase_ai::DeckProfile::analyze`. The engine is the single authority for archetype
+/// classification — the frontend must not compute this from card lists itself.
+///
+/// Input: a flat list of card names (duplicates allowed — `resolve_player_deck_list`
+/// groups them into DeckEntry counts). Unresolvable names are silently skipped.
+/// Output: `{ archetype, confidence: "Pure" | "Hybrid", secondary? }`.
+#[wasm_bindgen]
+pub fn classify_deck_js(names_js: JsValue) -> Result<JsValue, JsValue> {
+    let names: Vec<String> = serde_wasm_bindgen::from_value(names_js)
+        .map_err(|e| JsValue::from_str(&format!("Invalid card name list: {e}")))?;
+
+    CARD_DB.with(|cell| {
+        let db = cell.borrow();
+        let Some(db) = db.as_ref() else {
+            return Err(JsValue::from_str(
+                "Card database not loaded. Call load_card_database first.",
+            ));
+        };
+        let list = PlayerDeckList {
+            main_deck: names,
+            sideboard: Vec::new(),
+            commander: Vec::new(),
+        };
+        let payload = resolve_player_deck_list(db, &list);
+        let profile = DeckProfile::analyze(&payload.main_deck);
+        Ok(to_js(&DeckProfileResult::from(&profile)))
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeckProfileResult {
+    archetype: &'static str,
+    confidence: &'static str,
+    /// Present only when `confidence == "Hybrid"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secondary: Option<&'static str>,
+}
+
+impl DeckProfileResult {
+    fn from(profile: &DeckProfile) -> Self {
+        let archetype = archetype_name(profile.archetype);
+        match &profile.classification {
+            ArchetypeClassification::Pure(_) => Self {
+                archetype,
+                confidence: "Pure",
+                secondary: None,
+            },
+            ArchetypeClassification::Hybrid { secondary, .. } => Self {
+                archetype,
+                confidence: "Hybrid",
+                secondary: Some(archetype_name(*secondary)),
+            },
+        }
+    }
+}
+
+fn archetype_name(a: DeckArchetype) -> &'static str {
+    match a {
+        DeckArchetype::Aggro => "Aggro",
+        DeckArchetype::Midrange => "Midrange",
+        DeckArchetype::Control => "Control",
+        DeckArchetype::Combo => "Combo",
+        DeckArchetype::Ramp => "Ramp",
+    }
 }
 
 /// Evaluate deck compatibility and format legality using the loaded card database.

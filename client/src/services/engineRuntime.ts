@@ -67,6 +67,24 @@ export async function evaluateDeckCompatibilityJs(request: unknown) {
   return engine.evaluate_deck_compatibility_js(request);
 }
 
+/** Archetype classification from phase-ai. The engine is the single authority —
+ *  never compute archetype client-side. */
+export type DeckArchetype = "Aggro" | "Midrange" | "Control" | "Combo" | "Ramp";
+
+export interface DeckProfileResult {
+  archetype: DeckArchetype;
+  confidence: "Pure" | "Hybrid";
+  /** Present only when `confidence === "Hybrid"`. */
+  secondary?: DeckArchetype;
+}
+
+/** Classify a deck's archetype from a flat list of card names. */
+export async function classifyDeck(cardNames: string[]): Promise<DeckProfileResult> {
+  await ensureCardDatabase();
+  const engine = await loadEngineModule();
+  return engine.classify_deck_js(cardNames) as DeckProfileResult;
+}
+
 /// CR 903.3: Whether the named card can be a commander
 /// (legendary creature, legendary background, or "can be your commander").
 export async function isCardCommanderEligible(name: string): Promise<boolean> {

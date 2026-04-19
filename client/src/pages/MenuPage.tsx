@@ -127,8 +127,8 @@ export function MenuPage() {
     actions.push(
       {
         key: "setup",
-        title: hasSavedGame ? "Start New Match" : "Start Match",
-        description: "Choose format, rules, and deck — or jump straight in with your last settings.",
+        title: hasSavedGame ? "New AI Match" : "Play vs AI",
+        description: "Play a solo match against an AI opponent — choose format, deck, archetype, and difficulty.",
         accent: "arcane" as const,
         onClick: () => navigate("/setup"),
         icon: <SigilIcon />,

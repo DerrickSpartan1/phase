@@ -5,6 +5,14 @@ import type { GameFormat, MatchType, Phase } from "../adapter/types";
 import type { AnimationSpeed, CombatPacing, VfxQuality } from "../animation/types";
 import type { AIDifficulty } from "../constants/ai";
 import { DEFAULT_AI_DIFFICULTY } from "../constants/ai";
+import type { DeckArchetype } from "../services/engineRuntime";
+
+/** Literal sentinel for "any deck" in AI deck selection. Mirrors `DeckChoice::Random`
+ *  naming so the preference value is self-describing without a nullable field. */
+export const AI_DECK_RANDOM = "Random" as const;
+export type AiDeckSelection = typeof AI_DECK_RANDOM | string;
+export type AiArchetypeFilter = "Any" | DeckArchetype;
+export const DEFAULT_AI_COVERAGE_FLOOR = 90;
 
 export type CardSizePreference = "small" | "medium" | "large";
 export type HudLayout = "inline" | "floating";
@@ -41,6 +49,9 @@ interface PreferencesState {
   tapRotation: TapRotation;
   showKeywordStrip: boolean;
   aiDifficulty: AIDifficulty;
+  aiDeckName: AiDeckSelection;
+  aiArchetypeFilter: AiArchetypeFilter;
+  aiCoverageFloor: number;
   lastFormat: GameFormat | null;
   lastMatchType: MatchType;
   lastPlayerCount: number;
@@ -70,6 +81,9 @@ interface PreferencesActions {
   setTapRotation: (rotation: TapRotation) => void;
   setShowKeywordStrip: (show: boolean) => void;
   setAiDifficulty: (difficulty: AIDifficulty) => void;
+  setAiDeckName: (name: AiDeckSelection) => void;
+  setAiArchetypeFilter: (filter: AiArchetypeFilter) => void;
+  setAiCoverageFloor: (floor: number) => void;
   setLastFormat: (format: GameFormat) => void;
   setLastMatchType: (matchType: MatchType) => void;
   setLastPlayerCount: (count: number) => void;
@@ -100,6 +114,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       tapRotation: "mtga",
       showKeywordStrip: true,
       aiDifficulty: DEFAULT_AI_DIFFICULTY,
+      aiDeckName: AI_DECK_RANDOM,
+      aiArchetypeFilter: "Any",
+      aiCoverageFloor: DEFAULT_AI_COVERAGE_FLOOR,
       lastFormat: null,
       lastMatchType: "Bo1",
       lastPlayerCount: 2,
@@ -135,6 +152,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setTapRotation: (rotation) => set({ tapRotation: rotation }),
       setShowKeywordStrip: (show) => set({ showKeywordStrip: show }),
       setAiDifficulty: (difficulty) => set({ aiDifficulty: difficulty }),
+      setAiDeckName: (name) => set({ aiDeckName: name }),
+      setAiArchetypeFilter: (filter) => set({ aiArchetypeFilter: filter }),
+      setAiCoverageFloor: (floor) => set({ aiCoverageFloor: floor }),
       setLastFormat: (format) => set({ lastFormat: format }),
       setLastMatchType: (matchType) => set({ lastMatchType: matchType }),
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),

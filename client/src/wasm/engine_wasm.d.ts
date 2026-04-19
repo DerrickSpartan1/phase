@@ -9,6 +9,17 @@
 export function apply_seat_mutation(state_json: string, mutation_json: string): any;
 
 /**
+ * Classify a deck's archetype (Aggro / Midrange / Control / Combo / Ramp) using
+ * `phase_ai::DeckProfile::analyze`. The engine is the single authority for archetype
+ * classification — the frontend must not compute this from card lists itself.
+ *
+ * Input: a flat list of card names (duplicates allowed — `resolve_player_deck_list`
+ * groups them into DeckEntry counts). Unresolvable names are silently skipped.
+ * Output: `{ archetype, confidence: "Pure" | "Hybrid", secondary? }`.
+ */
+export function classify_deck_js(names_js: any): any;
+
+/**
  * Clear the game state without dropping the WASM instance or card database.
  *
  * Used by the singleton adapter to reset between game sessions. Any in-flight
@@ -208,6 +219,7 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly apply_seat_mutation: (a: number, b: number, c: number, d: number) => [number, number, number];
+    readonly classify_deck_js: (a: any) => [number, number, number];
     readonly evaluate_deck_compatibility_js: (a: any) => [number, number, number];
     readonly export_game_state_json: () => [number, number, number, number];
     readonly get_ai_action: (a: number, b: number, c: number) => [number, number, number];
