@@ -602,7 +602,7 @@ fn raise_cost_from_exile_does_not_tax_hand_cast() {
 
 use engine::types::ability::{CardPlayMode, StaticDefinition, TypeFilter};
 use engine::types::card_type::CoreType;
-use engine::types::statics::StaticMode;
+use engine::types::statics::{CastFrequency, StaticMode};
 
 /// CR 604.2 + CR 305.1: A permanent with GraveyardCastPermission { play_mode: Play }
 /// allows playing lands from the graveyard.
@@ -616,7 +616,7 @@ fn play_land_from_graveyard_with_permission() {
         .add_creature(P0, "Crucible of Worlds", 0, 0)
         .with_static_definition(
             StaticDefinition::new(StaticMode::GraveyardCastPermission {
-                once_per_turn: false,
+                frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
             })
             .affected(TargetFilter::Typed(
@@ -681,7 +681,7 @@ fn play_land_from_graveyard_respects_land_drop_limit() {
         .add_creature(P0, "Crucible of Worlds", 0, 0)
         .with_static_definition(
             StaticDefinition::new(StaticMode::GraveyardCastPermission {
-                once_per_turn: false,
+                frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
             })
             .affected(TargetFilter::Typed(

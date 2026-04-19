@@ -1641,12 +1641,26 @@ pub enum CastingVariant {
     /// whenever leaving the stack for any reason), exiled instead of going anywhere else.
     Flashback,
     /// CR 601.2a: Cast from graveyard via a static permission source (e.g. Lurrus).
-    /// Stores the granting permanent's ObjectId for once-per-turn tracking.
+    /// Stores the granting permanent's ObjectId for per-turn tracking.
     /// CR 400.7: Zone change creates new ObjectId, naturally resetting permission.
     GraveyardPermission {
         source: ObjectId,
-        /// When true, casting consumes this source's once-per-turn permission.
-        once_per_turn: bool,
+        /// CR 601.2a: When `OncePerTurn`, casting consumes this source's slot in
+        /// `graveyard_cast_permissions_used`. `Unlimited` permissions (Conduit)
+        /// skip tracking entirely.
+        frequency: super::statics::CastFrequency,
+    },
+    /// CR 601.2b + CR 118.9a: Cast from hand via a `CastFromHandFree` static
+    /// permission source (Zaffai). Stores the granting permanent's ObjectId for
+    /// per-turn tracking. Omniscience's unconditional silent path does not use
+    /// this variant — it short-circuits the mana cost to NoCost while leaving
+    /// `casting_variant = Normal`.
+    /// CR 400.7: Zone change creates new ObjectId, naturally resetting permission.
+    HandPermission {
+        source: ObjectId,
+        /// CR 601.2b: When `OncePerTurn`, casting consumes this source's slot in
+        /// `hand_cast_free_permissions_used`.
+        frequency: super::statics::CastFrequency,
     },
     /// CR 702.190a: Cast from graveyard via Sneak alt-cost. Legal only during
     /// the declare-blockers step. The returned unblocked attacker is part of
@@ -1921,6 +1935,12 @@ pub struct GameState {
     /// CR 400.7: Zone change creates new ObjectId, naturally resetting.
     #[serde(default)]
     pub graveyard_cast_permissions_used: HashSet<ObjectId>,
+    /// CR 601.2b: Tracks which `CastFromHandFree` once-per-turn permission sources
+    /// have been used this turn (Zaffai and the Tempests). Keyed by the granting
+    /// permanent's ObjectId. Unlimited sources (Omniscience) never populate this.
+    /// CR 400.7: Zone change creates new ObjectId, naturally resetting.
+    #[serde(default)]
+    pub hand_cast_free_permissions_used: HashSet<ObjectId>,
     #[serde(default)]
     pub spells_cast_this_game: HashMap<PlayerId, u32>,
     /// Per-player spell cast history this turn.
@@ -2277,6 +2297,7 @@ impl GameState {
             activated_abilities_this_turn: HashMap::new(),
             activated_abilities_this_game: HashMap::new(),
             graveyard_cast_permissions_used: HashSet::new(),
+            hand_cast_free_permissions_used: HashSet::new(),
             spells_cast_this_game: HashMap::new(),
             spells_cast_this_turn_by_player: HashMap::new(),
             players_who_searched_library_this_turn: HashSet::new(),
@@ -2438,6 +2459,7 @@ impl PartialEq for GameState {
             && self.activated_abilities_this_turn == other.activated_abilities_this_turn
             && self.activated_abilities_this_game == other.activated_abilities_this_game
             && self.graveyard_cast_permissions_used == other.graveyard_cast_permissions_used
+            && self.hand_cast_free_permissions_used == other.hand_cast_free_permissions_used
             && self.spells_cast_this_game == other.spells_cast_this_game
             && self.spells_cast_this_turn_by_player == other.spells_cast_this_turn_by_player
             && self.players_who_searched_library_this_turn

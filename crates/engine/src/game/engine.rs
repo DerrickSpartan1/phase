@@ -2023,14 +2023,14 @@ pub(super) fn begin_pending_trigger_target_selection(
 /// record the source as used to prevent a second play/cast from the same source this turn.
 fn record_graveyard_play_permission(state: &mut GameState, source: Option<ObjectId>) {
     if let Some(source_id) = source {
-        // Check if the source has a once_per_turn permission
+        // CR 604.2: Only OncePerTurn permissions need tracking; Unlimited sources skip.
         if let Some(obj) = state.objects.get(&source_id) {
             let is_once_per_turn =
                 super::functioning_abilities::active_static_definitions(state, obj).any(|s| {
                     matches!(
                         s.mode,
                         StaticMode::GraveyardCastPermission {
-                            once_per_turn: true,
+                            frequency: crate::types::statics::CastFrequency::OncePerTurn,
                             ..
                         }
                     )

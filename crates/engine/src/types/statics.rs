@@ -182,6 +182,52 @@ impl fmt::Display for ActivationExemption {
     }
 }
 
+/// CR 601.2a + CR 601.2b: How often a casting-permission static may be used per turn.
+///
+/// Replaces the older `once_per_turn: bool` flag on `GraveyardCastPermission` and
+/// parameterizes `CastFromHandFree` so every "cast from zone X for free / via alt
+/// cost" permission shares a single frequency axis.
+///
+/// - `Unlimited` — any number of casts per turn from this source (Conduit of Worlds,
+///   Crucible of Worlds, Omniscience).
+/// - `OncePerTurn` — at most one cast per turn from this source, tracked by the
+///   source's `ObjectId` in the corresponding per-turn used-set. CR 400.7: zone
+///   change creates a new `ObjectId`, so the permission naturally resets when the
+///   source leaves and returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum CastFrequency {
+    /// No per-turn limit — Omniscience, Conduit of Worlds, Crucible of Worlds.
+    #[default]
+    Unlimited,
+    /// At most one cast per turn from this source — Lurrus, Karador, Zaffai.
+    OncePerTurn,
+}
+
+impl fmt::Display for CastFrequency {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CastFrequency::Unlimited => write!(f, "unlimited"),
+            CastFrequency::OncePerTurn => write!(f, "once_per_turn"),
+        }
+    }
+}
+
+impl FromStr for CastFrequency {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "unlimited" => Ok(CastFrequency::Unlimited),
+            "once_per_turn" => Ok(CastFrequency::OncePerTurn),
+            // CR 601.2a: Legacy bool-encoded wire format from pre-CastFrequency
+            // migration — "true" meant once_per_turn, "false" meant unlimited.
+            "true" => Ok(CastFrequency::OncePerTurn),
+            "false" => Ok(CastFrequency::Unlimited),
+            other => Err(format!("unknown CastFrequency: {other}")),
+        }
+    }
+}
+
 /// All static ability modes from Forge's static ability registry.
 /// Matched case-sensitively against Forge mode strings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -286,14 +332,19 @@ pub enum StaticMode {
     /// CR 604.2 + CR 305.1: Static ability granting permission to play/cast
     /// matching cards from owner's graveyard.
     GraveyardCastPermission {
-        /// true = "once during each of your turns" (Lurrus, Karador)
-        once_per_turn: bool,
+        /// CR 601.2a: Per-turn cast frequency. `OncePerTurn` = "once during each of
+        /// your turns" (Lurrus, Karador). `Unlimited` = no per-turn cap (Conduit).
+        frequency: CastFrequency,
         /// Play (lands+spells) vs Cast (spells only)
         play_mode: CardPlayMode,
     },
-    /// CR 601.2b + CR 118.9a: Static ability granting permission to cast
-    /// matching spells from hand without paying their mana costs (Omniscience).
-    CastFromHandFree,
+    /// CR 601.2b + CR 118.9a: Static ability granting permission to cast matching
+    /// spells from hand without paying their mana costs. `Unlimited` = Omniscience,
+    /// Tamiyo emblem. `OncePerTurn` = Zaffai and the Tempests.
+    CastFromHandFree {
+        /// CR 601.2b: Per-turn cast frequency.
+        frequency: CastFrequency,
+    },
     /// CR 101.2: This spell/permanent can't be countered.
     CantBeCountered,
     /// CR 101.2 + CR 707.10: This spell can't be copied by spells or abilities.
@@ -481,11 +532,14 @@ impl Hash for StaticMode {
             StaticMode::AdditionalLandDrop { count } => count.hash(state),
             StaticMode::Other(s) => s.hash(state),
             StaticMode::GraveyardCastPermission {
-                once_per_turn,
+                frequency,
                 play_mode,
             } => {
-                once_per_turn.hash(state);
+                frequency.hash(state);
                 play_mode.hash(state);
+            }
+            StaticMode::CastFromHandFree { frequency } => {
+                frequency.hash(state);
             }
             StaticMode::SkipStep { step } => step.hash(state),
             // Data-carrying variants with non-Hash fields: discriminant only.
@@ -539,10 +593,12 @@ impl fmt::Display for StaticMode {
             StaticMode::Panharmonicon => write!(f, "Panharmonicon"),
             StaticMode::IgnoreHexproof => write!(f, "IgnoreHexproof"),
             StaticMode::GraveyardCastPermission {
-                once_per_turn,
+                frequency,
                 play_mode,
-            } => write!(f, "GraveyardCastPermission({play_mode},{once_per_turn})"),
-            StaticMode::CastFromHandFree => write!(f, "CastFromHandFree"),
+            } => write!(f, "GraveyardCastPermission({play_mode},{frequency})"),
+            StaticMode::CastFromHandFree { frequency } => {
+                write!(f, "CastFromHandFree({frequency})")
+            }
             StaticMode::CantBeCountered => write!(f, "CantBeCountered"),
             StaticMode::CantBeCopied => write!(f, "CantBeCopied"),
             StaticMode::CantEnterBattlefieldFrom => write!(f, "CantEnterBattlefieldFrom"),
@@ -685,7 +741,7 @@ impl FromStr for StaticMode {
             "Panharmonicon" => StaticMode::Panharmonicon,
             "IgnoreHexproof" => StaticMode::IgnoreHexproof,
             "GraveyardCastPermission" => StaticMode::GraveyardCastPermission {
-                once_per_turn: true,
+                frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
             },
             s if s.starts_with("GraveyardCastPermission(") => {
@@ -693,19 +749,30 @@ impl FromStr for StaticMode {
                     .strip_prefix("GraveyardCastPermission(")
                     .and_then(|s| s.strip_suffix(')'))
                     .unwrap_or("");
-                if let Some((pm, otp)) = inner.split_once(',') {
+                if let Some((pm, freq)) = inner.split_once(',') {
                     StaticMode::GraveyardCastPermission {
                         play_mode: pm.parse().unwrap_or(CardPlayMode::Cast),
-                        once_per_turn: otp == "true",
+                        frequency: freq.parse().unwrap_or(CastFrequency::OncePerTurn),
                     }
                 } else {
                     StaticMode::GraveyardCastPermission {
-                        once_per_turn: true,
+                        frequency: CastFrequency::OncePerTurn,
                         play_mode: CardPlayMode::Cast,
                     }
                 }
             }
-            "CastFromHandFree" => StaticMode::CastFromHandFree,
+            "CastFromHandFree" => StaticMode::CastFromHandFree {
+                frequency: CastFrequency::Unlimited,
+            },
+            s if s.starts_with("CastFromHandFree(") => {
+                let freq = s
+                    .strip_prefix("CastFromHandFree(")
+                    .and_then(|s| s.strip_suffix(')'))
+                    .unwrap_or("unlimited");
+                StaticMode::CastFromHandFree {
+                    frequency: freq.parse().unwrap_or(CastFrequency::Unlimited),
+                }
+            }
             "CantBeCountered" => StaticMode::CantBeCountered,
             "CantBeCopied" => StaticMode::CantBeCopied,
             "CantEnterBattlefieldFrom" => StaticMode::CantEnterBattlefieldFrom,
@@ -976,12 +1043,19 @@ mod tests {
             StaticMode::MayPlayAdditionalLand,
             // Graveyard cast/play permissions
             StaticMode::GraveyardCastPermission {
-                once_per_turn: true,
+                frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
             },
             StaticMode::GraveyardCastPermission {
-                once_per_turn: false,
+                frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
+            },
+            // Cast-from-hand-free permissions (Omniscience; Zaffai).
+            StaticMode::CastFromHandFree {
+                frequency: CastFrequency::Unlimited,
+            },
+            StaticMode::CastFromHandFree {
+                frequency: CastFrequency::OncePerTurn,
             },
             // Casting prohibitions
             StaticMode::CantBeCast {

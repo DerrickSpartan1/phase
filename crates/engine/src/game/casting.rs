@@ -13,7 +13,7 @@ use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::{ManaCost, ManaSpellGrant, SpellMeta};
 use crate::types::player::PlayerId;
 use crate::types::statics::{
-    ActivationExemption, CastingProhibitionCondition, ProhibitionScope, StaticMode,
+    ActivationExemption, CastFrequency, CastingProhibitionCondition, ProhibitionScope, StaticMode,
 };
 use crate::types::zones::Zone;
 
@@ -467,7 +467,7 @@ fn graveyard_objects_castable_by_permission(
     };
 
     // Find all battlefield permanents controlled by player with GraveyardCastPermission
-    let sources: Vec<(ObjectId, &TargetFilter, bool)> = state
+    let sources: Vec<(ObjectId, &TargetFilter, CastFrequency)> = state
         .battlefield
         .iter()
         .filter_map(|&obj_id| {
@@ -476,18 +476,20 @@ fn graveyard_objects_castable_by_permission(
                 return None;
             }
             active_static_definitions(state, obj).find_map(|s| match s.mode {
-                StaticMode::GraveyardCastPermission { once_per_turn, .. } => s
+                StaticMode::GraveyardCastPermission { frequency, .. } => s
                     .affected
                     .as_ref()
-                    .map(|filter| (obj_id, filter, once_per_turn)),
+                    .map(|filter| (obj_id, filter, frequency)),
                 _ => None,
             })
         })
         .collect();
 
-    for (source_id, filter, once_per_turn) in &sources {
+    for (source_id, filter, frequency) in &sources {
         // CR 604.2: Skip if this source's once-per-turn permission was already used
-        if *once_per_turn && state.graveyard_cast_permissions_used.contains(source_id) {
+        if *frequency == CastFrequency::OncePerTurn
+            && state.graveyard_cast_permissions_used.contains(source_id)
+        {
             continue;
         }
         let ctx = super::filter::FilterContext::from_source_with_controller(*source_id, player);
@@ -501,26 +503,28 @@ fn graveyard_objects_castable_by_permission(
 }
 
 /// CR 601.2a: Find the first valid permission source for a specific graveyard object.
-/// Returns (source_id, once_per_turn) so the caller can track per-turn usage.
+/// Returns (source_id, frequency) so the caller can track per-turn usage.
 fn graveyard_permission_source(
     state: &GameState,
     player: PlayerId,
     object_id: ObjectId,
-) -> Option<(ObjectId, bool)> {
+) -> Option<(ObjectId, CastFrequency)> {
     state.battlefield.iter().find_map(|&src_id| {
         let obj = state.objects.get(&src_id)?;
         if obj.controller != player {
             return None;
         }
-        let (filter, once_per_turn) =
+        let (filter, frequency) =
             active_static_definitions(state, obj).find_map(|s| match s.mode {
-                StaticMode::GraveyardCastPermission { once_per_turn, .. } => {
-                    s.affected.as_ref().map(|f| (f, once_per_turn))
+                StaticMode::GraveyardCastPermission { frequency, .. } => {
+                    s.affected.as_ref().map(|f| (f, frequency))
                 }
                 _ => None,
             })?;
         // CR 604.2: Skip if this source's once-per-turn permission was already used
-        if once_per_turn && state.graveyard_cast_permissions_used.contains(&src_id) {
+        if frequency == CastFrequency::OncePerTurn
+            && state.graveyard_cast_permissions_used.contains(&src_id)
+        {
             return None;
         }
         if super::filter::matches_target_filter(
@@ -529,7 +533,7 @@ fn graveyard_permission_source(
             filter,
             &super::filter::FilterContext::from_source_with_controller(src_id, player),
         ) {
-            Some((src_id, once_per_turn))
+            Some((src_id, frequency))
         } else {
             None
         }
@@ -548,7 +552,7 @@ pub fn graveyard_lands_playable_by_permission(
         None => return results,
     };
 
-    let sources: Vec<(ObjectId, &TargetFilter, bool)> = state
+    let sources: Vec<(ObjectId, &TargetFilter, CastFrequency)> = state
         .battlefield
         .iter()
         .filter_map(|&obj_id| {
@@ -558,19 +562,21 @@ pub fn graveyard_lands_playable_by_permission(
             }
             active_static_definitions(state, obj).find_map(|s| match s.mode {
                 StaticMode::GraveyardCastPermission {
-                    once_per_turn,
+                    frequency,
                     play_mode: CardPlayMode::Play,
                 } => s
                     .affected
                     .as_ref()
-                    .map(|filter| (obj_id, filter, once_per_turn)),
+                    .map(|filter| (obj_id, filter, frequency)),
                 _ => None,
             })
         })
         .collect();
 
-    for (source_id, filter, once_per_turn) in &sources {
-        if *once_per_turn && state.graveyard_cast_permissions_used.contains(source_id) {
+    for (source_id, filter, frequency) in &sources {
+        if *frequency == CastFrequency::OncePerTurn
+            && state.graveyard_cast_permissions_used.contains(source_id)
+        {
             continue;
         }
         let ctx = super::filter::FilterContext::from_source_with_controller(*source_id, player);
@@ -591,31 +597,45 @@ pub fn graveyard_lands_playable_by_permission(
     results
 }
 
-/// CR 601.2b + CR 118.9a: Check whether a spell being cast from hand has a
-/// matching `CastFromHandFree` static permission on the controller's battlefield.
-fn has_hand_cast_free_permission(
+/// CR 601.2b + CR 118.9a: Find the first `CastFromHandFree` static permission
+/// source on the controller's battlefield whose filter admits the given spell.
+/// Returns `(source_id, frequency)` so callers can track per-turn usage.
+///
+/// For `OncePerTurn` sources, the already-used set is consulted; exhausted sources
+/// do not qualify. `Unlimited` sources always qualify if their filter matches.
+pub(crate) fn hand_cast_free_permission_source(
     state: &GameState,
     player: PlayerId,
     obj: &crate::game::game_object::GameObject,
-) -> bool {
-    state.battlefield.iter().any(|&src_id| {
-        let Some(src_obj) = state.objects.get(&src_id) else {
-            return false;
-        };
+) -> Option<(ObjectId, CastFrequency)> {
+    state.battlefield.iter().find_map(|&src_id| {
+        let src_obj = state.objects.get(&src_id)?;
         if src_obj.controller != player {
-            return false;
+            return None;
         }
-        active_static_definitions(state, src_obj).any(|s| {
-            s.mode == StaticMode::CastFromHandFree
-                && s.affected.as_ref().is_some_and(|filter| {
-                    super::filter::matches_target_filter(
-                        state,
-                        obj.id,
-                        filter,
-                        &super::filter::FilterContext::from_source_with_controller(src_id, player),
-                    )
-                })
-        })
+        let (filter, frequency) =
+            active_static_definitions(state, src_obj).find_map(|s| match s.mode {
+                StaticMode::CastFromHandFree { frequency } => {
+                    s.affected.as_ref().map(|f| (f, frequency))
+                }
+                _ => None,
+            })?;
+        // CR 601.2b: Skip if this source's once-per-turn slot was already used.
+        if frequency == CastFrequency::OncePerTurn
+            && state.hand_cast_free_permissions_used.contains(&src_id)
+        {
+            return None;
+        }
+        if super::filter::matches_target_filter(
+            state,
+            obj.id,
+            filter,
+            &super::filter::FilterContext::from_source_with_controller(src_id, player),
+        ) {
+            Some((src_id, frequency))
+        } else {
+            None
+        }
     })
 }
 
@@ -851,20 +871,23 @@ fn prepare_spell_cast_with_variant_override(
             CastingVariant::Harmonize
         } else if flashback_cost.is_some() {
             CastingVariant::Flashback
-        } else if let Some((source, once_per_turn)) = graveyard_permission_src {
-            CastingVariant::GraveyardPermission {
-                source,
-                once_per_turn,
-            }
+        } else if let Some((source, frequency)) = graveyard_permission_src {
+            CastingVariant::GraveyardPermission { source, frequency }
         } else if warp_cost.is_some() {
             CastingVariant::Warp
         } else {
             CastingVariant::Normal
         }
     });
-    // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free casting from hand.
-    let hand_cast_free =
-        obj.zone == Zone::Hand && has_hand_cast_free_permission(state, player, obj);
+    // CR 601.2b + CR 118.9a: CastFromHandFree — static permission grants free
+    // casting from hand. Auto-application is restricted to `Unlimited` sources
+    // (Omniscience, Tamiyo emblem); `OncePerTurn` sources (Zaffai) must be opted
+    // into explicitly via a dedicated action to preserve the player's "may cast"
+    // choice and make per-turn slot consumption visible at the action layer.
+    let hand_cast_free = obj.zone == Zone::Hand
+        && !matches!(casting_variant, CastingVariant::HandPermission { .. })
+        && hand_cast_free_permission_source(state, player, obj)
+            .is_some_and(|(_, frequency)| frequency == CastFrequency::Unlimited);
 
     // CR 118.9: Energy replaces mana cost entirely when casting with ExileWithEnergyCost.
     // CR 702.34a: Non-mana flashback costs use NoCost for mana (cost is paid separately).
@@ -877,18 +900,25 @@ fn prepare_spell_cast_with_variant_override(
     } else {
         None
     };
-    let mut mana_cost =
-        if energy_cost_from_exile || hand_cast_free || flashback_non_mana_cost.is_some() {
-            crate::types::mana::ManaCost::NoCost
-        } else {
-            escape_cost
-                .or(harmonize_cost)
-                .or(flashback_mana_cost)
-                .or(effective_sneak_cost_for_path)
-                .or(alt_cost_from_exile)
-                .or(warp_cost)
-                .unwrap_or_else(|| obj.mana_cost.clone())
-        };
+    // CR 601.2b: HandPermission variant (A2 opt-in path for Zaffai) also pays
+    // no mana cost — the granting static replaces the mana cost with nothing.
+    let is_hand_permission_variant =
+        matches!(casting_variant, CastingVariant::HandPermission { .. });
+    let mut mana_cost = if energy_cost_from_exile
+        || hand_cast_free
+        || is_hand_permission_variant
+        || flashback_non_mana_cost.is_some()
+    {
+        crate::types::mana::ManaCost::NoCost
+    } else {
+        escape_cost
+            .or(harmonize_cost)
+            .or(flashback_mana_cost)
+            .or(effective_sneak_cost_for_path)
+            .or(alt_cost_from_exile)
+            .or(warp_cost)
+            .unwrap_or_else(|| obj.mana_cost.clone())
+    };
     let has_granted_flash =
         effective_spell_keyword_kinds(state, player, object_id).contains(&KeywordKind::Flash);
     // CR 304.1: Instants can be cast any time a player has priority.

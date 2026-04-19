@@ -34,8 +34,8 @@ use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::statics::{
-    ActivationExemption, CastingProhibitionCondition, HandSizeModification, ProhibitionScope,
-    StaticMode,
+    ActivationExemption, CastFrequency, CastingProhibitionCondition, HandSizeModification,
+    ProhibitionScope, StaticMode,
 };
 use crate::types::zones::Zone;
 
@@ -5697,21 +5697,21 @@ fn try_parse_max_hand_size(tp: &TextPair<'_>, text: &str) -> Option<StaticDefini
 /// alternative cost associated with the named keyword.
 fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
     // Determine pattern and extract the rest after the prefix
-    let (rest, once_per_turn, play_mode) = if let Some(r) = nom_tag_lower(
+    let (rest, frequency, play_mode) = if let Some(r) = nom_tag_lower(
         lower,
         lower,
         "once during each of your turns, you may cast ",
     ) {
-        (r, true, CardPlayMode::Cast)
+        (r, CastFrequency::OncePerTurn, CardPlayMode::Cast)
     } else if let Some(r) = nom_tag_lower(lower, lower, "you may play ") {
-        (r, false, CardPlayMode::Play)
+        (r, CastFrequency::Unlimited, CardPlayMode::Play)
     } else {
         let r = nom_tag_lower(lower, lower, "you may cast ")?;
         // Only match if "from your graveyard" follows — avoid catching other "you may cast" statics
         if !nom_primitives::scan_contains(r, "from your graveyard") {
             return None;
         }
-        (r, false, CardPlayMode::Cast)
+        (r, CastFrequency::Unlimited, CardPlayMode::Cast)
     };
 
     let (filter_text, trailing) = nom_primitives::split_once_on(rest, " from your graveyard")
@@ -5746,7 +5746,7 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
 
     Some(
         StaticDefinition::new(StaticMode::GraveyardCastPermission {
-            once_per_turn,
+            frequency,
             play_mode,
         })
         .affected(affected)
@@ -5810,9 +5810,11 @@ fn try_parse_hand_cast_free_permission(text: &str, lower: &str) -> Option<Static
     // Intentional: "spells" with no qualifier → Any filter (Omniscience) — no warning needed.
     if filter_text == "spells" {
         return Some(
-            StaticDefinition::new(StaticMode::CastFromHandFree)
-                .affected(TargetFilter::Any)
-                .description(text.to_string()),
+            StaticDefinition::new(StaticMode::CastFromHandFree {
+                frequency: CastFrequency::Unlimited,
+            })
+            .affected(TargetFilter::Any)
+            .description(text.to_string()),
         );
     }
 
@@ -5838,9 +5840,11 @@ fn try_parse_hand_cast_free_permission(text: &str, lower: &str) -> Option<Static
     }
 
     Some(
-        StaticDefinition::new(StaticMode::CastFromHandFree)
-            .affected(filter)
-            .description(text.to_string()),
+        StaticDefinition::new(StaticMode::CastFromHandFree {
+            frequency: CastFrequency::Unlimited,
+        })
+        .affected(filter)
+        .description(text.to_string()),
     )
 }
 
@@ -8350,7 +8354,7 @@ mod tests {
         assert!(matches!(
             def.mode,
             StaticMode::GraveyardCastPermission {
-                once_per_turn: true,
+                frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
             }
         ));
@@ -8378,7 +8382,7 @@ mod tests {
         assert!(matches!(
             def.mode,
             StaticMode::GraveyardCastPermission {
-                once_per_turn: true,
+                frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
             }
         ));
@@ -8398,7 +8402,7 @@ mod tests {
         assert!(matches!(
             def.mode,
             StaticMode::GraveyardCastPermission {
-                once_per_turn: true,
+                frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
             }
         ));
@@ -8415,7 +8419,7 @@ mod tests {
         assert!(matches!(
             def.mode,
             StaticMode::GraveyardCastPermission {
-                once_per_turn: true,
+                frequency: CastFrequency::OncePerTurn,
                 play_mode: CardPlayMode::Cast,
             }
         ));
@@ -8499,7 +8503,7 @@ mod tests {
         assert!(matches!(
             def.mode,
             StaticMode::GraveyardCastPermission {
-                once_per_turn: false,
+                frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Play,
             }
         ));
@@ -8520,7 +8524,7 @@ mod tests {
         assert!(matches!(
             def.mode,
             StaticMode::GraveyardCastPermission {
-                once_per_turn: false,
+                frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Cast,
             }
         ));
@@ -8544,7 +8548,7 @@ mod tests {
         assert!(matches!(
             def.mode,
             StaticMode::GraveyardCastPermission {
-                once_per_turn: false,
+                frequency: CastFrequency::Unlimited,
                 play_mode: CardPlayMode::Cast,
             }
         ));
@@ -8637,7 +8641,12 @@ mod tests {
     fn hand_cast_free_omniscience() {
         let text = "You may cast spells from your hand without paying their mana costs.";
         let def = parse_static_line(text).expect("should parse Omniscience text");
-        assert_eq!(def.mode, StaticMode::CastFromHandFree);
+        assert_eq!(
+            def.mode,
+            StaticMode::CastFromHandFree {
+                frequency: CastFrequency::Unlimited,
+            }
+        );
         assert_eq!(def.affected, Some(TargetFilter::Any));
     }
 

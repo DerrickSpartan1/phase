@@ -39,7 +39,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::PerTurnCastLimit { .. }
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::GraveyardCastPermission { .. }
-            | StaticMode::CastFromHandFree
+            | StaticMode::CastFromHandFree { .. }
             | StaticMode::CastWithKeyword { .. }
             | StaticMode::MaximumHandSize { .. }
             | StaticMode::CantBeBlockedBy { .. }
