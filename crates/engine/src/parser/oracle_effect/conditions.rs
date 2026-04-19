@@ -17,7 +17,7 @@ use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastVariantPaid, Comparator, ControllerRef,
     Duration, Effect, FilterProp, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
-    TypedFilter,
+    TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
@@ -1059,6 +1059,36 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
         };
         if let Some(zone) = zone {
             return Some(AbilityCondition::CastFromZone { zone });
+        }
+    }
+
+    // CR 400.7 + CR 608.2c: Past-tense "it was a [type] card" — the card has already
+    // moved zones; check its last-known information via TargetMatchesFilter { use_lki }.
+    // Distinct from present-tense "it's a [type]" which uses RevealedHasCardType.
+    for prefix in ["it was not a ", "it wasn't a ", "it was a "] {
+        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(prefix).parse(lower.as_str()) {
+            let rest = rest.trim_end_matches(" card").trim();
+            let type_filter: Option<TypeFilter> = match rest {
+                "creature" => Some(TypeFilter::Creature),
+                "land" => Some(TypeFilter::Land),
+                "instant" => Some(TypeFilter::Instant),
+                "sorcery" => Some(TypeFilter::Sorcery),
+                "artifact" => Some(TypeFilter::Artifact),
+                "enchantment" => Some(TypeFilter::Enchantment),
+                "planeswalker" => Some(TypeFilter::Planeswalker),
+                _ => None,
+            };
+            if let Some(tf) = type_filter {
+                let negated_lki = prefix.contains("not") || prefix.contains("wasn't");
+                // Negated form: only emit the positive form since TargetMatchesFilter
+                // has no negated field — skip negated cases for now.
+                if !negated_lki {
+                    return Some(AbilityCondition::TargetMatchesFilter {
+                        filter: TargetFilter::Typed(TypedFilter::new(tf)),
+                        use_lki: true,
+                    });
+                }
+            }
         }
     }
 
