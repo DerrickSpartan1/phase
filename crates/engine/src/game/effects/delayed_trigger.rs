@@ -32,6 +32,15 @@ pub fn resolve(
 
     bind_contextual_filter_to_condition(&mut condition, &ability.targets);
 
+    // CR 505.1 + CR 603.7a: "your next <phase>" binds the trigger to the
+    // ability's controller. The parser emits a placeholder `PlayerId(0)` in
+    // `AtNextPhaseForPlayer.player` because compile-time AST has no access to
+    // runtime player ids; rewrite here to the actual controller at resolve
+    // time. Mirrors the `bind_contextual_filter_to_condition` pattern above.
+    if let DelayedTriggerCondition::AtNextPhaseForPlayer { player, .. } = &mut condition {
+        *player = ability.controller;
+    }
+
     // Build the delayed trigger's resolved ability from the definition
     let mut delayed_effect = *effect_def.effect.clone();
 
@@ -300,5 +309,48 @@ mod tests {
             }
             other => panic!("Expected ChangeZoneAll, got {:?}", other),
         }
+    }
+
+    /// CR 505.1 + CR 603.7a: `AtNextPhaseForPlayer` player field is emitted
+    /// by the parser as a `PlayerId(0)` placeholder (compile-time AST has no
+    /// access to runtime player ids). `resolve()` rewrites it to
+    /// `ability.controller` so the delayed trigger fires on the correct
+    /// player's turn. Used by Mana Sculpt.
+    #[test]
+    fn at_next_phase_for_player_rebinds_placeholder_to_controller() {
+        let mut state = GameState::new_two_player(42);
+        let effect_def = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        // Cast by PlayerId(1), with the placeholder PlayerId(0) in the
+        // condition. Resolver must rewrite to PlayerId(1).
+        let ability = ResolvedAbility::new(
+            Effect::CreateDelayedTrigger {
+                condition: DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::PreCombatMain,
+                    player: PlayerId(0),
+                },
+                effect: Box::new(effect_def),
+                uses_tracked_set: false,
+            },
+            vec![],
+            ObjectId(5),
+            PlayerId(1),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).expect("resolve must succeed");
+        assert_eq!(state.delayed_triggers.len(), 1);
+        assert_eq!(
+            state.delayed_triggers[0].condition,
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::PreCombatMain,
+                player: PlayerId(1),
+            },
+            "placeholder player must be rewritten to ability.controller"
+        );
     }
 }

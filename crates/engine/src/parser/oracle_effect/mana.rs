@@ -15,7 +15,7 @@ use crate::types::ability::{
 use crate::types::keywords::KeywordKind;
 use crate::types::mana::{ManaColor, ManaSpellGrant};
 
-use super::super::oracle_quantity::parse_cda_quantity;
+use super::super::oracle_quantity::{parse_cda_quantity, parse_event_context_quantity};
 use super::super::oracle_util::{parse_mana_production, parse_number, TextPair};
 
 /// Bridge: run a nom combinator on a lowercase copy, mapping the consumed length
@@ -854,6 +854,32 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
     let (_, rest) = nom_on_lower(clause, &clause_lower, |i| {
         value((), tag("an amount of ")).parse(i)
     })?;
+    let rest = rest.trim_start();
+
+    // CR 106.1: Colorless-mana production ({C}). `parse_mana_production`
+    // only recognizes the five colored symbols (W/U/B/R/G) and returns
+    // `None` for `{C}`, so route colorless separately to
+    // `ManaProduction::Colorless` before falling through to the colored path.
+    if let Some(after_c) = rest.strip_prefix("{C}") {
+        let after_c = after_c.trim();
+        let after_c_lower = after_c.to_lowercase();
+        let (_, quantity_text) = nom_on_lower(after_c, &after_c_lower, |i| {
+            value((), tag("equal to ")).parse(i)
+        })?;
+        let quantity_text = quantity_text.trim().trim_end_matches(['.', '"']);
+        // CR 601.2h + CR 603.7c: "the amount of mana spent to cast that spell"
+        // resolves via `parse_event_context_quantity` to
+        // `ManaSpentOnTriggeringSpell`; fall back to `parse_cda_quantity` for
+        // non-event quantities (e.g. "~'s power").
+        let count = parse_event_context_quantity(quantity_text)
+            .or_else(|| parse_cda_quantity(quantity_text))?;
+        return Some(Effect::Mana {
+            produced: ManaProduction::Colorless { count },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+        });
+    }
 
     // Parse the mana color symbol(s): "{G}", "{R}", etc.
     let (colors, after_color) = parse_mana_production(rest)?;
@@ -869,7 +895,8 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
     })?;
     let quantity_text = quantity_text.trim().trim_end_matches(['.', '"']);
 
-    let count = parse_cda_quantity(quantity_text)?;
+    let count = parse_event_context_quantity(quantity_text)
+        .or_else(|| parse_cda_quantity(quantity_text))?;
 
     let color_options: Vec<ManaColor> = colors;
     Some(Effect::Mana {
@@ -999,5 +1026,34 @@ mod tests {
     #[test]
     fn trailing_period_is_tolerated() {
         assert!(extract_combinations("Add {U}{U}, {U}{B}, or {B}{B}.").is_some());
+    }
+
+    /// CR 106.1 + CR 601.2h + CR 603.7c: "add an amount of {C} equal to the
+    /// amount of mana spent to cast that spell" — Mana Sculpt's sub_ability.
+    /// The `{C}` colorless branch routes to `ManaProduction::Colorless`
+    /// (since `parse_mana_production` only recognizes W/U/B/R/G and would
+    /// otherwise silently fail), and the quantity clause routes through
+    /// `parse_event_context_quantity` to `ManaSpentOnTriggeringSpell`.
+    #[test]
+    fn amount_equal_to_mana_spent_on_triggering_spell() {
+        let effect = try_parse_add_mana_effect(
+            "Add an amount of {C} equal to the amount of mana spent to cast that spell",
+        )
+        .expect("Mana Sculpt amount clause must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana, got something else");
+        };
+        match produced {
+            ManaProduction::Colorless { count } => {
+                assert_eq!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ManaSpentOnTriggeringSpell
+                    },
+                    "count must reference mana spent on the triggering spell"
+                );
+            }
+            other => panic!("expected Colorless mana production, got {other:?}"),
+        }
     }
 }

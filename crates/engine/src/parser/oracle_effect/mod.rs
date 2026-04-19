@@ -4964,7 +4964,19 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             apply_where_x_ability_expression(current, where_x_expression.as_deref());
         }
 
-        // CR 603.7: Wrap in CreateDelayedTrigger if temporal suffix was found
+        // CR 603.7: Wrap in CreateDelayedTrigger if temporal suffix was found.
+        //
+        // CR 608.2c: Lift the inner ability's `condition` onto the new outer
+        // wrapper. A conditional like "If you control a Wizard, [effect at
+        // next main phase]" scopes to the whole clause but is evaluated at
+        // SPELL RESOLUTION time, not at delayed-trigger firing. The condition
+        // must gate whether the delayed trigger is even created — not what
+        // runs when it fires. Without this lift the inner `condition` would
+        // be stranded dead metadata (the `effects::delayed_trigger::resolve`
+        // path builds a fresh `ResolvedAbility` and does not read
+        // `effect_def.condition`), silently dropping the gate. Mana Sculpt is
+        // the first card exposed to this architecture; the lift closes the
+        // latent gap for any future delayed-trigger with an inner condition.
         if let Some(delayed_cond) = delayed_condition {
             for current in &mut current_defs {
                 let inner = std::mem::replace(
@@ -4977,6 +4989,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
                         },
                     ),
                 );
+                let lifted_condition = inner.condition.clone();
                 *current = AbilityDefinition::new(
                     kind,
                     Effect::CreateDelayedTrigger {
@@ -4985,6 +4998,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
                         uses_tracked_set: false,
                     },
                 );
+                current.condition = lifted_condition;
             }
         }
 
@@ -5478,6 +5492,12 @@ fn duration_to_condition(dur: Duration) -> StaticCondition {
 /// Parallel to `strip_trailing_duration()` but for one-shot deferred effects.
 /// Duration = "effect is active during this period"; DelayedTriggerCondition = "fire once at this
 /// future point".
+///
+/// CR 505.1: "your next main phase" binds the trigger to the ability's
+/// controller — the `player` field is a compile-time placeholder
+/// (`PlayerId(0)`) rewritten to `ability.controller` at resolution time in
+/// `effects::delayed_trigger::resolve`. Mirrors the existing
+/// `RestrictionScope::SourcesControlledBy` placeholder pattern.
 fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerCondition>) {
     let lower = text.to_lowercase();
     for (suffix, condition) in [
@@ -5495,6 +5515,15 @@ fn strip_temporal_suffix(text: &str) -> (&str, Option<DelayedTriggerCondition>) 
             " at end of combat",
             DelayedTriggerCondition::AtNextPhase {
                 phase: Phase::EndCombat,
+            },
+        ),
+        // CR 505.1: Precombat main phase of the controller. "Your" binds
+        // `player` to the ability's controller; resolved at resolve time.
+        (
+            " at the beginning of your next main phase",
+            DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::PreCombatMain,
+                player: crate::types::player::PlayerId(0),
             },
         ),
     ] {
@@ -9064,6 +9093,29 @@ mod tests {
         );
     }
 
+    /// CR 505.1 + CR 603.7a: "at the beginning of your next main phase" produces
+    /// `AtNextPhaseForPlayer` — controller-scoped variant. The `player` field
+    /// is a `PlayerId(0)` placeholder rewritten by
+    /// `effects::delayed_trigger::resolve` at resolution time. Used by Mana
+    /// Sculpt's delayed mana generation.
+    #[test]
+    fn strip_temporal_suffix_your_next_main_phase() {
+        let (text, cond) = strip_temporal_suffix(
+            "add an amount of {C} equal to the amount of mana spent to cast that spell at the beginning of your next main phase",
+        );
+        assert_eq!(
+            text,
+            "add an amount of {C} equal to the amount of mana spent to cast that spell"
+        );
+        assert_eq!(
+            cond,
+            Some(DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::PreCombatMain,
+                player: crate::types::player::PlayerId(0),
+            })
+        );
+    }
+
     #[test]
     fn strip_temporal_prefix_end_step() {
         let (text, cond) =
@@ -9114,6 +9166,130 @@ mod tests {
                 effect.effect
             );
         }
+    }
+
+    /// CR 608.2c + CR 603.7a + CR 505.1 + CR 601.2h: Mana Sculpt end-to-end.
+    ///
+    /// "Counter target spell. If you control a Wizard, add an amount of {C}
+    /// equal to the amount of mana spent to cast that spell at the beginning
+    /// of your next main phase."
+    ///
+    /// Asserts the full typed parse:
+    /// - primary effect is `Counter` targeting stack spell,
+    /// - sub_ability carries `QuantityCheck(ObjectCount{Wizard} GE 1)` at
+    ///   the OUTER level (the Wizard gate evaluates at spell resolution per
+    ///   CR 608.2c, not at delayed-trigger firing),
+    /// - sub_ability's effect is `CreateDelayedTrigger` with
+    ///   `AtNextPhaseForPlayer { PreCombatMain, PlayerId(0) /* placeholder */ }`,
+    /// - delayed trigger's inner effect is `Mana { Colorless { count:
+    ///   Ref(ManaSpentOnTriggeringSpell) } }`.
+    #[test]
+    fn mana_sculpt_full_parse_tree() {
+        let def = parse_effect_chain(
+            "Counter target spell. If you control a Wizard, add an amount of {C} equal to the amount of mana spent to cast that spell at the beginning of your next main phase.",
+            AbilityKind::Spell,
+        );
+        // Primary effect: Counter.
+        assert!(
+            matches!(*def.effect, Effect::Counter { .. }),
+            "Expected Counter primary effect, got {:?}",
+            def.effect
+        );
+
+        // Sub_ability carries the Wizard gate at the OUTER level.
+        let sub = def.sub_ability.as_ref().expect("sub_ability must exist");
+        let sub_cond = sub
+            .condition
+            .as_ref()
+            .expect("sub_ability must carry the Wizard gate at its outer condition");
+        match sub_cond {
+            crate::types::ability::AbilityCondition::QuantityCheck {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert!(
+                    matches!(
+                        lhs,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { .. }
+                        }
+                    ),
+                    "expected ObjectCount LHS, got {:?}",
+                    lhs
+                );
+                assert_eq!(*comparator, crate::types::ability::Comparator::GE);
+                assert_eq!(*rhs, QuantityExpr::Fixed { value: 1 });
+            }
+            other => panic!("expected QuantityCheck on outer sub_ability, got {other:?}"),
+        }
+
+        // Sub_ability effect: CreateDelayedTrigger at PreCombatMain.
+        let Effect::CreateDelayedTrigger {
+            condition: delayed_cond,
+            effect: delayed_effect_def,
+            ..
+        } = &*sub.effect
+        else {
+            panic!(
+                "expected CreateDelayedTrigger on sub_ability, got {:?}",
+                sub.effect
+            );
+        };
+        assert!(
+            matches!(
+                delayed_cond,
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::PreCombatMain,
+                    ..
+                }
+            ),
+            "expected AtNextPhaseForPlayer(PreCombatMain), got {delayed_cond:?}"
+        );
+
+        // Inner delayed effect: Mana(Colorless, Ref(ManaSpentOnTriggeringSpell)).
+        let Effect::Mana { produced, .. } = &*delayed_effect_def.effect else {
+            panic!(
+                "expected Mana effect on delayed trigger, got {:?}",
+                delayed_effect_def.effect
+            );
+        };
+        match produced {
+            ManaProduction::Colorless { count } => {
+                assert_eq!(
+                    *count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ManaSpentOnTriggeringSpell
+                    },
+                    "Colorless count must reference mana spent on triggering spell"
+                );
+            }
+            other => panic!("expected Colorless mana production, got {other:?}"),
+        }
+    }
+
+    /// CR 608.2c regression guard: a delayed-trigger effect chain WITHOUT an
+    /// inner condition must still parse correctly after the condition-lift.
+    /// The outer `CreateDelayedTrigger`-carrying `AbilityDefinition` has
+    /// `condition: None` (nothing to lift), and the inner `AbilityDefinition`
+    /// also has `condition: None`.
+    #[test]
+    fn delayed_trigger_without_inner_condition_lift_is_noop() {
+        let def = parse_effect_chain(
+            "Untap target creature at the beginning of the next end step.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            def.condition.is_none(),
+            "outer AbilityDefinition must carry no condition when none was present on inner"
+        );
+        let Effect::CreateDelayedTrigger { effect, .. } = &*def.effect else {
+            panic!("expected CreateDelayedTrigger, got {:?}", def.effect);
+        };
+        assert!(
+            effect.condition.is_none(),
+            "inner AbilityDefinition must carry no condition when none was present originally"
+        );
     }
 
     #[test]
