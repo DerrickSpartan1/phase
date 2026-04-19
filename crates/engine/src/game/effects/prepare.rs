@@ -601,4 +601,109 @@ mod tests {
             "no BecamePrepared event when already prepared"
         );
     }
+
+    // Test gap #3: Single-copy invariant under multiple triggers. A second call
+    // to `resolve_become_prepared` on an already-prepared source must be a
+    // no-op — the flag is unit-typed so "already prepared" is semantically
+    // idempotent. Complements the existing `become_prepared_idempotent_when_
+    // already_prepared` test by exercising the resolve-twice loop path: two
+    // sequential resolver invocations must produce exactly one event total.
+    #[test]
+    fn resolve_become_prepared_twice_emits_event_only_once() {
+        let mut state = GameState::new_two_player(42);
+        let id = setup_creature(&mut state);
+        // Give the creature a Prepare back face so the gate passes.
+        state.objects.get_mut(&id).unwrap().back_face = Some(BackFaceForTest::prepare());
+
+        let ability = ResolvedAbility::new(
+            Effect::BecomePrepared {
+                target: TargetFilter::Any,
+            },
+            vec![TargetRef::Object(id)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+        resolve_become_prepared(&mut state, &ability, &mut events).unwrap();
+
+        let flip_events = events
+            .iter()
+            .filter(|e| matches!(e, GameEvent::BecamePrepared { .. }))
+            .count();
+        assert_eq!(flip_events, 1, "second resolve must no-op");
+        assert!(state.objects[&id].prepared.is_some());
+    }
+
+    // Test gap #7: Battlefield-exit must clear the `prepared` flag via
+    // `reset_for_battlefield_exit`. The prepared state is a property of the
+    // permanent and must not carry across zone changes (CR 400.7 new-object
+    // identity on zone transition).
+    #[test]
+    fn battlefield_exit_clears_prepared_flag() {
+        let mut state = GameState::new_two_player(42);
+        let id = setup_creature(&mut state);
+        state.objects.get_mut(&id).unwrap().prepared = Some(PreparedState);
+        assert!(state.objects[&id].prepared.is_some());
+
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .reset_for_battlefield_exit();
+
+        assert!(
+            state.objects[&id].prepared.is_none(),
+            "battlefield exit must clear prepared state"
+        );
+    }
+
+    // Test gap #2 (partial — pre-stack level): cast-time unprepare is
+    // authoritative. `unprepare_object` is the single call site invoked by
+    // `cast_prepared_copy`; calling it leaves `prepared = None` even when no
+    // resolution event has happened yet. This is what makes counter-the-copy
+    // still leave the source unprepared: the unprepare fired at cast time,
+    // before the counter could interact with the stack copy.
+    #[test]
+    fn cast_time_unprepare_happens_before_resolution() {
+        let mut state = GameState::new_two_player(42);
+        let id = setup_creature(&mut state);
+        state.objects.get_mut(&id).unwrap().prepared = Some(PreparedState);
+        let mut events = Vec::new();
+        unprepare_object(&mut state, id, &mut events);
+        // After cast-time unprepare, source is no longer prepared regardless
+        // of what happens to the copy on the stack.
+        assert!(state.objects[&id].prepared.is_none());
+        assert_eq!(events.len(), 1);
+    }
+
+    /// Helper to build a minimal back-face with `layout_kind == Prepare` so
+    /// the resolver's `has_prepare_face` gate passes in tests.
+    struct BackFaceForTest;
+    impl BackFaceForTest {
+        fn prepare() -> crate::game::game_object::BackFaceData {
+            crate::game::game_object::BackFaceData {
+                name: "Test Prepare Face".to_string(),
+                power: None,
+                toughness: None,
+                loyalty: None,
+                defense: None,
+                card_types: Default::default(),
+                mana_cost: Default::default(),
+                keywords: Vec::new(),
+                abilities: Vec::new(),
+                trigger_definitions: crate::types::definitions::Definitions::default(),
+                replacement_definitions: crate::types::definitions::Definitions::default(),
+                static_definitions: crate::types::definitions::Definitions::default(),
+                color: Vec::new(),
+                printed_ref: None,
+                modal: None,
+                additional_cost: None,
+                strive_cost: None,
+                casting_restrictions: Vec::new(),
+                casting_options: Vec::new(),
+                layout_kind: Some(LayoutKind::Prepare),
+            }
+        }
+    }
 }
