@@ -1289,11 +1289,21 @@ fn build_restriction_clause(
             let mut def = StaticDefinition::new(mode.clone())
                 .affected(application.affected.clone())
                 .description(predicate.to_string());
-            // For CantUntap with a duration, inject the modification so the
-            // transient effect system can propagate it through layers.
-            if matches!(mode, StaticMode::CantUntap) && duration.is_some() {
+            // CR 613.2 layer 6: Combat/untap restriction modes with a duration are enforced
+            // via active_static_definitions() — inject AddStaticMode so the layer system
+            // propagates them onto the targeted object (CR 509.1a + CR 508.1d + CR 502.5).
+            if duration.is_some()
+                && matches!(
+                    mode,
+                    StaticMode::CantBlock
+                        | StaticMode::CantAttack
+                        | StaticMode::CantAttackOrBlock
+                        | StaticMode::CantBeBlocked
+                        | StaticMode::CantUntap
+                )
+            {
                 def = def.modifications(vec![ContinuousModification::AddStaticMode {
-                    mode: StaticMode::CantUntap,
+                    mode: mode.clone(),
                 }]);
             }
             def
@@ -1350,6 +1360,19 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     // Simple restrictions
     if lower == "can't block" || lower == "cannot block" {
         return Some(vec![StaticMode::CantBlock]);
+    }
+    // "can't block this creature" / "can't block ~" — source-referential variant used in
+    // activated abilities; grants CantBlock to the targeted creature (CR 509.1a).
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, VerboseError<&str>>("can't block "),
+        tag("cannot block "),
+    ))
+    .parse(lower)
+    {
+        let rest = rest.trim();
+        if rest == "this creature" || rest == "~" || rest == "it" {
+            return Some(vec![StaticMode::CantBlock]);
+        }
     }
     if lower == "can't attack" || lower == "cannot attack" {
         return Some(vec![StaticMode::CantAttack]);
