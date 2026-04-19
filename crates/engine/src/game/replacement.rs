@@ -3997,4 +3997,52 @@ mod tests {
             other => panic!("expected Execute(ProduceMana), got {:?}", other),
         }
     }
+
+    /// CR 614.1c + CR 601.2h: Wildgrowth Archaic requires `colors_spent_to_cast`
+    /// on the entering spell object to remain populated while the ZoneChange→Battlefield
+    /// replacement pipeline runs. `process_triggers` clears this field AFTER all
+    /// replacements have applied (see `triggers.rs` post-collection cleanup), so the
+    /// replacement pipeline is the correct place to read it. This test asserts the
+    /// invariant by driving a Moved replacement on a spell object whose colors are
+    /// populated, and confirming the field is still there after `replace_event` returns.
+    #[test]
+    fn colors_spent_to_cast_persists_through_zone_change_replacement() {
+        use crate::types::mana::ManaColor;
+
+        // Source of the replacement (static permanent on battlefield).
+        let repl_source = ObjectId(10);
+        let mut state = test_state_with_object(
+            repl_source,
+            Zone::Battlefield,
+            vec![make_repl(ReplacementEvent::Moved)],
+        );
+
+        // Spell object on the stack with 3 distinct colors of mana spent.
+        let spell_id = ObjectId(20);
+        let mut spell = crate::game::game_object::GameObject::new(
+            spell_id,
+            CardId(99),
+            PlayerId(0),
+            "Test Creature Spell".to_string(),
+            Zone::Stack,
+        );
+        spell.colors_spent_to_cast.add(ManaColor::White, 1);
+        spell.colors_spent_to_cast.add(ManaColor::Blue, 1);
+        spell.colors_spent_to_cast.add(ManaColor::Red, 1);
+        state.objects.insert(spell_id, spell);
+
+        let mut events = Vec::new();
+        let proposed = ProposedEvent::zone_change(spell_id, Zone::Stack, Zone::Battlefield, None);
+
+        let _ = replace_event(&mut state, proposed, &mut events);
+
+        // The invariant: `colors_spent_to_cast` is still intact after replacement.
+        // (process_triggers clears it later, not the replacement pipeline.)
+        let after = &state.objects[&spell_id].colors_spent_to_cast;
+        assert_eq!(after.get(ManaColor::White), 1);
+        assert_eq!(after.get(ManaColor::Blue), 1);
+        assert_eq!(after.get(ManaColor::Red), 1);
+        assert_eq!(after.get(ManaColor::Black), 0);
+        assert_eq!(after.get(ManaColor::Green), 0);
+    }
 }
