@@ -4748,6 +4748,22 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             continue;
         }
 
+        // CR 608.2c: "If <cond>, you may instead <reveal-N-from-among-body>" —
+        // conditional alternative SELECTION parameters for the preceding Dig effect.
+        // The alternative reuses the same top-N source but swaps keep_count/up_to/filter.
+        // Checked before the generic "instead" clause because the body starts with
+        // "you may instead ..." rather than a bare "instead ..." prefix/suffix and
+        // carries no standalone effect — it patches the preceding Dig.
+        if let Some(alt_def) = try_parse_dig_instead_alternative(normalized_text, defs.last(), kind)
+        {
+            if let Some(last_def) = defs.pop() {
+                let mut new_def = alt_def;
+                new_def.else_ability = Some(Box::new(last_def));
+                defs.push(new_def);
+                continue;
+            }
+        }
+
         // CR 608.2e: "if [condition], [effect] instead" — the preceding ability's effect
         // is replaced when the condition holds. Model as: new def has condition + instead effect,
         // preceding def becomes else_ability (the fallback when condition is false).
@@ -7261,6 +7277,91 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
     use crate::types::zones::Zone;
+
+    /// CR 608.2c: "If <cond>, you may instead <reveal-N-from-among>" must produce
+    /// a conditional Dig alternative where the `else_ability` is the base Dig
+    /// (with its patched filter) and the outer Dig carries the alternative's
+    /// selection parameters. Class coverage: any Dig-followed-by-conditional-reveal
+    /// pattern ("Follow the Lumarets" is the exemplar card).
+    #[test]
+    fn dig_conditional_instead_alternative_preserves_both_branches() {
+        let def = parse_effect_chain(
+            "Look at the top four cards of your library. You may reveal a creature or land card from among them and put it into your hand. If you gained life this turn, you may instead reveal two creature and/or land cards from among them and put them into your hand. Put the rest on the bottom of your library in a random order.",
+            AbilityKind::Spell,
+        );
+
+        // Outer Dig: alternative (condition true) — keep 2 exactly, Or[Creature, Land].
+        let Effect::Dig {
+            count,
+            keep_count,
+            up_to,
+            filter,
+            rest_destination,
+            destination,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected outer Effect::Dig, got {:?}", def.effect);
+        };
+        assert!(
+            matches!(count, QuantityExpr::Fixed { value: 4 }),
+            "alt branch should see top 4"
+        );
+        assert_eq!(*keep_count, Some(2), "alt branch keeps exactly 2");
+        assert!(!*up_to, "alt branch is exact-2 (not up-to)");
+        assert_eq!(*destination, Some(Zone::Hand));
+        assert_eq!(*rest_destination, Some(Zone::Library));
+        let TargetFilter::Or { filters } = filter else {
+            panic!("alt filter should be Or, got {:?}", filter);
+        };
+        assert_eq!(filters.len(), 2);
+
+        // Condition is life-gained-this-turn.
+        let Some(AbilityCondition::QuantityCheck {
+            lhs,
+            comparator,
+            rhs,
+        }) = &def.condition
+        else {
+            panic!("expected QuantityCheck condition, got {:?}", def.condition);
+        };
+        assert!(matches!(
+            lhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::LifeGainedThisTurn
+            }
+        ));
+        assert_eq!(*comparator, Comparator::GE);
+        assert!(matches!(rhs, QuantityExpr::Fixed { value: 1 }));
+
+        // else_ability carries the base Dig (condition false) — keep up_to 1.
+        let base = def
+            .else_ability
+            .as_deref()
+            .expect("base Dig must be stored as else_ability");
+        let Effect::Dig {
+            count: base_count,
+            keep_count: base_keep,
+            up_to: base_up_to,
+            filter: base_filter,
+            rest_destination: base_rest,
+            ..
+        } = &*base.effect
+        else {
+            panic!("expected base Effect::Dig, got {:?}", base.effect);
+        };
+        assert!(matches!(base_count, QuantityExpr::Fixed { value: 4 }));
+        assert_eq!(*base_keep, Some(1));
+        assert!(*base_up_to, "base branch is up-to 1");
+        assert_eq!(*base_rest, Some(Zone::Library), "PutRest must recurse");
+        let TargetFilter::Or {
+            filters: base_filters,
+        } = base_filter
+        else {
+            panic!("base filter should be Or, got {:?}", base_filter);
+        };
+        assert_eq!(base_filters.len(), 2);
+    }
 
     /// CR 601.2f: Regression gate — "This ability costs {1} less to activate
     /// for each page counter on this artifact" must parse into an

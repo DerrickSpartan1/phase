@@ -638,24 +638,14 @@ pub(super) fn apply_clause_continuation(
         }
         ContinuationAst::PutRest { destination } => {
             // Absorbed into preceding Dig or RevealUntil — sets rest_destination
-            // for unchosen/non-matching cards.
+            // for unchosen/non-matching cards. CR 608.2c: When the preceding def is
+            // a conditional "instead" alternative (new def with `else_ability =
+            // base_def`), patch BOTH branches so the rest-placement applies whether
+            // the condition was true or false.
             let Some(previous) = defs.last_mut() else {
                 return;
             };
-            match &mut *previous.effect {
-                Effect::Dig {
-                    rest_destination: rest @ None,
-                    ..
-                } => {
-                    *rest = Some(destination);
-                }
-                Effect::RevealUntil {
-                    rest_destination, ..
-                } => {
-                    *rest_destination = destination;
-                }
-                _ => {}
-            }
+            patch_rest_destination_recursively(previous, destination);
         }
         ContinuationAst::DigFromAmong {
             count,
@@ -842,6 +832,31 @@ pub(super) fn apply_clause_continuation(
     }
 }
 
+/// Recursively patch `rest_destination` on Dig/RevealUntil effects reachable from
+/// `def` via `else_ability`. CR 608.2c: When a preceding def is a conditional
+/// "instead" wrapper (new_def with `else_ability = base_def`), a trailing
+/// "Put the rest on the bottom..." clause applies to both the alternative and
+/// base branches — neither branch is selected until resolution.
+fn patch_rest_destination_recursively(def: &mut AbilityDefinition, destination: Zone) {
+    match &mut *def.effect {
+        Effect::Dig {
+            rest_destination: rest @ None,
+            ..
+        } => {
+            *rest = Some(destination);
+        }
+        Effect::RevealUntil {
+            rest_destination, ..
+        } => {
+            *rest_destination = destination;
+        }
+        _ => {}
+    }
+    if let Some(else_def) = def.else_ability.as_deref_mut() {
+        patch_rest_destination_recursively(else_def, destination);
+    }
+}
+
 pub(super) fn continuation_absorbs_current(
     continuation: &ContinuationAst,
     current_effect: &Effect,
@@ -956,7 +971,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
 /// - "put a creature card from among them into your hand"
 /// - "you may reveal a creature card from among them and put it into your hand"
 /// - "put two of them into your hand and the rest on the bottom of your library in any order"
-fn parse_dig_from_among(lower: &str, _original: &str) -> Option<ContinuationAst> {
+pub(super) fn parse_dig_from_among(lower: &str, _original: &str) -> Option<ContinuationAst> {
     // Determine kept-cards destination. `None` is the reveal-only form (Zimone's
     // Experiment): "reveal up to N <filter> cards from among them, then put the
     // rest on the bottom" — the kept cards are NOT auto-routed; subsequent

@@ -794,6 +794,102 @@ pub(super) fn try_parse_generic_instead_clause(
     Some(result)
 }
 
+/// CR 608.2c: "If <cond>, you may instead <reveal-N-from-among-body>" — conditional
+/// alternative selection for a preceding `Effect::Dig`. The "instead" body re-uses
+/// the preceding Dig's source (top N cards) but swaps keep_count/up_to/filter/destination.
+///
+/// Handles patterns like Follow the Lumarets:
+///   "Look at the top four cards of your library. You may reveal a creature or land
+///    card from among them and put it into your hand. If you gained life this turn,
+///    you may instead reveal two creature and/or land cards from among them and put
+///    them into your hand."
+///
+/// Returns a new AbilityDefinition carrying the alternative Dig plus condition; the
+/// caller wraps the preceding Dig as `else_ability`. Class coverage: any card of form
+/// "look at top N / reveal a <filter> card from among them ... if <cond>, you may
+/// instead reveal M <filter'> cards from among them" (CR 608.2c replacement effect).
+pub(super) fn try_parse_dig_instead_alternative(
+    text: &str,
+    previous: Option<&AbilityDefinition>,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    use super::sequence::parse_dig_from_among;
+    use super::types::ContinuationAst;
+
+    // Gate: previous effect must be a Dig that the alternative can piggy-back on.
+    let prev = previous?;
+    let Effect::Dig {
+        count: prev_count,
+        destination: _,
+        keep_count: _,
+        up_to: _,
+        filter: _,
+        rest_destination: prev_rest,
+        reveal: prev_reveal,
+    } = &*prev.effect
+    else {
+        return None;
+    };
+
+    let (condition_fragment, raw_body) = split_leading_conditional(text)?;
+    let condition_lower = condition_fragment.to_lowercase();
+    let cond_text = nom_on_lower(&condition_fragment, &condition_lower, |i| {
+        value((), tag("if ")).parse(i)
+    })
+    .map(|((), rest)| rest)
+    .unwrap_or(&condition_fragment)
+    .trim();
+
+    // Strip "you may instead " / "instead " / "you may " from the body to get
+    // the bare reveal-from-among clause. Composed with nom combinators; the
+    // "you may instead" arm is first so it wins over "you may ".
+    let trimmed_body = raw_body.trim_end_matches('.').trim();
+    let body_lower = trimmed_body.to_lowercase();
+    let ((), body_rest) = nom_on_lower(trimmed_body, &body_lower, |i| {
+        value(
+            (),
+            alt((tag("you may instead "), tag("instead "), tag("you may "))),
+        )
+        .parse(i)
+    })?;
+
+    let body_rest_lower = body_rest.to_lowercase();
+    let alt_continuation = parse_dig_from_among(&body_rest_lower, body_rest)?;
+    let ContinuationAst::DigFromAmong {
+        count: alt_keep_count,
+        up_to: alt_up_to,
+        filter: alt_filter,
+        destination: alt_destination,
+        rest_destination: alt_rest,
+    } = alt_continuation
+    else {
+        return None;
+    };
+
+    let condition = try_nom_condition_as_ability_condition(cond_text)
+        .or_else(|| parse_condition_text(cond_text))
+        .or_else(|| parse_control_count_as_ability_condition(cond_text))?;
+
+    // Clone the preceding Dig's source (top N) and reveal-mode, apply alternative
+    // selection parameters. `rest_destination` prefers the alternative's inline value
+    // (same-clause "and the rest on the bottom..."); otherwise falls back to the
+    // preceding Dig's (already-patched or None — a trailing PutRest continuation
+    // patches both branches by rewriting into the chain).
+    let alt_effect = Effect::Dig {
+        count: prev_count.clone(),
+        destination: alt_destination,
+        keep_count: Some(alt_keep_count),
+        up_to: alt_up_to,
+        filter: alt_filter,
+        rest_destination: alt_rest.or(*prev_rest),
+        reveal: *prev_reveal,
+    };
+
+    let mut result = AbilityDefinition::new(kind, alt_effect);
+    result.condition = Some(condition);
+    Some(result)
+}
+
 fn parse_control_count_as_ability_condition(text: &str) -> Option<AbilityCondition> {
     let text = text.trim();
     let (rest, _) = tag::<_, _, VerboseError<&str>>("you control ")
