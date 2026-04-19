@@ -1768,6 +1768,7 @@ fn try_parse_skip_next_turn(tp: TextPair) -> Option<ParsedEffectClause> {
 
     Some(parsed_clause(Effect::SkipNextTurn {
         target: TargetFilter::Controller,
+        count: QuantityExpr::Fixed { value: 1 },
     }))
 }
 

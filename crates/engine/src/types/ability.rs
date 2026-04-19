@@ -3205,6 +3205,20 @@ pub enum Effect {
         #[serde(default)]
         lose_effect: Option<Box<AbilityDefinition>>,
     },
+    /// CR 705: Flip N coins. `win_effect` runs once per heads (win),
+    /// `lose_effect` runs once per tails (loss). Generalization of `FlipCoin`
+    /// for "flip N coins, for each heads …" patterns (Ral Zarek, Guest
+    /// Lecturer). The one-flip degenerate case stays as `FlipCoin` — this
+    /// variant is only emitted when `count > 1` or when the Oracle text
+    /// explicitly binds a count.
+    FlipCoins {
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+        #[serde(default)]
+        win_effect: Option<Box<AbilityDefinition>>,
+        #[serde(default)]
+        lose_effect: Option<Box<AbilityDefinition>>,
+    },
     /// CR 705: Flip coins until you lose a flip, then execute effect with win count.
     FlipCoinUntilLose {
         win_effect: Box<AbilityDefinition>,
@@ -3388,12 +3402,16 @@ pub enum Effect {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
     },
-    /// CR 614.10: "Skip your next turn." — the affected player's next turn is skipped entirely.
+    /// CR 614.10: "Skip your next turn." — the affected player's next N turns are skipped.
     /// Stored as a per-player counter in `GameState.turns_to_skip`; decremented during turn
     /// transition in `start_next_turn`. The target determines who skips (usually Controller).
+    /// `count` is the number of turns to skip and defaults to 1 for backward compatibility
+    /// with legacy `SkipNextTurn { target }` emissions.
     SkipNextTurn {
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
     },
     /// CR 500.8: Add an additional combat phase (and optionally an additional main phase)
     /// after the current phase. Uses a LIFO stack on GameState.extra_phases.
@@ -3829,6 +3847,7 @@ impl Effect {
             | Effect::WinTheGame
             | Effect::RollDie { .. }
             | Effect::FlipCoin { .. }
+            | Effect::FlipCoins { .. }
             | Effect::FlipCoinUntilLose { .. }
             | Effect::RingTemptsYou
             | Effect::VentureIntoDungeon
@@ -3951,6 +3970,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::WinTheGame => "WinTheGame",
         Effect::RollDie { .. } => "RollDie",
         Effect::FlipCoin { .. } => "FlipCoin",
+        Effect::FlipCoins { .. } => "FlipCoins",
         Effect::FlipCoinUntilLose { .. } => "FlipCoinUntilLose",
         Effect::RingTemptsYou => "RingTemptsYou",
         Effect::VentureIntoDungeon => "VentureIntoDungeon",
@@ -4102,6 +4122,7 @@ pub enum EffectKind {
     WinTheGame,
     RollDie,
     FlipCoin,
+    FlipCoins,
     FlipCoinUntilLose,
     RingTemptsYou,
     VentureIntoDungeon,
@@ -4257,6 +4278,7 @@ impl From<&Effect> for EffectKind {
             Effect::WinTheGame => EffectKind::WinTheGame,
             Effect::RollDie { .. } => EffectKind::RollDie,
             Effect::FlipCoin { .. } => EffectKind::FlipCoin,
+            Effect::FlipCoins { .. } => EffectKind::FlipCoins,
             Effect::FlipCoinUntilLose { .. } => EffectKind::FlipCoinUntilLose,
             Effect::RingTemptsYou => EffectKind::RingTemptsYou,
             Effect::VentureIntoDungeon => EffectKind::VentureIntoDungeon,

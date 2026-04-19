@@ -1227,6 +1227,19 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("lose".into(), "yes".into()));
             }
         }
+        Effect::FlipCoins {
+            count,
+            win_effect,
+            lose_effect,
+        } => {
+            d.push(("count".into(), format!("{count:?}")));
+            if win_effect.is_some() {
+                d.push(("win".into(), "yes".into()));
+            }
+            if lose_effect.is_some() {
+                d.push(("lose".into(), "yes".into()));
+            }
+        }
         Effect::FlipCoinUntilLose { .. } => {
             d.push(("mode".into(), "until lose".into()));
         }
@@ -1322,8 +1335,14 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::ExtraTurn { target } => {
             d.push(("player".into(), fmt_target(target)));
         }
-        Effect::SkipNextTurn { target } => {
+        Effect::SkipNextTurn { target, count } => {
             d.push(("player".into(), fmt_target(target)));
+            if !matches!(
+                count,
+                crate::types::ability::QuantityExpr::Fixed { value: 1 }
+            ) {
+                d.push(("count".into(), format!("{count:?}")));
+            }
         }
         Effect::ControlNextTurn {
             target,
@@ -3924,6 +3943,11 @@ fn ability_tree_any(def: &AbilityDefinition, pred: &impl Fn(&AbilityDefinition) 
         Effect::FlipCoin {
             win_effect,
             lose_effect,
+        }
+        | Effect::FlipCoins {
+            win_effect,
+            lose_effect,
+            ..
         } => {
             if let Some(ref w) = win_effect {
                 if ability_tree_any(w, pred) {
