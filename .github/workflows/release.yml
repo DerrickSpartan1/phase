@@ -67,10 +67,13 @@ jobs:
           curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
 
       - name: Generate card data and coverage report
+        # Single source of truth: gen-card-data.sh produces all 7 public JSON
+        # files. Deploy and release must use the same generator the local
+        # workflow does — no YAML reimplementation.
         run: |
-          cargo run --release --bin oracle-gen --features cli -- data/ --stats --names-out client/public/card-names.json > client/public/card-data.json
+          mkdir -p data
+          ./scripts/gen-card-data.sh
           cp client/public/card-data.json data/card-data.json
-          cargo run --release --bin coverage-report -- data/ --all > client/public/coverage-data.json
 
       - name: Validate card-data against engine schema
         # Deploy gate — refuse to ship card-data the current engine cannot parse.
@@ -95,12 +98,11 @@ jobs:
 
       - name: Build frontend
         env:
-          # Bake the immutable hashed URL into the JS bundle so this WASM build
-          # is statically pinned to the card-data it was validated against.
+          # Standardized data URL config — see vite.config.ts. DATA_BASE_URL is
+          # the directory holding every shared JSON. CARD_DATA_URL pins the
+          # WASM bundle to its content-addressed card-data forever.
+          DATA_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
           CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/${{ steps.card-data-hash.outputs.filename }}"
-          COVERAGE_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/coverage-data.json"
-          COVERAGE_SUMMARY_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/coverage-summary.json"
-          SCRYFALL_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/scryfall-data.json"
           AUDIO_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/audio"
         run: |
           cd client
@@ -113,14 +115,55 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
         run: |
-          jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' client/public/coverage-data.json > client/public/coverage-summary.json
-          # Immutable, year-long cache for the content-addressed copy.
+          # Content-addressed card-data: immutable, year-long cache.
           npx wrangler r2 object put "phase-rs-data/$CARD_DATA_FILENAME" --file "client/public/$CARD_DATA_FILENAME" --remote --content-type application/json --cache-control "public, max-age=31536000, immutable"
-          # Legacy unhashed copy for any consumer still resolving /card-data.json.
-          npx wrangler r2 object put phase-rs-data/card-data.json --file client/public/card-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          npx wrangler r2 object put phase-rs-data/coverage-data.json --file client/public/coverage-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          npx wrangler r2 object put phase-rs-data/coverage-summary.json --file client/public/coverage-summary.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          npx wrangler r2 object put phase-rs-data/scryfall-data.json --file client/public/scryfall-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+
+          # Mutable shared JSONs. Single-source list mirrors deploy.yml.
+          DATA_FILES=(
+            card-data.json
+            card-data-meta.json
+            card-names.json
+            coverage-data.json
+            coverage-summary.json
+            decks.json
+            scryfall-data.json
+            set-list.json
+          )
+          for f in "${DATA_FILES[@]}"; do
+            if [ ! -f "client/public/$f" ]; then
+              echo "::error::Expected data file client/public/$f was not generated"
+              exit 1
+            fi
+            npx wrangler r2 object put "phase-rs-data/$f" --file "client/public/$f" --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          done
+
+      - name: Verify R2 uploads landed
+        env:
+          CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
+        run: |
+          BASE="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev"
+          VERIFY=(
+            "$CARD_DATA_FILENAME"
+            card-data.json
+            card-data-meta.json
+            card-names.json
+            coverage-data.json
+            coverage-summary.json
+            decks.json
+            scryfall-data.json
+            set-list.json
+          )
+          fail=0
+          for f in "${VERIFY[@]}"; do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/$f")
+            if [ "$status" != "200" ]; then
+              echo "::error::R2 upload verification failed: $BASE/$f returned $status"
+              fail=1
+            else
+              echo "Verified $BASE/$f ($status)"
+            fi
+          done
+          [ "$fail" = "0" ]
       - name: Remove large data files from dist (served from R2)
         # Hex glob keeps `card-data-meta.json` (consumed by `useCardDataMeta`).
         run: |

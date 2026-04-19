@@ -80,15 +80,18 @@ jobs:
           curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
 
       - name: Generate card data and coverage (from source)
+        # Single source of truth: scripts/gen-card-data.sh produces all 7
+        # public JSON files (card-data, card-data-meta, card-names, coverage-data,
+        # coverage-summary, decks, set-list). The deploy must use the same
+        # generator the local dev workflow does — no YAML reimplementation.
         run: |
           mkdir -p data
-          cargo run --release --bin oracle-gen --features cli -- data/ --stats --names-out data/card-names.json > data/card-data.json
-          cargo run --release --bin coverage-report -- data/ --all > data/coverage-data.json
-          jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' data/coverage-data.json > data/coverage-summary.json
-          cp data/card-data.json client/public/card-data.json
-          cp data/card-names.json client/public/card-names.json
-          cp data/coverage-data.json client/public/coverage-data.json
-          cp data/coverage-summary.json client/public/coverage-summary.json
+          ./scripts/gen-card-data.sh
+          # Mirror the artifacts the later steps (validate, hash, badges) read
+          # from data/. gen-card-data.sh is the source of truth and writes to
+          # client/public/.
+          cp client/public/card-data.json data/card-data.json
+          cp client/public/coverage-data.json data/coverage-data.json
 
       - name: Validate card-data against engine schema
         # Deploy gate — parse the freshly produced card-data through the same
@@ -123,21 +126,39 @@ jobs:
           ./scripts/gen-badge-endpoints.sh data/coverage-stats.json data/badges
 
       - name: Upload data to R2 (staging)
+        # Single source of truth: DATA_FILES lists every JSON the frontend
+        # fetches at runtime. Add a file here and it's automatically uploaded
+        # AND verified below — no separate config to forget.
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
         run: |
-          # Content-addressed copy: immutable, year-long cache. Each WASM
+          # Content-addressed card-data: immutable, year-long cache. Each WASM
           # bundle is baked with its own hashed URL, so old browser caches
-          # keep resolving the old hash even after this deploy publishes a new one.
+          # keep resolving the old hash after this deploy publishes a new one.
           npx wrangler r2 object put "phase-rs-data/staging/$CARD_DATA_FILENAME" --file "client/public/$CARD_DATA_FILENAME" --remote --content-type application/json --cache-control "public, max-age=31536000, immutable"
-          # Legacy unhashed copy: kept for local dev parity and any consumer that
-          # still resolves `/card-data.json` directly. Short cache.
-          npx wrangler r2 object put phase-rs-data/staging/card-data.json --file client/public/card-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          npx wrangler r2 object put phase-rs-data/staging/coverage-data.json --file client/public/coverage-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          npx wrangler r2 object put phase-rs-data/staging/coverage-summary.json --file client/public/coverage-summary.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
-          npx wrangler r2 object put phase-rs-data/staging/scryfall-data.json --file client/public/scryfall-data.json --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+
+          # Mutable shared JSONs. Short cache so a fresh deploy is visible
+          # immediately. Loop over a single source-of-truth list.
+          DATA_FILES=(
+            card-data.json
+            card-data-meta.json
+            card-names.json
+            coverage-data.json
+            coverage-summary.json
+            decks.json
+            scryfall-data.json
+            set-list.json
+          )
+          for f in "${DATA_FILES[@]}"; do
+            if [ ! -f "client/public/$f" ]; then
+              echo "::error::Expected data file client/public/$f was not generated"
+              exit 1
+            fi
+            npx wrangler r2 object put "phase-rs-data/staging/$f" --file "client/public/$f" --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
+          done
+
           for f in data/badges/*.json; do
             name=$(basename "$f")
             npx wrangler r2 object put "phase-rs-data/badges/$name" --file "$f" --remote --content-type application/json --cache-control "public, max-age=60, must-revalidate"
@@ -145,18 +166,34 @@ jobs:
 
       - name: Verify R2 uploads landed
         # Wrangler v4 silently writes to a local emulator unless --remote is
-        # passed. This step fails the deploy if the hashed card-data URL the
-        # WASM bundle will be pinned to is not actually fetchable from R2.
+        # passed. Fail the deploy if any file the frontend will fetch is not
+        # actually reachable. Mirrors the DATA_FILES list above.
         env:
           CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
         run: |
-          URL="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/$CARD_DATA_FILENAME"
-          status=$(curl -s -o /dev/null -w "%{http_code}" "$URL")
-          if [ "$status" != "200" ]; then
-            echo "::error::R2 upload verification failed: $URL returned $status"
-            exit 1
-          fi
-          echo "Verified $URL ($status)"
+          BASE="https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging"
+          VERIFY=(
+            "$CARD_DATA_FILENAME"
+            card-data.json
+            card-data-meta.json
+            card-names.json
+            coverage-data.json
+            coverage-summary.json
+            decks.json
+            scryfall-data.json
+            set-list.json
+          )
+          fail=0
+          for f in "${VERIFY[@]}"; do
+            status=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/$f")
+            if [ "$status" != "200" ]; then
+              echo "::error::R2 upload verification failed: $BASE/$f returned $status"
+              fail=1
+            else
+              echo "Verified $BASE/$f ($status)"
+            fi
+          done
+          [ "$fail" = "0" ]
 
       - name: Build WASM
         run: ./scripts/build-wasm.sh release
@@ -173,15 +210,13 @@ jobs:
 
       - name: Build frontend
         env:
-          # CRITICAL: point at the content-addressed card-data URL, not the
-          # mutable `card-data.json`. Vite bakes this string into the JS
-          # bundle's `__CARD_DATA_URL__`, statically pinning this WASM build
-          # to its own card-data forever. New deploys get a new hash; old
-          # browser caches keep resolving the old hash.
+          # Standardized data URL config — see vite.config.ts. DATA_BASE_URL is
+          # the directory holding every shared JSON; each `__*_URL__` resolves
+          # to a filename under it. CARD_DATA_URL is the one exception, pinned
+          # to the content-addressed copy so the WASM bundle is locked to the
+          # exact card-data it was built against.
+          DATA_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging"
           CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/${{ steps.card-data-hash.outputs.filename }}"
-          COVERAGE_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/coverage-data.json"
-          COVERAGE_SUMMARY_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/coverage-summary.json"
-          SCRYFALL_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/scryfall-data.json"
           AUDIO_BASE_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/audio"
         run: |
           cd client

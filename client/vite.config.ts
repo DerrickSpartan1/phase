@@ -98,29 +98,39 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(workspaceVersion()),
     __BUILD_HASH__: JSON.stringify(gitHash()),
+    // Single source of truth: DATA_BASE_URL points at the directory holding
+    // every shared JSON data file. Each `__*_URL__` resolves to a filename
+    // under that base. Default empty string = served from site root (local
+    // dev). At deploy time, set DATA_BASE_URL to the R2 staging/prod prefix.
+    //
+    // Exception: __CARD_DATA_URL__ is content-addressed (card-data-<hash>.json)
+    // so the WASM bundle pins to the exact card-data it was built against.
+    // Set CARD_DATA_URL explicitly at deploy time; otherwise falls back to
+    // the unhashed file under DATA_BASE_URL for local dev.
     __CARD_DATA_URL__: JSON.stringify(
-      process.env.CARD_DATA_URL || "/card-data.json",
+      process.env.CARD_DATA_URL ||
+        `${process.env.DATA_BASE_URL || ""}/card-data.json`,
     ),
     __COVERAGE_DATA_URL__: JSON.stringify(
-      process.env.COVERAGE_DATA_URL || "/coverage-data.json",
+      `${process.env.DATA_BASE_URL || ""}/coverage-data.json`,
     ),
     __COVERAGE_SUMMARY_URL__: JSON.stringify(
-      process.env.COVERAGE_SUMMARY_URL || "/coverage-summary.json",
+      `${process.env.DATA_BASE_URL || ""}/coverage-summary.json`,
     ),
     __CARD_DATA_META_URL__: JSON.stringify(
-      process.env.CARD_DATA_META_URL || "/card-data-meta.json",
+      `${process.env.DATA_BASE_URL || ""}/card-data-meta.json`,
     ),
     __SET_LIST_URL__: JSON.stringify(
-      process.env.SET_LIST_URL || "/set-list.json",
+      `${process.env.DATA_BASE_URL || ""}/set-list.json`,
     ),
     __DECKS_URL__: JSON.stringify(
-      process.env.DECKS_URL || "/decks.json",
+      `${process.env.DATA_BASE_URL || ""}/decks.json`,
+    ),
+    __SCRYFALL_DATA_URL__: JSON.stringify(
+      `${process.env.DATA_BASE_URL || ""}/scryfall-data.json`,
     ),
     __AUDIO_BASE_URL__: JSON.stringify(
       process.env.AUDIO_BASE_URL || "",
-    ),
-    __SCRYFALL_DATA_URL__: JSON.stringify(
-      process.env.SCRYFALL_DATA_URL || "/scryfall-data.json",
     ),
     __GIT_REPO_URL__: JSON.stringify("https://github.com/phase-rs/phase"),
   },
