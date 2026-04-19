@@ -904,6 +904,17 @@ fn prepare_spell_cast_with_variant_override(
     // no mana cost — the granting static replaces the mana cost with nothing.
     let is_hand_permission_variant =
         matches!(casting_variant, CastingVariant::HandPermission { .. });
+    // CR 702.94a: Miracle alternative cost — pulled from `Keyword::Miracle(cost)`
+    // on the hand object. Only honored when the caller explicitly opted into the
+    // Miracle variant via the reveal prompt.
+    let miracle_cost = if casting_variant == CastingVariant::Miracle {
+        obj.keywords.iter().find_map(|k| match k {
+            crate::types::keywords::Keyword::Miracle(cost) => Some(cost.clone()),
+            _ => None,
+        })
+    } else {
+        None
+    };
     let mut mana_cost = if energy_cost_from_exile
         || hand_cast_free
         || is_hand_permission_variant
@@ -911,7 +922,8 @@ fn prepare_spell_cast_with_variant_override(
     {
         crate::types::mana::ManaCost::NoCost
     } else {
-        escape_cost
+        miracle_cost
+            .or(escape_cost)
             .or(harmonize_cost)
             .or(flashback_mana_cost)
             .or(effective_sneak_cost_for_path)
@@ -1606,6 +1618,58 @@ pub fn handle_cast_spell_for_free(
     };
     let prepared =
         prepare_spell_cast_with_variant_override(state, player, object_id, Some(variant))?;
+    continue_with_prepared(state, player, prepared, events)
+}
+
+/// CR 702.94a + CR 603.11: Cast a spell from hand via its Miracle alternative
+/// mana cost after the player accepted the reveal prompt. Validates:
+/// - `object_id` matches `card_id` and is in the caster's hand.
+/// - The card still has `Keyword::Miracle(cost)` (layer effects between queue
+///   and accept may have removed it — in that case the cast fails cleanly).
+///
+/// Builds a `CastingVariant::Miracle` override and routes through the shared
+/// casting pipeline; `prepare_spell_cast_with_variant_override` substitutes
+/// the miracle cost for the printed mana cost via the `Keyword::Miracle`
+/// payload it discovers on the object.
+pub fn handle_cast_spell_as_miracle(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let obj = state
+        .objects
+        .get(&object_id)
+        .ok_or_else(|| EngineError::InvalidAction("Object not found".to_string()))?;
+    if obj.card_id != card_id {
+        return Err(EngineError::InvalidAction(format!(
+            "Object {object_id:?} does not match card_id {card_id:?}"
+        )));
+    }
+    // CR 702.94a: Miracle-revealed spells are cast from hand.
+    if obj.zone != Zone::Hand || obj.owner != player {
+        return Err(EngineError::ActionNotAllowed(
+            "CastSpellAsMiracle requires a hand card owned by the caster".to_string(),
+        ));
+    }
+    // CR 702.94a: The keyword must still be present — it can have been removed
+    // by layers / replacement effects between offer time and accept time.
+    let has_miracle = obj
+        .keywords
+        .iter()
+        .any(|k| matches!(k, crate::types::keywords::Keyword::Miracle(_)));
+    if !has_miracle {
+        return Err(EngineError::ActionNotAllowed(
+            "Card no longer has miracle".to_string(),
+        ));
+    }
+    let prepared = prepare_spell_cast_with_variant_override(
+        state,
+        player,
+        object_id,
+        Some(CastingVariant::Miracle),
+    )?;
     continue_with_prepared(state, player, prepared, events)
 }
 

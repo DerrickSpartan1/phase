@@ -169,6 +169,15 @@ pub enum GameAction {
         card_id: CardId,
         source_id: ObjectId,
     },
+    /// CR 702.94a + CR 603.11: Accept a pending `WaitingFor::MiracleReveal`
+    /// and cast `object_id` from hand for the card's miracle mana cost. Mirror
+    /// of `CastSpellAsSneak` / `CastSpellForFree` — dedicated variant because
+    /// the cast is opted into from a specialized prompt, not from Priority.
+    /// Decline is via the shared `DecideOptionalEffect { accept: false }`.
+    CastSpellAsMiracle {
+        object_id: ObjectId,
+        card_id: CardId,
+    },
     /// CR 609.3: Accept or decline an optional effect ("You may X").
     DecideOptionalEffect {
         accept: bool,
@@ -372,6 +381,7 @@ impl GameAction {
             GameAction::CastSpell { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsSneak { gy_object, .. } => Some(*gy_object),
             GameAction::CastSpellForFree { object_id, .. } => Some(*object_id),
+            GameAction::CastSpellAsMiracle { object_id, .. } => Some(*object_id),
             GameAction::ActivateAbility { source_id, .. } => Some(*source_id),
             GameAction::TapLandForMana { object_id } => Some(*object_id),
             GameAction::UntapLandForMana { object_id } => Some(*object_id),

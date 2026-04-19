@@ -35,6 +35,7 @@ import { AdventureCastModal } from "../components/modal/AdventureCastModal.tsx";
 import { CascadeChoiceModal } from "../components/modal/CascadeChoiceModal.tsx";
 import { ModalFaceModal } from "../components/modal/ModalFaceModal.tsx";
 import { WarpCostModal } from "../components/modal/WarpCostModal.tsx";
+import { MiracleRevealModal } from "../components/modal/MiracleRevealModal.tsx";
 import { CardChoiceModal } from "../components/modal/CardChoiceModal.tsx";
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
 import { ModeChoiceModal } from "../components/modal/ModeChoiceModal.tsx";
@@ -1151,6 +1152,7 @@ function GamePageContent({
       <CascadeChoiceModal />
       <ModalFaceModal />
       <WarpCostModal />
+      <MiracleRevealModal />
 
       {/* Scry/Dig/Surveil card choice modal */}
       <CardChoiceModal />

@@ -66,14 +66,66 @@ pub(super) fn run_post_action_pipeline(
     }
 
     if state.stack.len() > stack_before {
-        return Ok(WaitingFor::Priority {
-            player: state.active_player,
-        });
+        return Ok(flush_pending_miracle_offer(
+            state,
+            WaitingFor::Priority {
+                player: state.active_player,
+            },
+        ));
     }
 
     if state.layers_dirty {
         super::layers::evaluate_layers(state);
     }
 
-    Ok(default_wf.clone())
+    Ok(flush_pending_miracle_offer(state, default_wf.clone()))
+}
+
+/// CR 702.94a + CR 603.11: Intercept a `WaitingFor::Priority` and replace it
+/// with the head of `pending_miracle_offers` as `WaitingFor::MiracleReveal`,
+/// dropping the queued offer so a subsequent Priority flush picks up the next
+/// one (or returns the original Priority if the queue is empty).
+///
+/// Pass-through for any non-Priority `WaitingFor`: miracle prompts only
+/// interrupt the normal priority window, not nested choices (mana payment,
+/// target selection, etc.) that must complete before priority is granted.
+///
+/// Stale-offer filtering: offers whose `object_id` is no longer in the offer
+/// player's hand (moved/exiled/destroyed between queue time and flush) are
+/// discarded without prompting — the reveal is offered "as you draw it" per
+/// CR 702.94a, and the card can no longer be revealed from hand.
+fn flush_pending_miracle_offer(state: &mut GameState, outgoing: WaitingFor) -> WaitingFor {
+    if !matches!(outgoing, WaitingFor::Priority { .. }) {
+        return outgoing;
+    }
+    // `pop_next_live_miracle_offer` already drains stale entries internally,
+    // so a single pop is sufficient here. Consume the offer regardless of the
+    // player's eventual accept/decline so the queue progresses even if the
+    // same spell's resolution queued multiple offers for the same player.
+    match pop_next_live_miracle_offer(state) {
+        Some(offer) => WaitingFor::MiracleReveal {
+            player: offer.player,
+            object_id: offer.object_id,
+            cost: offer.cost,
+        },
+        None => outgoing,
+    }
+}
+
+/// Pop the next `MiracleOffer` whose `object_id` is still in the player's
+/// hand. Stale offers (card left the hand) are discarded. Returns `None`
+/// when the queue is empty or contains only stale entries.
+fn pop_next_live_miracle_offer(
+    state: &mut GameState,
+) -> Option<crate::types::game_state::MiracleOffer> {
+    while !state.pending_miracle_offers.is_empty() {
+        let offer = state.pending_miracle_offers.remove(0);
+        let still_in_hand = state.objects.get(&offer.object_id).is_some_and(|obj| {
+            obj.zone == crate::types::zones::Zone::Hand && obj.owner == offer.player
+        });
+        if still_in_hand {
+            return Some(offer);
+        }
+    }
+    None
 }

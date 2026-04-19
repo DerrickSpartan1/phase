@@ -1372,6 +1372,41 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
         // CR 702.xxx: Paradigm (Strixhaven) — enumerate each exiled paradigm
         // source as a cast candidate plus a pass option. Assign when WotC
         // publishes SOS CR update.
+        // CR 702.94a + CR 603.11: Miracle reveal — offer accept (cast for the
+        // miracle mana cost) and decline (DecideOptionalEffect { accept: false }).
+        // AI heuristic: reveal-and-cast when the miracle cost is affordable from
+        // the player's current mana pool including auto-tappable lands; otherwise
+        // decline so the AI isn't blocked on an unaffordable offer.
+        WaitingFor::MiracleReveal {
+            player,
+            object_id,
+            cost,
+        } => {
+            let card_id = state
+                .objects
+                .get(object_id)
+                .map(|o| o.card_id)
+                .unwrap_or(crate::types::identifiers::CardId(0));
+            let can_pay =
+                crate::game::casting::can_pay_cost_after_auto_tap(state, *player, *object_id, cost);
+            let mut v: Vec<CandidateAction> = Vec::new();
+            if can_pay {
+                v.push(candidate(
+                    GameAction::CastSpellAsMiracle {
+                        object_id: *object_id,
+                        card_id,
+                    },
+                    TacticalClass::Spell,
+                    Some(*player),
+                ));
+            }
+            v.push(candidate(
+                GameAction::DecideOptionalEffect { accept: false },
+                TacticalClass::Pass,
+                Some(*player),
+            ));
+            v
+        }
         WaitingFor::ParadigmCastOffer { player, offers } => {
             let mut v: Vec<CandidateAction> = offers
                 .iter()

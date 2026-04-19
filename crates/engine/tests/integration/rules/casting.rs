@@ -1021,3 +1021,266 @@ fn zaffai_second_cast_is_suppressed_same_turn() {
         "consumed once-per-turn slot must suppress further CastSpellForFree candidates"
     );
 }
+
+// --- Miracle tests (CR 702.94a + CR 603.11) ---
+
+/// CR 702.94a: A card with `Keyword::Miracle(cost)` drawn as the first card of
+/// the turn surfaces `WaitingFor::MiracleReveal` once priority is entered.
+#[test]
+fn miracle_first_draw_surfaces_reveal_prompt() {
+    use engine::game::zones::create_object;
+    use engine::types::keywords::Keyword;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    // Give P0 {W} available to pay the miracle cost.
+    scenario.add_basic_land(P0, ManaColor::White);
+
+    let mut runner = scenario.build();
+
+    // Put a miracle spell in P0's library as the top card, with an effect that
+    // has no targets (DrawCards N) so resolution doesn't need target selection.
+    let miracle_obj = create_object(
+        runner.state_mut(),
+        CardId(900),
+        P0,
+        "TestMiracleDraw".to_string(),
+        Zone::Library,
+    );
+    {
+        let obj = runner.state_mut().objects.get_mut(&miracle_obj).unwrap();
+        obj.card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Sorcery);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 5, // printed cost 5 — miracle cost is much cheaper
+        };
+        obj.keywords.push(Keyword::Miracle(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        }));
+        obj.base_keywords = obj.keywords.clone();
+        // Spell effect: draw 1 card. No targets → pipeline runs straight to finalize.
+        let ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        obj.abilities.push(ability.clone());
+        obj.base_abilities.push(ability);
+    }
+    // Tap a mana source so {W} is in pool.
+    runner.state_mut().players[0]
+        .mana_pool
+        .add(engine::types::mana::ManaUnit::new(
+            engine::types::mana::ManaType::White,
+            ObjectId(0),
+            false,
+            Vec::new(),
+        ));
+
+    // Drive a draw via a direct effect on the pipeline:
+    // the simplest path is to synthesize a Draw effect resolution.
+    let mut events = Vec::new();
+    let draw_ability = engine::types::ability::ResolvedAbility::new(
+        Effect::Draw {
+            count: QuantityExpr::Fixed { value: 1 },
+        },
+        Vec::new(),
+        miracle_obj,
+        P0,
+    );
+    engine::game::effects::draw::resolve(runner.state_mut(), &draw_ability, &mut events)
+        .expect("draw should succeed");
+
+    // Miracle offer should be queued.
+    assert_eq!(
+        runner.state().pending_miracle_offers.len(),
+        1,
+        "miracle offer should be queued after first draw"
+    );
+    let offer = &runner.state().pending_miracle_offers[0];
+    assert_eq!(offer.player, P0);
+    assert_eq!(offer.object_id, miracle_obj);
+}
+
+/// CR 702.94a: Declining a miracle reveal via `DecideOptionalEffect { accept: false }`
+/// consumes the offer and returns control to normal priority.
+#[test]
+fn miracle_decline_returns_to_priority() {
+    use engine::game::zones::create_object;
+    use engine::types::keywords::Keyword;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+
+    let mut runner = scenario.build();
+
+    let miracle_obj = create_object(
+        runner.state_mut(),
+        CardId(901),
+        P0,
+        "TestMiracle".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = runner.state_mut().objects.get_mut(&miracle_obj).unwrap();
+        obj.card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Sorcery);
+        obj.base_card_types = obj.card_types.clone();
+        obj.keywords.push(Keyword::Miracle(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        }));
+        obj.base_keywords = obj.keywords.clone();
+    }
+    // Seed the pending offer directly and set the reveal waiting state.
+    runner
+        .state_mut()
+        .pending_miracle_offers
+        .push(engine::types::game_state::MiracleOffer {
+            player: P0,
+            object_id: miracle_obj,
+            cost: ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 0,
+            },
+        });
+    // Surface the reveal prompt by forcing the state directly — simulating
+    // what `flush_pending_miracle_offer` would do.
+    runner.state_mut().waiting_for = WaitingFor::MiracleReveal {
+        player: P0,
+        object_id: miracle_obj,
+        cost: ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        },
+    };
+    // Pop the queue to reflect that the prompt consumed it.
+    runner.state_mut().pending_miracle_offers.clear();
+
+    let result = runner
+        .act(GameAction::DecideOptionalEffect { accept: false })
+        .expect("decline should succeed");
+
+    // After decline we should be back at Priority, and no further offers.
+    assert!(
+        matches!(result.waiting_for, WaitingFor::Priority { .. }),
+        "decline should return to Priority, got {:?}",
+        result.waiting_for,
+    );
+    assert!(
+        runner.state().pending_miracle_offers.is_empty(),
+        "queue should be empty after decline"
+    );
+    // Card remains in hand — it was not cast.
+    assert_eq!(
+        runner.state().objects.get(&miracle_obj).map(|o| o.zone),
+        Some(Zone::Hand),
+    );
+}
+
+/// CR 702.94a + CR 118.9a: Accepting the reveal casts the spell for its
+/// miracle mana cost via `CastingVariant::Miracle`, with the printed cost
+/// ignored.
+#[test]
+fn miracle_accept_casts_for_miracle_cost() {
+    use engine::game::zones::create_object;
+    use engine::types::keywords::Keyword;
+
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario.add_basic_land(P0, ManaColor::White);
+
+    let mut runner = scenario.build();
+    // Tap the land for {W}.
+    runner.state_mut().players[0]
+        .mana_pool
+        .add(engine::types::mana::ManaUnit::new(
+            engine::types::mana::ManaType::White,
+            ObjectId(0),
+            false,
+            Vec::new(),
+        ));
+
+    let miracle_obj = create_object(
+        runner.state_mut(),
+        CardId(902),
+        P0,
+        "TestMiracle".to_string(),
+        Zone::Hand,
+    );
+    {
+        let obj = runner.state_mut().objects.get_mut(&miracle_obj).unwrap();
+        obj.card_types
+            .core_types
+            .push(engine::types::card_type::CoreType::Sorcery);
+        obj.base_card_types = obj.card_types.clone();
+        // Printed cost: prohibitively expensive.
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 99,
+        };
+        obj.keywords.push(Keyword::Miracle(ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        }));
+        obj.base_keywords = obj.keywords.clone();
+        // A simple no-target ability: draw a card.
+        let ability = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        obj.abilities.push(ability.clone());
+        obj.base_abilities.push(ability);
+    }
+    let card_id = runner.state().objects[&miracle_obj].card_id;
+
+    // Surface the reveal prompt directly.
+    runner.state_mut().waiting_for = WaitingFor::MiracleReveal {
+        player: P0,
+        object_id: miracle_obj,
+        cost: ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        },
+    };
+
+    runner
+        .act(GameAction::CastSpellAsMiracle {
+            object_id: miracle_obj,
+            card_id,
+        })
+        .expect("CastSpellAsMiracle should succeed for an affordable miracle cost");
+
+    // Stack should have the miracle-cast spell with CastingVariant::Miracle.
+    assert_eq!(
+        runner.state().stack.len(),
+        1,
+        "miracle spell should be on the stack"
+    );
+    let entry = runner.state().stack.last().unwrap();
+    match &entry.kind {
+        StackEntryKind::Spell {
+            casting_variant, ..
+        } => {
+            assert_eq!(
+                *casting_variant,
+                CastingVariant::Miracle,
+                "stack entry should record CastingVariant::Miracle"
+            );
+        }
+        other => panic!("expected Spell on stack, got {other:?}"),
+    }
+    // The {W} was paid — pool should be empty.
+    assert!(
+        runner.state().players[0].mana_pool.mana.is_empty(),
+        "miracle cost of {{W}} should have consumed the white mana"
+    );
+}

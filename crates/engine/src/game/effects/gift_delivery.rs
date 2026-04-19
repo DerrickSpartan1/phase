@@ -123,11 +123,8 @@ fn deliver_card_draw(
                         player_id,
                         object_id: obj_id,
                     });
-                    // CR 702.94a: Mirror the A4 first-draw tracking in apply_draw_after_replacement.
-                    state
-                        .first_card_drawn_this_turn
-                        .entry(player_id)
-                        .or_insert(obj_id);
+                    // CR 702.94a + CR 603.11: Shared first-draw / miracle-offer hook.
+                    super::draw::record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
                     if let Some(p) = state.players.iter_mut().find(|p| p.id == player_id) {
                         p.cards_drawn_this_turn = p.cards_drawn_this_turn.saturating_add(1);
                     }

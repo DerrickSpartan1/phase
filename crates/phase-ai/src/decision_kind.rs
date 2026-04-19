@@ -116,7 +116,10 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::GameOver { .. }
         // CR 702.xxx: Paradigm (Strixhaven) — modeled as an ability-style
         // offer decision. Assign when WotC publishes SOS CR update.
-        | WaitingFor::ParadigmCastOffer { .. } => DecisionKind::ActivateAbility,
+        | WaitingFor::ParadigmCastOffer { .. }
+        // CR 702.94a: Miracle reveal — opt-in cast offer, routed to the
+        // ability-offer bucket so activation policies evaluate the candidates.
+        | WaitingFor::MiracleReveal { .. } => DecisionKind::ActivateAbility,
     }
 }
 

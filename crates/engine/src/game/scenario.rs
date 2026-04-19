@@ -1097,6 +1097,7 @@ impl GameRunner {
             WaitingFor::PhyrexianPayment { .. } => "PhyrexianPayment",
             WaitingFor::BlightChoice { .. } => "BlightChoice",
             WaitingFor::ParadigmCastOffer { .. } => "ParadigmCastOffer",
+            WaitingFor::MiracleReveal { .. } => "MiracleReveal",
         }
     }
 

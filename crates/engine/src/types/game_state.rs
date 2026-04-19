@@ -1029,6 +1029,18 @@ pub enum WaitingFor {
         source_id: ObjectId,
         count: u32,
     },
+    /// CR 702.94a + CR 603.11: `player` may reveal `object_id` from their hand
+    /// and cast it for the miracle mana cost `cost`, or decline. Flushed from
+    /// the head of `pending_miracle_offers` when `run_post_action_pipeline`
+    /// would otherwise return `WaitingFor::Priority` for the offer's player.
+    /// `GameAction::CastSpellAsMiracle` accepts; `GameAction::DecideOptionalEffect
+    /// { accept: false }` declines (reuses the generic optional-decline path).
+    /// Either response consumes the offer.
+    MiracleReveal {
+        player: PlayerId,
+        object_id: ObjectId,
+        cost: super::mana::ManaCost,
+    },
     /// CR 608.2d + CR 101.4: An opponent may choose to perform an optional effect.
     /// Prompts opponents in APNAP order. First accept wins; remaining are not prompted.
     OpponentMayChoice {
@@ -1489,7 +1501,8 @@ impl WaitingFor {
             | WaitingFor::ConniveDiscard { player, .. }
             | WaitingFor::CombatTaxPayment { player, .. }
             | WaitingFor::PhyrexianPayment { player, .. }
-            | WaitingFor::DiscardChoice { player, .. } => Some(*player),
+            | WaitingFor::DiscardChoice { player, .. }
+            | WaitingFor::MiracleReveal { player, .. } => Some(*player),
             WaitingFor::GameOver { .. } => None,
         }
     }
@@ -1617,6 +1630,19 @@ impl StackEntry {
     }
 }
 
+/// CR 702.94a + CR 603.11: A pending miracle reveal offer queued during the
+/// resolution of an action that caused `player` to draw `object_id` as their
+/// first card of the turn. `cost` is the miracle mana cost taken from the
+/// card's `Keyword::Miracle(ManaCost)` payload at queue time — captured here
+/// so the reveal prompt stays accurate even if the keyword is later removed
+/// mid-resolution by a replacement or layer effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MiracleOffer {
+    pub player: PlayerId,
+    pub object_id: ObjectId,
+    pub cost: super::mana::ManaCost,
+}
+
 /// How a spell was cast — determines zone routing and post-resolution behavior.
 /// Replaces individual boolean flags (cast_as_adventure, cast_as_warp) with a
 /// single enum that captures the casting context.
@@ -1672,6 +1698,13 @@ pub enum CastingVariant {
         attack_target: AttackTarget,
         returned_creature: ObjectId,
     },
+    /// CR 702.94a: Cast from hand via Miracle's alternative cost after revealing
+    /// the card as the first card drawn this turn. The granting keyword carries
+    /// the miracle mana cost, which `prepare_spell_cast_with_variant_override`
+    /// substitutes for the printed mana cost. The keyword's `ManaCost` payload
+    /// is read at preparation time rather than stored here because
+    /// `prepare_spell_cast` already reads `obj.keywords` for analogous paths.
+    Miracle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1950,6 +1983,18 @@ pub struct GameState {
     /// player has not drawn yet this turn.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub first_card_drawn_this_turn: HashMap<PlayerId, ObjectId>,
+    /// CR 702.94a + CR 603.11: FIFO queue of miracle reveal offers accumulated
+    /// during the current action's resolution. Populated by the draw pipeline
+    /// when a card with `Keyword::Miracle(cost)` becomes the first card drawn
+    /// this turn; drained one-at-a-time by `flush_pending_miracle_offer` at the
+    /// tail of `run_post_action_pipeline`. Each flush replaces an outgoing
+    /// `WaitingFor::Priority` with `WaitingFor::MiracleReveal` for the offer's
+    /// player, consuming the offer regardless of accept/decline so a second
+    /// draw in the same resolution step queues its own prompt. Reset at turn
+    /// start (stale offers from prior turns are never valid per CR 702.94a's
+    /// "first card drawn this turn" condition).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_miracle_offers: Vec<MiracleOffer>,
     #[serde(default)]
     pub spells_cast_this_game: HashMap<PlayerId, u32>,
     /// Per-player spell cast history this turn.
@@ -2308,6 +2353,7 @@ impl GameState {
             graveyard_cast_permissions_used: HashSet::new(),
             hand_cast_free_permissions_used: HashSet::new(),
             first_card_drawn_this_turn: HashMap::new(),
+            pending_miracle_offers: Vec::new(),
             spells_cast_this_game: HashMap::new(),
             spells_cast_this_turn_by_player: HashMap::new(),
             players_who_searched_library_this_turn: HashSet::new(),
@@ -2471,6 +2517,7 @@ impl PartialEq for GameState {
             && self.graveyard_cast_permissions_used == other.graveyard_cast_permissions_used
             && self.hand_cast_free_permissions_used == other.hand_cast_free_permissions_used
             && self.first_card_drawn_this_turn == other.first_card_drawn_this_turn
+            && self.pending_miracle_offers == other.pending_miracle_offers
             && self.spells_cast_this_game == other.spells_cast_this_game
             && self.spells_cast_this_turn_by_player == other.spells_cast_this_turn_by_player
             && self.players_who_searched_library_this_turn

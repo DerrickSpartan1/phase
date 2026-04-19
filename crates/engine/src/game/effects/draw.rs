@@ -136,19 +136,60 @@ pub fn apply_draw_after_replacement(
             player_id,
             object_id: obj_id,
         });
-        // CR 702.94a + CR 603.11: Record the first card drawn each turn per player.
-        // Keyed by PlayerId; absence of key indicates no draw has happened yet this
-        // turn. The stored `ObjectId` is the specific drawn card — consumed by the
-        // miracle reveal prompt (A5) to gate eligibility on "first card you drew
-        // this turn". Subsequent draws do NOT overwrite this entry.
-        state
-            .first_card_drawn_this_turn
-            .entry(player_id)
-            .or_insert(obj_id);
+        record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
         if let Some(player) = state.players.iter_mut().find(|p| p.id == player_id) {
             player.cards_drawn_this_turn = player.cards_drawn_this_turn.saturating_add(1);
         }
     }
+}
+
+/// CR 702.94a + CR 603.11: Shared first-draw hook — record the drawn
+/// `ObjectId` as `player`'s first-of-turn if absent, and if the drawn card has
+/// `Keyword::Miracle(cost)`, enqueue a `MiracleOffer` for the priority-entry
+/// flush to surface as `WaitingFor::MiracleReveal`. Subsequent draws do NOT
+/// overwrite the first-draw entry and do NOT enqueue more offers (the static
+/// ability only functions for the first-drawn card per CR 702.94a).
+pub(crate) fn record_first_draw_and_enqueue_miracle(
+    state: &mut GameState,
+    player: crate::types::player::PlayerId,
+    object_id: crate::types::identifiers::ObjectId,
+) {
+    // Only the FIRST draw of the turn per player establishes the miracle
+    // eligibility condition. `or_insert_with` returns a `&mut V` indicating
+    // whether the entry was freshly set; compare against `object_id` to know.
+    let is_first = !state.first_card_drawn_this_turn.contains_key(&player);
+    state
+        .first_card_drawn_this_turn
+        .entry(player)
+        .or_insert(object_id);
+    if !is_first {
+        return;
+    }
+    // CR 702.94a: Static ability functions from hand — check the drawn object's
+    // keywords. Reads the concrete `Keyword::Miracle(ManaCost)` payload; if
+    // layers remove miracle before draw resolution the offer simply never
+    // queues. `obj.keywords` is the printed+granted keyword set visible on the
+    // object while it's in the owner's hand.
+    let Some(obj) = state.objects.get(&object_id) else {
+        return;
+    };
+    if obj.owner != player {
+        return;
+    }
+    let miracle_cost = obj.keywords.iter().find_map(|k| match k {
+        crate::types::keywords::Keyword::Miracle(cost) => Some(cost.clone()),
+        _ => None,
+    });
+    let Some(cost) = miracle_cost else {
+        return;
+    };
+    state
+        .pending_miracle_offers
+        .push(crate::types::game_state::MiracleOffer {
+            player,
+            object_id,
+            cost,
+        });
 }
 
 #[cfg(test)]
@@ -519,6 +560,92 @@ mod tests {
             state.first_card_drawn_this_turn.get(&PlayerId(0)),
             Some(&first),
             "second draw this turn must not overwrite the first-draw entry",
+        );
+    }
+
+    /// CR 702.94a + CR 603.11: A card with Miracle drawn as the first card of
+    /// the turn queues a `MiracleOffer` with the keyword's mana cost. A second
+    /// draw of another miracle card in the same resolution does NOT queue a
+    /// second offer (CR 702.94a only honors the first-drawn card).
+    #[test]
+    fn miracle_first_draw_queues_offer() {
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        let mut state = GameState::new_two_player(42);
+        // Put two miracle-tagged cards on the library top.
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "MiracleOne".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "MiracleTwo".to_string(),
+            Zone::Library,
+        );
+        // Attach Keyword::Miracle({W}) to each.
+        for obj_id in [first, second] {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.keywords
+                .push(crate::types::keywords::Keyword::Miracle(ManaCost::Cost {
+                    shards: vec![ManaCostShard::White],
+                    generic: 0,
+                }));
+            obj.base_keywords = obj.keywords.clone();
+        }
+
+        let mut events = Vec::new();
+        resolve(&mut state, &make_ability(2), &mut events).unwrap();
+
+        // Only the first drawn card queues a miracle offer.
+        assert_eq!(
+            state.pending_miracle_offers.len(),
+            1,
+            "only the first drawn card should queue a miracle offer"
+        );
+        let offer = &state.pending_miracle_offers[0];
+        assert_eq!(offer.player, PlayerId(0));
+        assert_eq!(offer.object_id, first);
+    }
+
+    /// CR 702.94a: A card without Miracle as the first-drawn card does NOT
+    /// queue an offer, even if later drawn cards have Miracle.
+    #[test]
+    fn miracle_non_first_draw_does_not_queue_offer() {
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        let mut state = GameState::new_two_player(42);
+        // First card: no miracle. Second card: miracle.
+        let _first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mundane".to_string(),
+            Zone::Library,
+        );
+        let miracle_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "MiracleCard".to_string(),
+            Zone::Library,
+        );
+        let obj = state.objects.get_mut(&miracle_card).unwrap();
+        obj.keywords
+            .push(crate::types::keywords::Keyword::Miracle(ManaCost::Cost {
+                shards: vec![ManaCostShard::White],
+                generic: 0,
+            }));
+        obj.base_keywords = obj.keywords.clone();
+
+        let mut events = Vec::new();
+        resolve(&mut state, &make_ability(2), &mut events).unwrap();
+
+        assert!(
+            state.pending_miracle_offers.is_empty(),
+            "non-first-drawn miracle card must not queue an offer"
         );
     }
 }

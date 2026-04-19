@@ -332,6 +332,7 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
             | GameAction::CastSpell { .. }
             | GameAction::CastSpellAsSneak { .. }
             | GameAction::CastSpellForFree { .. }
+            | GameAction::CastSpellAsMiracle { .. }
             | GameAction::CancelCast
             | GameAction::PayUnlessCost { .. }
             | GameAction::PayCombatTax { .. } => {
@@ -1516,6 +1517,46 @@ fn apply_action(state: &mut GameState, action: GameAction) -> Result<ActionResul
                 card_id,
                 source_id,
                 &mut events,
+            )?
+        }
+        // CR 702.94a + CR 603.11: Miracle reveal — accept path. Caster casts
+        // the revealed card for its miracle mana cost via `CastingVariant::Miracle`.
+        (
+            WaitingFor::MiracleReveal {
+                player, object_id, ..
+            },
+            GameAction::CastSpellAsMiracle {
+                object_id: action_obj,
+                card_id,
+            },
+        ) => {
+            if *object_id != action_obj {
+                return Err(EngineError::InvalidAction(
+                    "CastSpellAsMiracle object_id does not match the outstanding miracle reveal"
+                        .to_string(),
+                ));
+            }
+            let p = *player;
+            let obj = action_obj;
+            super::casting::handle_cast_spell_as_miracle(state, p, obj, card_id, &mut events)?
+        }
+        // CR 702.94a: Miracle reveal — decline path. Reuses the generic
+        // DecideOptionalEffect decline; flushes the next pending miracle
+        // offer or returns to Priority. Flip `waiting_for` out of MiracleReveal
+        // before running the pipeline so its Priority-gated path (line 46 of
+        // engine_priority) engages and the flush has a chance to pop the next
+        // offer.
+        (
+            WaitingFor::MiracleReveal { player, .. },
+            GameAction::DecideOptionalEffect { accept: false },
+        ) => {
+            let p = *player;
+            state.waiting_for = WaitingFor::Priority { player: p };
+            super::engine_priority::run_post_action_pipeline(
+                state,
+                &mut events,
+                &WaitingFor::Priority { player: p },
+                true,
             )?
         }
         (waiting_for, action) if engine_resolution_choices::handles(waiting_for) => {

@@ -200,6 +200,11 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.hand_cast_free_permissions_used.clear();
     // CR 702.94a: Reset per-player first-card-drawn-this-turn tracking for miracle.
     state.first_card_drawn_this_turn.clear();
+    // CR 702.94a: Any miracle offers that outlived priority without being
+    // flushed are stale (the "first card drawn this turn" condition no longer
+    // applies after the turn ends). Drop them so we never surface a prompt for
+    // a card drawn last turn.
+    state.pending_miracle_offers.clear();
     state.spells_cast_this_turn_by_player.clear();
     state.players_who_searched_library_this_turn.clear();
     state.players_attacked_this_step.clear();
