@@ -472,6 +472,9 @@ pub fn threat_velocity(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine::game::zones::create_object;
+    use engine::types::identifiers::CardId;
+    use engine::types::zones::Zone;
 
     #[test]
     fn projection_horizon_is_copy_hash() {
@@ -490,5 +493,154 @@ mod tests {
         let appeared = VelocitySample::Appeared { projected_power: 5 };
         assert_ne!(changed, removed);
         assert_ne!(changed, appeared);
+    }
+
+    /// Build a minimal two-player state with one opponent creature.
+    fn state_with_opp_creature(name: &str, power: i32) -> (GameState, ObjectId) {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(power);
+        obj.toughness = Some(power);
+        (state, id)
+    }
+
+    #[test]
+    fn velocity_classifies_unchanged_creature_as_changed_zero() {
+        // A vanilla creature without triggers should report Changed { delta: 0 }
+        // when base and projection are identical (no growth).
+        let (base, id) = state_with_opp_creature("Vanilla Bear", 2);
+        let projection = Projection {
+            horizon_reached: ProjectionHorizon::OpponentBeginCombat,
+            state: base.clone(),
+            snapshots: vec![(ProjectionHorizon::OpponentBeginCombat, base.clone())],
+            confidence: Confidence::Exact,
+            target_opponent: PlayerId(1),
+        };
+        let samples = threat_velocity(&base, &projection, PlayerId(1));
+        assert_eq!(samples.get(&id), Some(&VelocitySample::Changed { delta: 0 }));
+    }
+
+    #[test]
+    fn velocity_classifies_grown_creature() {
+        // Simulate Ouroboroid effect: same ObjectId, higher projected power.
+        let (base, id) = state_with_opp_creature("Scaly", 1);
+        let mut projected = base.clone();
+        projected.objects.get_mut(&id).unwrap().power = Some(9);
+
+        let projection = Projection {
+            horizon_reached: ProjectionHorizon::OpponentBeginCombat,
+            state: projected.clone(),
+            snapshots: vec![(ProjectionHorizon::OpponentBeginCombat, projected)],
+            confidence: Confidence::Approximated { choice_count: 1 },
+            target_opponent: PlayerId(1),
+        };
+        let samples = threat_velocity(&base, &projection, PlayerId(1));
+        assert_eq!(samples.get(&id), Some(&VelocitySample::Changed { delta: 8 }));
+    }
+
+    #[test]
+    fn velocity_classifies_removed_creature() {
+        // Creature exists in base but is gone from projection (destroyed mid-turn).
+        let (base, id) = state_with_opp_creature("Doomed", 3);
+        let mut projected = base.clone();
+        // Remove from battlefield (mirrors what sacrifice/destroy does structurally).
+        projected.battlefield.retain(|&bid| bid != id);
+
+        let projection = Projection {
+            horizon_reached: ProjectionHorizon::OpponentBeginCombat,
+            state: projected.clone(),
+            snapshots: vec![(ProjectionHorizon::OpponentBeginCombat, projected)],
+            confidence: Confidence::Exact,
+            target_opponent: PlayerId(1),
+        };
+        let samples = threat_velocity(&base, &projection, PlayerId(1));
+        assert_eq!(samples.get(&id), Some(&VelocitySample::Removed));
+    }
+
+    #[test]
+    fn velocity_classifies_appeared_token() {
+        // Opponent creates a token during projection (Ophiomancer-style).
+        let (base, _original_id) = state_with_opp_creature("Host", 2);
+        let mut projected = base.clone();
+        let token_id = create_object(
+            &mut projected,
+            CardId(99),
+            PlayerId(1),
+            "Snake Token".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = projected.objects.get_mut(&token_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(1);
+        obj.toughness = Some(1);
+
+        let projection = Projection {
+            horizon_reached: ProjectionHorizon::OpponentBeginCombat,
+            state: projected.clone(),
+            snapshots: vec![(ProjectionHorizon::OpponentBeginCombat, projected)],
+            confidence: Confidence::Exact,
+            target_opponent: PlayerId(1),
+        };
+        let samples = threat_velocity(&base, &projection, PlayerId(1));
+        assert_eq!(
+            samples.get(&token_id),
+            Some(&VelocitySample::Appeared { projected_power: 1 })
+        );
+    }
+
+    #[test]
+    fn velocity_ignores_ai_controlled_creatures() {
+        // AI's own creatures shouldn't appear in opponent velocity samples.
+        let mut state = GameState::new_two_player(42);
+        let ai_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "AI Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&ai_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.power = Some(2);
+
+        let projection = Projection {
+            horizon_reached: ProjectionHorizon::OpponentBeginCombat,
+            state: state.clone(),
+            snapshots: vec![(ProjectionHorizon::OpponentBeginCombat, state.clone())],
+            confidence: Confidence::Exact,
+            target_opponent: PlayerId(1),
+        };
+        let samples = threat_velocity(&state, &projection, PlayerId(1));
+        assert!(
+            !samples.contains_key(&ai_id),
+            "AI creatures must not appear in opponent velocity samples"
+        );
+    }
+
+    #[test]
+    fn projection_key_includes_turn_for_implicit_invalidation() {
+        // Two keys identical except for turn_number must hash differently,
+        // so stale entries from prior turns never serve a current lookup.
+        let k1 = ProjectionKey {
+            state_hash: 12345,
+            turn_number: 3,
+            active_player: PlayerId(0),
+            ai_player: PlayerId(0),
+            target_opponent: PlayerId(1),
+            horizon: ProjectionHorizon::OpponentBeginCombat,
+        };
+        let k2 = ProjectionKey {
+            turn_number: 4,
+            ..k1
+        };
+        assert_ne!(k1, k2);
     }
 }
