@@ -72,6 +72,21 @@ jobs:
           cp client/public/card-data.json data/card-data.json
           cargo run --release --bin coverage-report -- data/ --all > client/public/coverage-data.json
 
+      - name: Validate card-data against engine schema
+        # Deploy gate — refuse to ship card-data the current engine cannot parse.
+        run: cargo run --release --bin card-data-validate -- client/public/card-data.json
+
+      - name: Compute content-addressed card-data filename
+        id: card-data-hash
+        # Pin this WASM bundle to its own card-data forever via an immutable
+        # `card-data-<hash>.json` URL baked into the JS bundle. Old browser
+        # caches keep resolving their old hash even after a new release.
+        run: |
+          HASH=$(sha256sum client/public/card-data.json | awk '{print substr($1, 1, 16)}')
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "filename=card-data-$HASH.json" >> "$GITHUB_OUTPUT"
+          cp client/public/card-data.json "client/public/card-data-$HASH.json"
+
       - name: Generate Scryfall data
         run: ./scripts/gen-scryfall-images.sh
 
@@ -80,7 +95,9 @@ jobs:
 
       - name: Build frontend
         env:
-          CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/card-data.json"
+          # Bake the immutable hashed URL into the JS bundle so this WASM build
+          # is statically pinned to the card-data it was validated against.
+          CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/${{ steps.card-data-hash.outputs.filename }}"
           COVERAGE_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/coverage-data.json"
           COVERAGE_SUMMARY_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/coverage-summary.json"
           SCRYFALL_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/scryfall-data.json"
@@ -94,14 +111,25 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
         run: |
           jq '{total_cards, supported_cards, coverage_pct, coverage_by_format}' client/public/coverage-data.json > client/public/coverage-summary.json
+          # Immutable, year-long cache for the content-addressed copy.
+          npx wrangler r2 object put "phase-rs-data/$CARD_DATA_FILENAME" --file "client/public/$CARD_DATA_FILENAME" --content-type application/json --cache-control "public, max-age=31536000, immutable"
+          # Legacy unhashed copy for any consumer still resolving /card-data.json.
           npx wrangler r2 object put phase-rs-data/card-data.json --file client/public/card-data.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/coverage-data.json --file client/public/coverage-data.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/coverage-summary.json --file client/public/coverage-summary.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/scryfall-data.json --file client/public/scryfall-data.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
       - name: Remove large data files from dist (served from R2)
-        run: rm -f client/dist/card-data.json client/dist/card-data.json.br client/dist/coverage-data.json client/dist/coverage-data.json.br client/dist/coverage-summary.json client/dist/coverage-summary.json.br client/dist/scryfall-data.json client/dist/scryfall-data.json.br
+        # Hex glob keeps `card-data-meta.json` (consumed by `useCardDataMeta`).
+        run: |
+          rm -f client/dist/card-data.json client/dist/card-data.json.br \
+            client/dist/coverage-data.json client/dist/coverage-data.json.br \
+            client/dist/coverage-summary.json client/dist/coverage-summary.json.br \
+            client/dist/scryfall-data.json client/dist/scryfall-data.json.br
+          find client/dist -maxdepth 1 \
+            -regex '.*/card-data-[0-9a-f]\{16\}\.json\(\.br\)?' -delete
 
       - name: Upload frontend artifact
         uses: actions/upload-artifact@v4

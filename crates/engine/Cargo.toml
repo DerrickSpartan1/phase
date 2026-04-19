@@ -45,6 +45,10 @@ name = "rules-audit"
 path = "src/bin/rules_audit.rs"
 required-features = ["audit"]
 
+[[bin]]
+name = "card-data-validate"
+path = "src/bin/card_data_validate.rs"
+
 [dev-dependencies]
 tempfile = "3"
 insta = { version = "1", features = ["json"] }

@@ -69,6 +69,12 @@ jobs:
         run: |
           cargo run --bin oracle-gen --features cli -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
+      - name: Validate card-data against engine schema
+        # PR-time gate — the same parse the WASM does at runtime, run against
+        # the freshly produced card-data. If a parser/schema change makes the
+        # engine unable to read its own output, fail the build before merge.
+        run: cargo run --bin card-data-validate -- data/card-data.json
+
       - name: Card support coverage report
         run: |
           cargo run --bin coverage-report -- data/ --all > data/coverage-data.json

@@ -90,6 +90,30 @@ jobs:
           cp data/coverage-data.json client/public/coverage-data.json
           cp data/coverage-summary.json client/public/coverage-summary.json
 
+      - name: Validate card-data against engine schema
+        # Deploy gate — parse the freshly produced card-data through the same
+        # `CardDatabase::from_export` path the WASM uses at runtime. Catches
+        # "this commit's engine cannot read this commit's card-data" before R2
+        # ever sees a broken file. Pairs with the content-addressed copy below.
+        run: cargo run --release --bin card-data-validate -- data/card-data.json
+
+      - name: Compute content-addressed card-data filename
+        id: card-data-hash
+        # Pin each WASM bundle to the exact card-data it was built against by
+        # publishing card-data at `card-data-<hash>.json` (immutable URL with
+        # long cache) and baking that URL into the JS bundle via Vite's
+        # `__CARD_DATA_URL__` define. New deploys publish a new hash; old WASM
+        # bundles in browser caches keep resolving their own old hashed URL.
+        # WASM/card-data schema drift across deploys becomes structurally
+        # impossible.
+        run: |
+          HASH=$(sha256sum data/card-data.json | awk '{print substr($1, 1, 16)}')
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          echo "filename=card-data-$HASH.json" >> "$GITHUB_OUTPUT"
+          cp data/card-data.json "data/card-data-$HASH.json"
+          cp "data/card-data-$HASH.json" "client/public/card-data-$HASH.json"
+          echo "Content-addressed card-data: card-data-$HASH.json"
+
       - name: Generate Scryfall data
         run: ./scripts/gen-scryfall-images.sh
 
@@ -102,7 +126,14 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CARD_DATA_FILENAME: ${{ steps.card-data-hash.outputs.filename }}
         run: |
+          # Content-addressed copy: immutable, year-long cache. Each WASM
+          # bundle is baked with its own hashed URL, so old browser caches
+          # keep resolving the old hash even after this deploy publishes a new one.
+          npx wrangler r2 object put "phase-rs-data/staging/$CARD_DATA_FILENAME" --file "client/public/$CARD_DATA_FILENAME" --content-type application/json --cache-control "public, max-age=31536000, immutable"
+          # Legacy unhashed copy: kept for local dev parity and any consumer that
+          # still resolves `/card-data.json` directly. Short cache.
           npx wrangler r2 object put phase-rs-data/staging/card-data.json --file client/public/card-data.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/staging/coverage-data.json --file client/public/coverage-data.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
           npx wrangler r2 object put phase-rs-data/staging/coverage-summary.json --file client/public/coverage-summary.json --content-type application/json --cache-control "public, max-age=60, must-revalidate"
@@ -127,7 +158,12 @@ jobs:
 
       - name: Build frontend
         env:
-          CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/card-data.json"
+          # CRITICAL: point at the content-addressed card-data URL, not the
+          # mutable `card-data.json`. Vite bakes this string into the JS
+          # bundle's `__CARD_DATA_URL__`, statically pinning this WASM build
+          # to its own card-data forever. New deploys get a new hash; old
+          # browser caches keep resolving the old hash.
+          CARD_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/${{ steps.card-data-hash.outputs.filename }}"
           COVERAGE_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/coverage-data.json"
           COVERAGE_SUMMARY_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/coverage-summary.json"
           SCRYFALL_DATA_URL: "https://pub-fc5b5c2c6e774356ae3e730bb0326394.r2.dev/staging/scryfall-data.json"
@@ -138,7 +174,18 @@ jobs:
           pnpm build
 
       - name: Remove large data files from dist (served from R2)
-        run: rm -f client/dist/card-data.json client/dist/card-data.json.br client/dist/coverage-data.json client/dist/coverage-data.json.br client/dist/coverage-summary.json client/dist/coverage-summary.json.br client/dist/scryfall-data.json client/dist/scryfall-data.json.br
+        # Strip the unhashed card-data and the 16-hex-char hashed copy that
+        # vite picked up from `client/public/`. Both live on R2 — Pages only
+        # ships the JS/WASM bundle that references them. The hex glob is
+        # specifically scoped so `card-data-meta.json` (consumed at runtime
+        # by `useCardDataMeta`) survives.
+        run: |
+          rm -f client/dist/card-data.json client/dist/card-data.json.br \
+            client/dist/coverage-data.json client/dist/coverage-data.json.br \
+            client/dist/coverage-summary.json client/dist/coverage-summary.json.br \
+            client/dist/scryfall-data.json client/dist/scryfall-data.json.br
+          find client/dist -maxdepth 1 \
+            -regex '.*/card-data-[0-9a-f]\{16\}\.json\(\.br\)?' -delete
 
       - name: SPA fallback for GitHub Pages
         run: cp client/dist/index.html client/dist/404.html

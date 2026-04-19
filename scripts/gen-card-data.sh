@@ -132,10 +132,41 @@ if [ ! -s "$NAMES_OUTPUT_TMP" ] || ! jq -e '.' "$NAMES_OUTPUT_TMP" >/dev/null 2>
   echo "Generated $NAMES_OUTPUT_TMP is empty or not valid JSON; aborting." >&2
   exit 1
 fi
+# Schema gate: parse the freshly produced card-data through the same
+# `CardDatabase::from_export` path the WASM uses at runtime. If the engine
+# code in this commit cannot read the JSON it just produced, fail loudly
+# rather than promote a broken artifact. This is the deploy-time half of
+# the WASM/card-data drift defense — see `card-data-validate` and the
+# content-addressed copy step further down.
+echo "Validating card-data against current engine schema..."
+if ! cargo run --profile tool --bin card-data-validate -- "$OUTPUT_TMP"; then
+  echo "Schema validation failed for $OUTPUT_TMP; aborting." >&2
+  exit 1
+fi
+
 # Promote immediately — coverage-report failure below must NOT invalidate this.
 promote_tmp "$OUTPUT_TMP"       "$OUTPUT"
 promote_tmp "$NAMES_OUTPUT_TMP" "$NAMES_OUTPUT"
 echo "Promoted $OUTPUT and $NAMES_OUTPUT"
+
+# Content-addressed copy: emit a sibling `card-data-<sha256-prefix>.json` that
+# deploys can upload to a long-cache, immutable R2 URL. Each WASM bundle is
+# baked (via Vite) with the hashed URL of the card-data it was built against,
+# so old WASM bundles continue resolving their own old hashed URL even after
+# new deploys publish new card-data. This makes WASM/card-data schema drift
+# across deploys structurally impossible.
+DATA_HASH=$(shasum -a 256 "$OUTPUT" | awk '{print substr($1, 1, 16)}')
+HASHED_OUTPUT="${OUTPUT_DIR}/card-data-${DATA_HASH}.json"
+# Prune older hashed copies from this directory so local public/ doesn't grow
+# unbounded across regenerations. Deploy targets (R2) keep their own history.
+# The 16-hex-char glob avoids collateral damage to siblings like
+# `card-data-meta.json` that share the `card-data-` prefix.
+find "$OUTPUT_DIR" -maxdepth 1 \
+  -regex ".*/card-data-[0-9a-f]\{16\}\.json" \
+  ! -name "card-data-${DATA_HASH}.json" \
+  -delete 2>/dev/null || true
+cp "$OUTPUT" "$HASHED_OUTPUT"
+echo "Wrote content-addressed $HASHED_OUTPUT"
 
 # --- Group 2: coverage-data + coverage-summary (best-effort sidecar) ---
 # A coverage-report failure warns but does not fail the whole pipeline — the
@@ -177,7 +208,7 @@ if [ -s "$MTGJSON_META_FILE" ]; then
 fi
 track_tmp "$META_OUTPUT_TMP"
 cat > "$META_OUTPUT_TMP" <<METAEOF
-{"generated_at":"${GEN_TIMESTAMP}","commit":"${GEN_COMMIT}","commit_short":"${GEN_COMMIT_SHORT}","mtgjson_version":"${MTGJSON_VERSION}","mtgjson_date":"${MTGJSON_DATE}"}
+{"generated_at":"${GEN_TIMESTAMP}","commit":"${GEN_COMMIT}","commit_short":"${GEN_COMMIT_SHORT}","mtgjson_version":"${MTGJSON_VERSION}","mtgjson_date":"${MTGJSON_DATE}","data_hash":"${DATA_HASH}","data_filename":"card-data-${DATA_HASH}.json"}
 METAEOF
 promote_tmp "$META_OUTPUT_TMP" "$META_OUTPUT"
 echo "Generated $META_OUTPUT"
