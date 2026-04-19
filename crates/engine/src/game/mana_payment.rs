@@ -355,6 +355,119 @@ pub fn pay_cost(
     pay_cost_with_demand(pool, cost, None, None, false)
 }
 
+/// CR 601.2g: Simulate paying `cost` from a clone of `pool` and return the
+/// residual cost the pool cannot cover. The auto-tap planner consults this so
+/// floating mana (e.g. a pre-tapped Sol Ring) isn't double-counted by tapping
+/// additional sources for shards the pool already satisfies.
+///
+/// This is the dry-run twin of `pay_cost_with_demand_and_choices`: it mirrors
+/// that function's shard-by-shard eligibility checks against a scratch pool,
+/// but records unmet shards into a new `ManaCost` instead of erroring on
+/// shortfall. `spell`/`any_color` gate eligibility exactly as the real payment
+/// does — restricted mana the spell can't use stays in the pool and the shard
+/// stays in the residual.
+///
+/// Returns `ManaCost::NoCost` when the pool fully covers the cost so callers
+/// can short-circuit.
+pub(crate) fn reduce_cost_by_pool(
+    pool: &ManaPool,
+    cost: &ManaCost,
+    spell: Option<&SpellMeta>,
+    any_color: bool,
+) -> ManaCost {
+    let (shards, generic) = match cost {
+        ManaCost::NoCost | ManaCost::SelfManaCost => return cost.clone(),
+        ManaCost::Cost { shards, generic } => (shards, *generic),
+    };
+
+    let mut scratch = pool.clone();
+    let mut residual_shards: Vec<ManaCostShard> = Vec::new();
+    let mut residual_generic = generic;
+
+    for &shard in shards {
+        let paid = match shard_to_mana_type(shard) {
+            // CR 107.4a/f + CR 609.4b: Exact color required (any_color relaxes to any mana).
+            // Phyrexian's life-payment option lives in the real payment path — at the planner
+            // layer we only check mana coverage; life-only payments leave the shard in the
+            // residual but auto-tap's `needs` then generates zero sources (requires_life
+            // ordering handles it downstream).
+            ShardRequirement::Single(color) | ShardRequirement::Phyrexian(color) => {
+                if any_color {
+                    spend_any_eligible(&mut scratch, spell).is_some()
+                } else {
+                    spend_eligible(&mut scratch, color, spell).is_some()
+                }
+            }
+            // CR 107.4e/f: Hybrid pays either half.
+            ShardRequirement::Hybrid(a, b) | ShardRequirement::HybridPhyrexian(a, b) => {
+                if any_color {
+                    spend_any_eligible(&mut scratch, spell).is_some()
+                } else {
+                    spend_eligible(&mut scratch, a, spell).is_some()
+                        || spend_eligible(&mut scratch, b, spell).is_some()
+                }
+            }
+            // CR 107.4e: {C/color} — prefer colorless, else the colored half.
+            ShardRequirement::ColorlessHybrid(color) => {
+                if any_color {
+                    spend_any_eligible(&mut scratch, spell).is_some()
+                } else {
+                    spend_eligible(&mut scratch, ManaType::Colorless, spell).is_some()
+                        || spend_eligible(&mut scratch, color, spell).is_some()
+                }
+            }
+            // CR 107.4e: {2/color} — 1 colored is cheaper than 2 generic; try colored first.
+            // The 2-generic fallback is atomic: we restore the scratch pool if we can't
+            // afford both halves, rather than half-draining it.
+            ShardRequirement::TwoGenericHybrid(color) => {
+                if any_color {
+                    spend_any_eligible(&mut scratch, spell).is_some()
+                } else if spend_eligible(&mut scratch, color, spell).is_some() {
+                    true
+                } else {
+                    let mut backup = scratch.clone();
+                    if spend_any_eligible(&mut backup, spell).is_some()
+                        && spend_any_eligible(&mut backup, spell).is_some()
+                    {
+                        scratch = backup;
+                        true
+                    } else {
+                        false
+                    }
+                }
+            }
+            // CR 107.4h: Snow mana only from snow sources.
+            ShardRequirement::Snow => spend_snow_unit(&mut scratch).is_some(),
+            // CR 107.1b: `ManaCost::concretize_x` strips `X` shards into generic
+            // before auto-tap runs, so this arm is defensive. Keep the shard in
+            // the residual so auto-tap's legacy `deferred_generic += 1` path
+            // still fires in the edge case where an unconverted X reaches here.
+            ShardRequirement::X => false,
+        };
+        if !paid {
+            residual_shards.push(shard);
+        }
+    }
+
+    // CR 107.4b: Generic may be paid with any eligible mana.
+    for _ in 0..generic {
+        if spend_any_eligible(&mut scratch, spell).is_some() {
+            residual_generic = residual_generic.saturating_sub(1);
+        } else {
+            break;
+        }
+    }
+
+    if residual_shards.is_empty() && residual_generic == 0 {
+        ManaCost::NoCost
+    } else {
+        ManaCost::Cost {
+            shards: residual_shards,
+            generic: residual_generic,
+        }
+    }
+}
+
 /// Pay a mana cost with hand-demand-aware hybrid resolution (CR 601.2f + CR 601.2h).
 ///
 /// CR 601.2f: If a cost includes hybrid mana symbols, the player announces the nonhybrid

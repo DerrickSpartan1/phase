@@ -1685,10 +1685,28 @@ pub(super) fn auto_tap_mana_sources(
     use crate::types::card_type::CoreType;
     use crate::types::mana::ManaCost;
 
-    let (shards, generic) = match cost {
+    // CR 601.2g: A player may spend mana from their mana pool to pay costs.
+    // Plan against the *residual* cost (what the pool can't already cover) so
+    // pre-floated mana isn't shadowed by redundant taps — e.g. Sol Ring + an
+    // Island floated before casting a 3-mana spell must not tap three more
+    // sources. Restriction-aware eligibility is delegated to
+    // `reduce_cost_by_pool`, which mirrors the real payment path.
+    let spell_meta =
+        deprioritize_source.and_then(|sid| super::casting::build_spell_meta(state, player, sid));
+    let any_color = super::static_abilities::player_can_spend_as_any_color(state, player);
+    let residual = state
+        .players
+        .iter()
+        .find(|p| p.id == player)
+        .map(|p| {
+            mana_payment::reduce_cost_by_pool(&p.mana_pool, cost, spell_meta.as_ref(), any_color)
+        })
+        .unwrap_or_else(|| cost.clone());
+
+    let (shards, generic) = match &residual {
         ManaCost::NoCost | ManaCost::SelfManaCost => return,
         ManaCost::Cost { shards, generic } if shards.is_empty() && *generic == 0 => return,
-        ManaCost::Cost { shards, generic } => (shards, *generic),
+        ManaCost::Cost { shards, generic } => (shards.as_slice(), *generic),
     };
 
     // Build list of activatable mana options for ALL permanents this player controls.
@@ -2816,6 +2834,139 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, GameEvent::LifeChanged { amount: -1, .. })),
             "auto-pay should not emit a life payment when an equivalent non-life line exists"
+        );
+    }
+
+    #[test]
+    fn auto_tap_skips_sources_when_pool_already_covers_cost() {
+        // CR 601.2g regression: if the player has already tapped Sol Ring ({C}{C})
+        // and an Island ({U}) before casting a {2}{U} spell, auto-tap must NOT
+        // tap three more untapped lands — the floating pool already covers the
+        // entire cost.
+        use crate::types::mana::ManaUnit;
+        let mut state = GameState::new_two_player(42);
+
+        // Three untapped basic lands as potential victims if auto-tap misbehaves.
+        let mut lands = Vec::new();
+        for i in 0..3 {
+            let land = create_object(
+                &mut state,
+                CardId(200 + i),
+                PlayerId(0),
+                "Island".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Island".to_string());
+            lands.push(land);
+        }
+
+        // Pre-float {C}{C}{U} into the pool (as if the player tapped sources
+        // before initiating the cast).
+        let floated_source = ObjectId(99);
+        for color in [ManaType::Colorless, ManaType::Colorless, ManaType::Blue] {
+            state.players[0].mana_pool.add(ManaUnit {
+                color,
+                source_id: floated_source,
+                snow: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        }
+
+        let mut events = Vec::new();
+        auto_tap_mana_sources(
+            &mut state,
+            PlayerId(0),
+            &ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            },
+            &mut events,
+            None,
+        );
+
+        // Pool unchanged — reduce_cost_by_pool consumed the residual to NoCost.
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            3,
+            "pool must not grow when it already covers the cost"
+        );
+        // No permanents tapped, no mana produced.
+        for land in &lands {
+            assert!(
+                !state.objects.get(land).unwrap().tapped,
+                "no land should be tapped when floating mana covers the cost"
+            );
+        }
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, GameEvent::PermanentTapped { .. })),
+            "auto-tap must emit no PermanentTapped events when pool covers cost"
+        );
+    }
+
+    #[test]
+    fn auto_tap_taps_only_the_shortfall_when_pool_partially_covers() {
+        // CR 601.2g: If the pool covers part of the cost, auto-tap must only
+        // produce the residual — not the full cost. Pool has {U}; cost is
+        // {2}{U}; expect exactly 2 additional sources tapped (for the {2}).
+        use crate::types::mana::ManaUnit;
+        let mut state = GameState::new_two_player(42);
+
+        let mut lands = Vec::new();
+        for i in 0..4 {
+            let land = create_object(
+                &mut state,
+                CardId(300 + i),
+                PlayerId(0),
+                "Island".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Island".to_string());
+            lands.push(land);
+        }
+
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Blue,
+            source_id: ObjectId(99),
+            snow: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+
+        let mut events = Vec::new();
+        auto_tap_mana_sources(
+            &mut state,
+            PlayerId(0),
+            &ManaCost::Cost {
+                shards: vec![ManaCostShard::Blue],
+                generic: 2,
+            },
+            &mut events,
+            None,
+        );
+
+        // Pool grew by exactly 2 (the residual {2} → two {U} from Islands).
+        // Original {U} stays floating; two new units produced.
+        assert_eq!(
+            state.players[0].mana_pool.total(),
+            3,
+            "pool should grow by exactly the residual — 2 mana for the generic {{2}}"
+        );
+        let tapped_count = lands
+            .iter()
+            .filter(|l| state.objects.get(l).unwrap().tapped)
+            .count();
+        assert_eq!(
+            tapped_count, 2,
+            "exactly 2 lands should tap for the residual; the pre-floated {{U}} covers the shard"
         );
     }
 
