@@ -9493,6 +9493,50 @@ mod tests {
         );
     }
 
+    // CR 115.1d: Scrollboost — "One or two target creatures each get +2/+2
+    // until end of turn" must attach `MultiTargetSpec { min: 1, max: Some(2) }`
+    // so the caster selects between one and two creatures (not zero, not the
+    // unlimited "any number of" shape).
+    #[test]
+    fn one_or_two_target_creatures_each_pump() {
+        let clause = parse_effect_clause(
+            "one or two target creatures each get +2/+2 until end of turn",
+            &ParseContext::default(),
+        );
+        assert!(
+            !matches!(clause.effect, Effect::Unimplemented { .. }),
+            "expected parsed pump effect, got {:?}",
+            clause.effect
+        );
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec {
+                min: 1,
+                max: Some(2)
+            }),
+        );
+    }
+
+    #[test]
+    fn one_two_or_three_target_creatures_each_pump() {
+        let clause = parse_effect_clause(
+            "one, two, or three target creatures each get +1/+1 until end of turn",
+            &ParseContext::default(),
+        );
+        assert!(
+            !matches!(clause.effect, Effect::Unimplemented { .. }),
+            "expected parsed pump effect, got {:?}",
+            clause.effect
+        );
+        assert_eq!(
+            clause.multi_target,
+            Some(MultiTargetSpec {
+                min: 1,
+                max: Some(3)
+            }),
+        );
+    }
+
     #[test]
     fn return_to_battlefield_produces_change_zone() {
         let e = parse_effect("return those cards to the battlefield under their owners' control");

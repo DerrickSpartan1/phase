@@ -298,6 +298,27 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         // `rest.trim_start()`.
         return Some((expr, rest.trim_start()));
     }
+
+    // CR 107.3: "twice N" / "three times N" — multiplicative count (Procrastinate:
+    // "Put twice X stun counters on it"). Mirrors the `parse_cda_quantity` branch
+    // but applies inside effect-count positions (put-counter count, draw count,
+    // mill count, etc.) so every quantity-taking verb picks it up uniformly. The
+    // inner count recursively delegates back to `parse_count_expr`, so "twice X"
+    // and "three times five" both compose through the same types.
+    for (factor, prefix) in [(2i32, "twice "), (3, "three times ")] {
+        if lower.starts_with(prefix) {
+            let rest = &text[prefix.len()..];
+            if let Some((inner, after)) = parse_count_expr(rest) {
+                return Some((
+                    QuantityExpr::Multiply {
+                        factor,
+                        inner: Box::new(inner),
+                    },
+                    after,
+                ));
+            }
+        }
+    }
     // CR 107.3a: "X" in Oracle text represents a variable determined at cast time.
     // Accept X followed by whitespace, comma, period, or end-of-string — all valid
     // Oracle text boundaries (e.g., "X cards", "X, rounded up", "X.").
@@ -1654,6 +1675,41 @@ mod tests {
         // Ensure "3 cards" still returns Fixed, not HalfRounded
         let (qty, rest) = parse_count_expr("3 cards").unwrap();
         assert!(matches!(qty, QuantityExpr::Fixed { value: 3 }));
+        assert_eq!(rest, "cards");
+    }
+
+    // CR 107.3: Procrastinate — "Put twice X stun counters on it" requires
+    // `parse_count_expr` to recognize multiplicative prefixes so counter /
+    // draw / mill / damage count positions see `Multiply { factor, inner }`
+    // and not a silent Fixed(0) default.
+    #[test]
+    fn parse_count_expr_twice_x() {
+        let (qty, rest) = parse_count_expr("twice X stun counters").unwrap();
+        match qty {
+            QuantityExpr::Multiply { factor, inner } => {
+                assert_eq!(factor, 2);
+                assert!(matches!(
+                    *inner,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable { .. }
+                    }
+                ));
+            }
+            other => panic!("expected Multiply, got {other:?}"),
+        }
+        assert_eq!(rest, "stun counters");
+    }
+
+    #[test]
+    fn parse_count_expr_three_times_fixed() {
+        let (qty, rest) = parse_count_expr("three times two cards").unwrap();
+        match qty {
+            QuantityExpr::Multiply { factor, inner } => {
+                assert_eq!(factor, 3);
+                assert!(matches!(*inner, QuantityExpr::Fixed { value: 2 }));
+            }
+            other => panic!("expected Multiply, got {other:?}"),
+        }
         assert_eq!(rest, "cards");
     }
 

@@ -374,6 +374,33 @@ pub(super) fn parse_subject_application(
             return Some(application);
         }
     }
+    // CR 115.1d: "one or two target X" / "one, two, or three target X" —
+    // bounded-count targeting with a minimum of 1 (Scrollboost:
+    // "One or two target creatures each get +2/+2 until end of turn"). Mirrors
+    // the "any number of target" branch above; the only axis of variation is
+    // the min/max pair bound by the phrase.
+    for (prefix, min, max) in [
+        ("one or two ", 1usize, 2usize),
+        ("one, two, or three ", 1, 3),
+    ] {
+        if let Ok((after_prefix, _)) = tag::<_, _, VerboseError<&str>>(prefix).parse(lower.as_str())
+        {
+            if tag::<_, _, VerboseError<&str>>("target ")
+                .parse(after_prefix)
+                .is_ok()
+            {
+                let consumed = lower.len() - after_prefix.len();
+                let target_text = &subject[consumed..];
+                let (filter, _) = parse_target(target_text);
+                let mut application = subject_filter_application(filter, true)?;
+                application.multi_target = Some(MultiTargetSpec {
+                    min,
+                    max: Some(max),
+                });
+                return Some(application);
+            }
+        }
+    }
     // "each of your opponents" / "each of those creatures" / "each of them" — variant of
     // "each" with an interposed "of" that parse_target doesn't handle directly.
     // Must check before "each " to avoid the generic "each" path swallowing "each of".
