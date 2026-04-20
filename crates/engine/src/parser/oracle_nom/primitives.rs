@@ -262,7 +262,13 @@ pub fn parse_counter_type(input: &str) -> OracleResult<'_, String> {
 }
 
 /// Parse a named counter type: "loyalty", "charge", "lore", "defense", etc.
+///
+/// CR 122.1b + CR 122.6: counter names are arbitrary strings; this list enumerates
+/// the names that appear in printed Oracle text (as of current MTG releases).
+/// Runtime routing maps these to `CounterType::Generic(name)` where no dedicated
+/// variant exists (`layers::evaluate_condition` handles the Generic fallback).
 fn parse_named_counter_type(input: &str) -> OracleResult<'_, String> {
+    // Split into two alt groups to stay within nom's 21-arm tuple limit.
     alt((
         map(tag("loyalty"), |s: &str| s.to_string()),
         map(tag("charge"), |s: &str| s.to_string()),
@@ -278,6 +284,23 @@ fn parse_named_counter_type(input: &str) -> OracleResult<'_, String> {
         map(tag("vigilance"), |s: &str| s.to_string()),
         map(tag("bounty"), |s: &str| s.to_string()),
     ))
+    .or(alt((
+        map(tag("oil"), |s: &str| s.to_string()),
+        map(tag("divinity"), |s: &str| s.to_string()),
+        map(tag("shield"), |s: &str| s.to_string()),
+        map(tag("judgment"), |s: &str| s.to_string()),
+        map(tag("depletion"), |s: &str| s.to_string()),
+        map(tag("feather"), |s: &str| s.to_string()),
+        map(tag("flood"), |s: &str| s.to_string()),
+        map(tag("slumber"), |s: &str| s.to_string()),
+        map(tag("sleep"), |s: &str| s.to_string()),
+        map(tag("phyresis"), |s: &str| s.to_string()),
+        map(tag("fire"), |s: &str| s.to_string()),
+        map(tag("shell"), |s: &str| s.to_string()),
+        map(tag("pupa"), |s: &str| s.to_string()),
+        map(tag("net"), |s: &str| s.to_string()),
+        map(tag("stun"), |s: &str| s.to_string()),
+    )))
     .parse(input)
 }
 

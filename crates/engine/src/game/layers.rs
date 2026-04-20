@@ -2379,6 +2379,50 @@ mod tests {
         assert!(!evaluate_condition(&state, &cond, PlayerId(0), id));
     }
 
+    /// Primordial Hydra: trample gate activates at exactly 10 +1/+1 counters and
+    /// stays active above that threshold; inactive at 9 or 0.
+    #[test]
+    fn has_counters_p1p1_ten_or_more_threshold() {
+        use crate::types::counter::CounterType;
+        let mut state = setup();
+        let id = make_creature(&mut state, "Primordial Hydra", 0, 0, PlayerId(0));
+        let cond = StaticCondition::HasCounters {
+            counter_type: "+1/+1".to_string(),
+            minimum: 10,
+            maximum: None,
+        };
+
+        // 0 counters → inactive.
+        assert!(!evaluate_condition(&state, &cond, PlayerId(0), id));
+
+        // 9 counters → inactive.
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 9);
+        assert!(!evaluate_condition(&state, &cond, PlayerId(0), id));
+
+        // 10 counters → active.
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 10);
+        assert!(evaluate_condition(&state, &cond, PlayerId(0), id));
+
+        // 11 counters → active.
+        state
+            .objects
+            .get_mut(&id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 11);
+        assert!(evaluate_condition(&state, &cond, PlayerId(0), id));
+    }
+
     #[test]
     fn compound_and_true_when_both_conditions_met() {
         let mut state = setup();

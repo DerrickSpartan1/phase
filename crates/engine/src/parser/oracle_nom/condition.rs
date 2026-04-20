@@ -11,7 +11,7 @@ use nom::sequence::preceded;
 use nom::Parser;
 
 use super::error::OracleResult;
-use super::primitives::{parse_article, parse_mana_cost, parse_number};
+use super::primitives::{parse_article, parse_counter_type, parse_mana_cost, parse_number};
 use super::quantity as nom_quantity;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
@@ -216,6 +216,72 @@ fn parse_source_attached_to_creature(input: &str) -> OracleResult<'_, StaticCond
     .parse(rest)
 }
 
+/// CR 122.1 + CR 122.6: Parse "<subject> has <quantity> <counter_type> counter(s) on it".
+///
+/// Produces `StaticCondition::HasCounters { counter_type, minimum, maximum }` — the
+/// same typed variant used by level-up and spacecraft statics — so runtime evaluation
+/// (`layers::evaluate_condition`) and proliferate interactions work unchanged.
+///
+/// Grammar (decomposed by axis, not enumerated):
+///   subject  := "~" | "this creature" | "this permanent" | "it"
+///   quantity := "no" (→ min 0 / max 0)
+///             | "a" | "an" (→ min 1 / max None)
+///             | "exactly N" (→ min N / max N)
+///             | "N or more" (→ min N / max None)
+///             | "N or fewer" (→ min 0 / max N)
+///   counter  := parse_counter_type (named or +1/+1 / -1/-1)
+///   trailer  := " counter" ("s")? " on it"
+///
+/// Covers Unleash ("~ has a +1/+1 counter on it"), Outlast/Renown bodies,
+/// Primordial Hydra ("it has ten or more +1/+1 counters on it"), Armored
+/// Scrapgorger ("it has three or more oil counters on it"), and Angelic Cub
+/// ("this creature has three or more +1/+1 counters on it"), along with the
+/// less common "no counters" and "exactly N counters" variants.
+fn parse_source_has_counters(input: &str) -> OracleResult<'_, StaticCondition> {
+    // Subject axis — reuse `parse_source_subject` for the "~ " / "this creature " /
+    // "this permanent " forms, and add "it " as an extra branch. The pronoun "it"
+    // is only ever the source in "as long as it has …" conditions; wider pronoun
+    // resolution is out of scope here.
+    let (rest, _) = alt((parse_source_subject, tag("it "))).parse(input)?;
+    let (rest, _) = tag("has ").parse(rest)?;
+
+    // Quantity axis → (minimum, maximum). Each branch is a compositional combinator
+    // over the same underlying `parse_number`/`parse_article`/`tag` primitives.
+    let (rest, (minimum, maximum)) = alt((
+        // "no … counters" — CR 122.1 with count == 0.
+        value((0u32, Some(0u32)), tag("no")),
+        // "exactly N … counters"
+        map(preceded(tag("exactly "), parse_number), |n| (n, Some(n))),
+        // "N or more … counters"
+        map((parse_number, tag(" or more")), |(n, _)| (n, None::<u32>)),
+        // "N or fewer … counters"
+        map((parse_number, tag(" or fewer")), |(n, _)| (0u32, Some(n))),
+        // "a"/"an" article → at least one.
+        map(parse_article, |()| (1u32, None::<u32>)),
+    ))
+    .parse(rest)?;
+
+    // Counter type — optional leading space (absorbed from the quantity branch for
+    // "no"/"exactly N"/"N or more"/"N or fewer"; the article branch already
+    // consumed its trailing space).
+    let (rest, _) = opt(tag(" ")).parse(rest)?;
+    let (rest, counter_type) = parse_counter_type(rest)?;
+
+    // Trailer: " counter" optional "s" " on it".
+    let (rest, _) = tag(" counter").parse(rest)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" on it").parse(rest)?;
+
+    Ok((
+        rest,
+        StaticCondition::HasCounters {
+            counter_type,
+            minimum,
+            maximum,
+        },
+    ))
+}
+
 /// CR 611.2b: Parse source-state conditions (tapped, untapped, entered this turn).
 fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
@@ -234,6 +300,12 @@ fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // Must precede `parse_source_is_type` so the specific "is attached to a creature"
         // predicate wins over generic "is <type>" dispatch.
         parse_source_attached_to_creature,
+        // CR 122.1: "<subject> has <quantity> <counter_type> counter(s) on it"
+        // — covers Unleash/Outlast/Renown bodies, Primordial Hydra's trample gate,
+        // and every "as long as it has …" counter-comparator static.
+        // Must precede `parse_source_is_type` so "has … counters on it" wins over
+        // any other interpretation.
+        parse_source_has_counters,
         // CR 400.7: Entered this turn
         value(
             StaticCondition::SourceEnteredThisTurn,
@@ -2565,5 +2637,136 @@ mod tests {
             }
             other => panic!("expected QuantityComparison, got {other:?}"),
         }
+    }
+
+    // --- CR 122.1 counter-comparator statics ---------------------------------
+
+    /// Primordial Hydra's trample gate: "it has ten or more +1/+1 counters on it".
+    #[test]
+    fn test_parse_condition_it_has_ten_or_more_p1p1_counters() {
+        let (rest, c) =
+            parse_condition("as long as it has ten or more +1/+1 counters on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::HasCounters {
+                counter_type: "+1/+1".to_string(),
+                minimum: 10,
+                maximum: None,
+            }
+        );
+    }
+
+    /// Unleash / Outlast body: "it has a +1/+1 counter on it" (article → min 1).
+    #[test]
+    fn test_parse_condition_it_has_a_p1p1_counter() {
+        let (rest, c) = parse_condition("as long as it has a +1/+1 counter on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::HasCounters {
+                counter_type: "+1/+1".to_string(),
+                minimum: 1,
+                maximum: None,
+            }
+        );
+    }
+
+    /// Angelic Cub form: "this creature has three or more +1/+1 counters on it".
+    #[test]
+    fn test_parse_condition_this_creature_has_three_or_more_p1p1() {
+        let (rest, c) =
+            parse_condition("as long as this creature has three or more +1/+1 counters on it")
+                .unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::HasCounters {
+                counter_type: "+1/+1".to_string(),
+                minimum: 3,
+                maximum: None,
+            }
+        );
+    }
+
+    /// Named counter type: "it has three or more oil counters on it".
+    #[test]
+    fn test_parse_condition_it_has_three_or_more_oil_counters() {
+        // "oil" is not in the named counter list; falls through to generic. Use a
+        // counter type that is in the named list to keep the test scoped to the
+        // combinator, not the counter-type vocabulary.
+        let (rest, c) =
+            parse_condition("as long as it has three or more charge counters on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::HasCounters {
+                counter_type: "charge".to_string(),
+                minimum: 3,
+                maximum: None,
+            }
+        );
+    }
+
+    /// "exactly N" variant.
+    #[test]
+    fn test_parse_condition_it_has_exactly_two_counters() {
+        let (rest, c) =
+            parse_condition("as long as it has exactly 2 +1/+1 counters on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::HasCounters {
+                counter_type: "+1/+1".to_string(),
+                minimum: 2,
+                maximum: Some(2),
+            }
+        );
+    }
+
+    /// "N or fewer" variant.
+    #[test]
+    fn test_parse_condition_it_has_two_or_fewer_counters() {
+        let (rest, c) =
+            parse_condition("as long as it has two or fewer +1/+1 counters on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::HasCounters {
+                counter_type: "+1/+1".to_string(),
+                minimum: 0,
+                maximum: Some(2),
+            }
+        );
+    }
+
+    /// "no" variant — zero counters (min 0, max 0).
+    #[test]
+    fn test_parse_condition_it_has_no_counters() {
+        let (rest, c) = parse_condition("as long as it has no +1/+1 counters on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::HasCounters {
+                counter_type: "+1/+1".to_string(),
+                minimum: 0,
+                maximum: Some(0),
+            }
+        );
+    }
+
+    /// "~" subject form — leveler-style source reference.
+    #[test]
+    fn test_parse_condition_tilde_has_a_counter() {
+        let (rest, c) = parse_condition("as long as ~ has a +1/+1 counter on it").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::HasCounters {
+                counter_type: "+1/+1".to_string(),
+                minimum: 1,
+                maximum: None,
+            }
+        );
     }
 }
