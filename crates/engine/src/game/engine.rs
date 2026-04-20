@@ -2336,7 +2336,7 @@ fn handle_play_land(
                 // CR 400.7: reset_for_battlefield_entry (inside move_to_zone) sets
                 // defaults. Override only when the replacement pipeline changed them.
                 if let Some(obj) = state.objects.get_mut(&object_id) {
-                    if enter_tapped {
+                    if enter_tapped.resolve(false) {
                         obj.tapped = true;
                     }
                     if let Some(new_controller) = controller_override {

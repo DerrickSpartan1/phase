@@ -211,7 +211,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     ..
                 } = &mut proposed
                 {
-                    *enter_tapped = true;
+                    *enter_tapped = crate::types::proposed_event::EtbTapState::Tapped;
                 }
             }
             // CR 712.14a + CR 310.11b: If this spell was cast via an
@@ -269,7 +269,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     {
                         zones::move_to_zone(state, object_id, to, events);
                         if let Some(obj) = state.objects.get_mut(&object_id) {
-                            if enter_tapped {
+                            if enter_tapped.resolve(false) {
                                 obj.tapped = true;
                             }
                             if let Some(new_controller) = controller_override {

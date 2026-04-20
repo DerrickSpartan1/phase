@@ -42,7 +42,7 @@ pub(super) fn handle_replacement_choice(
                     // defaults. Override only when the replacement pipeline changed them.
                     if to == Zone::Battlefield {
                         if let Some(obj) = state.objects.get_mut(&object_id) {
-                            if enter_tapped {
+                            if enter_tapped.resolve(false) {
                                 obj.tapped = true;
                             }
                             if let Some(new_controller) = controller_override {
@@ -900,7 +900,7 @@ mod tests {
             from: Zone::Battlefield,
             to: Zone::Exile,
             cause: None,
-            enter_tapped: false,
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -958,6 +958,7 @@ mod tests {
         let proposed = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(spec),
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
             applied: std::collections::HashSet::new(),
         };

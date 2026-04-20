@@ -7,12 +7,14 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 
-use super::filter::{matches_target_filter, FilterContext};
+use super::filter::{
+    matches_target_filter, matches_target_filter_on_battlefield_entry, FilterContext,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PendingReplacement, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::proposed_event::{ProposedEvent, ReplacementId};
+use crate::types::proposed_event::{EtbTapState, ProposedEvent, ReplacementId};
 use crate::types::replacements::ReplacementEvent;
 use crate::types::zones::Zone;
 
@@ -95,6 +97,25 @@ fn stub_applier(
 }
 
 // --- 1. Moved (ZoneChange) ---
+
+fn change_zone_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
+    matches!(
+        event,
+        ProposedEvent::ZoneChange {
+            to: Zone::Battlefield,
+            ..
+        } | ProposedEvent::CreateToken { .. }
+    )
+}
+
+fn change_zone_applier(
+    event: ProposedEvent,
+    _rid: ReplacementId,
+    _state: &mut GameState,
+    _events: &mut Vec<GameEvent>,
+) -> ApplyResult {
+    ApplyResult::Modified(event)
+}
 
 fn moved_matcher(event: &ProposedEvent, _source: ObjectId, _state: &GameState) -> bool {
     matches!(event, ProposedEvent::ZoneChange { .. })
@@ -628,6 +649,7 @@ fn create_token_applier(
     if let ProposedEvent::CreateToken {
         owner,
         spec,
+        enter_tapped,
         count,
         applied,
     } = event
@@ -642,6 +664,7 @@ fn create_token_applier(
         ApplyResult::Modified(ProposedEvent::CreateToken {
             owner,
             spec,
+            enter_tapped,
             count: new_count,
             applied,
         })
@@ -916,6 +939,13 @@ pub fn build_replacement_registry() -> IndexMap<ReplacementEvent, ReplacementHan
         ReplacementHandlerEntry {
             matcher: damage_done_matcher,
             applier: damage_done_applier,
+        },
+    );
+    registry.insert(
+        ReplacementEvent::ChangeZone,
+        ReplacementHandlerEntry {
+            matcher: change_zone_matcher,
+            applier: change_zone_applier,
         },
     );
     registry.insert(
@@ -1349,6 +1379,10 @@ fn evaluate_replacement_condition(
         // TODO: Propagate additional_cost_paid to GameObject for precise evaluation.
         // For now, conservatively apply the replacement (counters always placed).
         ReplacementCondition::CastViaKicker { .. } => true,
+        ReplacementCondition::SourceTappedState { tapped } => state
+            .objects
+            .get(&source_id)
+            .is_some_and(|obj| obj.tapped == *tapped),
         // CR 120.1: "dealt damage this turn by a source you controlled" — check damage records.
         ReplacementCondition::DealtDamageThisTurnBySourceControlledBy {
             controller: ctrl_ref,
@@ -1471,10 +1505,14 @@ pub fn find_applicable_replacements(
                     // must match the filter (e.g., SelfRef means only this card's own events)
                     if let Some(ref filter) = repl_def.valid_card {
                         let ctx = FilterContext::from_source(state, obj.id);
-                        let matches = event
-                            .affected_object_id()
-                            .map(|oid| matches_target_filter(state, oid, filter, &ctx))
-                            .unwrap_or(false);
+                        let matches = if repl_def.event == ReplacementEvent::ChangeZone {
+                            matches_target_filter_on_battlefield_entry(state, event, filter, &ctx)
+                        } else {
+                            event
+                                .affected_object_id()
+                                .map(|oid| matches_target_filter(state, oid, filter, &ctx))
+                                .unwrap_or(false)
+                        };
                         if !matches {
                             continue;
                         }
@@ -1483,6 +1521,10 @@ pub fn find_applicable_replacements(
                     if let Some(ref dest_zone) = repl_def.destination_zone {
                         let matches_dest = match event {
                             ProposedEvent::ZoneChange { to, .. } => to == dest_zone,
+                            ProposedEvent::CreateToken { .. } => {
+                                repl_def.event == ReplacementEvent::ChangeZone
+                                    && *dest_zone == Zone::Battlefield
+                            }
                             // CR 614.6: Only zone-change events can match a destination zone scope.
                             _ => false,
                         };
@@ -1751,7 +1793,7 @@ fn extract_etb_counters(
 /// replacements whose decline branch would be a no-op (CR 614.7).
 #[derive(Debug, Clone, Default)]
 struct EventModifiers {
-    enters_tapped: bool,
+    etb_tap_state: EtbTapState,
     etb_counters: Vec<(String, u32)>,
     redirect_zone: Option<Zone>,
 }
@@ -1768,6 +1810,8 @@ impl EventModifiers {
         matches!(
             &*def.effect,
             Effect::Tap {
+                target: TargetFilter::SelfRef,
+            } | Effect::Untap {
                 target: TargetFilter::SelfRef,
             } | Effect::PutCounter {
                 target: TargetFilter::SelfRef,
@@ -1787,23 +1831,47 @@ fn event_modifiers_for_ability(
     source_id: ObjectId,
     event: &ProposedEvent,
 ) -> EventModifiers {
-    let tapped = ability.is_some_and(|def| {
-        matches!(
-            *def.effect,
+    let etb_tap_state = ability
+        .map(|def| match &*def.effect {
             Effect::Tap {
                 target: TargetFilter::SelfRef,
-            }
-        )
-    });
+            } => EtbTapState::Tapped,
+            Effect::Untap {
+                target: TargetFilter::SelfRef,
+            } => EtbTapState::Untapped,
+            _ => EtbTapState::Unspecified,
+        })
+        .unwrap_or(EtbTapState::Unspecified);
     let counters = extract_etb_counters(ability, state, source_id, event);
     let redirect = ability.and_then(|def| match &*def.effect {
         Effect::ChangeZone { destination, .. } => Some(*destination),
         _ => None,
     });
     EventModifiers {
-        enters_tapped: tapped,
+        etb_tap_state,
         etb_counters: counters,
         redirect_zone: redirect,
+    }
+}
+
+fn battlefield_entry_current_tapped(event: &ProposedEvent) -> Option<bool> {
+    match event {
+        ProposedEvent::ZoneChange { enter_tapped, .. } => Some(enter_tapped.resolve(false)),
+        ProposedEvent::CreateToken {
+            spec, enter_tapped, ..
+        } => Some(enter_tapped.resolve(spec.tapped)),
+        _ => None,
+    }
+}
+
+fn battlefield_entry_counters(event: &ProposedEvent) -> Option<&Vec<(String, u32)>> {
+    match event {
+        ProposedEvent::ZoneChange {
+            enter_with_counters,
+            ..
+        } => Some(enter_with_counters),
+        ProposedEvent::CreateToken { spec, .. } => Some(&spec.enter_with_counters),
+        _ => None,
     }
 }
 
@@ -1829,14 +1897,10 @@ fn optional_decline_is_noop(
     state: &GameState,
     source_id: ObjectId,
 ) -> bool {
-    // Dominance only applies to ZoneChange events — that's where enter_tapped /
-    // etb_counters / redirect_zone live. For other event kinds, never skip.
-    let ProposedEvent::ZoneChange {
-        enter_tapped,
-        enter_with_counters,
-        ..
-    } = event
-    else {
+    let Some(current_tapped) = battlefield_entry_current_tapped(event) else {
+        return false;
+    };
+    let Some(enter_with_counters) = battlefield_entry_counters(event) else {
         return false;
     };
 
@@ -1852,7 +1916,11 @@ fn optional_decline_is_noop(
     }
 
     let mods = event_modifiers_for_ability(Some(def), state, source_id, event);
-    let tap_already = !mods.enters_tapped || *enter_tapped;
+    let tap_already = match mods.etb_tap_state {
+        EtbTapState::Unspecified => true,
+        EtbTapState::Tapped => current_tapped,
+        EtbTapState::Untapped => !current_tapped,
+    };
     let counters_already = mods.etb_counters.iter().all(|(ct, n)| {
         enter_with_counters
             .iter()
@@ -1938,14 +2006,9 @@ fn apply_single_replacement(
         let event_type = event_key.to_string();
         match (handler.applier)(proposed, rid, state, events) {
             ApplyResult::Modified(mut new_event) => {
-                // CR 614.1c: If the applied branch is a Tap SelfRef (ETB tapped), mark the zone change.
-                if modifiers.enters_tapped {
-                    if let ProposedEvent::ZoneChange {
-                        ref mut enter_tapped,
-                        ..
-                    } = new_event
-                    {
-                        *enter_tapped = true;
+                if modifiers.etb_tap_state != EtbTapState::Unspecified {
+                    if let Some(enter_tapped) = new_event.battlefield_entry_tap_state_mut() {
+                        *enter_tapped = modifiers.etb_tap_state;
                     }
                 }
                 // CR 614.6: Apply zone redirect (e.g., graveyard → exile for Rest in Peace).
@@ -1956,12 +2019,15 @@ fn apply_single_replacement(
                 }
                 // CR 614.1c: Applied branch carries ETB counter data; add to the zone change.
                 if !modifiers.etb_counters.is_empty() {
-                    if let ProposedEvent::ZoneChange {
-                        ref mut enter_with_counters,
-                        ..
-                    } = new_event
-                    {
-                        enter_with_counters.extend(modifiers.etb_counters.iter().cloned());
+                    match &mut new_event {
+                        ProposedEvent::ZoneChange {
+                            enter_with_counters,
+                            ..
+                        } => enter_with_counters.extend(modifiers.etb_counters.iter().cloned()),
+                        ProposedEvent::CreateToken { spec, .. } => spec
+                            .enter_with_counters
+                            .extend(modifiers.etb_counters.iter().cloned()),
+                        _ => {}
                     }
                 }
                 // CR 614.12a: Stash the mandatory execute ability as a post-replacement
@@ -2047,43 +2113,17 @@ fn pipeline_loop(
                 Err(ApplyResult::Modified(_)) => unreachable!(),
             }
         } else {
-            // CR 616.1e: If multiple replacement effects apply, the affected player chooses which to apply first.
-            // If all are mandatory, auto-apply the first (APNAP order) and continue the loop —
-            // the loop will pick up the remaining candidates on the next iteration.
-            let any_optional = candidates.iter().any(|rid| {
-                state
-                    .objects
-                    .get(&rid.source)
-                    .and_then(|obj| obj.replacement_definitions.get(rid.index))
-                    .is_some_and(|repl| matches!(repl.mode, ReplacementMode::Optional { .. }))
-            });
-
-            if any_optional {
-                let affected = proposed.affected_player(state);
-                state.pending_replacement = Some(PendingReplacement {
-                    proposed,
-                    candidates,
-                    depth,
-                    is_optional: false,
-                });
-                return ReplacementResult::NeedsChoice(affected);
-            }
-
-            // All mandatory: apply the first candidate; remaining will be picked up next iteration.
-            let rid = candidates[0];
-            proposed.mark_applied(rid);
-            match apply_single_replacement(
-                state,
+            // CR 616.1: If multiple replacement effects apply, the affected player
+            // or controller of the affected object chooses which one to apply first,
+            // even when every candidate is mandatory.
+            let affected = proposed.affected_player(state);
+            state.pending_replacement = Some(PendingReplacement {
                 proposed,
-                rid,
-                ReplacementBranch::Execute,
-                registry,
-                events,
-            ) {
-                Ok(new_event) => proposed = new_event,
-                Err(ApplyResult::Prevented) => return ReplacementResult::Prevented,
-                Err(ApplyResult::Modified(_)) => unreachable!(),
-            }
+                candidates,
+                depth,
+                is_optional: false,
+            });
+            return ReplacementResult::NeedsChoice(affected);
         }
 
         depth += 1;
@@ -2196,10 +2236,12 @@ pub fn continue_replacement(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::GameObject;
     use crate::types::ability::{GainLifePlayer, ReplacementDefinition, TargetRef};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::proposed_event::{EtbTapState, TokenSpec};
     use crate::types::replacements::ReplacementEvent;
     use std::collections::HashSet;
 
@@ -2227,6 +2269,17 @@ mod tests {
             state.battlefield.push(obj_id);
         }
         state
+    }
+
+    fn resolve_first_replacement_choice(
+        state: &mut GameState,
+        result: ReplacementResult,
+        events: &mut Vec<GameEvent>,
+    ) -> ReplacementResult {
+        match result {
+            ReplacementResult::NeedsChoice(_) => continue_replacement(state, 0, events),
+            other => other,
+        }
     }
 
     #[test]
@@ -2260,7 +2313,8 @@ mod tests {
 
     #[test]
     fn test_once_per_event_enforcement() {
-        // Two mandatory Moved replacements on the same object — both auto-apply; neither fires twice.
+        // Two mandatory Moved replacements on the same object — the affected player
+        // chooses the first, then the remaining one still applies exactly once.
         let repl1 = make_repl(ReplacementEvent::Moved);
         let repl2 = make_repl(ReplacementEvent::Moved);
         let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl1, repl2]);
@@ -2270,22 +2324,26 @@ mod tests {
             ProposedEvent::zone_change(ObjectId(10), Zone::Battlefield, Zone::Graveyard, None);
 
         let result = replace_event(&mut state, proposed, &mut events);
-        // Both mandatory replacements auto-apply without NeedsChoice; each fires exactly once.
-        if let ReplacementResult::Execute(event) = result {
-            let applied = event.applied_set();
-            assert_eq!(
-                applied.len(),
-                2,
-                "both replacements should have been applied"
-            );
-        } else {
-            panic!("expected Execute, got {:?}", result);
-        }
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice, got {:?}", result);
+        };
+        assert_eq!(player, PlayerId(0));
+
+        let final_result = continue_replacement(&mut state, 0, &mut events);
+        let ReplacementResult::Execute(event) = final_result else {
+            panic!("expected Execute after choosing replacement order, got {final_result:?}");
+        };
+        assert_eq!(
+            event.applied_set().len(),
+            2,
+            "both replacements should have been applied exactly once"
+        );
     }
 
     #[test]
-    fn test_multiple_mandatory_replacements_auto_apply() {
-        // Two different objects each with a mandatory Moved replacement — both auto-apply.
+    fn test_multiple_mandatory_replacements_need_choice() {
+        // Two different objects each with a mandatory Moved replacement — the affected
+        // player must choose the order instead of the pipeline auto-applying one.
         let repl = make_repl(ReplacementEvent::Moved);
 
         let mut state = GameState::new_two_player(42);
@@ -2328,23 +2386,27 @@ mod tests {
             from: Zone::Battlefield,
             to: Zone::Graveyard,
             cause: None,
-            enter_tapped: false,
+            enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
             applied: HashSet::new(),
         };
         let result = replace_event(&mut state, proposed, &mut events);
-        // Both mandatory replacements auto-apply; result is Execute with both in the applied set.
-        if let ReplacementResult::Execute(event) = result {
-            assert_eq!(
-                event.applied_set().len(),
-                2,
-                "both replacements should have applied"
-            );
-        } else {
-            panic!("expected Execute, got {:?}", result);
-        }
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("expected NeedsChoice, got {:?}", result);
+        };
+        assert_eq!(player, PlayerId(0));
+
+        let final_result = continue_replacement(&mut state, 0, &mut events);
+        let ReplacementResult::Execute(event) = final_result else {
+            panic!("expected Execute after choosing replacement order, got {final_result:?}");
+        };
+        assert_eq!(
+            event.applied_set().len(),
+            2,
+            "both replacements should have applied"
+        );
     }
 
     #[test]
@@ -2477,8 +2539,8 @@ mod tests {
 
     #[test]
     fn test_continue_replacement_after_choice() {
-        // Two mandatory Moved replacements — both auto-apply without NeedsChoice.
-        // (continue_replacement is exercised by the optional-replacement tests.)
+        // Two mandatory replacements should now surface a choice, and resolving one
+        // choice should let the pipeline finish the remaining replacement.
         let repl1 = make_repl(ReplacementEvent::Moved);
         let repl2 = make_repl(ReplacementEvent::Moved);
 
@@ -2489,11 +2551,15 @@ mod tests {
             ProposedEvent::zone_change(ObjectId(10), Zone::Battlefield, Zone::Graveyard, None);
 
         let result = replace_event(&mut state, proposed, &mut events);
-        // Both mandatory replacements auto-apply; result is Execute with both applied.
+        let ReplacementResult::NeedsChoice(player) = result else {
+            panic!("mandatory replacements should prompt for order, got {result:?}");
+        };
+        assert_eq!(player, PlayerId(0));
+
+        let final_result = continue_replacement(&mut state, 0, &mut events);
         assert!(
-            matches!(result, ReplacementResult::Execute(_)),
-            "mandatory replacements should auto-apply, got {:?}",
-            result
+            matches!(final_result, ReplacementResult::Execute(_)),
+            "pipeline should finish after resolving the replacement choice, got {final_result:?}"
         );
     }
 
@@ -2551,7 +2617,7 @@ mod tests {
             from: Zone::Battlefield,
             to: Zone::Graveyard,
             cause: None,
-            enter_tapped: false,
+            enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -2631,14 +2697,15 @@ mod tests {
         // fail-fast signal if a future parser path starts producing them
         // without wiring a handler.
         assert!(
-            registry.len() >= 22,
-            "registry should have 22+ entries, got {}",
+            registry.len() >= 25,
+            "registry should have 25+ entries, got {}",
             registry.len()
         );
 
         // Verify all expected keys
         let expected: Vec<ReplacementEvent> = vec![
             ReplacementEvent::DamageDone,
+            ReplacementEvent::ChangeZone,
             ReplacementEvent::Moved,
             ReplacementEvent::Destroy,
             ReplacementEvent::Draw,
@@ -2765,7 +2832,7 @@ mod tests {
 
     fn authority_replacement() -> ReplacementDefinition {
         use crate::types::ability::{AbilityKind, ControllerRef, TargetFilter, TypedFilter};
-        ReplacementDefinition::new(ReplacementEvent::Moved)
+        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
             .execute(AbilityDefinition::new(
                 AbilityKind::Spell,
                 Effect::Tap {
@@ -2776,6 +2843,46 @@ mod tests {
                 TypedFilter::creature().controller(ControllerRef::Opponent),
             ))
             .destination_zone(Zone::Battlefield)
+    }
+
+    fn spelunking_replacement() -> ReplacementDefinition {
+        use crate::types::ability::{AbilityKind, ControllerRef, TargetFilter, TypedFilter};
+        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Untap {
+                    target: TargetFilter::SelfRef,
+                },
+            ))
+            .valid_card(TargetFilter::Typed(
+                TypedFilter::new(crate::types::ability::TypeFilter::Land)
+                    .controller(ControllerRef::You),
+            ))
+            .destination_zone(Zone::Battlefield)
+    }
+
+    fn test_token_spec(
+        owner_controller: PlayerId,
+        core_type: crate::types::card_type::CoreType,
+    ) -> TokenSpec {
+        TokenSpec {
+            display_name: "Test Token".to_string(),
+            script_name: "w_1_1_soldier".to_string(),
+            power: Some(1),
+            toughness: Some(1),
+            core_types: vec![core_type],
+            subtypes: vec!["Soldier".to_string()],
+            supertypes: Vec::new(),
+            colors: vec![crate::types::mana::ManaColor::White],
+            keywords: Vec::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(999),
+            controller: owner_controller,
+        }
     }
 
     #[test]
@@ -2918,6 +3025,260 @@ mod tests {
         assert!(
             candidates.is_empty(),
             "Authority should NOT match own creature entering battlefield"
+        );
+    }
+
+    #[test]
+    fn destination_zone_authority_matches_token_battlefield_entry() {
+        let repl = authority_replacement();
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(1),
+            count: 1,
+            spec: Box::new(test_token_spec(
+                PlayerId(0),
+                crate::types::card_type::CoreType::Creature,
+            )),
+            enter_tapped: EtbTapState::Unspecified,
+            applied: HashSet::new(),
+        };
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            !candidates.is_empty(),
+            "Authority should match opponent-controlled creature token entry"
+        );
+    }
+
+    #[test]
+    fn destination_zone_authority_own_token_not_affected() {
+        let repl = authority_replacement();
+        let state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            count: 1,
+            spec: Box::new(test_token_spec(
+                PlayerId(1),
+                crate::types::card_type::CoreType::Creature,
+            )),
+            enter_tapped: EtbTapState::Unspecified,
+            applied: HashSet::new(),
+        };
+        let registry = build_replacement_registry();
+        let candidates = find_applicable_replacements(&state, &proposed, &registry);
+        assert!(
+            candidates.is_empty(),
+            "Authority should not match tokens entering under your control"
+        );
+    }
+
+    #[test]
+    fn source_tapped_state_condition_matches_object_state() {
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, Vec::new());
+        state.objects.get_mut(&ObjectId(10)).unwrap().tapped = true;
+
+        assert!(evaluate_replacement_condition(
+            &ReplacementCondition::SourceTappedState { tapped: true },
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+        assert!(!evaluate_replacement_condition(
+            &ReplacementCondition::SourceTappedState { tapped: false },
+            PlayerId(0),
+            ObjectId(10),
+            &state,
+            None,
+            &dummy_begin_turn_event(),
+        ));
+    }
+
+    #[test]
+    fn untap_override_replaces_seeded_zone_change_tap_state() {
+        let repl = spelunking_replacement();
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let registry = build_replacement_registry();
+        let mut events = Vec::new();
+
+        let proposed = ProposedEvent::ZoneChange {
+            object_id: ObjectId(20),
+            from: Zone::Hand,
+            to: Zone::Battlefield,
+            cause: None,
+            enter_tapped: EtbTapState::Tapped,
+            enter_with_counters: Vec::new(),
+            controller_override: None,
+            enter_transformed: false,
+            applied: HashSet::new(),
+        };
+
+        let replaced = apply_single_replacement(
+            &mut state,
+            proposed,
+            ReplacementId {
+                source: ObjectId(10),
+                index: 0,
+            },
+            ReplacementBranch::Execute,
+            &registry,
+            &mut events,
+        )
+        .expect("Spelunking untap replacement should modify the event");
+
+        assert_eq!(
+            replaced.battlefield_entry_tap_state(),
+            Some(EtbTapState::Untapped)
+        );
+    }
+
+    #[test]
+    fn later_tap_state_modifier_overwrites_earlier_one() {
+        let tap_repl = authority_replacement();
+        let untap_repl = spelunking_replacement();
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![tap_repl]);
+        let mut other_source = GameObject::new(
+            ObjectId(11),
+            CardId(2),
+            PlayerId(0),
+            "Spelunking".to_string(),
+            Zone::Battlefield,
+        );
+        other_source.replacement_definitions = vec![untap_repl].into();
+        state.objects.insert(ObjectId(11), other_source);
+        state.battlefield.push(ObjectId(11));
+
+        let registry = build_replacement_registry();
+        let mut events = Vec::new();
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(20), Zone::Hand, Zone::Battlefield, None);
+
+        let tapped_event = apply_single_replacement(
+            &mut state,
+            proposed,
+            ReplacementId {
+                source: ObjectId(10),
+                index: 0,
+            },
+            ReplacementBranch::Execute,
+            &registry,
+            &mut events,
+        )
+        .expect("tap replacement should apply");
+        assert_eq!(
+            tapped_event.battlefield_entry_tap_state(),
+            Some(EtbTapState::Tapped)
+        );
+
+        let untapped_event = apply_single_replacement(
+            &mut state,
+            tapped_event,
+            ReplacementId {
+                source: ObjectId(11),
+                index: 0,
+            },
+            ReplacementBranch::Execute,
+            &registry,
+            &mut events,
+        )
+        .expect("untap replacement should apply");
+        assert_eq!(
+            untapped_event.battlefield_entry_tap_state(),
+            Some(EtbTapState::Untapped)
+        );
+
+        let retapped_event = apply_single_replacement(
+            &mut state,
+            untapped_event,
+            ReplacementId {
+                source: ObjectId(10),
+                index: 0,
+            },
+            ReplacementBranch::Execute,
+            &registry,
+            &mut events,
+        )
+        .expect("later tap replacement should overwrite prior untap");
+        assert_eq!(
+            retapped_event.battlefield_entry_tap_state(),
+            Some(EtbTapState::Tapped)
+        );
+    }
+
+    #[test]
+    fn authority_taps_creature_tokens_after_replacement() {
+        let repl = authority_replacement();
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let mut events = Vec::new();
+
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(1),
+            count: 1,
+            spec: Box::new(test_token_spec(
+                PlayerId(0),
+                crate::types::card_type::CoreType::Creature,
+            )),
+            enter_tapped: EtbTapState::Unspecified,
+            applied: HashSet::new(),
+        };
+
+        let ReplacementResult::Execute(event) = replace_event(&mut state, proposed, &mut events)
+        else {
+            panic!("expected authority token replacement to auto-apply");
+        };
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let created_id = *state
+            .battlefield
+            .iter()
+            .find(|id| state.objects.get(id).is_some_and(|obj| obj.is_token))
+            .expect("token should be created");
+        let created = state.objects.get(&created_id).unwrap();
+        assert!(
+            created.tapped,
+            "Authority should make creature tokens enter tapped"
+        );
+    }
+
+    #[test]
+    fn spelunking_untaps_seeded_land_tokens_after_replacement() {
+        let repl = spelunking_replacement();
+        let mut state = test_state_with_object(ObjectId(10), Zone::Battlefield, vec![repl]);
+        let mut events = Vec::new();
+        let mut spec = test_token_spec(PlayerId(1), crate::types::card_type::CoreType::Land);
+        spec.tapped = true;
+        spec.power = None;
+        spec.toughness = None;
+        spec.script_name = "c_a_clue".to_string();
+        spec.display_name = "Land Token".to_string();
+        spec.subtypes.clear();
+
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            count: 1,
+            spec: Box::new(spec),
+            enter_tapped: EtbTapState::Tapped,
+            applied: HashSet::new(),
+        };
+
+        let ReplacementResult::Execute(event) = replace_event(&mut state, proposed, &mut events)
+        else {
+            panic!("expected spelunking token replacement to auto-apply");
+        };
+        apply_create_token_after_replacement(&mut state, event, &mut events);
+
+        let created_id = *state
+            .battlefield
+            .iter()
+            .find(|id| state.objects.get(id).is_some_and(|obj| obj.is_token))
+            .expect("token should be created");
+        let created = state.objects.get(&created_id).unwrap();
+        assert!(
+            !created.tapped,
+            "Spelunking should make your land tokens enter untapped"
         );
     }
 
@@ -3083,7 +3444,8 @@ mod tests {
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl1, repl2]);
         let mut events = Vec::new();
         let proposed = damage_event(3);
-        let result = replace_event(&mut state, proposed, &mut events);
+        let initial_result = replace_event(&mut state, proposed, &mut events);
+        let result = resolve_first_replacement_choice(&mut state, initial_result, &mut events);
         match result {
             ReplacementResult::Execute(ProposedEvent::Damage { amount, .. }) => {
                 assert_eq!(amount, 12, "Two doublers should quadruple: 3 * 2 * 2 = 12");
@@ -3390,7 +3752,8 @@ mod tests {
             applied: HashSet::new(),
         };
         let mut events = Vec::new();
-        let result = replace_event(&mut state, proposed, &mut events);
+        let initial_result = replace_event(&mut state, proposed, &mut events);
+        let result = resolve_first_replacement_choice(&mut state, initial_result, &mut events);
         assert_eq!(result, ReplacementResult::Prevented);
 
         let obj = state.objects.get(&bear_id).unwrap();
@@ -3414,7 +3777,8 @@ mod tests {
             cant_regenerate: false,
             applied: HashSet::new(),
         };
-        let result2 = replace_event(&mut state, proposed2, &mut events);
+        let initial_result2 = replace_event(&mut state, proposed2, &mut events);
+        let result2 = resolve_first_replacement_choice(&mut state, initial_result2, &mut events);
         assert_eq!(result2, ReplacementResult::Prevented);
 
         let obj = state.objects.get(&bear_id).unwrap();

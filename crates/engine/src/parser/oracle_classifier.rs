@@ -277,6 +277,7 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
     "prevent all",
     "enters the battlefield tapped",
     "enters tapped",
+    "enters untapped",
     "enter as a copy of",
 ];
 
@@ -289,6 +290,10 @@ pub(crate) fn is_replacement_pattern(lower: &str) -> bool {
     }
 
     if lower.trim_end_matches('.').ends_with(" enter tapped") {
+        return true;
+    }
+
+    if lower.trim_end_matches('.').ends_with(" enter untapped") {
         return true;
     }
 

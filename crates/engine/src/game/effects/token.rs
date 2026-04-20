@@ -422,6 +422,7 @@ pub fn resolve(
     let proposed = ProposedEvent::CreateToken {
         owner: token_owner,
         spec: Box::new(spec),
+        enter_tapped: crate::types::proposed_event::EtbTapState::from_seeded_tapped(tapped),
         count,
         applied: HashSet::new(),
     };
@@ -556,6 +557,7 @@ pub fn apply_create_token_after_replacement(
     let ProposedEvent::CreateToken {
         owner,
         spec,
+        enter_tapped,
         count: final_count,
         ..
     } = event
@@ -600,7 +602,7 @@ pub fn apply_create_token_after_replacement(
                 obj.keywords = spec.keywords.clone();
                 obj.base_keywords = spec.keywords.clone();
             }
-            obj.tapped = spec.tapped;
+            obj.tapped = enter_tapped.resolve(spec.tapped);
 
             // CR 113.3d: Apply static abilities from the token definition.
             for static_def in &spec.static_abilities {
@@ -1607,6 +1609,7 @@ mod tests {
         let event = ProposedEvent::CreateToken {
             owner: PlayerId(0),
             spec: Box::new(spec),
+            enter_tapped: crate::types::proposed_event::EtbTapState::Unspecified,
             count: 1,
             applied: HashSet::new(),
         };

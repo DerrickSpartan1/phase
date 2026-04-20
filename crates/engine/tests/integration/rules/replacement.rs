@@ -29,6 +29,29 @@ fn fast_land_replacement(description: &str) -> ReplacementDefinition {
         })
 }
 
+fn replacement_choice_index(runner: &GameRunner, description: &str) -> usize {
+    let WaitingFor::ReplacementChoice {
+        candidate_descriptions,
+        ..
+    } = &runner.state().waiting_for
+    else {
+        panic!(
+            "expected ReplacementChoice, got {:?}",
+            runner.state().waiting_for
+        );
+    };
+
+    candidate_descriptions
+        .iter()
+        .position(|candidate| candidate.contains(description))
+        .unwrap_or_else(|| {
+            panic!(
+                "replacement choice {description:?} not found in {:?}",
+                candidate_descriptions
+            )
+        })
+}
+
 // ── Fast land integration tests ──
 
 /// CR 305.7 + CR 614.1c: Fast land with 0 other lands → enters untapped.
@@ -200,5 +223,157 @@ fn fast_land_self_not_counted() {
     assert!(
         !obj.tapped,
         "Fast land must not count itself in 'other lands' check — 2 other lands ≤ 2 → untapped"
+    );
+}
+
+#[test]
+fn spelunking_order_can_leave_tapland_tapped() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Spelunking", 0, 4)
+        .as_enchantment()
+        .from_oracle_text("Lands you control enter untapped.");
+
+    let land_id = scenario
+        .add_land_to_hand(P0, "Guildgate")
+        .from_oracle_text("This land enters tapped.")
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&land_id].card_id;
+
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land_id,
+            card_id,
+        })
+        .expect("play land should succeed");
+    let spelunking_first = replacement_choice_index(&runner, "Lands you control enter untapped.");
+    runner
+        .act(GameAction::ChooseReplacement {
+            index: spelunking_first,
+        })
+        .expect("replacement choice should resolve");
+
+    let obj = &runner.state().objects[&land_id];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(
+        obj.tapped,
+        "Choosing Spelunking first should leave the tapland tapped"
+    );
+}
+
+#[test]
+fn spelunking_order_can_leave_tapland_untapped() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Spelunking", 0, 4)
+        .as_enchantment()
+        .from_oracle_text("Lands you control enter untapped.");
+
+    let land_id = scenario
+        .add_land_to_hand(P0, "Guildgate")
+        .from_oracle_text("This land enters tapped.")
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&land_id].card_id;
+
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land_id,
+            card_id,
+        })
+        .expect("play land should succeed");
+    let tapland_first = replacement_choice_index(&runner, "This land enters tapped.");
+    runner
+        .act(GameAction::ChooseReplacement {
+            index: tapland_first,
+        })
+        .expect("replacement choice should resolve");
+
+    let obj = &runner.state().objects[&land_id];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(
+        !obj.tapped,
+        "Choosing the tapland replacement first should let Spelunking untap it"
+    );
+}
+
+#[test]
+fn archelos_untapped_makes_other_taplands_enter_untapped() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    scenario
+        .add_creature(P0, "Archelos, Lagoon Mystic", 2, 4)
+        .from_oracle_text(
+            "As long as ~ is untapped, other permanents enter untapped.\nAs long as ~ is tapped, other permanents enter tapped.",
+        );
+
+    let land_id = scenario
+        .add_land_to_hand(P0, "Guildgate")
+        .from_oracle_text("This land enters tapped.")
+        .id();
+
+    let mut runner = scenario.build();
+    let card_id = runner.state().objects[&land_id].card_id;
+
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land_id,
+            card_id,
+        })
+        .expect("play land should succeed");
+    let tapland_first = replacement_choice_index(&runner, "This land enters tapped.");
+    runner
+        .act(GameAction::ChooseReplacement {
+            index: tapland_first,
+        })
+        .expect("replacement choice should resolve");
+
+    let obj = &runner.state().objects[&land_id];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(
+        !obj.tapped,
+        "Untapped Archelos should let other permanents enter untapped"
+    );
+}
+
+#[test]
+fn archelos_tapped_makes_other_lands_enter_tapped() {
+    let mut scenario = GameScenario::new();
+    scenario.at_phase(Phase::PreCombatMain);
+    let archelos_id = scenario
+        .add_creature(P0, "Archelos, Lagoon Mystic", 2, 4)
+        .from_oracle_text(
+            "As long as ~ is untapped, other permanents enter untapped.\nAs long as ~ is tapped, other permanents enter tapped.",
+        )
+        .id();
+
+    let land_id = scenario.add_land_to_hand(P0, "Forest").id();
+
+    let mut runner = scenario.build();
+    runner
+        .state_mut()
+        .objects
+        .get_mut(&archelos_id)
+        .unwrap()
+        .tapped = true;
+
+    let card_id = runner.state().objects[&land_id].card_id;
+    runner
+        .act(GameAction::PlayLand {
+            object_id: land_id,
+            card_id,
+        })
+        .expect("play land should succeed");
+
+    let obj = &runner.state().objects[&land_id];
+    assert_eq!(obj.zone, Zone::Battlefield);
+    assert!(
+        obj.tapped,
+        "Tapped Archelos should make other permanents enter tapped"
     );
 }

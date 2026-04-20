@@ -112,3 +112,145 @@ pub fn resolve(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{CastingPermission, Duration, TargetFilter};
+    use crate::types::game_state::GameState;
+    use crate::types::identifiers::CardId;
+    use crate::types::zones::Zone;
+
+    /// CR 611.2a default: grantee defaults to the ability controller.
+    #[test]
+    fn grantee_ability_controller_binds_to_caster() {
+        let mut state = GameState::new_two_player(1);
+        let target = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Exile,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::UntilYourNextTurn,
+                    granted_to: PlayerId(0),
+                },
+                target: TargetFilter::Any,
+                grantee: PermissionGrantee::AbilityController,
+            },
+            vec![TargetRef::Object(target)],
+            crate::types::identifiers::ObjectId(100),
+            PlayerId(0), // caster
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = &state.objects[&target];
+        assert_eq!(obj.casting_permissions.len(), 1);
+        match obj.casting_permissions[0] {
+            CastingPermission::PlayFromExile { granted_to, .. } => {
+                assert_eq!(granted_to, PlayerId(0), "granted_to should be the caster");
+            }
+            _ => panic!("expected PlayFromExile"),
+        }
+    }
+
+    /// CR 108.3: `ObjectOwner` grants the permission to each iterated object's
+    /// owner — powers Suspend Aggression's "its owner may play it".
+    #[test]
+    fn grantee_object_owner_binds_per_target_to_owner() {
+        let mut state = GameState::new_two_player(1);
+        let p0_card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "MyCard".to_string(),
+            Zone::Exile,
+        );
+        let p1_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "TheirCard".to_string(),
+            Zone::Exile,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::UntilYourNextTurn,
+                    granted_to: PlayerId(0),
+                },
+                target: TargetFilter::Any,
+                grantee: PermissionGrantee::ObjectOwner,
+            },
+            vec![TargetRef::Object(p0_card), TargetRef::Object(p1_card)],
+            crate::types::identifiers::ObjectId(100),
+            PlayerId(0), // caster — NOT the grantee
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        for (obj_id, expected_owner) in [(p0_card, PlayerId(0)), (p1_card, PlayerId(1))] {
+            let obj = &state.objects[&obj_id];
+            assert_eq!(obj.casting_permissions.len(), 1);
+            match obj.casting_permissions[0] {
+                CastingPermission::PlayFromExile { granted_to, .. } => {
+                    assert_eq!(
+                        granted_to, expected_owner,
+                        "granted_to should equal object owner"
+                    );
+                }
+                _ => panic!("expected PlayFromExile"),
+            }
+        }
+    }
+
+    /// CR 109.4: `ParentTargetController` binds the grant to the first
+    /// `TargetRef::Player` in the ability's targets — powers Expedited
+    /// Inheritance's "its controller may ... they may play those cards".
+    #[test]
+    fn grantee_parent_target_controller_binds_to_player_target() {
+        let mut state = GameState::new_two_player(1);
+        let exiled = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Card".to_string(),
+            Zone::Exile,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::UntilYourNextTurn,
+                    granted_to: PlayerId(0),
+                },
+                target: TargetFilter::Any,
+                grantee: PermissionGrantee::ParentTargetController,
+            },
+            vec![TargetRef::Player(PlayerId(1)), TargetRef::Object(exiled)],
+            crate::types::identifiers::ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let obj = &state.objects[&exiled];
+        assert_eq!(obj.casting_permissions.len(), 1);
+        match obj.casting_permissions[0] {
+            CastingPermission::PlayFromExile { granted_to, .. } => {
+                assert_eq!(
+                    granted_to,
+                    PlayerId(1),
+                    "granted_to should equal the player target"
+                );
+            }
+            _ => panic!("expected PlayFromExile"),
+        }
+    }
+}

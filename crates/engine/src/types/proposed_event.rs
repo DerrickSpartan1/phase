@@ -19,6 +19,32 @@ pub struct ReplacementId {
     pub index: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+pub enum EtbTapState {
+    #[default]
+    Unspecified,
+    Tapped,
+    Untapped,
+}
+
+impl EtbTapState {
+    pub fn from_seeded_tapped(tapped: bool) -> Self {
+        if tapped {
+            Self::Tapped
+        } else {
+            Self::Unspecified
+        }
+    }
+
+    pub fn resolve(self, seeded_tapped: bool) -> bool {
+        match self {
+            Self::Unspecified => seeded_tapped,
+            Self::Tapped => true,
+            Self::Untapped => false,
+        }
+    }
+}
+
 /// CR 111.1 + CR 111.4 + CR 111.10: Fully-resolved token creation specification.
 ///
 /// `Effect::Token` carries authoring-time fields (`PtValue`, `QuantityExpr`,
@@ -76,8 +102,10 @@ pub enum ProposedEvent {
         from: Zone,
         to: Zone,
         cause: Option<ObjectId>,
-        /// Whether this permanent enters the battlefield tapped (set by ETB-tapped replacements).
-        enter_tapped: bool,
+        /// Explicit ETB tap-state override carried through the replacement pipeline.
+        /// `Unspecified` preserves any non-replacement tapped seed from the originating effect.
+        #[serde(default)]
+        enter_tapped: EtbTapState,
         /// Counters to place on this permanent as it enters the battlefield.
         /// Each entry is (counter_type_string, count). Set by ETB-counter replacements.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -140,6 +168,10 @@ pub enum ProposedEvent {
         /// Resolved token characteristics, keyed by replacement pipeline
         /// matchers on the apply path to reproduce the token faithfully.
         spec: Box<TokenSpec>,
+        /// Explicit ETB tap-state override carried through the replacement pipeline.
+        /// `Unspecified` preserves the token spec's authored `tapped` bit.
+        #[serde(default)]
+        enter_tapped: EtbTapState,
         /// CR 614.1a: Number of tokens to create. May be modified by replacement effects.
         count: u32,
         applied: HashSet<ReplacementId>,
@@ -203,14 +235,14 @@ pub enum ProposedEvent {
 }
 
 impl ProposedEvent {
-    /// Construct a `ZoneChange` with default `enter_tapped: false` and empty `applied` set.
+    /// Construct a `ZoneChange` with default `enter_tapped: Unspecified` and empty `applied` set.
     pub fn zone_change(object_id: ObjectId, from: Zone, to: Zone, cause: Option<ObjectId>) -> Self {
         Self::ZoneChange {
             object_id,
             from,
             to,
             cause,
-            enter_tapped: false,
+            enter_tapped: EtbTapState::Unspecified,
             enter_with_counters: Vec::new(),
             controller_override: None,
             enter_transformed: false,
@@ -243,6 +275,22 @@ impl ProposedEvent {
             player_id,
             mana_type,
             applied: HashSet::new(),
+        }
+    }
+
+    pub fn battlefield_entry_tap_state(&self) -> Option<EtbTapState> {
+        match self {
+            ProposedEvent::ZoneChange { enter_tapped, .. }
+            | ProposedEvent::CreateToken { enter_tapped, .. } => Some(*enter_tapped),
+            _ => None,
+        }
+    }
+
+    pub fn battlefield_entry_tap_state_mut(&mut self) -> Option<&mut EtbTapState> {
+        match self {
+            ProposedEvent::ZoneChange { enter_tapped, .. }
+            | ProposedEvent::CreateToken { enter_tapped, .. } => Some(enter_tapped),
+            _ => None,
         }
     }
 
@@ -419,6 +467,7 @@ mod tests {
                     source_id: ObjectId(1),
                     controller: PlayerId(0),
                 }),
+                enter_tapped: EtbTapState::Unspecified,
                 count: 1,
                 applied: HashSet::new(),
             },

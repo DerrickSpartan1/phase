@@ -429,24 +429,39 @@ pub fn is_known_effect(effect: &Effect) -> bool {
     !matches!(effect, Effect::Unimplemented { .. })
 }
 
-/// CR 603.7: Check if the next sub_ability needs tracked set recording.
+/// CR 603.7: Check if any descendant sub_ability needs tracked set recording.
 ///
-/// A sub consumes the tracked set when any of its quantity or filter positions
-/// reference the most recent set — via `QuantityRef::TrackedSetSize` (e.g.,
-/// "for each creature destroyed this way") or `TargetFilter::TrackedSet { .. }`
-/// (e.g., "those cards"). Two flag-driven cases are also consumers:
-/// `CreateDelayedTrigger { uses_tracked_set: true }` binds the set to the
-/// delayed trigger's later resolution, and `ChooseFromZone` selects out of it.
+/// A descendant consumes the tracked set when any of its quantity or filter
+/// positions reference the most recent set — via `QuantityRef::TrackedSetSize`
+/// (e.g., "for each creature destroyed this way") or
+/// `TargetFilter::TrackedSet { .. }` (e.g., "those cards"). Two flag-driven
+/// cases are also consumers: `CreateDelayedTrigger { uses_tracked_set: true }`
+/// binds the set to the delayed trigger's later resolution, and
+/// `ChooseFromZone` selects out of it.
+///
+/// The walk is **transitive** across the sub_ability chain — a grandchild
+/// referencing `TrackedSet(0)` causes every zone-changing ancestor in the
+/// chain to publish, which (combined with chain-unification at publish
+/// time) merges all affected objects into a single tracked set. This is
+/// what makes compound exile (Suspend Aggression's
+/// "Exile target nonland permanent and the top card of your library ...
+/// for each of those cards") expose both exiled objects to the grant.
 fn next_sub_needs_tracked_set(ability: &ResolvedAbility) -> bool {
-    ability.sub_ability.as_ref().is_some_and(|sub| {
-        matches!(
+    let mut cursor = ability.sub_ability.as_deref();
+    while let Some(sub) = cursor {
+        let consumes = matches!(
             &sub.effect,
             Effect::CreateDelayedTrigger {
                 uses_tracked_set: true,
                 ..
             } | Effect::ChooseFromZone { .. }
-        ) || effect_references_tracked_set(&sub.effect)
-    })
+        ) || effect_references_tracked_set(&sub.effect);
+        if consumes {
+            return true;
+        }
+        cursor = sub.sub_ability.as_deref();
+    }
+    false
 }
 
 /// Returns true if the effect references the most recent tracked set through
@@ -690,6 +705,11 @@ pub fn resolve_ability_chain(
         state.last_zone_changed_ids.clear();
         state.last_effect_amount = None;
         state.exiled_from_hand_this_resolution = 0;
+        // CR 603.7: Chain-local tracked-set identity — resets per top-level
+        // ability resolution so compound zone changes within one chain
+        // coalesce into a single tracked set, while unrelated resolutions
+        // stay isolated.
+        state.chain_tracked_set_id = None;
     }
 
     // BeginGame abilities are handled at game-start setup, not during stack resolution
@@ -1060,9 +1080,25 @@ pub fn resolve_ability_chain(
                     .collect()
             }
         };
-        let set_id = TrackedSetId(state.next_tracked_set_id);
-        state.next_tracked_set_id += 1;
-        state.tracked_object_sets.insert(set_id, affected_ids);
+        // CR 603.7 + CR 608.2c: Chain unification. If an ancestor in this
+        // resolution chain already published a tracked set, extend that set
+        // with the current publish so compound zone-changing effects
+        // (e.g., Suspend Aggression: "Exile target permanent and the top
+        // card of your library ... For each of those cards") expose every
+        // affected object to a single downstream "those cards" reference.
+        // Otherwise start a new chain-scoped set.
+        if let Some(chain_id) = state.chain_tracked_set_id {
+            state
+                .tracked_object_sets
+                .entry(chain_id)
+                .or_default()
+                .extend(affected_ids);
+        } else {
+            let set_id = TrackedSetId(state.next_tracked_set_id);
+            state.next_tracked_set_id += 1;
+            state.tracked_object_sets.insert(set_id, affected_ids);
+            state.chain_tracked_set_id = Some(set_id);
+        }
     }
 
     // ExileFromTopUntil handles its own sub_ability chain internally (injecting the
@@ -1321,6 +1357,7 @@ pub fn resolve_ability_chain(
         } else if sub.targets.is_empty()
             && !state.last_zone_changed_ids.is_empty()
             && matches!(ability.effect, Effect::ExileTop { .. })
+            && !effect_uses_implicit_tracked_set_targets(&sub.effect)
         {
             // CR 309.4c + CR 607.1: Forward exiled card IDs to sub-ability
             // (linked ability pair — second refers to cards exiled by the first).
@@ -1737,8 +1774,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityDefinition, AbilityKind, DelayedTriggerCondition, PlayerFilter, QuantityExpr,
-        SpellContext, TargetFilter, TargetRef,
+        AbilityDefinition, AbilityKind, CastingPermission, DelayedTriggerCondition, Duration,
+        PlayerFilter, QuantityExpr, SpellContext, TargetFilter, TargetRef,
     };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::mana::ManaCost;
@@ -2920,5 +2957,121 @@ mod tests {
             state.players[1].life, 15,
             "Expected 5 damage — swap should clear parent condition"
         );
+    }
+
+    /// CR 603.7 + CR 608.2c: Compound zone-changing effects in one resolution
+    /// chain coalesce into a single tracked set. Shape modeled on Suspend
+    /// Aggression: "Exile target permanent AND exile the top card ... For
+    /// each of those cards, its owner may play it." The two exile steps must
+    /// produce ONE set so the downstream GrantCastingPermission sees both
+    /// objects, not just the most recent exile.
+    #[test]
+    fn compound_zone_change_chain_unifies_tracked_set() {
+        use crate::types::ability::PermissionGrantee;
+        let mut state = GameState::new_two_player(42);
+        let permanent = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        let lib_card = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Spell".to_string(),
+            Zone::Library,
+        );
+        state.players[0].library.push(lib_card);
+
+        // Grandchild: grant PlayFromExile to the tracked set. Forces every
+        // zone-changing ancestor to publish (transitive descendant check).
+        let grant = ResolvedAbility::new(
+            Effect::GrantCastingPermission {
+                permission: CastingPermission::PlayFromExile {
+                    duration: Duration::UntilYourNextTurn,
+                    granted_to: PlayerId(0),
+                },
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                grantee: PermissionGrantee::ObjectOwner,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        // Sub-ability: ExileTop 1 card from controller's library.
+        let exile_top = ResolvedAbility::new(
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(grant);
+
+        // Parent: Exile target permanent. ChangeZone{target=Any} moves
+        // `permanent` to exile via the explicit TargetRef::Object(permanent).
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZone {
+                origin: Some(Zone::Battlefield),
+                destination: Zone::Exile,
+                target: TargetFilter::Any,
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+            },
+            vec![TargetRef::Object(permanent)],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(exile_top);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Exactly ONE tracked set — unified — containing both exiled objects.
+        assert_eq!(
+            state.tracked_object_sets.len(),
+            1,
+            "chain should publish into a single tracked set, got {}",
+            state.tracked_object_sets.len()
+        );
+        let set = state.tracked_object_sets.values().next().unwrap();
+        assert!(
+            set.contains(&permanent),
+            "unified set must contain the exiled permanent"
+        );
+        assert!(
+            set.contains(&lib_card),
+            "unified set must contain the exiled library card"
+        );
+
+        // Both objects received the grant, bound to their respective owners.
+        for (id, owner) in [(permanent, PlayerId(1)), (lib_card, PlayerId(0))] {
+            let obj = &state.objects[&id];
+            assert_eq!(
+                obj.casting_permissions.len(),
+                1,
+                "object {id:?} should have one PlayFromExile grant"
+            );
+            match obj.casting_permissions[0] {
+                CastingPermission::PlayFromExile { granted_to, .. } => {
+                    assert_eq!(
+                        granted_to, owner,
+                        "ObjectOwner grantee should bind to each object's owner"
+                    );
+                }
+                _ => panic!("expected PlayFromExile"),
+            }
+        }
     }
 }

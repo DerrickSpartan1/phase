@@ -68,7 +68,7 @@ pub(crate) fn execute_zone_move(
             ..
         } = proposed
         {
-            *et = true;
+            *et = crate::types::proposed_event::EtbTapState::Tapped;
         }
     }
 
@@ -130,7 +130,7 @@ pub(crate) fn execute_zone_move(
                     }
                 }
                 // CR 614.1: Apply enter-tapped if the effect or replacement set it.
-                if should_tap && to == Zone::Battlefield {
+                if should_tap.resolve(false) && to == Zone::Battlefield {
                     if let Some(obj) = state.objects.get_mut(&object_id) {
                         obj.tapped = true;
                     }

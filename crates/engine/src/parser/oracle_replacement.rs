@@ -23,8 +23,8 @@ use crate::types::ability::{
     AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, Comparator,
     ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
     DamageTargetFilter, Effect, FilterProp, ManaModification, PreventionAmount, QuantityExpr,
-    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, TargetFilter,
-    TypeFilter, TypedFilter,
+    QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode, StaticCondition,
+    TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::mana::{ManaColor, ManaType};
@@ -63,6 +63,16 @@ pub fn parse_replacement_line(text: &str, card_name: &str) -> Option<Replacement
     // --- "You may have ~ enter as a copy of [filter]" (clone replacement) ---
     // CR 707.9: "Enter as a copy" is a replacement effect modifying the ETB event.
     if let Some(def) = parse_clone_replacement(&norm_lower, &text, card_name) {
+        return Some(def);
+    }
+
+    // --- "As long as ~ is tapped/untapped, [subject] enter tapped/untapped" ---
+    if let Some(def) = parse_source_state_external_entry(&norm_lower, &text) {
+        return Some(def);
+    }
+
+    // --- "[Type] you control enter untapped" (external replacement) ---
+    if let Some(def) = parse_external_enters_untapped(&norm_lower, &text) {
         return Some(def);
     }
 
@@ -1388,6 +1398,104 @@ fn extract_kicker_enters_condition(norm_lower: &str) -> (Option<ReplacementCondi
     }
 }
 
+fn replacement_condition_from_static(condition: StaticCondition) -> Option<ReplacementCondition> {
+    match condition {
+        StaticCondition::SourceIsTapped => {
+            Some(ReplacementCondition::SourceTappedState { tapped: true })
+        }
+        StaticCondition::Not { condition } if *condition == StaticCondition::SourceIsTapped => {
+            Some(ReplacementCondition::SourceTappedState { tapped: false })
+        }
+        _ => None,
+    }
+}
+
+fn parse_external_entry_suffix(stripped: &str) -> Option<(&str, bool)> {
+    stripped
+        .strip_suffix(" enter tapped")
+        .map(|subject| (subject, true))
+        .or_else(|| {
+            stripped
+                .strip_suffix(" enters tapped")
+                .map(|subject| (subject, true))
+        })
+        .or_else(|| {
+            stripped
+                .strip_suffix(" enter untapped")
+                .map(|subject| (subject, false))
+        })
+        .or_else(|| {
+            stripped
+                .strip_suffix(" enters untapped")
+                .map(|subject| (subject, false))
+        })
+}
+
+fn build_external_entry_replacement(
+    subject: &str,
+    original_text: &str,
+    enters_tapped: bool,
+) -> Option<ReplacementDefinition> {
+    if subject.contains('~') {
+        return None;
+    }
+
+    let (filter, rest) = parse_type_phrase(subject);
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let effect = if enters_tapped {
+        Effect::Tap {
+            target: TargetFilter::SelfRef,
+        }
+    } else {
+        Effect::Untap {
+            target: TargetFilter::SelfRef,
+        }
+    };
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::ChangeZone)
+            .execute(AbilityDefinition::new(AbilityKind::Spell, effect))
+            .valid_card(filter)
+            .destination_zone(Zone::Battlefield)
+            .description(original_text.to_string()),
+    )
+}
+
+fn parse_source_state_external_entry(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (condition, rest) = nom_on_lower(original_text, norm_lower, |i| {
+        let (i, _) = tag::<_, _, VerboseError<&str>>("as long as ").parse(i)?;
+        let (i, condition) = parse_inner_condition(i)?;
+        let (i, _) = tag(", ").parse(i)?;
+        Ok((i, condition))
+    })?;
+    let condition = replacement_condition_from_static(condition)?;
+    let rest_lower = rest.to_lowercase();
+    let stripped = rest_lower.trim_end_matches('.');
+    let (entry_subject, enters_tapped) = parse_external_entry_suffix(stripped)?;
+    let mut def = build_external_entry_replacement(entry_subject, original_text, enters_tapped)?;
+    def.condition = Some(condition);
+    Some(def)
+}
+
+/// Parse "[Type] enter untapped" / "[Type] enters untapped" — external replacement effects.
+fn parse_external_enters_untapped(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let stripped = norm_lower.trim_end_matches('.');
+    let (subject, enters_tapped) = parse_external_entry_suffix(stripped)?;
+    if enters_tapped {
+        return None;
+    }
+    build_external_entry_replacement(subject, original_text, false)
+}
+
 /// Parse "[Type] enter tapped" / "[Type] enters tapped" — external replacement effects.
 /// E.g., "Creatures your opponents control enter tapped." (Authority of the Consuls)
 /// E.g., "Artifacts and creatures your opponents control enter tapped." (Blind Obedience)
@@ -1396,34 +1504,11 @@ fn parse_external_enters_tapped(
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
     let stripped = norm_lower.trim_end_matches('.');
-    let subject = stripped
-        .strip_suffix(" enter tapped")
-        .or_else(|| stripped.strip_suffix(" enters tapped"))?;
-
-    // Must NOT be a self-reference (those are handled by the normal enters-tapped path)
-    if subject.contains('~') {
+    let (subject, enters_tapped) = parse_external_entry_suffix(stripped)?;
+    if !enters_tapped {
         return None;
     }
-
-    let (filter, rest) = parse_type_phrase(subject);
-    // Ensure the entire subject was consumed (no trailing unparsed text)
-    if !rest.trim().is_empty() {
-        return None;
-    }
-
-    // CR 614.12: Only match zone changes TO the battlefield.
-    Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::Tap {
-                    target: TargetFilter::SelfRef,
-                },
-            ))
-            .valid_card(filter)
-            .destination_zone(Zone::Battlefield)
-            .description(original_text.to_string()),
-    )
+    build_external_entry_replacement(subject, original_text, true)
 }
 
 /// CR 614.1a: Parse "If [filter] would die, exile it instead" replacement effects.
@@ -3260,7 +3345,7 @@ mod tests {
             "Authority of the Consuls",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
         assert_eq!(def.destination_zone, Some(Zone::Battlefield));
         assert!(matches!(
             *def.execute.as_ref().unwrap().effect,
@@ -3284,7 +3369,7 @@ mod tests {
             "Blind Obedience",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
         assert_eq!(def.destination_zone, Some(Zone::Battlefield));
         match &def.valid_card {
             Some(TargetFilter::Or { filters }) => {
@@ -3313,7 +3398,7 @@ mod tests {
             "Frozen Aether",
         )
         .unwrap();
-        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
         assert_eq!(def.destination_zone, Some(Zone::Battlefield));
         match &def.valid_card {
             Some(TargetFilter::Or { filters }) => {
@@ -3339,6 +3424,71 @@ mod tests {
             }
             other => panic!("Expected Or filter with 3 elements, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn spelunking_lands_you_control_enter_untapped() {
+        let def =
+            parse_replacement_line("Lands you control enter untapped.", "Spelunking").unwrap();
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::Untap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        match &def.valid_card {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Land));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+            }
+            other => panic!("Expected Typed filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn archelos_untapped_other_permanents_enter_untapped() {
+        let def = parse_replacement_line(
+            "As long as ~ is untapped, other permanents enter untapped.",
+            "Archelos, Lagoon Mystic",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::SourceTappedState { tapped: false })
+        );
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::Untap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        assert!(def.valid_card.is_some(), "expected other-permanents filter");
+    }
+
+    #[test]
+    fn archelos_tapped_other_permanents_enter_tapped() {
+        let def = parse_replacement_line(
+            "As long as ~ is tapped, other permanents enter tapped.",
+            "Archelos, Lagoon Mystic",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::ChangeZone);
+        assert_eq!(def.destination_zone, Some(Zone::Battlefield));
+        assert_eq!(
+            def.condition,
+            Some(ReplacementCondition::SourceTappedState { tapped: true })
+        );
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        assert!(def.valid_card.is_some(), "expected other-permanents filter");
     }
 
     // ── Fast land tests ──

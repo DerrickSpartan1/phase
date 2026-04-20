@@ -1870,7 +1870,7 @@ fn install_shock_land(state: &mut GameState, card_id: CardId, zone: Zone, name: 
 #[test]
 fn earthbend_return_skips_shock_land_pay_life_prompt() {
     use engine::game::replacement::{replace_event, ReplacementResult};
-    use engine::types::proposed_event::ProposedEvent;
+    use engine::types::proposed_event::{EtbTapState, ProposedEvent};
 
     let mut state = GameState::new_two_player(42);
     state.phase = Phase::PreCombatMain;
@@ -1889,7 +1889,7 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
         from: Zone::Graveyard,
         to: Zone::Battlefield,
         cause: None,
-        enter_tapped: true,
+        enter_tapped: EtbTapState::Tapped,
         enter_with_counters: Vec::new(),
         controller_override: Some(P0),
         enter_transformed: false,
@@ -1910,7 +1910,11 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
             ..
         }) => {
             assert_eq!(to, Zone::Battlefield);
-            assert!(enter_tapped, "enter_tapped must remain true after pipeline");
+            assert_eq!(
+                enter_tapped,
+                EtbTapState::Tapped,
+                "enter_tapped must remain true after pipeline"
+            );
             assert_eq!(
                 controller_override,
                 Some(P0),
@@ -1943,7 +1947,7 @@ fn earthbend_return_skips_shock_land_pay_life_prompt() {
 #[test]
 fn plain_shock_land_etb_still_prompts_for_life_payment() {
     use engine::game::replacement::{replace_event, ReplacementResult};
-    use engine::types::proposed_event::ProposedEvent;
+    use engine::types::proposed_event::{EtbTapState, ProposedEvent};
 
     let mut state = GameState::new_two_player(42);
     state.phase = Phase::PreCombatMain;
@@ -1958,7 +1962,7 @@ fn plain_shock_land_etb_still_prompts_for_life_payment() {
         from: Zone::Hand,
         to: Zone::Battlefield,
         cause: None,
-        enter_tapped: false,
+        enter_tapped: EtbTapState::Unspecified,
         enter_with_counters: Vec::new(),
         controller_override: None,
         enter_transformed: false,

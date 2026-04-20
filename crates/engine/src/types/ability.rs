@@ -5153,6 +5153,9 @@ pub enum ReplacementCondition {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cost_text: Option<String>,
     },
+    /// "as long as ~ is tapped/untapped" — replacement applies only while the
+    /// source object is in the required tapped state.
+    SourceTappedState { tapped: bool },
     /// CR 120.1: "dealt damage this turn by a source you controlled" — replacement applies
     /// only to objects that were dealt damage this turn by a source controlled by the specified
     /// player. Checks `damage_dealt_this_turn` records in game state.

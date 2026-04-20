@@ -14,9 +14,10 @@ use crate::types::ability::{
 };
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{GameState, SpellCastRecord, ZoneChangeRecord};
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
+use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenSpec};
 use crate::types::zones::Zone;
 
 /// CR 608.2c: Resolve contextual parent-target exclusions before a mass-effect scan.
@@ -159,6 +160,37 @@ pub fn matches_target_filter(
     )
 }
 
+pub fn matches_target_filter_on_battlefield_entry(
+    state: &GameState,
+    event: &ProposedEvent,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    match event {
+        ProposedEvent::ZoneChange { object_id, to, .. } if *to == Zone::Battlefield => {
+            matches_target_filter(state, *object_id, filter, ctx)
+        }
+        ProposedEvent::CreateToken {
+            owner,
+            spec,
+            enter_tapped,
+            ..
+        } => {
+            let obj = build_battlefield_entry_token_object(*owner, spec, *enter_tapped);
+            filter_inner_for_object(
+                state,
+                &obj,
+                obj.id,
+                filter,
+                ctx.source_id,
+                ctx.source_controller,
+                ctx.ability,
+            )
+        }
+        _ => false,
+    }
+}
+
 /// CR 603.10: Check whether a zone-change snapshot matches a target filter.
 ///
 /// This is the shared past-tense matcher for zone-change events whose subject has
@@ -195,11 +227,32 @@ fn filter_inner(
     // specifically mention phased-out permanents" — is extraordinarily rare
     // and handled by targeted callers that bypass this choke point; the
     // safe default here is to exclude.
-    if let Some(obj) = state.objects.get(&object_id) {
-        if obj.is_phased_out() {
-            return false;
-        }
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    if obj.is_phased_out() {
+        return false;
     }
+    filter_inner_for_object(
+        state,
+        obj,
+        object_id,
+        filter,
+        source_id,
+        source_controller,
+        ability,
+    )
+}
+
+fn filter_inner_for_object(
+    state: &GameState,
+    obj: &GameObject,
+    object_id: ObjectId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    source_controller: Option<PlayerId>,
+    ability: Option<&ResolvedAbility>,
+) -> bool {
     match filter {
         TargetFilter::None => false,
         TargetFilter::Any => true,
@@ -211,10 +264,6 @@ fn filter_inner(
             controller,
             properties,
         }) => {
-            let obj = match state.objects.get(&object_id) {
-                Some(o) => o,
-                None => return false,
-            };
             // Type filters check (all must match — conjunction)
             for tf in type_filters {
                 if !type_filter_matches(tf, obj) {
@@ -275,20 +324,37 @@ fn filter_inner(
                 .iter()
                 .all(|p| matches_filter_prop(p, state, obj, object_id, &source_ctx))
         }
-        TargetFilter::Not { filter: inner } => !filter_inner(
+        TargetFilter::Not { filter: inner } => !filter_inner_for_object(
             state,
+            obj,
             object_id,
             inner,
             source_id,
             source_controller,
             ability,
         ),
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|f| filter_inner(state, object_id, f, source_id, source_controller, ability)),
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|f| filter_inner(state, object_id, f, source_id, source_controller, ability)),
+        TargetFilter::Or { filters } => filters.iter().any(|f| {
+            filter_inner_for_object(
+                state,
+                obj,
+                object_id,
+                f,
+                source_id,
+                source_controller,
+                ability,
+            )
+        }),
+        TargetFilter::And { filters } => filters.iter().all(|f| {
+            filter_inner_for_object(
+                state,
+                obj,
+                object_id,
+                f,
+                source_id,
+                source_controller,
+                ability,
+            )
+        }),
         // StackAbility/StackSpell targeting is handled directly at call sites, not via filter
         TargetFilter::StackAbility | TargetFilter::StackSpell => false,
         TargetFilter::SpecificObject { id: target_id } => object_id == *target_id,
@@ -319,8 +385,9 @@ fn filter_inner(
                 .get(id)
                 .is_some_and(|set| set.contains(&object_id));
             in_set
-                && filter_inner(
+                && filter_inner_for_object(
                     state,
+                    obj,
                     object_id,
                     filter,
                     source_id,
@@ -353,22 +420,47 @@ fn filter_inner(
                     _ => None,
                 })
             });
-            chosen_name.is_some_and(|name| {
-                state
-                    .objects
-                    .get(&object_id)
-                    .is_some_and(|obj| obj.name == name)
-            })
+            chosen_name.is_some_and(|name| obj.name == name)
         }
         // "card named [literal]" — static name match.
-        TargetFilter::Named { name } => state
-            .objects
-            .get(&object_id)
-            .is_some_and(|obj| obj.name == *name),
+        TargetFilter::Named { name } => obj.name == *name,
         // CR 400.3: Owner is a player-resolving filter (resolves to the owner of
         // source_id), meaningless as an object-matching predicate.
         TargetFilter::Owner => false,
     }
+}
+
+fn build_battlefield_entry_token_object(
+    owner: PlayerId,
+    spec: &TokenSpec,
+    enter_tapped: EtbTapState,
+) -> GameObject {
+    let mut obj = GameObject::new(
+        ObjectId(u64::MAX),
+        CardId(0),
+        owner,
+        spec.display_name.clone(),
+        Zone::Battlefield,
+    );
+    obj.controller = owner;
+    obj.is_token = true;
+    obj.power = spec.power;
+    obj.toughness = spec.toughness;
+    obj.base_power = spec.power;
+    obj.base_toughness = spec.toughness;
+    obj.card_types.core_types = spec.core_types.clone();
+    obj.card_types.subtypes = spec.subtypes.clone();
+    obj.card_types.supertypes = spec.supertypes.clone();
+    obj.base_card_types = obj.card_types.clone();
+    obj.color = spec.colors.clone();
+    obj.base_color = spec.colors.clone();
+    obj.keywords = spec.keywords.clone();
+    obj.base_keywords = spec.keywords.clone();
+    for static_def in &spec.static_abilities {
+        obj.static_definitions.push(static_def.clone());
+    }
+    obj.tapped = enter_tapped.resolve(spec.tapped);
+    obj
 }
 
 fn zone_change_filter_inner(

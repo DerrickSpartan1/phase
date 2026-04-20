@@ -1889,6 +1889,16 @@ pub struct GameState {
     #[serde(default)]
     pub next_tracked_set_id: u64,
 
+    /// CR 603.7 + CR 608.2c: The tracked set published by the currently-resolving
+    /// ability chain, if any. Set by the first publish inside a chain and reused
+    /// (extended) by later publishes in the same chain so compound zone-changing
+    /// effects (e.g., "Exile target permanent and the top card of your library
+    /// ... For each of those cards") merge their results into a single set
+    /// before downstream "those cards" references resolve. Cleared at the
+    /// top-level chain entry (depth == 0) in `resolve_ability_chain`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_tracked_set_id: Option<TrackedSetId>,
+
     // Commander support
     #[serde(default)]
     pub commander_cast_count: HashMap<ObjectId, u32>,
@@ -2336,6 +2346,7 @@ impl GameState {
             delayed_triggers: Vec::new(),
             tracked_object_sets: HashMap::new(),
             next_tracked_set_id: 1,
+            chain_tracked_set_id: None,
             commander_cast_count: HashMap::new(),
             extra_turns: Vec::new(),
             turns_to_skip: vec![0; player_count as usize],
@@ -2500,6 +2511,7 @@ impl PartialEq for GameState {
             && self.delayed_triggers == other.delayed_triggers
             && self.tracked_object_sets == other.tracked_object_sets
             && self.next_tracked_set_id == other.next_tracked_set_id
+            && self.chain_tracked_set_id == other.chain_tracked_set_id
             && self.commander_cast_count == other.commander_cast_count
             && self.extra_turns == other.extra_turns
             && self.turns_to_skip == other.turns_to_skip

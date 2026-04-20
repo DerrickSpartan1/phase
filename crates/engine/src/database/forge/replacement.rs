@@ -79,7 +79,8 @@ fn translate_replacement_event(event: &str) -> Result<ReplacementEvent, ForgeTra
         // CR 614.1a: Life gain replacement
         "GainLife" => Ok(ReplacementEvent::GainLife),
         // CR 614.12: Zone change replacement
-        "ChangeZone" | "Moved" => Ok(ReplacementEvent::ChangeZone),
+        "ChangeZone" => Ok(ReplacementEvent::ChangeZone),
+        "Moved" => Ok(ReplacementEvent::Moved),
         // CR 614.1a: Counter placement replacement
         "AddCounter" => Ok(ReplacementEvent::AddCounter),
         // CR 614.1a: Counter removal replacement
@@ -139,6 +140,19 @@ mod tests {
             params: parse_params(raw),
         };
         let mut resolver = make_resolver(&[("Exile", "DB$ ChangeZone | Hidden$ True | Origin$ All | Destination$ Exile | Defined$ ReplacedCard")]);
+        let def = translate_replacement(&line, &mut resolver).unwrap();
+
+        assert!(matches!(def.event, ReplacementEvent::Moved));
+    }
+
+    #[test]
+    fn test_change_zone_event_translation() {
+        let raw = "Event$ ChangeZone | ValidCard$ Creature.OppCtrl | ReplaceWith$ TapIt | Description$ Creatures your opponents control enter tapped.";
+        let line = ForgeAbilityLine {
+            raw: raw.to_string(),
+            params: parse_params(raw),
+        };
+        let mut resolver = make_resolver(&[("TapIt", "DB$ Tap | Defined$ ReplacedCard")]);
         let def = translate_replacement(&line, &mut resolver).unwrap();
 
         assert!(matches!(def.event, ReplacementEvent::ChangeZone));
