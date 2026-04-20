@@ -33,6 +33,16 @@ fn is_it_pronoun(text: &str) -> bool {
         .is_some()
 }
 
+/// Output of [`try_parse_put_counter_chain`]: the ordered list of
+/// `(counter_type, count)` entries, the shared target, the remaining original-
+/// case text after the clause, and any multi-target spec.
+pub(super) type PutCounterChain<'a> = (
+    Vec<(String, QuantityExpr)>,
+    TargetFilter,
+    &'a str,
+    Option<MultiTargetSpec>,
+);
+
 /// CR 122.1: Parse "put a X counter, a Y counter[, and a Z counter] on TARGET"
 /// — a list of counters of distinct types placed on a shared target. Covers
 /// Abigale, Unexpected Fangs, Gift of the Viper, Qarsi Revenant, Nezumi
@@ -46,12 +56,7 @@ pub(super) fn try_parse_put_counter_chain<'a>(
     lower: &str,
     text: &'a str,
     ctx: &ParseContext,
-) -> Option<(
-    Vec<(String, QuantityExpr)>,
-    TargetFilter,
-    &'a str,
-    Option<MultiTargetSpec>,
-)> {
+) -> Option<PutCounterChain<'a>> {
     let ((), after_put) = nom_on_lower(lower, lower, |i| value((), tag("put ")).parse(i))?;
     let mut remaining = after_put.trim_start();
     let mut entries: Vec<(String, QuantityExpr)> = Vec::new();

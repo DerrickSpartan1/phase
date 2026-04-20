@@ -1,3 +1,4 @@
+use crate::types::keywords::KeywordKind;
 use serde::{Deserialize, Serialize};
 
 /// Counter types serialize as flat strings so they can be used as JSON map keys
@@ -17,8 +18,35 @@ pub enum CounterType {
     Stun,
     /// CR 714.1: Lore counters track Saga chapter progression.
     Lore,
+    /// CR 122.1b: A keyword counter grants its keyword to the permanent (flying,
+    /// first strike, deathtouch, lifelink, ...). Uses the parameterless
+    /// `KeywordKind` discriminant — keyword counters never carry parameters
+    /// (no Ward N / Afflict N / Annihilator N variants exist as counters).
+    Keyword(KeywordKind),
     Generic(String),
 }
+
+/// CR 122.1b: Parameterless keyword kinds that can appear as counters, paired
+/// with their canonical Oracle-text name. Single source of truth for the
+/// string↔`KeywordKind` mapping at the parser/serialization boundary —
+/// runtime dispatch works on the typed `CounterType::Keyword(kind)` directly.
+const KEYWORD_COUNTERS: &[(&str, KeywordKind)] = &[
+    ("flying", KeywordKind::Flying),
+    ("first strike", KeywordKind::FirstStrike),
+    ("double strike", KeywordKind::DoubleStrike),
+    ("deathtouch", KeywordKind::Deathtouch),
+    ("decayed", KeywordKind::Decayed),
+    ("exalted", KeywordKind::Exalted),
+    ("haste", KeywordKind::Haste),
+    ("hexproof", KeywordKind::Hexproof),
+    ("indestructible", KeywordKind::Indestructible),
+    ("lifelink", KeywordKind::Lifelink),
+    ("menace", KeywordKind::Menace),
+    ("reach", KeywordKind::Reach),
+    ("shadow", KeywordKind::Shadow),
+    ("trample", KeywordKind::Trample),
+    ("vigilance", KeywordKind::Vigilance),
+];
 
 impl CounterType {
     pub fn as_str(&self) -> &str {
@@ -29,6 +57,11 @@ impl CounterType {
             CounterType::Defense => "defense",
             CounterType::Stun => "stun",
             CounterType::Lore => "lore",
+            CounterType::Keyword(kind) => KEYWORD_COUNTERS
+                .iter()
+                .find(|(_, k)| k == kind)
+                .map(|(name, _)| *name)
+                .expect("KeywordKind stored in CounterType::Keyword must be in KEYWORD_COUNTERS"),
             CounterType::Generic(s) => s.as_str(),
         }
     }
@@ -67,13 +100,21 @@ pub enum CounterMatch {
 }
 
 pub fn parse_counter_type(text: &str) -> CounterType {
-    match text.trim().trim_end_matches(" counter").trim() {
+    let trimmed = text.trim().trim_end_matches(" counter").trim();
+    match trimmed {
         "P1P1" | "+1/+1" | "plus1plus1" => CounterType::Plus1Plus1,
         "M1M1" | "-1/-1" | "minus1minus1" => CounterType::Minus1Minus1,
         "LOYALTY" | "loyalty" => CounterType::Loyalty,
         "defense" | "DEFENSE" => CounterType::Defense,
         "stun" => CounterType::Stun,
         "lore" | "LORE" => CounterType::Lore,
-        other => CounterType::Generic(other.to_string()),
+        other => {
+            let lower = other.to_lowercase();
+            if let Some((_, kind)) = KEYWORD_COUNTERS.iter().find(|(name, _)| *name == lower) {
+                CounterType::Keyword(*kind)
+            } else {
+                CounterType::Generic(other.to_string())
+            }
+        }
     }
 }

@@ -43,15 +43,17 @@ fn sync_derived_from_counters(obj: &mut GameObject, counter_type: &CounterType) 
         | CounterType::Minus1Minus1
         | CounterType::Stun
         | CounterType::Lore
+        | CounterType::Keyword(_)
         | CounterType::Generic(_) => {}
     }
 }
 
 /// CR 613.1d: Mark layers dirty if this counter type projects into a derived
 /// characteristic computed by the layer system. P1P1/M1M1 feed layer 7c;
-/// Loyalty/Defense are cached fields mirrored from the counter map. Setting
-/// `layers_dirty` for all four is defensive — the layer reset/re-derive path
-/// is idempotent when counters already match.
+/// Loyalty/Defense are cached fields mirrored from the counter map; keyword
+/// counters grant abilities at layer 6 (CR 122.1b). Setting `layers_dirty`
+/// for these is defensive — the layer reset/re-derive path is idempotent
+/// when counters already match.
 fn counter_type_affects_layers(counter_type: &CounterType) -> bool {
     matches!(
         counter_type,
@@ -59,6 +61,7 @@ fn counter_type_affects_layers(counter_type: &CounterType) -> bool {
             | CounterType::Minus1Minus1
             | CounterType::Loyalty
             | CounterType::Defense
+            | CounterType::Keyword(_)
     )
 }
 

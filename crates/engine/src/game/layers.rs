@@ -513,6 +513,30 @@ pub fn evaluate_layers(state: &mut GameState) {
         }
     }
 
+    // CR 122.1b + CR 613.1f: Keyword counters grant their keyword at layer 6.
+    // The CR enumerates the keyword counters a permanent can gain a keyword from:
+    // flying, first strike, double strike, deathtouch, decayed, exalted, haste,
+    // hexproof, indestructible, lifelink, menace, reach, shadow, trample, and
+    // vigilance (and variants). Anything outside this list is a flavor counter
+    // without a runtime effect — e.g. a "charge" counter doesn't grant Charge.
+    for &id in &bf_ids {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            let granted: Vec<Keyword> = obj
+                .counters
+                .keys()
+                .filter_map(|ct| match ct {
+                    CounterType::Keyword(kind) => Keyword::promote_keyword_kind(*kind),
+                    _ => None,
+                })
+                .collect();
+            for keyword in granted {
+                if !obj.has_keyword(&keyword) {
+                    obj.keywords.push(keyword);
+                }
+            }
+        }
+    }
+
     // CR 613.4c: +1/+1 and -1/-1 counters modify P/T in layer 7c.
     for &id in &bf_ids {
         if let Some(obj) = state.objects.get_mut(&id) {

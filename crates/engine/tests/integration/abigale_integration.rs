@@ -16,16 +16,17 @@
 use crate::rules::{GameAction, GameScenario, WaitingFor, Zone, P0, P1};
 use engine::types::ability::TargetRef;
 use engine::types::counter::CounterType;
+use engine::types::keywords::{Keyword, KeywordKind};
 use engine::types::phase::Phase;
 
 fn flying() -> CounterType {
-    CounterType::Generic("flying".to_string())
+    CounterType::Keyword(KeywordKind::Flying)
 }
 fn first_strike() -> CounterType {
-    CounterType::Generic("first strike".to_string())
+    CounterType::Keyword(KeywordKind::FirstStrike)
 }
 fn lifelink() -> CounterType {
-    CounterType::Generic("lifelink".to_string())
+    CounterType::Keyword(KeywordKind::Lifelink)
 }
 
 #[test]
@@ -96,6 +97,24 @@ fn abigale_enters_puts_counters_on_target_creature_not_self() {
         bear.counters.get(&lifelink()).copied().unwrap_or(0) >= 1,
         "Bear should have a lifelink counter; counters = {:?}",
         bear.counters,
+    );
+
+    // CR 122.1b: Keyword counters must grant the corresponding keyword at
+    // layer 6. Counters without abilities is the exact bug being regressed.
+    assert!(
+        bear.has_keyword(&Keyword::Flying),
+        "Bear should have Flying granted by its flying counter; keywords = {:?}",
+        bear.keywords,
+    );
+    assert!(
+        bear.has_keyword(&Keyword::FirstStrike),
+        "Bear should have FirstStrike granted by its first strike counter; keywords = {:?}",
+        bear.keywords,
+    );
+    assert!(
+        bear.has_keyword(&Keyword::Lifelink),
+        "Bear should have Lifelink granted by its lifelink counter; keywords = {:?}",
+        bear.keywords,
     );
 
     let abigale = runner

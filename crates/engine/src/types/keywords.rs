@@ -607,6 +607,34 @@ pub enum Keyword {
 }
 
 impl Keyword {
+    /// CR 122.1b: Promote a bare `KeywordKind` (as stored on `CounterType::Keyword`)
+    /// to the full `Keyword` enum for insertion into an object's keyword list.
+    /// Every enumerated keyword-counter kind maps to a parameterless Keyword
+    /// variant (keyword counters never carry parameters like Ward N or Afflict N),
+    /// so this is lossless for the CR-enumerated set. Returns `None` for any
+    /// `KeywordKind` whose full `Keyword` variant requires parameters we cannot
+    /// synthesize from a bare counter.
+    pub fn promote_keyword_kind(kind: KeywordKind) -> Option<Self> {
+        Some(match kind {
+            KeywordKind::Flying => Keyword::Flying,
+            KeywordKind::FirstStrike => Keyword::FirstStrike,
+            KeywordKind::DoubleStrike => Keyword::DoubleStrike,
+            KeywordKind::Deathtouch => Keyword::Deathtouch,
+            KeywordKind::Decayed => Keyword::Decayed,
+            KeywordKind::Exalted => Keyword::Exalted,
+            KeywordKind::Haste => Keyword::Haste,
+            KeywordKind::Hexproof => Keyword::Hexproof,
+            KeywordKind::Indestructible => Keyword::Indestructible,
+            KeywordKind::Lifelink => Keyword::Lifelink,
+            KeywordKind::Menace => Keyword::Menace,
+            KeywordKind::Reach => Keyword::Reach,
+            KeywordKind::Shadow => Keyword::Shadow,
+            KeywordKind::Trample => Keyword::Trample,
+            KeywordKind::Vigilance => Keyword::Vigilance,
+            _ => return None,
+        })
+    }
+
     pub fn kind(&self) -> KeywordKind {
         match self {
             Keyword::Flying => KeywordKind::Flying,
