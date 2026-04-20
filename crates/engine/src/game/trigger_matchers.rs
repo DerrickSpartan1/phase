@@ -84,6 +84,7 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         TriggerMode::Immediate | TriggerMode::Always => match_always,
         TriggerMode::Explored => match_explored,
         TriggerMode::TurnFaceUp => match_turn_face_up,
+        TriggerMode::ManifestDread => match_manifest_dread,
         TriggerMode::DayTimeChanges => match_day_time_changes,
         TriggerMode::CommitCrime => match_commit_crime,
         TriggerMode::CaseSolved => match_case_solved,
@@ -153,7 +154,6 @@ pub fn trigger_matcher(mode: TriggerMode) -> Option<TriggerMatcher> {
         | TriggerMode::Forage
         | TriggerMode::FullyUnlock
         | TriggerMode::GiveGift
-        | TriggerMode::ManifestDread
         | TriggerMode::Mentored
         | TriggerMode::Mutates
         | TriggerMode::SeekAll
@@ -283,6 +283,8 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
 
     // Promoted trigger matchers -- face-down mechanics
     r.insert(TriggerMode::TurnFaceUp, match_turn_face_up);
+    // CR 701.62: Manifest Dread actor-side trigger.
+    r.insert(TriggerMode::ManifestDread, match_manifest_dread);
 
     // Promoted trigger matchers -- day/night
     r.insert(TriggerMode::DayTimeChanges, match_day_time_changes);
@@ -378,7 +380,6 @@ pub fn build_trigger_registry() -> HashMap<TriggerMode, TriggerMatcher> {
         TriggerMode::Forage,
         TriggerMode::FullyUnlock,
         TriggerMode::GiveGift,
-        TriggerMode::ManifestDread,
         TriggerMode::Mentored,
         TriggerMode::Mutates,
         TriggerMode::SeekAll,
@@ -1640,20 +1641,65 @@ pub(super) fn match_become_monstrous(
     )
 }
 
-/// TurnFaceUp: fires when a face-down creature is turned face up.
+/// CR 708 + CR 701.40b + CR 701.58b: TurnFaceUp fires when a face-down
+/// permanent is turned face up. Uses `GameEvent::TurnedFaceUp` emitted by
+/// `crate::game::morph::turn_face_up`.
+///
+/// Filters:
+/// - `valid_card` gates the turned-up object (e.g. "a creature", "a permanent").
+/// - `valid_target` gates the controller of the turned-up object
+///   (e.g. `ControllerRef::You` for "whenever you turn a permanent face up").
 pub(super) fn match_turn_face_up(
     event: &GameEvent,
-    _trigger: &TriggerDefinition,
-    _source_id: ObjectId,
-    _state: &GameState,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
 ) -> bool {
-    matches!(
-        event,
-        GameEvent::EffectResolved {
-            kind: EffectKind::TurnFaceUp,
-            ..
-        }
-    )
+    let GameEvent::TurnedFaceUp { object_id } = event else {
+        return false;
+    };
+    // CR 603.2a: Filter on the face-up object when a subject filter is present
+    // (e.g. "a creature"). No filter → any face-up permanent matches.
+    if trigger.valid_card.is_some() && !valid_card_matches(trigger, state, *object_id, source_id) {
+        return false;
+    }
+    // CR 603.2a: Filter on controller of the face-up object for actor-side
+    // forms ("whenever you turn a permanent face up").
+    if let Some(ref vt) = trigger.valid_target {
+        let Some(flipped_controller) = state.objects.get(object_id).map(|o| o.controller) else {
+            return false;
+        };
+        return player_matches_filter(vt, state, flipped_controller, source_id);
+    }
+    true
+}
+
+/// CR 701.62 + CR 701.62b: ManifestDread fires after a player finishes resolving
+/// the "manifest dread" keyword action. Uses `GameEvent::EffectResolved`
+/// emitted by `crate::game::effects::manifest_dread`.
+///
+/// `valid_target` gates the controller performing the action (e.g.
+/// `ControllerRef::You` for "whenever you manifest dread").
+pub(super) fn match_manifest_dread(
+    event: &GameEvent,
+    trigger: &TriggerDefinition,
+    source_id: ObjectId,
+    state: &GameState,
+) -> bool {
+    let GameEvent::EffectResolved {
+        kind: EffectKind::ManifestDread,
+        source_id: triggering_source,
+    } = event
+    else {
+        return false;
+    };
+    let Some(actor) = state.objects.get(triggering_source).map(|o| o.controller) else {
+        return false;
+    };
+    if let Some(ref vt) = trigger.valid_target {
+        return player_matches_filter(vt, state, actor, source_id);
+    }
+    true
 }
 
 /// DayTimeChanges: fires when day/night changes.
@@ -4413,6 +4459,143 @@ mod tests {
             player_id: PlayerId(1),
         };
         assert!(match_sacrificed(&event_opp, &trigger, source_id, &state));
+    }
+
+    // CR 701.62 + CR 701.62b: Manifest Dread actor-side trigger.
+    #[test]
+    fn match_manifest_dread_fires_for_controller() {
+        let mut state = setup();
+        let trigger_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Paranormal Analyst".to_string(),
+            Zone::Battlefield,
+        );
+        // A separate object acts as the effect source (could be the same, usually is).
+        let dread_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Dread Source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::ManifestDread);
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        let event = GameEvent::EffectResolved {
+            kind: EffectKind::ManifestDread,
+            source_id: dread_source,
+        };
+        assert!(match_manifest_dread(
+            &event,
+            &trigger,
+            trigger_source,
+            &state
+        ));
+
+        // Non-manifest-dread effect should not fire.
+        let other = GameEvent::EffectResolved {
+            kind: EffectKind::Manifest,
+            source_id: dread_source,
+        };
+        assert!(!match_manifest_dread(
+            &other,
+            &trigger,
+            trigger_source,
+            &state
+        ));
+    }
+
+    #[test]
+    fn match_manifest_dread_filters_by_controller() {
+        let mut state = setup();
+        let trigger_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Paranormal Analyst".to_string(),
+            Zone::Battlefield,
+        );
+        // Opponent performs the manifest-dread action.
+        let opp_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Dread Source".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::ManifestDread);
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        let event = GameEvent::EffectResolved {
+            kind: EffectKind::ManifestDread,
+            source_id: opp_source,
+        };
+        // "Whenever you manifest dread" should not fire when the opponent
+        // triggers the effect.
+        assert!(!match_manifest_dread(
+            &event,
+            &trigger,
+            trigger_source,
+            &state
+        ));
+    }
+
+    // CR 708 + CR 701.40b: TurnFaceUp matcher consumes `GameEvent::TurnedFaceUp`
+    // and filters on both the face-up object and its controller.
+    #[test]
+    fn match_turn_face_up_fires_on_turned_face_up_event() {
+        let mut state = setup();
+        let trigger_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Growing Dread".to_string(),
+            Zone::Battlefield,
+        );
+        let flipped = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Manifested Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::TurnFaceUp);
+        trigger.valid_card = Some(TargetFilter::Any);
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        let event = GameEvent::TurnedFaceUp { object_id: flipped };
+        assert!(match_turn_face_up(&event, &trigger, trigger_source, &state));
+    }
+
+    #[test]
+    fn match_turn_face_up_rejects_opponent_controller_for_you_filter() {
+        let mut state = setup();
+        let trigger_source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Growing Dread".to_string(),
+            Zone::Battlefield,
+        );
+        let flipped = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1), // opponent's manifest
+            "Opponent Manifested".to_string(),
+            Zone::Battlefield,
+        );
+        let mut trigger = make_trigger(TriggerMode::TurnFaceUp);
+        trigger.valid_target = Some(TargetFilter::Controller);
+
+        let event = GameEvent::TurnedFaceUp { object_id: flipped };
+        assert!(!match_turn_face_up(
+            &event,
+            &trigger,
+            trigger_source,
+            &state
+        ));
     }
 
     #[test]

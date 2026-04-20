@@ -2451,6 +2451,45 @@ fn try_parse_special_trigger_pattern(lower: &str) -> Option<(TriggerMode, Trigge
         return Some((TriggerMode::UnlockDoor, def));
     }
 
+    // CR 701.62 + CR 701.62b: "Whenever you manifest dread" — actor-side
+    // Manifest Dread trigger. "You" constrains the acting player to the
+    // trigger's controller via `TargetFilter::Controller`.
+    fn parse_manifest_dread_prefix(input: &str) -> OracleResult<'_, ()> {
+        let (rest, _) = alt((tag("whenever "), tag("when "))).parse(input)?;
+        value((), tag("you manifest dread")).parse(rest)
+    }
+    if parse_manifest_dread_prefix(lower).is_ok() {
+        let mut def = make_base();
+        def.mode = TriggerMode::ManifestDread;
+        def.valid_target = Some(TargetFilter::Controller);
+        return Some((TriggerMode::ManifestDread, def));
+    }
+
+    // CR 708 + CR 701.40b + CR 701.58b: "Whenever you turn a permanent/creature
+    // face up" — actor-side TurnFaceUp trigger. Subject after "turn " must be a
+    // face-down-capable noun phrase; `valid_card` records the type filter,
+    // `valid_target = Controller` gates on the turning player being the trigger
+    // controller.
+    fn parse_turn_face_up_prefix(input: &str) -> OracleResult<'_, TypeFilter> {
+        let (rest, _) = alt((tag("whenever "), tag("when "))).parse(input)?;
+        let (rest, _) = tag("you turn ").parse(rest)?;
+        let (rest, _) = alt((tag("a "), tag("an "))).parse(rest)?;
+        let (rest, ty) = alt((
+            value(TypeFilter::Permanent, tag("permanent")),
+            value(TypeFilter::Creature, tag("creature")),
+        ))
+        .parse(rest)?;
+        let (rest, _) = tag(" face up").parse(rest)?;
+        Ok((rest, ty))
+    }
+    if let Ok((_, ty)) = parse_turn_face_up_prefix(lower) {
+        let mut def = make_base();
+        def.mode = TriggerMode::TurnFaceUp;
+        def.valid_card = Some(TargetFilter::Typed(TypedFilter::new(ty)));
+        def.valid_target = Some(TargetFilter::Controller);
+        return Some((TriggerMode::TurnFaceUp, def));
+    }
+
     // CR 508.1a: "enchanted player is attacked" — the aura enchants a player,
     // and the trigger fires when any creature attacks that player.
     for prefix in [
@@ -6619,6 +6658,50 @@ mod tests {
     fn trigger_commit_crime_mode() {
         let def = parse_trigger_line("Whenever you commit a crime, draw a card.", "At Knifepoint");
         assert_eq!(def.mode, TriggerMode::CommitCrime);
+    }
+
+    // CR 701.62: "Whenever you manifest dread" — actor-side Manifest Dread
+    // trigger, gated on controller via TargetFilter::Controller.
+    #[test]
+    fn trigger_manifest_dread_actor_side() {
+        let def = parse_trigger_line(
+            "Whenever you manifest dread, put a card you put into your graveyard this way into your hand.",
+            "Paranormal Analyst",
+        );
+        assert_eq!(def.mode, TriggerMode::ManifestDread);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    // CR 708 + CR 701.40b: "Whenever you turn a permanent face up" — actor-side
+    // TurnFaceUp trigger. `valid_card` records the subject, `valid_target`
+    // gates on the turning player being the trigger controller.
+    #[test]
+    fn trigger_turn_permanent_face_up_actor_side() {
+        let def = parse_trigger_line(
+            "Whenever you turn a permanent face up, put a +1/+1 counter on it.",
+            "Growing Dread",
+        );
+        assert_eq!(def.mode, TriggerMode::TurnFaceUp);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)))
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    // CR 708 + CR 701.40b: creature-subject variant of the actor-side trigger.
+    #[test]
+    fn trigger_turn_creature_face_up_actor_side() {
+        let def = parse_trigger_line(
+            "Whenever you turn a creature face up, draw a card.",
+            "Hypothetical Morph Payoff",
+        );
+        assert_eq!(def.mode, TriggerMode::TurnFaceUp);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature)))
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
     }
 
     #[test]
