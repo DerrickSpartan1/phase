@@ -1,4 +1,5 @@
 use crate::game::layers::compute_current_copiable_values;
+use crate::game::quantity::resolve_quantity;
 use crate::game::zones;
 use crate::types::ability::{
     Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
@@ -10,20 +11,25 @@ use crate::types::zones::Zone;
 
 /// CR 707.2 / CR 707.5: Create a token that's a copy of a permanent.
 /// Copies copiable characteristics from the target to a newly created token.
+///
+/// CR 707.10: When `count` resolves to N > 1, N independent copy-tokens are
+/// created (e.g., Rite of Replication kicked = 5, Adrix and Nev doubling).
 pub fn resolve(
     state: &mut GameState,
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
     // Extract fields from effect
-    let (target_filter, enters_attacking, tapped) = match &ability.effect {
+    let (target_filter, enters_attacking, tapped, count_expr) = match &ability.effect {
         Effect::CopyTokenOf {
             target,
             enters_attacking,
             tapped,
-        } => (target, *enters_attacking, *tapped),
+            count,
+        } => (target, *enters_attacking, *tapped, count.clone()),
         _ => return Err(EffectError::MissingParam("CopyTokenOf".to_string())),
     };
+    let count = resolve_quantity(state, &count_expr, ability.controller, ability.source_id).max(0);
 
     // Step 1: Resolve the copy source.
     // CR 608.2c + 603.10a: LTB self-trigger patterns such as Vaultborn Tyrant
@@ -58,73 +64,79 @@ pub fn resolve(
         .ok_or(EffectError::ObjectNotFound(copy_source_id))?;
     let name = values.name.clone();
 
-    // Step 3: Create a new token object on the battlefield.
-    let token_id = zones::create_object(
-        state,
-        CardId(0),
-        ability.controller,
-        name.clone(),
-        Zone::Battlefield,
-    );
-
-    // Step 4: Apply snapshotted characteristics to the token (CR 707.2).
-    let token = state.objects.get_mut(&token_id).unwrap();
-    token.is_token = true;
-    token.name = values.name.clone();
-    token.base_name = values.name.clone();
-    token.mana_cost = values.mana_cost.clone();
-    token.base_mana_cost = values.mana_cost.clone();
-    token.base_color = values.color.clone();
-    token.color = values.color.clone();
-    token.base_card_types = values.card_types.clone();
-    token.card_types = values.card_types.clone();
-    token.base_power = values.power;
-    token.power = values.power;
-    token.base_toughness = values.toughness;
-    token.toughness = values.toughness;
-    token.base_loyalty = values.loyalty;
-    token.loyalty = values.loyalty;
-    token.base_keywords = values.keywords.clone();
-    token.keywords = values.keywords.clone();
-    token.base_abilities = values.abilities.clone();
-    token.abilities = values.abilities.clone();
-    token.base_trigger_definitions = values.trigger_definitions.clone();
-    token.trigger_definitions = values.trigger_definitions.clone().into();
-    token.base_replacement_definitions = values.replacement_definitions.clone();
-    token.replacement_definitions = values.replacement_definitions.clone().into();
-    token.base_static_definitions = values.static_definitions.clone();
-    token.static_definitions = values.static_definitions.clone().into();
-    token.base_characteristics_initialized = true;
-    token.entered_battlefield_turn = Some(state.turn_number);
-
-    // Step 5: If tapped, set tapped state.
-    if tapped {
-        token.tapped = true;
-    }
-
-    // Step 6: If enters_attacking, add to combat attackers.
-    // CR 508.4: Uses shared helper for defending player resolution.
-    if enters_attacking {
-        crate::game::combat::enter_attacking(
+    // CR 707.10: Create `count` independent copy-tokens. Each is snapshotted
+    // from the same source values so that subsequent SBAs (e.g., legendary
+    // rule) see identical copies.
+    for _ in 0..count {
+        // Step 3: Create a new token object on the battlefield.
+        let token_id = zones::create_object(
             state,
-            token_id,
-            ability.source_id,
+            CardId(0),
             ability.controller,
+            name.clone(),
+            Zone::Battlefield,
         );
+
+        // Step 4: Apply snapshotted characteristics to the token (CR 707.2).
+        let token = state.objects.get_mut(&token_id).unwrap();
+        token.is_token = true;
+        token.name = values.name.clone();
+        token.base_name = values.name.clone();
+        token.mana_cost = values.mana_cost.clone();
+        token.base_mana_cost = values.mana_cost.clone();
+        token.base_color = values.color.clone();
+        token.color = values.color.clone();
+        token.base_card_types = values.card_types.clone();
+        token.card_types = values.card_types.clone();
+        token.base_power = values.power;
+        token.power = values.power;
+        token.base_toughness = values.toughness;
+        token.toughness = values.toughness;
+        token.base_loyalty = values.loyalty;
+        token.loyalty = values.loyalty;
+        token.base_keywords = values.keywords.clone();
+        token.keywords = values.keywords.clone();
+        token.base_abilities = values.abilities.clone();
+        token.abilities = values.abilities.clone();
+        token.base_trigger_definitions = values.trigger_definitions.clone();
+        token.trigger_definitions = values.trigger_definitions.clone().into();
+        token.base_replacement_definitions = values.replacement_definitions.clone();
+        token.replacement_definitions = values.replacement_definitions.clone().into();
+        token.base_static_definitions = values.static_definitions.clone();
+        token.static_definitions = values.static_definitions.clone().into();
+        token.base_characteristics_initialized = true;
+        token.entered_battlefield_turn = Some(state.turn_number);
+
+        // Step 5: If tapped, set tapped state.
+        if tapped {
+            token.tapped = true;
+        }
+
+        // Step 6: If enters_attacking, add to combat attackers.
+        // CR 508.4: Uses shared helper for defending player resolution.
+        if enters_attacking {
+            crate::game::combat::enter_attacking(
+                state,
+                token_id,
+                ability.source_id,
+                ability.controller,
+            );
+        }
+
+        // Step 6b: Inject predefined abilities, record entry, and mark layers dirty.
+        // CR 111.10a-v: Predefined token abilities for known subtypes (Treasure, Food, etc.).
+        super::token::inject_predefined_token_abilities(state, token_id);
+        state.layers_dirty = true;
+        crate::game::restrictions::record_battlefield_entry(state, token_id);
+        crate::game::restrictions::record_token_created(state, token_id);
+
+        // Step 7: Emit events.
+        events.push(GameEvent::TokenCreated {
+            object_id: token_id,
+            name: name.clone(),
+        });
     }
 
-    // Step 6b: Inject predefined abilities, record entry, and mark layers dirty.
-    // CR 111.10a-v: Predefined token abilities for known subtypes (Treasure, Food, etc.).
-    super::token::inject_predefined_token_abilities(state, token_id);
-    state.layers_dirty = true;
-    crate::game::restrictions::record_battlefield_entry(state, token_id);
-    crate::game::restrictions::record_token_created(state, token_id);
-
-    // Step 7: Emit events.
-    events.push(GameEvent::TokenCreated {
-        object_id: token_id,
-        name,
-    });
     events.push(GameEvent::EffectResolved {
         kind: EffectKind::from(&ability.effect),
         source_id: ability.source_id,
@@ -180,6 +192,7 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 enters_attacking: false,
                 tapped: false,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
             },
             vec![],
             source_id,
@@ -246,6 +259,7 @@ mod tests {
                 target: TargetFilter::Any,
                 enters_attacking: false,
                 tapped: false,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
             },
             vec![TargetRef::Object(target_id)],
             source_id,
@@ -295,6 +309,7 @@ mod tests {
                 target: TargetFilter::ParentTarget,
                 enters_attacking: false,
                 tapped: false,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
             },
             vec![],
             source_id,
@@ -341,6 +356,7 @@ mod tests {
                 target: TargetFilter::Any,
                 enters_attacking: true,
                 tapped: true,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
             },
             vec![TargetRef::Object(source_id)],
             source_id,

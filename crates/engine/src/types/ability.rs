@@ -3029,6 +3029,11 @@ pub enum Effect {
         /// Token enters the battlefield tapped.
         #[serde(default)]
         tapped: bool,
+        /// CR 707.10: Number of copy-tokens to create. Defaults to one. Used by
+        /// "create [N] of those tokens" continuations (Rite of Replication kicker,
+        /// Krothuss, Adrix and Nev doubling, etc.) and by populate-style multi-copy.
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
     },
     /// CR 707.2 / CR 613.1a: Become a copy of target permanent.
     /// Sets copiable characteristics at Layer 1.

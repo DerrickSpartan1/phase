@@ -4983,6 +4983,11 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         if let Some(instead_def) = try_parse_generic_instead_clause(normalized_text, kind) {
             if let Some(last_def) = defs.pop() {
                 let mut new_def = instead_def;
+                // CR 702.33d + CR 707.10: Resolve "create N of those tokens" anaphor
+                // against the fallback (else_ability) effect before composition, since
+                // the instead clause was parsed in isolation by the nested chain call
+                // and could not see its antecedent.
+                rewrite_those_tokens_from_antecedent(&mut new_def.effect, &last_def.effect);
                 new_def.else_ability = Some(Box::new(last_def));
                 defs.push(new_def);
                 continue;
@@ -5539,6 +5544,13 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         }
     }
 
+    // CR 702.33d + CR 608.2e: Resolve "create [N] of those tokens [instead]"
+    // anaphoric subs — the sub-ability parses as `Unimplemented` because the
+    // noun "those tokens" refers back to the previous clause's token-creation
+    // effect. Rewrite those subs by cloning the previous effect with an
+    // updated count (Rite of Replication / Saproling Migration / Krothuss).
+    resolve_those_tokens_anaphors(&mut defs);
+
     // CR 706 + CR 705: Consolidate die result table lines into their parent RollDie,
     // and coin flip conditional branches into their parent FlipCoin.
     consolidate_die_and_coin_defs(&mut defs, kind);
@@ -5611,6 +5623,107 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
     }
 
     result
+}
+
+/// CR 702.33d + CR 608.2e: Resolve "create [N] of those tokens [instead]"
+/// anaphoric clauses. The clause refers back to the previous def's token
+/// creation effect (either `Token` or `CopyTokenOf`) and reproduces it with
+/// a new count. We walk `defs` looking for an `Unimplemented` clause whose
+/// description matches the anaphor, and rewrite its effect as a clone of the
+/// previous def's effect with the parsed count.
+fn resolve_those_tokens_anaphors(defs: &mut [AbilityDefinition]) {
+    for i in 1..defs.len() {
+        let (prev_rest, cur_rest) = defs.split_at_mut(i);
+        let prev = &prev_rest[i - 1];
+        let cur = &mut cur_rest[0];
+        rewrite_those_tokens_from_antecedent(&mut cur.effect, &prev.effect);
+    }
+}
+
+/// CR 702.33d + CR 707.10: If `cur` is an `Unimplemented` "create N of those
+/// tokens" anaphor, rewrite it as a clone of the `antecedent` token-creation
+/// effect with count set to N. No-op when the shapes don't match.
+fn rewrite_those_tokens_from_antecedent(cur: &mut Effect, antecedent: &Effect) {
+    let Some(count) = match_create_of_those_tokens(cur) else {
+        return;
+    };
+    let new_effect = match antecedent {
+        Effect::CopyTokenOf {
+            target,
+            enters_attacking,
+            tapped,
+            ..
+        } => Some(Effect::CopyTokenOf {
+            target: target.clone(),
+            enters_attacking: *enters_attacking,
+            tapped: *tapped,
+            count: QuantityExpr::Fixed {
+                value: count as i32,
+            },
+        }),
+        Effect::Token {
+            name,
+            power,
+            toughness,
+            types,
+            colors,
+            keywords,
+            tapped,
+            owner,
+            attach_to,
+            enters_attacking,
+            supertypes,
+            static_abilities,
+            enter_with_counters,
+            ..
+        } => Some(Effect::Token {
+            name: name.clone(),
+            power: power.clone(),
+            toughness: toughness.clone(),
+            types: types.clone(),
+            colors: colors.clone(),
+            keywords: keywords.clone(),
+            tapped: *tapped,
+            count: QuantityExpr::Fixed {
+                value: count as i32,
+            },
+            owner: owner.clone(),
+            attach_to: attach_to.clone(),
+            enters_attacking: *enters_attacking,
+            supertypes: supertypes.clone(),
+            static_abilities: static_abilities.clone(),
+            enter_with_counters: enter_with_counters.clone(),
+        }),
+        _ => None,
+    };
+    if let Some(effect) = new_effect {
+        *cur = effect;
+    }
+}
+
+/// Match an `Unimplemented` effect whose description is
+/// "create <N> of those tokens" (optionally with a trailing modifier like
+/// "that are tapped and attacking" or "instead"). Returns the parsed count.
+fn match_create_of_those_tokens(effect: &Effect) -> Option<u32> {
+    let Effect::Unimplemented { name, description } = effect else {
+        return None;
+    };
+    if name != "create" {
+        return None;
+    }
+    let text = description.as_deref()?;
+    let lower = text.to_lowercase();
+    let rest = lower.strip_prefix("create ")?;
+    let (count, after) = crate::parser::oracle_util::parse_number(rest)?;
+    let after = after.trim_start();
+    // Accept "of those tokens" with optional trailing modifier.
+    let tail = after.strip_prefix("of those tokens")?;
+    // Accept end, or a comma/whitespace-prefixed modifier.
+    if tail.is_empty() || tail.starts_with(' ') || tail.starts_with(',') || tail.starts_with('.') {
+        Some(count)
+    } else {
+        None
+    }
 }
 
 /// CR 705: Post-process parsed ability defs to consolidate coin flip conditional
@@ -10378,6 +10491,45 @@ mod tests {
         assert!(
             matches!(&*sub.effect, Effect::Destroy { .. }),
             "Kicked effect should be Destroy"
+        );
+    }
+
+    #[test]
+    fn rite_of_replication_kicker_creates_five_copies() {
+        // CR 702.33d + CR 707.10: Rite of Replication's kicked mode creates
+        // five copies instead of one. The "create five of those tokens" sub
+        // is an anaphor to the parent CopyTokenOf clause.
+        let ability = parse_effect_chain(
+            "Create a token that's a copy of target creature. If this spell was kicked, create five of those tokens instead.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(
+                &*ability.effect,
+                Effect::CopyTokenOf {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
+                }
+            ),
+            "Base effect should be CopyTokenOf with count 1, got {:?}",
+            ability.effect
+        );
+        let sub = ability.sub_ability.as_ref().expect("expected sub_ability");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::AdditionalCostPaidInstead),
+            "Kicker sub should use AdditionalCostPaidInstead ('create five ... instead')"
+        );
+        assert!(
+            matches!(
+                &*sub.effect,
+                Effect::CopyTokenOf {
+                    count: QuantityExpr::Fixed { value: 5 },
+                    ..
+                }
+            ),
+            "Kicked sub should be CopyTokenOf with count 5, got {:?}",
+            sub.effect
         );
     }
 

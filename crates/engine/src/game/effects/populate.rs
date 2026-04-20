@@ -72,6 +72,7 @@ pub fn create_token_copy(
             target: TargetFilter::Any,
             enters_attacking: false,
             tapped: false,
+            count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
         },
         vec![TargetRef::Object(token_to_copy)],
         ability.source_id,

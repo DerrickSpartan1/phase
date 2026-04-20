@@ -901,6 +901,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             target,
             enters_attacking: false,
             tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
         },
         SearchCreationImperativeAst::Token { token } => Effect::Token {
             name: token.name,

@@ -265,7 +265,17 @@ fn strip_instead_suffix(text: &str) -> (String, bool) {
         // Guard: "instead" must be at end of text (not "instead of" compound)
         let remainder = after.lower.trim().trim_end_matches('.');
         if remainder.is_empty() {
-            return (before.original.trim().to_string(), true);
+            // CR 608.2c guard: Only treat as a cross-line "instead" replacement when
+            // the "instead" clause covers the whole effect line (i.e., the remaining
+            // text is a single conditional sentence). When there is a prior sentence
+            // in the same line (Rite of Replication, Saproling Migration: "Create X.
+            // If kicked, create Y instead."), the "instead" is an intra-chain override
+            // and must be handled by `strip_additional_cost_conditional` inside the
+            // chain parser to produce `AdditionalCostPaidInstead` on the sub-ability.
+            let before_trim = before.original.trim().trim_end_matches('.');
+            if !before_trim.contains('.') {
+                return (before.original.trim().to_string(), true);
+            }
         }
     }
 

@@ -56,6 +56,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str) -> Option<Effect> {
             target,
             enters_attacking: false,
             tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
         });
     }
 
