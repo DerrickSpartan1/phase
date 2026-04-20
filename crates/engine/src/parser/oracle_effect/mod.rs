@@ -3744,6 +3744,34 @@ fn lower_subject_predicate_ast(
                     count,
                 });
             }
+            // CR 701.40a + CR 608.2c: "<player> manifests the top [N] card(s) of
+            // their library" — Reality Shift's "its controller manifests the top
+            // card of their library" routes through this arm so the acting
+            // player is bound to `subject.affected` (e.g., ParentTargetController)
+            // rather than the default Controller.
+            if alt((
+                tag::<_, _, VerboseError<&str>>("manifest "),
+                tag("manifests "),
+            ))
+            .parse(pred_lower.as_str())
+            .is_ok()
+                && scan_contains_phrase(&pred_lower, "top")
+                && scan_contains_phrase(&pred_lower, "library")
+            {
+                let count = if let Some(after_top) = strip_after(&pred_lower, "top ") {
+                    let n = nom_primitives::parse_number
+                        .parse(after_top)
+                        .map(|(_, n)| n as i32)
+                        .unwrap_or(1);
+                    QuantityExpr::Fixed { value: n }
+                } else {
+                    QuantityExpr::Fixed { value: 1 }
+                };
+                return parsed_clause(Effect::Manifest {
+                    target: subject.affected,
+                    count,
+                });
+            }
             let mut clause = lower_imperative_clause(&text, ctx);
             if let Some(player_target) = subject
                 .target
@@ -9022,10 +9050,11 @@ mod tests {
             matches!(
                 e,
                 Effect::Manifest {
+                    target: TargetFilter::Controller,
                     count: QuantityExpr::Fixed { value: 1 }
                 }
             ),
-            "expected Manifest {{ count: 1 }}, got: {e:?}"
+            "expected Manifest {{ Controller, count: 1 }}, got: {e:?}"
         );
     }
 
@@ -9036,10 +9065,43 @@ mod tests {
             matches!(
                 e,
                 Effect::Manifest {
+                    target: TargetFilter::Controller,
                     count: QuantityExpr::Fixed { value: 2 }
                 }
             ),
-            "expected Manifest {{ count: 2 }}, got: {e:?}"
+            "expected Manifest {{ Controller, count: 2 }}, got: {e:?}"
+        );
+    }
+
+    #[test]
+    fn effect_its_controller_manifests_top_card() {
+        // CR 701.40a + CR 608.2c: Reality Shift — subject-shifted manifest binds
+        // the acting player to ParentTargetController (the exiled creature's
+        // controller) rather than the caster.
+        let def = parse_effect_chain(
+            "Exile target creature. Its controller manifests the top card of their library.",
+            AbilityKind::Spell,
+        );
+        // First clause exiles a creature target.
+        assert!(
+            matches!(*def.effect, Effect::ChangeZone { .. }),
+            "expected ChangeZone primary effect, got {:?}",
+            def.effect
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected chained manifest sub-ability");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::Manifest {
+                    target: TargetFilter::ParentTargetController,
+                    count: QuantityExpr::Fixed { value: 1 }
+                }
+            ),
+            "expected Manifest {{ ParentTargetController, count: 1 }}, got: {:?}",
+            sub.effect
         );
     }
 

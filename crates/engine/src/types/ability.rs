@@ -3601,10 +3601,15 @@ pub enum Effect {
         #[serde(default)]
         forced_to: Option<TargetFilter>,
     },
-    /// CR 701.40a: Manifest — put the top card of the controller's library onto
-    /// the battlefield face down as a 2/2 creature with no text, no name, no
-    /// subtypes, and no mana cost. Count determines how many cards to manifest.
+    /// CR 701.40a: Manifest — put the top card of a player's library onto the
+    /// battlefield face down as a 2/2 creature with no text, no name, no
+    /// subtypes, and no mana cost. `target` selects whose library is manifested
+    /// from: `Controller` for "you manifest..." (Whisperwood Elemental,
+    /// Qarsi High Priest) and `ParentTargetController` for "its controller
+    /// manifests..." (Reality Shift). `count` determines how many cards to
+    /// manifest.
     Manifest {
+        target: TargetFilter,
         count: QuantityExpr,
     },
     /// CR 701.62a: Manifest dread — look at top 2 cards of library, manifest one,

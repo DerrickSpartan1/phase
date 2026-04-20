@@ -1632,6 +1632,10 @@ pub(crate) const PREDICATE_VERBS: &[&str] = &[
     "have",
     "look",
     "lose",
+    // CR 701.40a: Manifest — "its controller manifests the top card of their
+    // library" (Reality Shift). Subject-shifted manifest clauses route through
+    // the PredicateAst::ImperativeFallback arm in `lower_subject_predicate_ast`.
+    "manifest",
     "mill",
     "pay",
     "phase",

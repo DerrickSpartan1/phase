@@ -3343,7 +3343,14 @@ fn lower_imperative_family_effect(ast: ImperativeFamilyAst) -> Effect {
         }
         ImperativeFamilyAst::Investigate => Effect::Investigate,
         ImperativeFamilyAst::Learn => Effect::Learn,
-        ImperativeFamilyAst::Manifest { count } => Effect::Manifest { count },
+        // CR 701.40a: Default subject is the controller ("you manifest..."). Subject
+        // lowering for "its controller manifests..." routes through the dedicated
+        // subject-predicate arm in `lower_subject_predicate_ast` below, which
+        // constructs `Effect::Manifest { target: subject.affected, ... }` directly.
+        ImperativeFamilyAst::Manifest { count } => Effect::Manifest {
+            target: TargetFilter::Controller,
+            count,
+        },
         ImperativeFamilyAst::ManifestDread => Effect::ManifestDread,
         ImperativeFamilyAst::BecomeMonarch => Effect::BecomeMonarch,
         ImperativeFamilyAst::VentureIntoDungeon => Effect::VentureIntoDungeon,
