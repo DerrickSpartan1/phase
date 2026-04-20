@@ -154,7 +154,12 @@ echo "Promoted $OUTPUT and $NAMES_OUTPUT"
 # against `data/`, etc.) can find it without the workflow having to know the
 # generator's output layout. Single source of truth: this script.
 mkdir -p "$DATA_DIR"
-cp "$OUTPUT" "$DATA_DIR/card-data.json"
+# Skip the copy when $DATA_DIR/card-data.json already resolves to $OUTPUT
+# (symlink or hardlink setup) — macOS `cp` errors with "are identical" and
+# `set -e` would kill the script before the meta + set-list steps run.
+if ! [ "$OUTPUT" -ef "$DATA_DIR/card-data.json" ]; then
+  cp "$OUTPUT" "$DATA_DIR/card-data.json"
+fi
 
 # Content-addressed copy: emit a sibling `card-data-<sha256-prefix>.json` that
 # deploys can upload to a long-cache, immutable R2 URL. Each WASM bundle is
