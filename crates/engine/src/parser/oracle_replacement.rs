@@ -1118,21 +1118,28 @@ fn try_parse_quantity_prefix(text: &str) -> Option<(u32, &str)> {
     Some((n, type_text))
 }
 
-/// Inject a `ControllerRef` into a `TargetFilter`, handling both `Typed` and `Or` variants.
-/// CR 109.5 — ownership/control reference is attached to each leaf typed filter.
+/// Inject a `ControllerRef` into every `Typed` leaf of a `TargetFilter`.
+/// CR 109.5 — ownership/control reference is attached to each leaf typed filter,
+/// recursing through compound `Or` / `And` / `Not` wrappers so any leaf under a
+/// compound filter is stamped. Non-typed leaves (context refs, specific objects,
+/// etc.) are preserved untouched.
 fn inject_controller(filter: TargetFilter, controller: ControllerRef) -> TargetFilter {
     match filter {
         TargetFilter::Typed(tf) => TargetFilter::Typed(tf.controller(controller)),
         TargetFilter::Or { filters } => TargetFilter::Or {
             filters: filters
                 .into_iter()
-                .map(|f| match f {
-                    TargetFilter::Typed(tf) => {
-                        TargetFilter::Typed(tf.controller(controller.clone()))
-                    }
-                    other => other,
-                })
+                .map(|f| inject_controller(f, controller.clone()))
                 .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|f| inject_controller(f, controller.clone()))
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(inject_controller(*filter, controller)),
         },
         other => other,
     }

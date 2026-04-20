@@ -1,3 +1,4 @@
+mod abigale_integration;
 mod adapter_contract_fixtures;
 mod cr_annotations;
 #[cfg(feature = "proptest")]

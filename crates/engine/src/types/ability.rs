@@ -1670,7 +1670,7 @@ pub enum QuantityRef {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         controller: Option<ControllerRef>,
     },
-    /// CR 107.3a + CR 601.2b + CR 603.7c: The announced value of `{X}` for the
+    /// CR 107.3a + CR 601.2b + CR 603.2: The announced value of `{X}` for the
     /// triggering spell. Reads `GameObject::cost_x_paid` on the spell object
     /// referenced by `current_trigger_event` (populated during
     /// `determine_total_cost` and persisted through stack → battlefield).
@@ -1817,7 +1817,7 @@ pub enum PlayerFilter {
     /// "each player who [verb]ed a card this way" — scoped to players who owned objects
     /// that changed zones in the preceding effect (tracked via `last_zone_changed_ids`).
     ZoneChangedThisWay,
-    /// CR 603.7c: The player identified by `state.current_trigger_event`. Used to route
+    /// CR 113.3c + CR 603.2: The player identified by `state.current_trigger_event`. Used to route
     /// "they [verb]" effects on triggers whose subject is a player (e.g. Firemane
     /// Commando's "another player ... they draw a card").
     TriggeringPlayer,

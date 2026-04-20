@@ -248,8 +248,8 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
         (None, None) => None,
     };
 
-    // CR 603.7c: When the trigger's subject is a non-self player (e.g.
-    // "whenever another player attacks ..." → valid_target carries
+    // CR 113.3c + CR 603.2: When the trigger's subject is a non-self player
+    // (e.g. "whenever another player attacks ..." → valid_target carries
     // `ControllerRef::Opponent`), a player-scoped effect body like "they draw
     // a card" / "they lose N life" must route to the triggering player, not
     // the trigger controller. Surface this via `player_scope =
@@ -1551,10 +1551,10 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
 /// Warnings from `parse_trigger_subject` are discarded — this function is a best-effort
 /// subject extraction for pronoun resolution, not a diagnostic site. Warnings for
 /// degraded subjects are emitted by the main trigger condition path instead.
-/// CR 603.7c: If the trigger's subject is scoped to an opponent (the trigger
-/// fires off another player's action) AND its execute ability has a
-/// player-scoped effect with no explicit `player_scope`, rewire the execute to
-/// `PlayerFilter::TriggeringPlayer` so the effect resolves for the acting
+/// CR 113.3c + CR 603.2: If the trigger's subject is scoped to an opponent
+/// (the trigger fires off another player's action) AND its execute ability has
+/// a player-scoped effect with no explicit `player_scope`, rewire the execute
+/// to `PlayerFilter::TriggeringPlayer` so the effect resolves for the acting
 /// player rather than the trigger controller. Covers Firemane Commando's
 /// "they draw a card" branch and analogous cards whose effect is expressed
 /// from the acting player's perspective.
@@ -2616,7 +2616,7 @@ fn try_parse_n_or_more_attacks(lower: &str) -> Option<(TriggerMode, TriggerDefin
                 minimum: min_count - 1,
             });
         }
-        // CR 603.10c: "One or more creatures ... attack" fires once per batch of
+        // CR 603.2c: "One or more creatures ... attack" fires once per batch of
         // simultaneous attackers (not once per attacker). Killian's trigger relies
         // on this to yield exactly one draw when multiple enchanted creatures
         // attack together.
@@ -2714,7 +2714,7 @@ fn try_parse_attack_with_n_creatures(lower: &str) -> Option<(TriggerMode, Trigge
 }
 
 /// Parse "whenever one or more [subject] die" patterns.
-/// CR 603.10c: "One or more" triggers fire once per batch of simultaneous events.
+/// CR 603.2c: "One or more" triggers fire once per batch of simultaneous events.
 fn try_parse_one_or_more_die(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever one or more ", "when one or more "] {
         let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
@@ -2745,7 +2745,7 @@ fn try_parse_one_or_more_die(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 }
 
 /// Parse "whenever you create one or more [type-phrase] tokens" patterns.
-/// CR 111.1 + CR 603.10c: Token creation is its own event (tokens come into
+/// CR 111.1 + CR 603.2c: Token creation is its own event (tokens come into
 /// existence directly on the battlefield); "one or more" triggers fire once
 /// per batch of simultaneous token-creation events.
 ///
@@ -2801,7 +2801,7 @@ fn try_parse_one_or_more_tokens_created(lower: &str) -> Option<(TriggerMode, Tri
 }
 
 /// Parse "whenever one or more [subject] cards leave your graveyard" patterns.
-/// CR 603.10c: "One or more" triggers fire once per batch of simultaneous events.
+/// CR 603.2c: "One or more" triggers fire once per batch of simultaneous events.
 fn try_parse_one_or_more_leave_graveyard(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     for prefix in ["whenever one or more ", "when one or more "] {
         let Ok((rest, ())) = value((), tag::<_, _, VerboseError<&str>>(prefix)).parse(lower) else {
@@ -4241,7 +4241,7 @@ fn try_parse_put_into_graveyard(
 }
 
 /// Parse "whenever one or more [type] cards are put into [your] graveyard from [your library]".
-/// CR 603.10c: "One or more" triggers fire once per batch of simultaneous events.
+/// CR 603.2c: "One or more" triggers fire once per batch of simultaneous events.
 fn try_parse_one_or_more_put_into_graveyard(
     lower: &str,
 ) -> Option<(TriggerMode, TriggerDefinition)> {
@@ -4351,7 +4351,7 @@ fn try_parse_discard_trigger(
     .parse(lower)
     .ok()?;
 
-    // CR 603.10c: Batched discard triggers — "one or more" fire once per batch.
+    // CR 603.2c: Batched discard triggers — "one or more" fire once per batch.
     if tag::<_, _, VerboseError<&str>>("you discard one or more")
         .parse(event)
         .is_ok()
@@ -7145,7 +7145,7 @@ mod tests {
 
     #[test]
     fn trigger_one_or_more_ninja_or_rogue_combat_damage() {
-        // CR 205.3m + CR 603.10c: Compound subtype in "one or more" batched damage trigger
+        // CR 205.3m + CR 603.2c: Compound subtype in "one or more" batched damage trigger
         let result = try_parse_one_or_more_combat_damage_to_player(
             "whenever one or more ninja or rogue creatures you control deal combat damage to a player",
         );
@@ -7515,7 +7515,7 @@ mod tests {
 
     #[test]
     fn trigger_one_or_more_creature_cards_put_into_graveyard_from_library() {
-        // CR 603.10c: "One or more" triggers fire once per batch
+        // CR 603.2c: "One or more" triggers fire once per batch
         let def = parse_trigger_line(
             "Whenever one or more creature cards are put into your graveyard from your library, draw a card.",
             "Some Card",
@@ -9322,7 +9322,7 @@ mod tests {
                 "expected And(AttackersDeclaredMin, NoneOfAttackersTargetedYou), got {other:?}"
             ),
         }
-        // CR 603.7c: "they draw a card" routes to the triggering player.
+        // CR 113.3c + CR 603.2: "they draw a card" routes to the triggering player.
         let execute = def.execute.as_ref().expect("execute");
         assert!(matches!(
             &*execute.effect,

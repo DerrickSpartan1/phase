@@ -340,7 +340,11 @@ fn populate_active_zones_from_condition(def: &mut StaticDefinition) {
     }
     // Deduplicate while preserving order.
     zones.dedup();
-    if !zones.is_empty() {
+    // Don't clobber an explicitly-set active_zones: upstream callers may pin
+    // non-battlefield zones directly on the StaticDefinition (e.g. hand-zone
+    // statics) and the condition-derived inference should only fill in zones
+    // when nothing has been specified.
+    if !zones.is_empty() && def.active_zones.is_empty() {
         def.active_zones = zones;
     }
 }
