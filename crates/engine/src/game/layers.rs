@@ -301,6 +301,15 @@ pub(crate) fn evaluate_condition(
             .objects
             .get(&source_id)
             .is_some_and(|obj| obj.zone == *zone),
+        // CR 708.2 + CR 707.2: True when the creature this Aura/Equipment is attached to
+        // is face-down. Traverses `attached_to` to the target object and reads its
+        // `face_down` status (false if source is not attached to any object).
+        StaticCondition::EnchantedIsFaceDown => state
+            .objects
+            .get(&source_id)
+            .and_then(|obj| obj.attached_to)
+            .and_then(|target_id| state.objects.get(&target_id))
+            .is_some_and(|target| target.face_down),
         // CR 608.2c: Check if the source object matches a type filter (leveler gates).
         StaticCondition::SourceMatchesFilter { filter } => matches_target_filter(
             state,
@@ -2909,6 +2918,48 @@ mod tests {
             &StaticCondition::SourceIsTapped,
             PlayerId(0),
             id
+        ));
+    }
+
+    // CR 708.2 + CR 707.2: EnchantedIsFaceDown resolver tests.
+    #[test]
+    fn evaluate_enchanted_is_face_down_true_when_attached_face_down() {
+        let mut state = setup();
+        let aura = make_creature(&mut state, "Aura", 0, 0, PlayerId(0));
+        let creature = make_creature(&mut state, "Manifested", 2, 2, PlayerId(0));
+        state.objects.get_mut(&creature).unwrap().face_down = true;
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(creature);
+        assert!(evaluate_condition_for_test(
+            &state,
+            &StaticCondition::EnchantedIsFaceDown,
+            PlayerId(0),
+            aura,
+        ));
+    }
+
+    #[test]
+    fn evaluate_enchanted_is_face_down_false_when_attached_face_up() {
+        let mut state = setup();
+        let aura = make_creature(&mut state, "Aura", 0, 0, PlayerId(0));
+        let creature = make_creature(&mut state, "Face Up", 2, 2, PlayerId(0));
+        state.objects.get_mut(&aura).unwrap().attached_to = Some(creature);
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::EnchantedIsFaceDown,
+            PlayerId(0),
+            aura,
+        ));
+    }
+
+    #[test]
+    fn evaluate_enchanted_is_face_down_false_when_unattached() {
+        let mut state = setup();
+        let aura = make_creature(&mut state, "Aura", 0, 0, PlayerId(0));
+        assert!(!evaluate_condition_for_test(
+            &state,
+            &StaticCondition::EnchantedIsFaceDown,
+            PlayerId(0),
+            aura,
         ));
     }
 

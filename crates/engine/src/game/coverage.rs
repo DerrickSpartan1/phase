@@ -571,6 +571,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::DistinctCardTypesExiledBySource => {
             "card types among cards exiled with source".into()
         }
+        QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
         QuantityRef::ZoneCardCount {
             zone,
             card_types,
@@ -3915,6 +3916,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::DistinctCardTypesExiledBySource => {
             ("DistinctCardTypesExiledBySource", Unhandled)
         }
+        QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount => ("BasicLandTypeCount", Handled),
         QuantityRef::PreviousEffectAmount => ("PreviousEffectAmount", Handled),
@@ -4016,6 +4018,7 @@ fn static_condition_feature(cond: &StaticCondition) -> (&'static str, FeatureSup
         StaticCondition::SourceAttachedToCreature => ("SourceAttachedToCreature", Unhandled),
         StaticCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
         StaticCondition::SourceInZone { .. } => ("SourceInZone", Unhandled),
+        StaticCondition::EnchantedIsFaceDown => ("EnchantedIsFaceDown", Handled),
     }
 }
 

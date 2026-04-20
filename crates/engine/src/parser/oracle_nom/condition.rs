@@ -241,12 +241,26 @@ fn parse_source_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         // Must precede `parse_source_is_type` so "has … counters on it" wins over
         // any other interpretation.
         parse_source_has_counters,
-        // CR 400.7: Entered this turn
+        // CR 400.7: Entered this turn.
+        // Accept both the long "entered the battlefield this turn" and the abbreviated
+        // "entered this turn" forms — Oracle templates vary between them for the same
+        // semantic. Longer tag first so the shorter one doesn't shadow it.
         value(
             StaticCondition::SourceEnteredThisTurn,
-            tag("~ entered the battlefield this turn"),
+            alt((
+                tag("~ entered the battlefield this turn"),
+                tag("~ entered this turn"),
+            )),
         ),
         parse_this_type_entered_this_turn,
+        // CR 708.2: "enchanted creature is face down" — the attached-to creature is face-down.
+        value(
+            StaticCondition::EnchantedIsFaceDown,
+            alt((
+                tag("enchanted creature is face down"),
+                tag("enchanted permanent is face down"),
+            )),
+        ),
         value(StaticCondition::IsRingBearer, tag("~ is your ring-bearer")),
         parse_source_is_type,
         parse_source_power_toughness_condition,
@@ -1763,6 +1777,78 @@ mod tests {
             parse_inner_condition("this aura entered the battlefield this turn").unwrap();
         assert_eq!(rest, "");
         assert_eq!(c, StaticCondition::SourceEnteredThisTurn);
+    }
+
+    // CR 400.7: Shardmage's Rescue — `~ entered this turn` (no "the battlefield").
+    // After `this aura` → `~` normalization, the condition parser sees the canonical
+    // `~` form of the abbreviated phrase.
+    #[test]
+    fn test_tilde_entered_this_turn_short_form() {
+        let (rest, c) = parse_inner_condition("~ entered this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SourceEnteredThisTurn);
+    }
+
+    // CR 400.7: Long form still wins via first-match-longest `alt` ordering.
+    #[test]
+    fn test_tilde_entered_battlefield_this_turn() {
+        let (rest, c) = parse_inner_condition("~ entered the battlefield this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SourceEnteredThisTurn);
+    }
+
+    // CR 708.2: Unable to Scream — attached-to creature face-down gate.
+    #[test]
+    fn test_enchanted_creature_is_face_down() {
+        let (rest, c) = parse_inner_condition("enchanted creature is face down").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::EnchantedIsFaceDown);
+    }
+
+    #[test]
+    fn test_enchanted_permanent_is_face_down() {
+        let (rest, c) = parse_inner_condition("enchanted permanent is face down").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::EnchantedIsFaceDown);
+    }
+
+    // CR 406.6 + CR 607.1: Veteran Survivor — threshold over linked-exile pile.
+    #[test]
+    fn test_there_are_three_or_more_cards_exiled_with_source() {
+        let (rest, c) =
+            parse_inner_condition("there are three or more cards exiled with ~").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } => {}
+            other => panic!("expected CardsExiledBySource GE 3, got {other:?}"),
+        }
+    }
+
+    // Variant phrasing: "this creature" form (used before `~` normalization kicks in,
+    // and remains accepted by the quantity parser for robustness).
+    #[test]
+    fn test_there_are_cards_exiled_with_this_creature() {
+        let (rest, c) =
+            parse_inner_condition("there are two or more cards exiled with this creature").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            } => {}
+            other => panic!("expected CardsExiledBySource GE 2, got {other:?}"),
+        }
     }
 
     // -- Combat-state predicate tests (CR 508.1k / CR 509.1g / CR 509.1h) --

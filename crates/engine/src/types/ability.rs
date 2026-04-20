@@ -1617,6 +1617,11 @@ pub enum QuantityRef {
     /// CR 607.2a + CR 406.6: Count distinct card types across cards exiled with the source.
     /// Used for linked-exile patterns like "card types among cards exiled with this creature".
     DistinctCardTypesExiledBySource,
+    /// CR 406.6 + CR 607.1: Count of cards currently in exile that are linked to the source
+    /// via its exile-linked ability. Used by "as long as there are N or more cards exiled
+    /// with ~" conditional statics (Veteran Survivor, etc.) — composes with
+    /// `StaticCondition::QuantityComparison` rather than requiring a dedicated variant.
+    CardsExiledBySource,
     /// CR 604.3: Count cards in a zone matching optional type filters.
     /// Empty card_types means all cards. Multiple entries = OR (any match).
     /// "creature cards in your graveyard" → zone=Graveyard, card_types=[Creature], scope=Controller
@@ -2103,6 +2108,10 @@ pub enum StaticCondition {
     SourceInZone {
         zone: crate::types::zones::Zone,
     },
+    /// CR 708.2 + CR 707.2: True when the creature this Aura/Equipment is attached to is
+    /// face-down. Resolves against the attached-to object's `face_down` status. Used by
+    /// "as long as enchanted creature is face down" gated statics (Unable to Scream, etc.).
+    EnchantedIsFaceDown,
     None,
 }
 

@@ -626,6 +626,7 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         | StaticCondition::OpponentPoisonAtLeast { .. }
         | StaticCondition::UnlessPay { .. }
         | StaticCondition::Unrecognized { .. }
+        | StaticCondition::EnchantedIsFaceDown
         | StaticCondition::None => None,
 
         // CR 309.7: Dungeon completion bridges directly.

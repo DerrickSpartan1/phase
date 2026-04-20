@@ -314,6 +314,9 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_the_number_of,
         parse_distinct_card_types_exiled_with_source,
         parse_distinct_card_types_in_zone,
+        // CR 406.6: "cards exiled with ~" — must precede `parse_cards_in_zone_ref`
+        // so "cards exiled with …" wins over the generic "cards in …" zone phrase.
+        parse_cards_exiled_with_source,
         parse_life_total_ref,
         parse_speed_ref,
         parse_cards_in_zone_ref,
@@ -474,6 +477,26 @@ fn parse_distinct_card_types_exiled_with_source(input: &str) -> OracleResult<'_,
     ))
     .parse(rest)?;
     Ok((rest, QuantityRef::DistinctCardTypesExiledBySource))
+}
+
+/// CR 406.6 + CR 607.1: Parse bare "cards exiled with ~" (or "cards exiled with this X")
+/// → `QuantityRef::CardsExiledBySource`.
+///
+/// Reached after a parent combinator (typically `parse_there_are_conditions` after
+/// "there are N [or more] ") has consumed the leading quantity. Composes with
+/// `StaticCondition::QuantityComparison` to express thresholds over the source's
+/// linked-exile pile (Veteran Survivor: "three or more cards exiled with ~").
+fn parse_cards_exiled_with_source(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("cards exiled with ").parse(input)?;
+    let (rest, _) = alt((
+        tag("~"),
+        preceded(
+            tag("this "),
+            take_while1(|c: char| c.is_ascii_alphabetic() || c == '-'),
+        ),
+    ))
+    .parse(rest)?;
+    Ok((rest, QuantityRef::CardsExiledBySource))
 }
 
 /// Parse "opponents" / "opponents you have" after "the number of".

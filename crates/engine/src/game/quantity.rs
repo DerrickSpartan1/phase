@@ -573,6 +573,20 @@ fn resolve_ref(
             }
             seen.len() as i32
         }
+        // CR 406.6 + CR 607.1: Count cards currently in exile that are linked to the source
+        // via `exile_links`. Mirrors `DistinctCardTypesExiledBySource` but returns the raw
+        // count rather than a type-set size.
+        QuantityRef::CardsExiledBySource => state
+            .exile_links
+            .iter()
+            .filter(|link| link.source_id == source_id)
+            .filter(|link| {
+                state
+                    .objects
+                    .get(&link.exiled_id)
+                    .is_some_and(|obj| obj.zone == Zone::Exile)
+            })
+            .count() as i32,
         // CR 604.3: Count cards in a zone matching optional type filters.
         QuantityRef::ZoneCardCount {
             zone,
@@ -1521,6 +1535,68 @@ mod tests {
 
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::DistinctCardTypesExiledBySource,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 2);
+    }
+
+    // CR 406.6 + CR 607.1: CardsExiledBySource counts distinct exiled objects
+    // linked to the source, ignoring links to other sources and cards that have
+    // left exile.
+    #[test]
+    fn cards_exiled_by_source_counts_linked_cards_in_exile() {
+        let mut state = GameState::new_two_player(42);
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let other_source = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other".to_string(),
+            Zone::Battlefield,
+        );
+
+        // Three cards linked to source: two in Exile, one returned to Graveyard.
+        let mut linked_ids = Vec::new();
+        for i in 0..3 {
+            let id = create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(1),
+                format!("Exiled {i}"),
+                Zone::Exile,
+            );
+            state.exile_links.push(ExileLink {
+                source_id: source,
+                exiled_id: id,
+                kind: ExileLinkKind::TrackedBySource,
+            });
+            linked_ids.push(id);
+        }
+        // Simulate the third card leaving exile (e.g. returned via a linked ability).
+        state.objects.get_mut(&linked_ids[2]).unwrap().zone = Zone::Graveyard;
+
+        // Link to a different source should not count.
+        let other_exiled = create_object(
+            &mut state,
+            CardId(20),
+            PlayerId(1),
+            "Other Linked".to_string(),
+            Zone::Exile,
+        );
+        state.exile_links.push(ExileLink {
+            source_id: other_source,
+            exiled_id: other_exiled,
+            kind: ExileLinkKind::TrackedBySource,
+        });
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::CardsExiledBySource,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 2);
     }
