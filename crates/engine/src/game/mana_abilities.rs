@@ -493,15 +493,14 @@ fn advance_mana_ability_activation(
 
     if pending.color_override.is_none() {
         if let Some(choice) = mana_choice_prompt(&ability_def.effect, state, pending.source_id) {
-            resolve_mana_ability_with_selected_choices(
+            pay_mana_ability_cost_with_choices(
                 state,
                 pending.source_id,
                 pending.player,
-                &ability_def,
+                &ability_def.cost,
                 events,
-                None,
-                &pending.chosen_tappers,
-                &pending.chosen_discards,
+                &mut pending.chosen_tappers.iter().copied(),
+                &mut pending.chosen_discards.iter().copied(),
             )?;
             return Ok(WaitingFor::ChooseManaColor {
                 player: pending.player,
@@ -545,6 +544,7 @@ fn pay_mana_ability_cost(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve_mana_ability_with_selected_choices(
     state: &mut GameState,
     source_id: ObjectId,

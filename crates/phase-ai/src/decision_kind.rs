@@ -122,7 +122,8 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         // ability-offer bucket so activation policies evaluate the candidates.
         | WaitingFor::MiracleReveal { .. }
         | WaitingFor::MiracleCastOffer { .. }
-        | WaitingFor::MadnessCastOffer { .. } => DecisionKind::ActivateAbility,
+        | WaitingFor::MadnessCastOffer { .. }
+        | WaitingFor::DiscardForManaAbility { .. } => DecisionKind::ActivateAbility,
     }
 }
 
