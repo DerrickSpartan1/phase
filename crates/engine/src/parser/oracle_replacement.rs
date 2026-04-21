@@ -2210,25 +2210,23 @@ fn parse_conditional_draw_replacement(text: &str, lower: &str) -> Option<Replace
 
 /// CR 614.1a: Parse token creation replacement effects.
 /// Handles "twice that many tokens" (Primal Vigor, Doubling Season, Parallel Lives)
-/// and "those tokens plus a [Name] token" (Donatello, Chatterfang) as a recognized stub.
+/// and "those tokens plus [spec]" (Chatterfang — "that many 1/1 green Squirrel
+/// creature tokens"; Donatello — "a Mutagen token").
 fn parse_token_replacement(lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     use crate::types::ability::QuantityModification;
 
-    let modification = if nom_primitives::scan_contains(lower, "twice that many") {
-        Some(QuantityModification::Double)
-    } else if nom_primitives::scan_contains(lower, "those tokens plus") {
-        // "those tokens plus a [Name] token" — recognized as CreateToken replacement.
-        // Extra token creation requires ExtraTokenSpec infrastructure (future work).
-        None
-    } else {
-        return None;
-    };
+    let modification_mode = parse_token_replacement_shape(lower)?;
 
     let mut def = ReplacementDefinition::new(ReplacementEvent::CreateToken)
         .description(original_text.to_string());
 
-    if let Some(m) = modification {
-        def = def.quantity_modification(m);
+    match modification_mode {
+        TokenReplacementShape::Double => {
+            def = def.quantity_modification(QuantityModification::Double);
+        }
+        TokenReplacementShape::PlusSpec { spec } => {
+            def = def.additional_token_spec(*spec);
+        }
     }
 
     // Scope: "under your control" → restrict to controller's tokens
@@ -2237,6 +2235,122 @@ fn parse_token_replacement(lower: &str, original_text: &str) -> Option<Replaceme
     }
 
     Some(def)
+}
+
+enum TokenReplacementShape {
+    /// "twice that many tokens … are created instead" (Doubling Season).
+    Double,
+    /// "those tokens plus [spec] are created instead" (Chatterfang, Donatello).
+    PlusSpec {
+        spec: Box<crate::types::proposed_event::TokenSpec>,
+    },
+}
+
+/// CR 614.1a: Nom dispatch on the two token-replacement shapes. Uses
+/// `nom_on_lower` for case-preserving parsing and delegates token-spec
+/// extraction to the existing `parse_token_description` building block.
+fn parse_token_replacement_shape(lower: &str) -> Option<TokenReplacementShape> {
+    // "twice that many" → Doubling Season pattern.
+    if nom_on_lower(lower, lower, |i| {
+        let (i, _) = take_until::<_, _, VerboseError<&str>>("twice that many").parse(i)?;
+        let (i, _) = tag("twice that many").parse(i)?;
+        Ok((i, ()))
+    })
+    .is_some()
+    {
+        return Some(TokenReplacementShape::Double);
+    }
+
+    // "those tokens plus <spec> (is|are) created instead" → Chatterfang / Donatello.
+    // Extract the spec descriptor between "those tokens plus " and the trailing
+    // "are/is created instead" clause using nom combinators.
+    let ((descriptor_start, descriptor_len), _rest) = nom_on_lower(lower, lower, |i| {
+        let (i, pre) = take_until::<_, _, VerboseError<&str>>("those tokens plus ").parse(i)?;
+        let start_offset = pre.len() + "those tokens plus ".len();
+        let (i, _) = tag("those tokens plus ").parse(i)?;
+        let (_, descriptor) = alt((
+            take_until::<_, _, VerboseError<&str>>(" are created instead"),
+            take_until::<_, _, VerboseError<&str>>(" is created instead"),
+        ))
+        .parse(i)?;
+        Ok((i, (start_offset, descriptor.len())))
+    })?;
+
+    let descriptor = lower
+        .get(descriptor_start..descriptor_start + descriptor_len)?
+        .trim();
+    let token = super::oracle_effect::parse_token_description(descriptor)?;
+    let spec = token_description_to_spec(&token)?;
+    Some(TokenReplacementShape::PlusSpec {
+        spec: Box::new(spec),
+    })
+}
+
+/// CR 111.1 + CR 111.4: Convert a parser-extracted `TokenDescription` into a
+/// static `TokenSpec`. Source/controller are placeholder zeros — the applier
+/// fills them with the replacement source's runtime identity. `sacrifice_at`
+/// is `None` because the appended-token class (Chatterfang, Donatello) never
+/// composes with duration-bound token keywords. Power/toughness resolution
+/// uses the parser's `PtValue::Fixed` directly; variable P/T in an appended
+/// spec is not a pattern any known card uses.
+fn token_description_to_spec(
+    token: &super::oracle_effect::TokenDescription,
+) -> Option<crate::types::proposed_event::TokenSpec> {
+    use crate::types::ability::PtValue;
+    use crate::types::card_type::{CoreType, Supertype};
+    use crate::types::proposed_event::TokenSpec;
+
+    // Split parsed `types` into core_types vs subtypes by checking CoreType::from_str.
+    let mut core_types: Vec<CoreType> = Vec::new();
+    let mut subtypes: Vec<String> = Vec::new();
+    for ty in &token.types {
+        let trimmed = ty.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(core) = CoreType::from_str(trimmed) {
+            if !core_types.contains(&core) {
+                core_types.push(core);
+            }
+        } else {
+            subtypes.push(trimmed.to_string());
+        }
+    }
+
+    let fixed_or = |pt: Option<&PtValue>| -> Option<i32> {
+        match pt? {
+            PtValue::Fixed(v) => Some(*v),
+            // Dynamic P/T in an appended spec is not supported by the current
+            // pattern class — fall through to `None` (no P/T on the token).
+            _ => None,
+        }
+    };
+    let power = fixed_or(token.power.as_ref());
+    let toughness = fixed_or(token.toughness.as_ref());
+    let has_pt = power.is_some() || toughness.is_some();
+    if has_pt && core_types.is_empty() {
+        core_types.push(CoreType::Creature);
+    }
+
+    Some(TokenSpec {
+        display_name: token.name.clone(),
+        script_name: token.name.clone(),
+        power,
+        toughness,
+        core_types,
+        subtypes,
+        supertypes: Vec::<Supertype>::new(),
+        colors: token.colors.clone(),
+        keywords: token.keywords.clone(),
+        static_abilities: token.static_abilities.clone(),
+        enter_with_counters: Vec::new(),
+        tapped: token.tapped,
+        enters_attacking: false,
+        sacrifice_at: None,
+        // Placeholder: overwritten at apply time with the replacement source's identity.
+        source_id: crate::types::identifiers::ObjectId(0),
+        controller: crate::types::player::PlayerId(0),
+    })
 }
 
 /// CR 614.1a: Parse counter addition replacement effects.
@@ -4891,5 +5005,45 @@ mod tests {
             panic!("expected PutCounter");
         };
         assert_eq!(count, &QuantityExpr::Fixed { value: 1 });
+    }
+
+    /// CR 614.1a + CR 111.1: Chatterfang's "those tokens plus that many 1/1
+    /// green Squirrel creature tokens" replacement parses into a CreateToken
+    /// replacement whose `additional_token_spec` carries a 1/1 green Squirrel
+    /// creature spec, scoped to the controller's tokens.
+    #[test]
+    fn parses_chatterfang_plus_squirrel_tokens() {
+        let text = "If one or more tokens would be created under your control, those tokens plus that many 1/1 green Squirrel creature tokens are created instead.";
+        let def = parse_replacement_line(text, "Chatterfang, Squirrel General")
+            .expect("should parse Chatterfang replacement");
+        assert_eq!(def.event, ReplacementEvent::CreateToken);
+        assert_eq!(def.token_owner_scope, Some(ControllerRef::You));
+        assert!(
+            def.quantity_modification.is_none(),
+            "Chatterfang adds tokens, not a count modifier"
+        );
+        let spec = def
+            .additional_token_spec
+            .as_ref()
+            .expect("additional_token_spec set");
+        assert_eq!(spec.power, Some(1));
+        assert_eq!(spec.toughness, Some(1));
+        assert_eq!(spec.core_types, vec![CoreType::Creature]);
+        assert_eq!(spec.subtypes, vec!["Squirrel".to_string()]);
+        assert_eq!(spec.colors, vec![ManaColor::Green]);
+    }
+
+    /// CR 614.1a: The "twice that many" shape and the "those tokens plus"
+    /// shape are mutually exclusive in `parse_token_replacement_shape`. The
+    /// Double branch must not leak an `additional_token_spec`.
+    #[test]
+    fn token_replacement_double_shape_has_no_additional_spec() {
+        let lower = "it creates twice that many of those tokens instead";
+        let def = parse_token_replacement(lower, lower).expect("double shape parses");
+        assert!(matches!(
+            def.quantity_modification,
+            Some(crate::types::ability::QuantityModification::Double)
+        ));
+        assert!(def.additional_token_spec.is_none());
     }
 }

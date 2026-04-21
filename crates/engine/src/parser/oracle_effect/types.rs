@@ -45,17 +45,17 @@ pub(super) struct SubjectApplication {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct TokenDescription {
-    pub(super) name: String,
-    pub(super) power: Option<crate::types::ability::PtValue>,
-    pub(super) toughness: Option<crate::types::ability::PtValue>,
-    pub(super) types: Vec<String>,
-    pub(super) colors: Vec<ManaColor>,
-    pub(super) keywords: Vec<Keyword>,
-    pub(super) tapped: bool,
-    pub(super) count: QuantityExpr,
-    pub(super) attach_to: Option<TargetFilter>,
-    pub(super) static_abilities: Vec<StaticDefinition>,
+pub(crate) struct TokenDescription {
+    pub(crate) name: String,
+    pub(crate) power: Option<crate::types::ability::PtValue>,
+    pub(crate) toughness: Option<crate::types::ability::PtValue>,
+    pub(crate) types: Vec<String>,
+    pub(crate) colors: Vec<ManaColor>,
+    pub(crate) keywords: Vec<Keyword>,
+    pub(crate) tapped: bool,
+    pub(crate) count: QuantityExpr,
+    pub(crate) attach_to: Option<TargetFilter>,
+    pub(crate) static_abilities: Vec<StaticDefinition>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

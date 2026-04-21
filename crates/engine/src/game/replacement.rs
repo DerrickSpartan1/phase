@@ -1,4 +1,5 @@
 use indexmap::IndexMap;
+use std::collections::HashSet;
 
 use crate::types::ability::{
     AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification, DamageTargetFilter,
@@ -637,14 +638,20 @@ fn create_token_applier(
     event: ProposedEvent,
     rid: ReplacementId,
     state: &mut GameState,
-    _events: &mut Vec<GameEvent>,
+    events: &mut Vec<GameEvent>,
 ) -> ApplyResult {
     use crate::types::ability::QuantityModification;
-    let modification = state
+    let (modification, additional_spec) = state
         .objects
         .get(&rid.source)
         .and_then(|obj| obj.replacement_definitions.get(rid.index))
-        .and_then(|def| def.quantity_modification.clone());
+        .map(|def| {
+            (
+                def.quantity_modification.clone(),
+                def.additional_token_spec.clone(),
+            )
+        })
+        .unwrap_or((None, None));
 
     if let ProposedEvent::CreateToken {
         owner,
@@ -661,6 +668,60 @@ fn create_token_applier(
             Some(QuantityModification::Minus { value }) => count.saturating_sub(value),
             None => count,
         };
+
+        // CR 614.1a + CR 111.1: "those tokens plus ..." — emit an additional
+        // CreateToken for the appended spec class (Chatterfang Squirrels,
+        // Donatello Mutagen). The additional batch counts equal the
+        // already-modified `new_count`, so replacement-ordering choices
+        // (CR 616) applied before this replacement flow through to the
+        // appended batch. The additional batch is proposed through
+        // `replace_event` so further replacements (e.g., Doubling Season on
+        // the creating player) apply to it as a separate event per CR 614.1a.
+        if let Some(mut extra) = additional_spec {
+            // Fill in the replacement source's runtime identity. The parser
+            // stores placeholder ObjectId(0) / PlayerId(0) since these cannot
+            // be known until the replacement fires.
+            let source_controller = state
+                .objects
+                .get(&rid.source)
+                .map(|o| o.controller)
+                .unwrap_or(owner);
+            extra.source_id = rid.source;
+            extra.controller = source_controller;
+            // CR 614.1a: Mark this replacement as already-applied on the
+            // appended batch so the same Chatterfang-class replacement does
+            // not re-fire on its own output (which would be an infinite loop
+            // since the appended batch matches the same owner scope). Other
+            // replacements (Doubling Season, Parallel Lives) still see the
+            // appended batch as a fresh CreateToken event.
+            let mut applied_on_extra = HashSet::new();
+            applied_on_extra.insert(rid);
+            let extra_proposed = ProposedEvent::CreateToken {
+                owner,
+                spec: extra,
+                enter_tapped,
+                count: new_count,
+                applied: applied_on_extra,
+            };
+            match replace_event(state, extra_proposed, events) {
+                ReplacementResult::Execute(extra_event) => {
+                    crate::game::effects::token::apply_create_token_after_replacement(
+                        state,
+                        extra_event,
+                        events,
+                    );
+                }
+                // Prevented / NeedsChoice branches on the appended batch do not
+                // affect the primary event. A NeedsChoice here would require
+                // infrastructure to queue replacement prompts inside an applier
+                // (none exists yet); the appended batch is silently dropped in
+                // that rare collision case, which is acceptable for the
+                // current class (no cards combine Chatterfang-style appends
+                // with optional ETB replacements on their targets).
+                ReplacementResult::Prevented | ReplacementResult::NeedsChoice(_) => {}
+            }
+        }
+
         ApplyResult::Modified(ProposedEvent::CreateToken {
             owner,
             spec,
@@ -4537,5 +4598,93 @@ mod tests {
         // No entering object — resolves against `source` directly.
         let n = crate::game::quantity::resolve_quantity(&state, &expr, PlayerId(0), source);
         assert_eq!(n, 2);
+    }
+
+    /// CR 614.1a + CR 111.1: Chatterfang-class replacement emits additional
+    /// tokens alongside the primary CreateToken event. Two Plant tokens enter
+    /// plus two Squirrel tokens, all under the primary owner's control.
+    #[test]
+    fn create_token_applier_emits_additional_token_spec_batch() {
+        let chatterfang = ObjectId(500);
+        let squirrel_spec = TokenSpec {
+            display_name: "Squirrel".to_string(),
+            script_name: "Squirrel".to_string(),
+            power: Some(1),
+            toughness: Some(1),
+            core_types: vec![crate::types::card_type::CoreType::Creature],
+            subtypes: vec!["Squirrel".to_string()],
+            supertypes: Vec::new(),
+            colors: vec![crate::types::mana::ManaColor::Green],
+            keywords: Vec::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: ObjectId(0),
+            controller: PlayerId(0),
+        };
+        let repl = ReplacementDefinition::new(ReplacementEvent::CreateToken)
+            .token_owner_scope(ControllerRef::You)
+            .additional_token_spec(squirrel_spec);
+        let mut state = test_state_with_object(chatterfang, Zone::Battlefield, vec![repl]);
+        let mut events = Vec::new();
+
+        let plant_spec = TokenSpec {
+            display_name: "Plant".to_string(),
+            script_name: "Plant".to_string(),
+            power: Some(0),
+            toughness: Some(2),
+            core_types: vec![crate::types::card_type::CoreType::Creature],
+            subtypes: vec!["Plant".to_string()],
+            supertypes: Vec::new(),
+            colors: vec![crate::types::mana::ManaColor::Green],
+            keywords: Vec::new(),
+            static_abilities: Vec::new(),
+            enter_with_counters: Vec::new(),
+            tapped: false,
+            enters_attacking: false,
+            sacrifice_at: None,
+            source_id: chatterfang,
+            controller: PlayerId(0),
+        };
+        let proposed = ProposedEvent::CreateToken {
+            owner: PlayerId(0),
+            spec: Box::new(plant_spec),
+            enter_tapped: EtbTapState::Unspecified,
+            count: 2,
+            applied: HashSet::new(),
+        };
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        let ReplacementResult::Execute(primary) = result else {
+            panic!("expected Execute; got {:?}", result);
+        };
+        crate::game::effects::token::apply_create_token_after_replacement(
+            &mut state,
+            primary,
+            &mut events,
+        );
+
+        let plant_count = state
+            .objects
+            .values()
+            .filter(|o| o.is_token && o.card_types.subtypes.iter().any(|s| s == "Plant"))
+            .count();
+        let squirrel_count = state
+            .objects
+            .values()
+            .filter(|o| o.is_token && o.card_types.subtypes.iter().any(|s| s == "Squirrel"))
+            .count();
+        assert_eq!(plant_count, 2, "primary Plant batch materializes");
+        assert_eq!(
+            squirrel_count, 2,
+            "additional_token_spec emits matching Squirrel batch"
+        );
+        assert!(state
+            .objects
+            .values()
+            .filter(|o| o.is_token)
+            .all(|o| o.owner == PlayerId(0)));
     }
 }

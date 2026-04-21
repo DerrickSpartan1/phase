@@ -6,8 +6,11 @@ pub(crate) mod mana;
 mod search;
 mod sequence;
 pub(crate) mod subject;
-mod token;
-mod types;
+pub(crate) mod token;
+pub(crate) mod types;
+
+pub(crate) use self::token::parse_token_description;
+pub(crate) use self::types::TokenDescription;
 
 use std::str::FromStr;
 

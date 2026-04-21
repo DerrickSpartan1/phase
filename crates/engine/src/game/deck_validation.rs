@@ -815,8 +815,13 @@ fn combined_copy_counts(
 /// CR 100.2a: Flag card names whose combined count exceeds `max_copies`,
 /// excluding basic lands and cards whose Oracle text grants a per-card deck-limit
 /// override (e.g. Relentless Rats, Shadowborn Apostle, Rat Colony, Persistent
-/// Petitioners). Seven Dwarves / Nazgûl have finite caps printed on the card
-/// (7 and 9 respectively); v1 treats them as "unlimited" and documents the gap.
+/// Petitioners — all printed with "A deck can have any number of cards named ...").
+///
+/// Seven Dwarves / Nazgûl have finite caps printed on the card (7 and 9
+/// respectively) via "A deck can have up to <N> cards named ..."; their phrasing
+/// does not match the "any number" override, so they currently fall through to
+/// the default 4-per-name limit. That's a known gap — supporting arbitrary N-caps
+/// requires parsing the printed number, which is out of scope for this pass.
 ///
 /// Input counts must be keyed by canonical (DFC-resolved, lowercased) names —
 /// use `combined_copy_counts`.

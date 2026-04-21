@@ -5815,6 +5815,17 @@ pub struct ReplacementDefinition {
     /// e.g., Contamination ("produces {B} instead") → `ReplaceWith { Black }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mana_modification: Option<ManaModification>,
+    /// CR 614.1a + CR 111.1: Additional token creation appended to a
+    /// `CreateToken` replacement. Covers the "those tokens plus a [Name] token"
+    /// / "those tokens plus that many 1/1 green Squirrel creature tokens"
+    /// pattern class (Chatterfang, Squirrel General; Donatello, Sol Invictus).
+    /// The stored spec carries static characteristics only; `source_id` and
+    /// `controller` are filled from the replacement source at apply time.
+    /// Count equals the primary event's `count` at apply time, so additional
+    /// replacements (e.g., Doubling Season) ordered before Chatterfang are
+    /// reflected in the Squirrel count per CR 616.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub additional_token_spec: Option<Box<crate::types::proposed_event::TokenSpec>>,
 }
 
 impl ReplacementDefinition {
@@ -5840,6 +5851,7 @@ impl ReplacementDefinition {
             is_consumed: false,
             redirect_target: None,
             mana_modification: None,
+            additional_token_spec: None,
         }
     }
 
@@ -5925,6 +5937,15 @@ impl ReplacementDefinition {
     /// CR 106.3 + CR 614.1a: Set the mana modification for `ProduceMana` replacements.
     pub fn mana_modification(mut self, modification: ManaModification) -> Self {
         self.mana_modification = Some(modification);
+        self
+    }
+
+    /// CR 614.1a + CR 111.1: Attach an additional-token spec emitted alongside
+    /// the primary `CreateToken` event (Chatterfang Squirrels, Donatello
+    /// Mutagen). The stored spec's `source_id` / `controller` are placeholders
+    /// overwritten with the replacement source at apply time.
+    pub fn additional_token_spec(mut self, spec: crate::types::proposed_event::TokenSpec) -> Self {
+        self.additional_token_spec = Some(Box::new(spec));
         self
     }
 }

@@ -119,7 +119,7 @@ fn strip_except_it_has_keywords(text: &str) -> (&str, Vec<Keyword>) {
     (head, keywords)
 }
 
-pub(super) fn parse_token_description(text: &str) -> Option<TokenDescription> {
+pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     let text = text.trim().trim_end_matches('.');
     let lower = text.to_lowercase();
 

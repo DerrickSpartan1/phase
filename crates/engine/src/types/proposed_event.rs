@@ -57,7 +57,7 @@ impl EtbTapState {
 /// self-describing form used by `ProposedEvent::CreateToken` and the
 /// post-accept apply path, so replacement matchers and modifiers see the full
 /// characteristics of the token that's about to be created.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokenSpec {
     /// CR 111.4: The token's display name (same as its subtype(s) + "Token"
     /// unless the creating effect specifies otherwise).
