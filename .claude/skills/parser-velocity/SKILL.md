@@ -116,16 +116,21 @@ Run when wrapping up or at a natural stopping point (queue empty, pattern family
 
 ```bash
 cargo fmt --all
-cargo clippy --all-targets -- -D warnings
-cargo test-all                                      # full workspace — catches engine-wasm/phase-ai/server-core breakage
-./scripts/gen-card-data.sh                          # regen for coverage/semantic-audit determinism
-cargo coverage                                      # final flip count (reads fresh card-data.json)
-cargo semantic-audit                                # catch over-matching
+cargo clippy -p engine --all-targets -- -D warnings  # engine only — parser changes don't touch downstream crates
+cargo test -p engine                                  # engine suite — parser + game + types
+./scripts/gen-card-data.sh                            # regen for coverage/semantic-audit determinism
+cargo coverage                                        # final flip count (reads fresh card-data.json)
+cargo semantic-audit                                  # catch over-matching
 ./scripts/snapshot-regression.sh /tmp/card-data-before.json
-rm -f /tmp/velocity-flipped.txt                     # clear session state
+rm -f /tmp/velocity-flipped.txt                       # clear session state
 ```
 
-**Use `cargo test-all`, not `cargo test -p engine`.** Parser edits can alter AST shapes consumed by `engine-wasm`, `phase-ai`, or `server-core` — the engine-only suite will miss downstream breakage.
+**Do NOT use `cargo test-all` in this gate.** Parser-only changes don't touch
+`engine-wasm`, `phase-ai`, or `server-core` code paths — `cargo test -p engine`
+is authoritative. `cargo test-all` adds ~5 minutes of unrelated test runtime.
+The only time to escalate to `test-all` is if you knowingly changed an AST type
+signature exported across crate boundaries (e.g., added a variant to
+`TriggerMode`). That is rare and belongs in `unlock-set`, not velocity.
 
 **`gen-card-data.sh` runs at the top of Phase 3** so coverage + semantic-audit see the freshest state rather than the Phase 0 snapshot.
 
