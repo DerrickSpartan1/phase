@@ -226,14 +226,28 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
         }
     }
 
-    // "N plus [inner]" generalized offset pattern
-    if let Some((prefix, rest)) = text.split_once(" plus ") {
-        if let Some((n, _)) = parse_number(prefix) {
-            if let Some(inner) = parse_cda_quantity(rest) {
-                return Some(QuantityExpr::Offset {
-                    inner: Box::new(inner),
-                    offset: n as i32,
-                });
+    // CR 604.3: "N plus [inner]" / "N minus [inner]" generalized offset pattern.
+    // Negative form uses Offset with a negated-expression inner (Multiply by -1),
+    // composing cleanly over the existing types without introducing new variants.
+    for (connector, sign) in [(" plus ", 1i32), (" minus ", -1)] {
+        if let Some((prefix, rest)) = text.split_once(connector) {
+            if let Some((n, num_rest)) = parse_number(prefix) {
+                if num_rest.trim().is_empty() {
+                    if let Some(inner) = parse_cda_quantity(rest) {
+                        let inner_expr = if sign < 0 {
+                            QuantityExpr::Multiply {
+                                factor: -1,
+                                inner: Box::new(inner),
+                            }
+                        } else {
+                            inner
+                        };
+                        return Some(QuantityExpr::Offset {
+                            inner: Box::new(inner_expr),
+                            offset: n as i32,
+                        });
+                    }
+                }
             }
         }
     }
@@ -372,19 +386,14 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         }
     }
 
-    // CR 604.3: "N plus the number of X" / "N plus [inner]" offset expressions.
-    // Delegates inner to parse_cda_quantity which handles "the number of …" patterns.
-    if let Some((prefix, rest)) = lower.split_once(" plus ") {
-        if let Some((n, remainder)) = parse_number(prefix.trim()) {
-            if remainder.trim().is_empty() {
-                if let Some(inner) = parse_cda_quantity(rest.trim()) {
-                    return Some(QuantityExpr::Offset {
-                        inner: Box::new(inner),
-                        offset: n as i32,
-                    });
-                }
-            }
-        }
+    // CR 604.3: Composite quantity expressions ("N plus/minus [inner]", "twice [inner]")
+    // delegate to parse_cda_quantity — the single authority for offset/multiply grammar.
+    // Limited to composite variants so atomic refs still flow through the
+    // TargetPower/TargetLifeTotal exclusion in the fallback below.
+    if let Some(qty @ (QuantityExpr::Offset { .. } | QuantityExpr::Multiply { .. })) =
+        parse_cda_quantity(lower)
+    {
+        return Some(qty);
     }
 
     // Fall back to parse_quantity_ref for named quantity patterns
