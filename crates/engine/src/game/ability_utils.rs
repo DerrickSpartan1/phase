@@ -746,7 +746,8 @@ fn legal_targets_for_ability_filter(
         return targets;
     }
 
-    if !uses_relative_controller_you(filter) {
+    let relative_kind = relative_controller_kind(filter);
+    if relative_kind.is_none() {
         return targeting::find_legal_targets(state, filter, ability.controller, ability.source_id);
     }
 
@@ -760,6 +761,21 @@ fn legal_targets_for_ability_filter(
         return targeting::find_legal_targets(state, filter, ability.controller, ability.source_id);
     };
 
+    // CR 109.4 + CR 115.1: For each candidate from the companion player slot,
+    // re-enumerate with the relative controller bound to that player. The
+    // filter is rewritten to `ControllerRef::You` so `find_legal_targets`'s
+    // existing source-controller plumbing handles per-player substitution
+    // uniformly for both the `You` (per-player iteration) and `TargetPlayer`
+    // (Karazikar-style attacked-player) cases.
+    let enumeration_filter = match relative_kind {
+        Some(crate::types::ability::ControllerRef::TargetPlayer) => rewrite_relative_controller(
+            filter,
+            crate::types::ability::ControllerRef::TargetPlayer,
+            crate::types::ability::ControllerRef::You,
+        ),
+        _ => filter.clone(),
+    };
+
     let mut legal_targets = Vec::new();
     for player_id in player_slot
         .legal_targets
@@ -769,7 +785,9 @@ fn legal_targets_for_ability_filter(
             TargetRef::Object(_) => None,
         })
     {
-        for target in targeting::find_legal_targets(state, filter, player_id, ability.source_id) {
+        for target in
+            targeting::find_legal_targets(state, &enumeration_filter, player_id, ability.source_id)
+        {
             if !legal_targets.contains(&target) {
                 legal_targets.push(target);
             }
@@ -779,14 +797,65 @@ fn legal_targets_for_ability_filter(
     legal_targets
 }
 
-fn uses_relative_controller_you(filter: &TargetFilter) -> bool {
+/// Returns the relative `ControllerRef` (`You` or `TargetPlayer`) embedded in
+/// `filter`, if any. Used by `legal_targets_for_ability_filter` to detect
+/// filters that need per-player re-enumeration against a companion player slot.
+fn relative_controller_kind(filter: &TargetFilter) -> Option<crate::types::ability::ControllerRef> {
+    use crate::types::ability::ControllerRef;
     match filter {
-        TargetFilter::Typed(tf) => tf.controller == Some(crate::types::ability::ControllerRef::You),
+        TargetFilter::Typed(tf) => match tf.controller {
+            Some(ControllerRef::You) => Some(ControllerRef::You),
+            Some(ControllerRef::TargetPlayer) => Some(ControllerRef::TargetPlayer),
+            _ => None,
+        },
         TargetFilter::Or { filters } | TargetFilter::And { filters } => {
-            filters.iter().any(uses_relative_controller_you)
+            filters.iter().find_map(relative_controller_kind)
         }
-        TargetFilter::Not { filter } => uses_relative_controller_you(filter),
-        _ => false,
+        TargetFilter::Not { filter } => relative_controller_kind(filter),
+        _ => None,
+    }
+}
+
+/// True iff `filter` carries a `ControllerRef::You` binding requiring per-
+/// player rebinding at target-resolution time. Thin wrapper over
+/// `relative_controller_kind` for the `You`-specific call sites.
+fn uses_relative_controller_you(filter: &TargetFilter) -> bool {
+    matches!(
+        relative_controller_kind(filter),
+        Some(crate::types::ability::ControllerRef::You)
+    )
+}
+
+/// Substitute every `from`-controller binding in `filter` with `to`. Used to
+/// rewrite `TargetPlayer` → `You` so per-player enumeration through
+/// `find_legal_targets`'s `source_controller` parameter works uniformly.
+fn rewrite_relative_controller(
+    filter: &TargetFilter,
+    from: crate::types::ability::ControllerRef,
+    to: crate::types::ability::ControllerRef,
+) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(tf) if tf.controller == Some(from.clone()) => {
+            let mut new_tf = tf.clone();
+            new_tf.controller = Some(to);
+            TargetFilter::Typed(new_tf)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .iter()
+                .map(|f| rewrite_relative_controller(f, from.clone(), to.clone()))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .iter()
+                .map(|f| rewrite_relative_controller(f, from.clone(), to.clone()))
+                .collect(),
+        },
+        TargetFilter::Not { filter: inner } => TargetFilter::Not {
+            filter: Box::new(rewrite_relative_controller(inner, from, to)),
+        },
+        other => other.clone(),
     }
 }
 
@@ -2544,6 +2613,80 @@ mod tests {
                 chosen.0
             );
         }
+    }
+
+    /// CR 109.4 + CR 115.1 + CR 506.2: Karazikar regression guard.
+    ///
+    /// "Whenever you attack a player, tap target creature that player controls
+    /// and goad it." The Tap effect's target filter has
+    /// `controller = ControllerRef::TargetPlayer`. Auto-surfacing must produce
+    /// a Player target slot, and runtime filter evaluation with a chosen player
+    /// must restrict legal creature targets to only that player's creatures —
+    /// never the trigger controller's own creatures.
+    #[test]
+    fn karazikar_tap_target_player_restricts_to_chosen_players_creatures() {
+        use crate::game::filter::{matches_target_filter, FilterContext};
+        use crate::types::ability::ControllerRef;
+
+        let mut state = GameState::new_two_player(42);
+        let your_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Your Soldier".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Goblin".to_string(),
+            Zone::Battlefield,
+        );
+        for c in [your_creature, opp_creature] {
+            state
+                .objects
+                .get_mut(&c)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let creature_filter =
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::TargetPlayer));
+
+        let ability = ResolvedAbility::new(
+            Effect::Tap {
+                target: creature_filter.clone(),
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        // Auto-surface produces the companion Player slot first.
+        let slots = build_target_slots(&state, &ability).expect("should build");
+        assert!(
+            slots
+                .iter()
+                .any(|s| s.legal_targets.contains(&TargetRef::Player(PlayerId(1)))),
+            "expected a Player slot offering opponent as a target"
+        );
+
+        // Runtime filter: with the opponent chosen, only the opponent's creature
+        // matches; your own creature must be excluded.
+        let mut resolved = ability.clone();
+        resolved.targets = vec![TargetRef::Player(PlayerId(1))];
+        let ctx = FilterContext::from_ability(&resolved);
+        assert!(
+            matches_target_filter(&state, opp_creature, &creature_filter, &ctx),
+            "opponent's creature should be a legal tap target",
+        );
+        assert!(
+            !matches_target_filter(&state, your_creature, &creature_filter, &ctx),
+            "your own creature must NOT be a legal tap target — this is the Karazikar bug",
+        );
     }
 
     /// CR 701.12a: ExchangeControl must surface two independent target slots,
