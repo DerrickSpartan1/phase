@@ -2086,6 +2086,15 @@ pub enum StaticCondition {
     /// CR 611.2b: True when the source object is tapped.
     /// Used for "for as long as ~ remains tapped" duration conditions.
     SourceIsTapped,
+    /// CR 702.62a + CR 611.2b: True when the source object's current controller
+    /// equals the stored player. General-purpose "while you control this"
+    /// predicate; the runtime-installed Suspend haste static uses
+    /// `Duration::ForAsLongAs { SourceControllerEquals { player } }` so haste
+    /// lapses the moment another player gains control of the suspended
+    /// creature (Threaten, Mind Control, etc.).
+    SourceControllerEquals {
+        player: super::player::PlayerId,
+    },
     /// CR 301.5a: True when at least one Equipment is attached to the source object.
     /// Used for "as long as ~ is equipped" statics (Auriok Steelshaper, etc.).
     SourceIsEquipped,

@@ -939,8 +939,23 @@ fn prepare_spell_cast_with_variant_override(
     // permission-aware eligibility (the HasKeywordKind filter on the granting
     // rider) while keeping the default cast path for GY creatures under
     // GraveyardCastPermission unchanged.
+    // CR 702.62a: Suspend free-cast detection — when casting an exile-zone card
+    // that has `Keyword::Suspend` AND an `ExileWithAltCost` permission (granted
+    // by the synthesized last-counter trigger via `Effect::CastFromZone`), the
+    // cast is the suspend "play it without paying its mana cost" path. Mirrors
+    // Warp/Flashback's keyword-presence detection and avoids coupling
+    // `Effect::CastFromZone` to a cast-variant override field.
+    let is_suspend_cast = obj.zone == Zone::Exile
+        && alt_cost_from_exile.is_some()
+        && obj
+            .keywords
+            .iter()
+            .any(|k| matches!(k, crate::types::keywords::Keyword::Suspend { .. }));
+
     let casting_variant = variant_override.unwrap_or_else(|| {
-        if escape_cost.is_some() {
+        if is_suspend_cast {
+            CastingVariant::Suspend
+        } else if escape_cost.is_some() {
             CastingVariant::Escape
         } else if harmonize_cost.is_some() {
             CastingVariant::Harmonize

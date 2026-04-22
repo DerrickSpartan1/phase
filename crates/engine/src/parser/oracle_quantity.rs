@@ -14,10 +14,10 @@ use nom::combinator::value;
 use nom::Parser;
 use nom_language::error::VerboseError;
 
+use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_target::parse_type_phrase;
-use crate::parser::oracle_util::parse_number;
 use crate::types::ability::{
     AggregateFunction, CountScope, ObjectProperty, PlayerFilter, QuantityExpr, QuantityRef,
     TargetFilter, ZoneRef,
@@ -227,28 +227,30 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
     }
 
     // CR 604.3: "N plus [inner]" / "N minus [inner]" generalized offset pattern.
-    // Negative form uses Offset with a negated-expression inner (Multiply by -1),
-    // composing cleanly over the existing types without introducing new variants.
-    for (connector, sign) in [(" plus ", 1i32), (" minus ", -1)] {
-        if let Some((prefix, rest)) = text.split_once(connector) {
-            if let Some((n, num_rest)) = parse_number(prefix) {
-                if num_rest.trim().is_empty() {
-                    if let Some(inner) = parse_cda_quantity(rest) {
-                        let inner_expr = if sign < 0 {
-                            QuantityExpr::Multiply {
-                                factor: -1,
-                                inner: Box::new(inner),
-                            }
-                        } else {
-                            inner
-                        };
-                        return Some(QuantityExpr::Offset {
-                            inner: Box::new(inner_expr),
-                            offset: n as i32,
-                        });
-                    }
+    // Negative form uses Offset with a Multiply-by-(-1) inner, composing cleanly
+    // over existing types without introducing new variants.
+    if let Ok((rest, (n, sign))) = (
+        nom_primitives::parse_number,
+        alt((
+            value(1i32, tag::<_, _, VerboseError<&str>>(" plus ")),
+            value(-1i32, tag(" minus ")),
+        )),
+    )
+        .parse(text)
+    {
+        if let Some(inner) = parse_cda_quantity(rest) {
+            let inner_expr = if sign < 0 {
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(inner),
                 }
-            }
+            } else {
+                inner
+            };
+            return Some(QuantityExpr::Offset {
+                inner: Box::new(inner_expr),
+                offset: n as i32,
+            });
         }
     }
 
