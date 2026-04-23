@@ -365,6 +365,25 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
     // for the duration of the effect.
     rewire_player_scoped_execute_to_triggering_player(&mut def);
 
+    // CR 109.4 + CR 603.7c: When the execute ability references
+    // `ControllerRef::TargetPlayer` in a filter (e.g. Ruthless Winnower's
+    // "that player sacrifices a non-Elf creature" → `Sacrifice { target:
+    // Typed { controller: TargetPlayer } }`) and the trigger has no
+    // `valid_target`, surface `TargetFilter::Player` on the trigger so the
+    // triggering player (upkeep's active player, damaged player, etc.) is
+    // auto-bound to the first `TargetRef::Player` slot from the trigger
+    // event. Without this, `collect_target_slots` would surface a
+    // companion player-choice slot and the controller would be prompted to
+    // pick — which is wrong for phase and damage triggers whose acting
+    // player is implicit.
+    if def.valid_target.is_none() {
+        if let Some(execute) = def.execute.as_deref() {
+            if execute_references_target_player(&execute.effect) {
+                def.valid_target = Some(TargetFilter::Player);
+            }
+        }
+    }
+
     // Check for constraint phrases in the full text.
     // Text-based constraints take precedence; fall back to any constraint already set
     // by the trigger condition parser (e.g. NthSpellThisTurn from try_parse_nth_spell_trigger).
@@ -1698,6 +1717,33 @@ fn rewire_player_scoped_execute_to_triggering_player(def: &mut TriggerDefinition
     if routable {
         execute.player_scope = Some(PlayerFilter::TriggeringPlayer);
     }
+}
+
+/// CR 109.4 + CR 603.7c: Returns `true` when any filter inside the execute
+/// ability's effect chain references `ControllerRef::TargetPlayer`. Walks
+/// sub-abilities so triggers like Dokuchi Silencer (outer Discard, inner
+/// Destroy targeting "that player controls") and Ruthless Winnower
+/// (Sacrifice with `TargetPlayer`-scoped filter) both trigger the companion
+/// `valid_target = Player` surface in `parse_trigger_line`.
+fn execute_references_target_player(effect: &crate::types::ability::Effect) -> bool {
+    fn filter_references(filter: &TargetFilter) -> bool {
+        match filter {
+            TargetFilter::Typed(TypedFilter { controller, .. }) => {
+                matches!(controller, Some(ControllerRef::TargetPlayer))
+            }
+            TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+                filters.iter().any(filter_references)
+            }
+            TargetFilter::Not { filter } => filter_references(filter),
+            _ => false,
+        }
+    }
+    if let Some(filter) = effect.target_filter() {
+        if filter_references(filter) {
+            return true;
+        }
+    }
+    false
 }
 
 fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
