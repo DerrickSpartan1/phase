@@ -920,9 +920,10 @@ pub fn parse_oracle_text(
                     .push(ActivationRestriction::IsSolved);
                 if constraints.sorcery_speed() {
                     def.sorcery_speed = true;
-                    def.activation_restrictions
-                        .push(ActivationRestriction::AsSorcery);
                 }
+                // CR 602.5d: `constraints.restrictions` already contains
+                // `AsSorcery` when the source text said "Activate only as a
+                // sorcery"; extend preserves it so the legality gate fires.
                 if !constraints.restrictions.is_empty() {
                     def.activation_restrictions.extend(constraints.restrictions);
                 }
@@ -1735,6 +1736,7 @@ fn try_parse_loyalty_line(line: &str) -> Option<AbilityDefinition> {
                     let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
                     def.cost = Some(AbilityCost::Loyalty { amount });
                     def.description = Some(trimmed.to_string());
+                    apply_loyalty_restrictions(&mut def);
                     return Some(def);
                 }
             }
@@ -1756,12 +1758,42 @@ fn try_parse_loyalty_line(line: &str) -> Option<AbilityDefinition> {
                 let mut def = parse_effect_chain(effect_text, AbilityKind::Activated);
                 def.cost = Some(AbilityCost::Loyalty { amount });
                 def.description = Some(trimmed.to_string());
+                apply_loyalty_restrictions(&mut def);
                 return Some(def);
             }
         }
     }
 
     None
+}
+
+/// CR 606.3: A player may activate a loyalty ability only during a main phase
+/// of their turn with an empty stack, and only if no player has previously
+/// activated a loyalty ability of that permanent that turn. The planeswalker
+/// activation path (`game::planeswalker::can_activate_loyalty`) already gates
+/// this independently, but tagging the ability with `AsSorcery` +
+/// `OnlyOnceEachTurn` + the display flag keeps parser output self-describing
+/// and satisfies the shared invariant that every sorcery-speed activated
+/// ability carries `ActivationRestriction::AsSorcery`.
+fn apply_loyalty_restrictions(def: &mut AbilityDefinition) {
+    // CR 606.3: "...only during a main phase of their turn when the stack is empty..."
+    def.sorcery_speed = true;
+    if !def
+        .activation_restrictions
+        .contains(&ActivationRestriction::AsSorcery)
+    {
+        def.activation_restrictions
+            .push(ActivationRestriction::AsSorcery);
+    }
+    // CR 606.3: "...only if no player has previously activated a loyalty ability
+    // of that permanent that turn."
+    if !def
+        .activation_restrictions
+        .contains(&ActivationRestriction::OnlyOnceEachTurn)
+    {
+        def.activation_restrictions
+            .push(ActivationRestriction::OnlyOnceEachTurn);
+    }
 }
 
 /// Parse a loyalty number string like "+2", "−3", "0", "-1".

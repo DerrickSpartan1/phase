@@ -5006,8 +5006,23 @@ impl AbilityDefinition {
         self
     }
 
+    /// CR 602.5d: "Activate only as a sorcery" — set both the display flag (for
+    /// UI consumers) and push `ActivationRestriction::AsSorcery` so the legality
+    /// gate in `game::restrictions::check_activation_restrictions` actually
+    /// enforces the timing at runtime. Single authority for "this ability is
+    /// sorcery speed" — covers Equip (CR 702.6a), Fortify (CR 702.67a),
+    /// Reconfigure (CR 702.151a), Level Up (CR 702.87a), Scavenge (CR 702.97a),
+    /// planeswalker loyalty (CR 606.3), and any future keyword that is required
+    /// to be activated at sorcery speed.
     pub fn sorcery_speed(mut self) -> Self {
         self.sorcery_speed = true;
+        if !self
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery)
+        {
+            self.activation_restrictions
+                .push(ActivationRestriction::AsSorcery);
+        }
         self
     }
 

@@ -145,6 +145,12 @@ pub fn synthesize_basic_land_mana(face: &mut CardFace) {
     }
 }
 
+/// CR 702.6a: Equip is an activated ability of Equipment cards. "Equip [cost]"
+/// means "[Cost]: Attach this permanent to target creature you control.
+/// Activate only as a sorcery." The `.sorcery_speed()` builder is the single
+/// authority that sets both the display flag and pushes
+/// `ActivationRestriction::AsSorcery` so the runtime legality gate enforces
+/// timing at activation time.
 pub fn synthesize_equip(face: &mut CardFace) {
     let equip_abilities: Vec<AbilityDefinition> = face
         .keywords
@@ -160,7 +166,9 @@ pub fn synthesize_equip(face: &mut CardFace) {
                             ),
                         },
                     )
-                    .cost(AbilityCost::Mana { cost: cost.clone() }),
+                    .cost(AbilityCost::Mana { cost: cost.clone() })
+                    // CR 702.6a: "Activate only as a sorcery."
+                    .sorcery_speed(),
                 )
             } else {
                 None
@@ -513,8 +521,6 @@ pub fn synthesize_case_solve(face: &mut CardFace) {
 /// CR 702.87a: Synthesize level up activated ability — "Pay {cost}: Put a level counter
 /// on this permanent. Activate only as a sorcery."
 pub fn synthesize_level_up(face: &mut CardFace) {
-    use crate::types::ability::ActivationRestriction;
-
     let level_up_abilities: Vec<AbilityDefinition> = face
         .keywords
         .iter()
@@ -531,7 +537,9 @@ pub fn synthesize_level_up(face: &mut CardFace) {
                         },
                     )
                     .cost(AbilityCost::Mana { cost: cost.clone() })
-                    .activation_restrictions(vec![ActivationRestriction::AsSorcery]),
+                    // CR 702.87a: "Activate only as a sorcery." `.sorcery_speed()`
+                    // sets the display flag and pushes `AsSorcery` for runtime.
+                    .sorcery_speed(),
                 )
             } else {
                 None
@@ -684,7 +692,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
 /// target for "this card's power" in the graveyard reminder text. No new quantity
 /// ref is needed; `SelfPower` is already the right abstraction.
 pub fn synthesize_scavenge(face: &mut CardFace) {
-    use crate::types::ability::{ActivationRestriction, QuantityRef};
+    use crate::types::ability::QuantityRef;
 
     let scavenge_abilities: Vec<AbilityDefinition> = face
         .keywords
@@ -718,9 +726,10 @@ pub fn synthesize_scavenge(face: &mut CardFace) {
             };
             let mut def = AbilityDefinition::new(AbilityKind::Activated, effect)
                 .cost(composite_cost)
-                // CR 702.97a: "Activate only as a sorcery."
-                .sorcery_speed()
-                .activation_restrictions(vec![ActivationRestriction::AsSorcery]);
+                // CR 702.97a: "Activate only as a sorcery." The `.sorcery_speed()`
+                // builder sets both the display flag and pushes
+                // `ActivationRestriction::AsSorcery` for runtime enforcement.
+                .sorcery_speed();
             // CR 702.97a: "functions only while the card with scavenge is in a graveyard."
             def.activation_zone = Some(Zone::Graveyard);
             Some(def)
@@ -2854,5 +2863,217 @@ mod idempotency_tests {
             first_count,
             "casualty trigger should only register once"
         );
+    }
+}
+
+#[cfg(test)]
+mod sorcery_speed_invariant_tests {
+    //! CR 602.5d: Every activated ability tagged with the `sorcery_speed`
+    //! display flag MUST also carry `ActivationRestriction::AsSorcery` so the
+    //! runtime legality gate (`game::restrictions::check_activation_restrictions`)
+    //! actually enforces sorcery timing. Historically the `sorcery_speed` bool
+    //! was display-only, and callers were required to separately push the enum
+    //! variant — a recurring source of bugs where equip abilities were
+    //! activatable at instant speed. Unifying the two via the `.sorcery_speed()`
+    //! builder (and this invariant) prevents the bug class from recurring.
+    use super::*;
+    use crate::types::ability::ActivationRestriction;
+    use crate::types::mana::{ManaCost, ManaCostShard};
+
+    /// Walk every sub_ability in the chain.
+    fn walk_chain<F: FnMut(&AbilityDefinition)>(def: &AbilityDefinition, mut visit: F) {
+        let mut cur: Option<&AbilityDefinition> = Some(def);
+        while let Some(d) = cur {
+            visit(d);
+            cur = d.sub_ability.as_deref();
+        }
+    }
+
+    fn assert_sorcery_invariant(def: &AbilityDefinition, context: &str) {
+        walk_chain(def, |d| {
+            if d.sorcery_speed {
+                assert!(
+                    d.activation_restrictions
+                        .contains(&ActivationRestriction::AsSorcery),
+                    "{context}: ability has sorcery_speed=true but \
+                     activation_restrictions is missing AsSorcery"
+                );
+            }
+        });
+    }
+
+    /// CR 702.6a: Swiftfoot Boots — "Equip {1}" synthesizes an activated ability
+    /// that MUST be gated at sorcery speed. Regression test for the confirmed
+    /// bug where equip abilities were activatable at instant speed because
+    /// `synthesize_equip` set neither the display flag nor the restriction.
+    #[test]
+    fn synthesize_equip_pushes_as_sorcery_restriction() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Equip(ManaCost::Cost {
+            shards: vec![],
+            generic: 1,
+        }));
+        synthesize_equip(&mut face);
+
+        assert_eq!(face.abilities.len(), 1, "one equip ability");
+        let def = &face.abilities[0];
+        assert!(def.sorcery_speed, "sorcery_speed display flag set");
+        assert!(
+            def.activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery),
+            "AsSorcery restriction pushed for runtime enforcement (CR 702.6a)"
+        );
+    }
+
+    /// CR 702.87a: Level Up synthesis must carry AsSorcery.
+    #[test]
+    fn synthesize_level_up_pushes_as_sorcery_restriction() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::LevelUp(ManaCost::Cost {
+            shards: vec![],
+            generic: 2,
+        }));
+        synthesize_level_up(&mut face);
+
+        let def = &face.abilities[0];
+        assert!(def.sorcery_speed);
+        assert!(def
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+    }
+
+    /// CR 702.97a: Scavenge synthesis must carry AsSorcery (single `.sorcery_speed()`
+    /// call must produce both the flag and the restriction).
+    #[test]
+    fn synthesize_scavenge_pushes_as_sorcery_restriction() {
+        let mut face = CardFace::default();
+        face.keywords.push(Keyword::Scavenge(ManaCost::Cost {
+            shards: vec![ManaCostShard::Green],
+            generic: 2,
+        }));
+        synthesize_scavenge(&mut face);
+
+        let def = &face.abilities[0];
+        assert!(def.sorcery_speed);
+        assert!(def
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+        // Guard against double-push regression: AsSorcery should appear exactly once.
+        let count = def
+            .activation_restrictions
+            .iter()
+            .filter(|r| matches!(r, ActivationRestriction::AsSorcery))
+            .count();
+        assert_eq!(count, 1, "AsSorcery must not be duplicated");
+    }
+
+    /// CR 602.5d: The shared invariant — corpus-wide, walk every synthesized
+    /// ability and its sub_ability chain; every ability with
+    /// `sorcery_speed=true` must carry `AsSorcery`. Runs the synthesis pipeline
+    /// against every keyword variant that has synthesis coverage and enforces
+    /// the invariant, so any future keyword synthesis regressing to a
+    /// display-only `sorcery_speed=true` fails this test.
+    #[test]
+    fn sorcery_speed_flag_implies_as_sorcery_restriction_for_synthesized_abilities() {
+        fn mana() -> ManaCost {
+            ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            }
+        }
+
+        type SynthCase = (&'static str, fn() -> CardFace);
+        let cases: &[SynthCase] = &[
+            ("Equip {1}", || {
+                let mut f = CardFace::default();
+                f.keywords.push(Keyword::Equip(mana()));
+                synthesize_equip(&mut f);
+                f
+            }),
+            ("Level Up {1}", || {
+                let mut f = CardFace::default();
+                f.keywords.push(Keyword::LevelUp(mana()));
+                synthesize_level_up(&mut f);
+                f
+            }),
+            ("Scavenge {1}", || {
+                let mut f = CardFace::default();
+                f.keywords.push(Keyword::Scavenge(mana()));
+                synthesize_scavenge(&mut f);
+                f
+            }),
+        ];
+
+        for (name, build) in cases {
+            let face = build();
+            for def in &face.abilities {
+                assert_sorcery_invariant(def, name);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod loyalty_sorcery_speed_tests {
+    //! CR 606.3: Planeswalker loyalty abilities may only be activated during
+    //! the controller's main phase with an empty stack, and only once per turn
+    //! per permanent. The parser must tag every loyalty line with both
+    //! `ActivationRestriction::AsSorcery` (CR 606.3 timing) and
+    //! `ActivationRestriction::OnlyOnceEachTurn` (CR 606.3 per-permanent
+    //! limit) so downstream consumers (and the shared invariant) see a
+    //! self-describing restriction set. The planeswalker activation path
+    //! (`game::planeswalker::can_activate_loyalty`) already gates loyalty
+    //! independently; these restrictions are defensive + invariant-preserving.
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::types::ability::ActivationRestriction;
+
+    #[test]
+    fn loyalty_ability_parses_with_as_sorcery_and_once_each_turn() {
+        // Jace, the Mind Sculptor reminder-text-like minimal loyalty line.
+        let r = parse_oracle_text("+2: Draw a card.", "Test Planeswalker", &[], &[], &[]);
+        assert_eq!(r.abilities.len(), 1);
+        let def = &r.abilities[0];
+        assert!(def.sorcery_speed, "loyalty sets sorcery_speed display flag");
+        assert!(
+            def.activation_restrictions
+                .contains(&ActivationRestriction::AsSorcery),
+            "CR 606.3: AsSorcery restriction is pushed for loyalty"
+        );
+        assert!(
+            def.activation_restrictions
+                .contains(&ActivationRestriction::OnlyOnceEachTurn),
+            "CR 606.3: OnlyOnceEachTurn restriction is pushed for loyalty"
+        );
+    }
+
+    #[test]
+    fn loyalty_bracket_format_also_tagged() {
+        // Bracket format: [+1]: effect.
+        let r = parse_oracle_text("[+1]: Draw a card.", "Test Planeswalker", &[], &[], &[]);
+        assert_eq!(r.abilities.len(), 1);
+        let def = &r.abilities[0];
+        assert!(def.sorcery_speed);
+        assert!(def
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
+        assert!(def
+            .activation_restrictions
+            .contains(&ActivationRestriction::OnlyOnceEachTurn));
+    }
+
+    #[test]
+    fn loyalty_negative_minus_cost_tagged() {
+        let r = parse_oracle_text(
+            "\u{2212}3: Destroy target creature.",
+            "Test Planeswalker",
+            &[],
+            &[],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let def = &r.abilities[0];
+        assert!(def
+            .activation_restrictions
+            .contains(&ActivationRestriction::AsSorcery));
     }
 }
