@@ -4936,7 +4936,19 @@ fn try_parse_sacrifice_trigger(
     let (after_verb, actor) = parse_sacrifice_actor.parse(event).ok()?;
 
     let (filter, remainder) = parse_trigger_subject(after_verb);
-    if !remainder.trim().is_empty() {
+
+    // CR 603.2 + CR 603.7: Optional trailing turn constraint — "during your
+    // turn", "during an opponent's turn", etc. Szarel, Genesis Shepherd and
+    // similar cards append this to a sacrifice trigger; the constraint
+    // narrows when the trigger fires without changing its event structure.
+    // Strip the "during " conjunction with nom, then delegate to
+    // `parse_turn_constraint` which recognizes the turn-possessive phrases.
+    let turn_constraint = tag::<_, _, VerboseError<&str>>("during ")
+        .parse(remainder.trim())
+        .ok()
+        .and_then(|(body, _)| parse_turn_constraint(body));
+
+    if turn_constraint.is_none() && !remainder.trim().is_empty() {
         return None;
     }
 
@@ -4946,6 +4958,9 @@ fn try_parse_sacrifice_trigger(
         Some(cr) => add_controller(filter, cr),
         None => filter,
     });
+    if let Some(constraint) = turn_constraint {
+        def.constraint = Some(constraint);
+    }
     Some((TriggerMode::Sacrificed, def))
 }
 
@@ -6816,6 +6831,21 @@ mod tests {
                 TypedFilter::creature().controller(ControllerRef::Opponent)
             ))
         );
+    }
+
+    #[test]
+    fn trigger_sacrifice_with_during_your_turn_constraint() {
+        // CR 603.2 + CR 603.7: Szarel, Genesis Shepherd — sacrifice trigger
+        // with a trailing turn constraint. The parser must extract the
+        // constraint rather than reject the whole line because the subject
+        // wasn't the final token.
+        use crate::types::ability::TriggerConstraint;
+        let def = parse_trigger_line(
+            "Whenever you sacrifice another nontoken permanent during your turn, you gain 1 life.",
+            "Szarel, Genesis Shepherd",
+        );
+        assert_eq!(def.mode, TriggerMode::Sacrificed);
+        assert_eq!(def.constraint, Some(TriggerConstraint::OnlyDuringYourTurn));
     }
 
     #[test]

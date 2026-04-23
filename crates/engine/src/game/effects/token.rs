@@ -905,6 +905,28 @@ fn blood_ability() -> AbilityDefinition {
     })
 }
 
+/// CR 106.1 + CR 701.16a: Eldrazi Spawn — "Sacrifice this token: Add {C}."
+/// Modern Eldrazi Spawn printings (from Rise of the Eldrazi onward) use this
+/// no-tap sacrifice mana ability. Applied by subtype lookup so every token
+/// with subtype "Spawn" gains the ability without per-card registration.
+fn spawn_ability() -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Mana {
+            produced: ManaProduction::Colorless {
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+        },
+    )
+    .cost(AbilityCost::Sacrifice {
+        target: TargetFilter::SelfRef,
+        count: 1,
+    })
+}
+
 /// CR 111.10h: Powerstone — "{T}: Add {C}. This mana can't be spent to cast a nonartifact spell."
 fn powerstone_ability() -> AbilityDefinition {
     use crate::types::ability::ManaSpendRestriction;
@@ -964,6 +986,7 @@ fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
         "Blood" => vec![blood_ability()],
         "Powerstone" => vec![powerstone_ability()],
         "Map" => vec![map_ability()],
+        "Spawn" => vec![spawn_ability()],
         // TODO: Incubator (transform), Shard, Gold, Junk
         _ => vec![],
     }
@@ -1559,6 +1582,23 @@ mod tests {
             }
             other => panic!("expected composite cost, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn predefined_spawn_has_colorless_sacrifice_mana_ability() {
+        // CR 106.1 + CR 701.16a: Eldrazi Spawn tokens produced by Writhing
+        // Chrysalis, Awakening Zone, etc. share a single sacrifice-for-{C}
+        // mana ability, injected by subtype.
+        let abilities = predefined_token_abilities("Spawn");
+        assert_eq!(abilities.len(), 1);
+        assert!(matches!(*abilities[0].effect, Effect::Mana { .. }));
+        assert!(matches!(
+            abilities[0].cost,
+            Some(AbilityCost::Sacrifice {
+                target: TargetFilter::SelfRef,
+                count: 1,
+            })
+        ));
     }
 
     #[test]
