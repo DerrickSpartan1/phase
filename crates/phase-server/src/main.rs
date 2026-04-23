@@ -18,6 +18,7 @@ use engine::ai_support::{
     legal_actions_with_costs as engine_legal_actions_with_costs,
 };
 use engine::database::CardDatabase;
+use engine::game::derived_views::derive_views;
 use engine::game::{validate_deck_for_format, DeckCompatibilityRequest};
 use engine::types::game_state::GameState;
 use engine::types::player::PlayerId;
@@ -895,6 +896,7 @@ async fn broadcast_game_started(
                         }
                     });
                 let is_actor = actor == Some(player);
+                let derived = derive_views(&filtered);
                 (
                     player,
                     ServerMessage::GameStarted {
@@ -913,6 +915,7 @@ async fn broadcast_game_started(
                         } else {
                             HashMap::new()
                         },
+                        derived,
                         player_token: None,
                     },
                 )
@@ -971,6 +974,7 @@ async fn broadcast_game_started(
                         } else {
                             HashMap::new()
                         },
+                        derived: derive_views(pstate),
                     });
                 }
             }
@@ -1168,6 +1172,7 @@ async fn handle_client_message(
                         } else {
                             vec![]
                         };
+                        let derived_joiner = derive_views(&filtered_state);
                         let msg = ServerMessage::GameStarted {
                             state: filtered_state,
                             your_player: joiner,
@@ -1180,6 +1185,7 @@ async fn handle_client_message(
                             } else {
                                 HashMap::new()
                             },
+                            derived: derived_joiner,
                             player_token: Some(player_token.clone()),
                         };
                         if let Ok(json) = serde_json::to_string(&msg) {
@@ -1197,6 +1203,7 @@ async fn handle_client_message(
                                 } else {
                                     vec![]
                                 };
+                                let derived_p = derive_views(&p_state);
                                 let _ = sender.send(ServerMessage::GameStarted {
                                     state: p_state,
                                     your_player: pid,
@@ -1209,6 +1216,7 @@ async fn handle_client_message(
                                     } else {
                                         HashMap::new()
                                     },
+                                    derived: derived_p,
                                     player_token: None,
                                 });
                             }
@@ -1348,6 +1356,7 @@ async fn handle_client_message(
                                         eliminated_players: eliminated.clone(),
                                         log_entries: log_entries.clone(),
                                         spell_costs: p_spell_costs,
+                                        derived: derive_views(pstate),
                                     });
                                 }
                             }
@@ -1402,6 +1411,7 @@ async fn handle_client_message(
                                         eliminated_players: eliminated.clone(),
                                         log_entries: ai_log_entries.clone(),
                                         spell_costs: p_spell_costs,
+                                        derived: derive_views(pstate),
                                     });
                                 }
                             }
@@ -1494,6 +1504,7 @@ async fn handle_client_message(
                             let is_actor = actor == Some(player);
                             let player_legals = if is_actor { legal_actions_all } else { vec![] };
 
+                            let derived_reconnect = derive_views(&filtered_state);
                             let game_started_msg = ServerMessage::GameStarted {
                                 state: filtered_state,
                                 your_player: player,
@@ -1506,6 +1517,7 @@ async fn handle_client_message(
                                 } else {
                                     HashMap::new()
                                 },
+                                derived: derived_reconnect,
                                 player_token: None,
                             };
 
@@ -1593,6 +1605,7 @@ async fn handle_client_message(
                         let filtered = server_core::filter_state_for_player(&raw_state, player);
                         let is_actor = actor == Some(player);
                         let player_legals = if is_actor { legal_actions } else { vec![] };
+                        let derived = derive_views(&filtered);
                         let _ = tx.send(ServerMessage::StateUpdate {
                             state: filtered,
                             events,
@@ -1605,6 +1618,7 @@ async fn handle_client_message(
                             } else {
                                 HashMap::new()
                             },
+                            derived,
                         });
                     }
                 }
@@ -1911,6 +1925,7 @@ async fn handle_client_message(
                     let host_state =
                         server_core::filter_state_for_player(&session.state, PlayerId(0));
 
+                    let derived_host = derive_views(&host_state);
                     let game_started_msg = ServerMessage::GameStarted {
                         state: host_state,
                         your_player: PlayerId(0),
@@ -1923,6 +1938,7 @@ async fn handle_client_message(
                         } else {
                             HashMap::new()
                         },
+                        derived: derived_host,
                         player_token: None,
                     };
 
@@ -1971,6 +1987,7 @@ async fn handle_client_message(
                     {
                         let is_actor = actor == Some(PlayerId(0));
                         let player_legals = if is_actor { legal_actions } else { vec![] };
+                        let derived = derive_views(&filtered);
                         let _ = tx.send(ServerMessage::StateUpdate {
                             state: filtered,
                             events,
@@ -1983,6 +2000,7 @@ async fn handle_client_message(
                             } else {
                                 HashMap::new()
                             },
+                            derived,
                         });
                     }
                 }
@@ -2411,6 +2429,7 @@ async fn handle_client_message(
                         .await;
                     }
 
+                    let derived = derive_views(&filtered_state);
                     let msg = ServerMessage::StateUpdate {
                         state: filtered_state,
                         events: vec![],
@@ -2419,6 +2438,7 @@ async fn handle_client_message(
                         eliminated_players: vec![],
                         log_entries: vec![],
                         spell_costs: HashMap::new(),
+                        derived,
                     };
                     if let Ok(json) = serde_json::to_string(&msg) {
                         let _ = socket.send(Message::text(json)).await;

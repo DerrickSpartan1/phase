@@ -13,6 +13,23 @@ import { EngineWorkerClient } from "./engine-worker-client";
 import { AiWorkerPool } from "./ai-worker-pool";
 
 /**
+ * Flatten the `ClientGameState { state, derived }` wire envelope produced
+ * by the engine's WASM getters into the store-side `GameState` shape with
+ * `derived` attached as an optional field. When the runtime returns a
+ * plain `GameState` (older WASM build, post-state-loss sentinel), the
+ * wrapped shape is absent and we pass through untouched.
+ *
+ * See `crates/engine/src/game/derived_views.rs`.
+ */
+function unwrapClientGameState(raw: unknown): GameState {
+  if (raw != null && typeof raw === "object" && "state" in raw) {
+    const wrapped = raw as { state: GameState; derived?: GameState["derived"] };
+    return { ...wrapped.state, derived: wrapped.derived ?? wrapped.state.derived };
+  }
+  return raw as GameState;
+}
+
+/**
  * Classify an unknown error thrown by the engine worker or main-thread
  * fallback. If the Rust sentinel prefix is present, escalate to an
  * `AdapterError` with code `STATE_LOST` so the recovery layer in
@@ -117,8 +134,14 @@ export class WasmAdapter implements EngineAdapter {
   async getState(): Promise<GameState> {
     this.assertInitialized();
     try {
-      if (this.engine) return await this.engine.getState();
-      return await this.fallback!.getState();
+      // WASM `get_game_state` now returns ClientGameState { state, derived }.
+      // Flatten to the store's GameState shape by attaching `derived` as an
+      // optional field on the state object. Components that don't consume
+      // derived (the vast majority) see no change.
+      const wrapped = this.engine
+        ? await this.engine.getState()
+        : await this.fallback!.getState();
+      return unwrapClientGameState(wrapped);
     } catch (err) {
       classifyEngineError(err);
     }
@@ -127,8 +150,10 @@ export class WasmAdapter implements EngineAdapter {
   async getFilteredState(viewerId: number): Promise<GameState> {
     this.assertInitialized();
     try {
-      if (this.engine) return await this.engine.getFilteredState(viewerId);
-      return await this.fallback!.getFilteredState(viewerId);
+      const wrapped = this.engine
+        ? await this.engine.getFilteredState(viewerId)
+        : await this.fallback!.getFilteredState(viewerId);
+      return unwrapClientGameState(wrapped);
     } catch (err) {
       classifyEngineError(err);
     }
@@ -146,7 +171,7 @@ export class WasmAdapter implements EngineAdapter {
 
   async getAiAction(
     difficulty: string,
-    playerId = 1,
+    playerId: number,
   ): Promise<GameAction | null> {
     this.assertInitialized();
 
@@ -192,7 +217,7 @@ export class WasmAdapter implements EngineAdapter {
     }
   }
 
-  /** Lazy AI pool init — only created on first VeryHard request. */
+/** Lazy AI pool init — only created on first VeryHard request. */
   private async ensureAiPool(): Promise<AiWorkerPool | null> {
     if (this.aiPool) return this.aiPool;
     if (this.aiPoolFailed) return null;
@@ -463,7 +488,7 @@ async function createMainThreadFallback(): Promise<MainThreadFallback> {
         return (r ?? null) as GameAction | null;
       }),
 
-    restoreState: (stateJson: string) => {
+restoreState: (stateJson: string) => {
       enqueue(() => wasm.restore_game_state(stateJson));
     },
 

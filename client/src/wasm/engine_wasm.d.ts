@@ -86,14 +86,20 @@ export function get_card_parse_details(name: string): any;
 export function get_card_rulings(name: string): any;
 
 /**
- * Get a filtered view of the current game state for the given player.
+ * Filtered-viewer variant of `get_game_state`. Runs the viewer filter
+ * first (hides opponent hand/library per standard multiplayer redaction),
+ * then derives views over the filtered state so the wire shape is
+ * identical to `get_game_state` regardless of filter path.
  */
 export function get_filtered_game_state(viewer: number): any;
 
 /**
- * Get the current game state as JSON.
- * Derived display fields (summoning sickness, devotion, etc.) are computed
- * automatically by the engine in apply()/start_game().
+ * Get the current game state as a `ClientGameState` wire envelope
+ * (`{ state, derived }`). The `derived` block holds engine-authored
+ * presentation projections — commander-damage grouping, etc. — so the
+ * frontend never computes game logic. Derivation happens just-in-time per
+ * call and does not mutate `GameState`. See
+ * `engine::game::derived_views::ClientGameStateRef`.
  */
 export function get_game_state(): any;
 
@@ -102,6 +108,14 @@ export function get_game_state(): any;
  * Returns `{ actions: GameAction[], autoPassRecommended: boolean, spellCosts: Record<ObjectId, ManaCost> }`.
  */
 export function get_legal_actions_js(): any;
+
+/**
+ * Current stack pressure bucket for animation pacing (Normal/Elevated/Rapid/Instant).
+ * Not a rules concept — presentation policy owned by the engine for consistency
+ * across browser/desktop/server consumers. Returned as a string to avoid
+ * tsify enum-sharing overhead; frontend maps the string to a multiplier.
+ */
+export function get_stack_pressure(): any;
 
 /**
  * Initialize panic hook for better error messages in WASM.
@@ -254,6 +268,7 @@ export interface InitOutput {
     readonly submit_action: (a: number, b: any) => any;
     readonly get_game_state: () => any;
     readonly get_legal_actions_js: () => any;
+    readonly get_stack_pressure: () => any;
     readonly init_panic_hook: () => void;
     readonly create_initial_state: () => any;
     readonly clear_game_state: () => void;

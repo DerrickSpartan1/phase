@@ -449,6 +449,19 @@ export interface StackEntry {
   kind: StackEntryKind;
 }
 
+/**
+ * Engine-authored coalesced view of the stack. Adjacent entries with the
+ * same source + kind + description + target signature collapse into one
+ * group with a `×count` badge. Authoritative derivation lives in
+ * `crates/engine/src/game/stack.rs::stack_display_groups`; the frontend
+ * never re-implements the grouping rule.
+ */
+export interface StackDisplayGroup {
+  representative: ObjectId;
+  count: number;
+  member_ids: ObjectId[];
+}
+
 // ── Pending Cast (for target selection) ──────────────────────────────────
 
 export interface PendingCast {
@@ -534,7 +547,7 @@ export type WaitingFor =
   | { type: "ScryChoice"; data: { player: PlayerId; cards: ObjectId[] } }
   | { type: "DigChoice"; data: { player: PlayerId; cards: ObjectId[]; keep_count: number; up_to?: boolean; selectable_cards?: ObjectId[]; kept_destination?: Zone | null; rest_destination?: Zone | null } }
   | { type: "SurveilChoice"; data: { player: PlayerId; cards: ObjectId[] } }
-  | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown } }
+  | { type: "RevealChoice"; data: { player: PlayerId; cards: ObjectId[]; filter: unknown; optional?: boolean } }
   | { type: "SearchChoice"; data: { player: PlayerId; cards: ObjectId[]; count: number; reveal?: boolean } }
   | { type: "TriggerTargetSelection"; data: { player: PlayerId; target_slots: TargetSelectionSlot[]; target_constraints?: TargetSelectionConstraint[]; selection: TargetSelectionProgress; source_id?: ObjectId; description?: string } }
   | { type: "BetweenGamesSideboard"; data: { player: PlayerId; game_number: number; score: MatchScore } }
@@ -712,7 +725,7 @@ export type GameAction =
   | { type: "DiscoverChoice"; data: { choice: CastChoice } }
   | { type: "CascadeChoice"; data: { choice: CastChoice } }
   | { type: "ChooseTopOrBottom"; data: { top: boolean } }
-  | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn" } } }
+  | { type: "SetAutoPass"; data: { mode: { type: "UntilStackEmpty" } | { type: "UntilEndOfTurn"; phase_stops: Phase[] } } }
   | { type: "CancelAutoPass" }
   | { type: "AssignCombatDamage"; data: { assignments: [ObjectId, number][]; trample_damage: number; controller_damage: number } }
   | { type: "DistributeAmong"; data: { distribution: [TargetRef, number][] } }
@@ -809,6 +822,35 @@ export type GameEvent =
 
 // ── Game State ───────────────────────────────────────────────────────────
 
+/**
+ * Engine-authored presentation projections — a single commander-damage
+ * badge entry. Mirrors `engine::game::derived_views::CommanderDamageView`.
+ */
+export interface CommanderDamageView {
+  victim: PlayerId;
+  commander: ObjectId;
+  damage: number;
+}
+
+/**
+ * Engine-authored projections computed at each state snapshot. Rides
+ * alongside GameState through every adapter path. Frontend components
+ * consume this shape directly and never compute grouping/filtering
+ * themselves (CLAUDE.md: engine owns all logic). Mirrors
+ * `engine::game::derived_views::DerivedViews`.
+ */
+export interface DerivedViews {
+  /** Keyed by attacking commander's current controller (PlayerId as string). */
+  commander_damage_by_attacker?: Record<string, CommanderDamageView[]>;
+  /**
+   * Engine-authored coalesced view of the stack. Empty (and omitted from
+   * the wire payload) when the stack is empty. StackDisplay consumes this
+   * directly — never re-compute the grouping client-side. Mirrors
+   * `engine::game::derived_views::DerivedViews::stack_display_groups`.
+   */
+  stack_display_groups?: StackDisplayGroup[];
+}
+
 export interface GameState {
   turn_number: number;
   active_player: PlayerId;
@@ -828,6 +870,14 @@ export interface GameState {
   lands_played_this_turn: number;
   max_lands_per_turn: number;
   priority_pass_count: number;
+  /**
+   * Engine-authored derived projections, attached by adapters from the
+   * wire-format `ClientGameState.derived` sibling field. Optional because
+   * some wire paths (legacy cached state, older server builds) may not
+   * carry it. Consumers MUST treat absence as "no data" and MUST NOT
+   * synthesize grouped values client-side — that's a CLAUDE.md violation.
+   */
+  derived?: DerivedViews;
   pending_replacement: unknown | null;
   layers_dirty: boolean;
   next_timestamp: number;
@@ -866,7 +916,7 @@ export interface GameState {
 
 export type AutoPassMode =
   | { type: "UntilStackEmpty"; initial_stack_len: number }
-  | { type: "UntilEndOfTurn" };
+  | { type: "UntilEndOfTurn"; phase_stops: Phase[] };
 
 // ── Adapter Interface ────────────────────────────────────────────────────
 
@@ -953,7 +1003,7 @@ export interface EngineAdapter {
   submitAction(action: GameAction, actor: PlayerId): Promise<SubmitResult>;
   getState(): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
-  getAiAction(difficulty: string, playerId?: number): Promise<GameAction | null> | GameAction | null;
+  getAiAction(difficulty: string, playerId: number): Promise<GameAction | null> | GameAction | null;
   restoreState(state: GameState): void;
   dispose(): void;
 }

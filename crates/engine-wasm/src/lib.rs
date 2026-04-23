@@ -464,21 +464,36 @@ pub fn submit_action(actor: u8, action: JsValue) -> JsValue {
     }
 }
 
-/// Get the current game state as JSON.
-/// Derived display fields (summoning sickness, devotion, etc.) are computed
-/// automatically by the engine in apply()/start_game().
+/// Get the current game state as a `ClientGameState` wire envelope
+/// (`{ state, derived }`). The `derived` block holds engine-authored
+/// presentation projections — commander-damage grouping, etc. — so the
+/// frontend never computes game logic. Derivation happens just-in-time per
+/// call and does not mutate `GameState`. See
+/// `engine::game::derived_views::ClientGameStateRef`.
 #[wasm_bindgen]
 pub fn get_game_state() -> JsValue {
-    match with_state(to_js) {
+    match with_state(|state| {
+        to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
+            state,
+        ))
+    }) {
         Ok(val) => val,
         Err(_) => JsValue::NULL,
     }
 }
 
-/// Get a filtered view of the current game state for the given player.
+/// Filtered-viewer variant of `get_game_state`. Runs the viewer filter
+/// first (hides opponent hand/library per standard multiplayer redaction),
+/// then derives views over the filtered state so the wire shape is
+/// identical to `get_game_state` regardless of filter path.
 #[wasm_bindgen]
 pub fn get_filtered_game_state(viewer: u8) -> JsValue {
-    match with_state(|state| to_js(&filter_state_for_viewer(state, PlayerId(viewer)))) {
+    match with_state(|state| {
+        let filtered = filter_state_for_viewer(state, PlayerId(viewer));
+        to_js(&engine::game::derived_views::ClientGameStateRef::wrap(
+            &filtered,
+        ))
+    }) {
         Ok(val) => val,
         Err(_) => JsValue::NULL,
     }
@@ -502,6 +517,37 @@ pub fn get_legal_actions_js() -> JsValue {
         Err(_) => JsValue::NULL,
     }
 }
+
+/// Current stack pressure bucket for animation pacing (Normal/Elevated/Rapid/Instant).
+/// Not a rules concept — presentation policy owned by the engine for consistency
+/// across browser/desktop/server consumers. Returned as a string to avoid
+/// tsify enum-sharing overhead; frontend maps the string to a multiplier.
+#[wasm_bindgen]
+pub fn get_stack_pressure() -> JsValue {
+    match with_state(|state| {
+        let s = match engine::game::stack::stack_pressure(state) {
+            engine::game::stack::StackPressure::Normal => "Normal",
+            engine::game::stack::StackPressure::Elevated => "Elevated",
+            engine::game::stack::StackPressure::Rapid => "Rapid",
+            engine::game::stack::StackPressure::Instant => "Instant",
+        };
+        JsValue::from_str(s)
+    }) {
+        Ok(v) => v,
+        Err(_) => JsValue::NULL,
+    }
+}
+
+// `get_stack_display_groups` and `get_commander_damage_received` were both
+// retired when their grouping moved into the authoritative
+// `ClientGameState.derived` wire envelope produced by `get_game_state` /
+// `get_filtered_game_state`. Leaving the standalone exports alongside would
+// have created two paths to the same derived value — "duplicate logic
+// across adapters" per CLAUDE.md — and the async RPC path also required a
+// generation-counter race guard on the frontend to survive rapid stack
+// mutations. Riding the same snapshot that carries `state.stack` makes the
+// grouping atomically consistent with the stack it describes.
+// See `engine::game::derived_views`.
 
 /// Export the current game state as a JSON string.
 /// Used by the engine worker to transfer state to AI workers for root parallelism.

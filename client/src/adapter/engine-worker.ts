@@ -277,6 +277,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
         result(msg.id, delta ?? null);
         break;
       }
+
     }
   } catch (err) {
     const id = "id" in msg ? (msg as { id: number }).id : -1;

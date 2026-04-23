@@ -14,6 +14,7 @@ pub mod day_night;
 pub mod deck_loading;
 pub mod deck_validation;
 pub mod derived;
+pub mod derived_views;
 pub mod devotion;
 pub mod dungeon;
 pub mod effects;
