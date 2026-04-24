@@ -4799,6 +4799,103 @@ pub mod tests {
     }
 
     #[test]
+    fn suppress_triggers_does_not_block_transform_on_reentry() {
+        // CR 603.2g + CR 701.28: SuppressTriggers only gates triggered-ability
+        // registration. A permanent returning to the battlefield with
+        // `enter_transformed=true` (e.g., Ajani, Nacatl Pariah's flip trigger)
+        // must still transform — transform is NOT a triggered ability. Any
+        // ETB-triggered abilities on Ajani's back face are legitimately suppressed,
+        // but the flip itself must resolve.
+        use crate::game::effects::change_zone::execute_zone_move;
+        use crate::game::game_object::BackFaceData;
+        use crate::types::card_type::CardType;
+        use crate::types::mana::{ManaColor, ManaCost};
+
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Opponent's Doorkeeper Thrull: SuppressTriggers on creature ETB.
+        add_suppress_triggers_permanent(
+            &mut state,
+            PlayerId(1),
+            TargetFilter::Typed(TypedFilter::creature()),
+            vec![SuppressedTriggerEvent::EntersBattlefield],
+        );
+
+        // Ajani is currently in exile (mid-resolution of his flip trigger).
+        // Set up as a DFC creature with a planeswalker back face.
+        let ajani = create_object(
+            &mut state,
+            CardId(0xA1A1),
+            PlayerId(0),
+            "Ajani, Nacatl Pariah".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&ajani).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.base_card_types = obj.card_types.clone();
+            obj.back_face = Some(BackFaceData {
+                name: "Ajani, Nacatl Avenger".to_string(),
+                power: None,
+                toughness: None,
+                loyalty: Some(4),
+                defense: None,
+                card_types: CardType {
+                    supertypes: vec![],
+                    core_types: vec![CoreType::Planeswalker],
+                    subtypes: vec!["Ajani".to_string()],
+                },
+                mana_cost: ManaCost::default(),
+                keywords: vec![],
+                abilities: vec![],
+                trigger_definitions: Default::default(),
+                replacement_definitions: Default::default(),
+                static_definitions: Default::default(),
+                color: vec![ManaColor::White],
+                printed_ref: None,
+                modal: None,
+                additional_cost: None,
+                strive_cost: None,
+                casting_restrictions: vec![],
+                casting_options: vec![],
+                layout_kind: None,
+            });
+        }
+
+        // Return Ajani from exile to battlefield with enter_transformed=true,
+        // mirroring the sub_ability of his "Cat dies" trigger.
+        let mut events = Vec::new();
+        let _ = execute_zone_move(
+            &mut state,
+            ajani,
+            Zone::Exile,
+            Zone::Battlefield,
+            ObjectId(0xA1A1), // self-sourced
+            None,
+            true,  // enter_transformed
+            false, // effect_enter_tapped
+            None,  // controller_override
+            &mut events,
+        );
+
+        let obj = &state.objects[&ajani];
+        assert_eq!(
+            obj.zone,
+            Zone::Battlefield,
+            "Ajani must reach the battlefield"
+        );
+        assert!(
+            obj.transformed,
+            "Ajani must flip to his back face — SuppressTriggers must not block CR 701.28 transform"
+        );
+        assert_eq!(
+            obj.name, "Ajani, Nacatl Avenger",
+            "Back-face characteristics must be applied"
+        );
+    }
+
+    #[test]
     fn fertile_ground_triggered_mana_ability_skips_stack_and_adds_mana() {
         // CR 605.1b: "Whenever enchanted land is tapped for mana, its controller
         // adds an additional {G}" — a triggered mana ability that must resolve
