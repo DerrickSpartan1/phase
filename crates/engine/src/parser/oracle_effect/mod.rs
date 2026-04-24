@@ -4189,6 +4189,8 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         | Effect::Mill { target, .. }
         | Effect::Discard { target, .. }
         | Effect::Draw { target, .. }
+        | Effect::Scry { target, .. }
+        | Effect::Surveil { target, .. }
         | Effect::PutAtLibraryPosition { target, .. }
             if *target == TargetFilter::Any || *target == TargetFilter::Controller =>
         {
@@ -7952,7 +7954,13 @@ pub(crate) fn normalize_verb_token(token: &str) -> String {
         "does" => "do".to_string(),
         "has" => "have".to_string(),
         "is" => "be".to_string(),
-        "copies" => "copy".to_string(),
+        // English consonant-y → ies plural (copy→copies, scry→scries, try→tries).
+        // Vowel-y verbs (play→plays) take regular -s and fall through. Result is
+        // checked against `PREDICATE_VERBS`; false positives like "series→sery"
+        // are silent (no allowlist hit, no behavior change).
+        _ if token.ends_with("ies") && token.len() > 3 => {
+            format!("{}y", &token[..token.len() - 3])
+        }
         _ if token.ends_with('s') && !token.ends_with("ss") => token[..token.len() - 1].to_string(),
         _ => token.to_string(),
     }
@@ -8669,7 +8677,8 @@ mod tests {
             matches!(
                 *sub.effect,
                 Effect::Scry {
-                    count: QuantityExpr::Fixed { value: 1 }
+                    count: QuantityExpr::Fixed { value: 1 },
+                    ..
                 }
             ),
             "sub_ability: {:?}",
@@ -9201,7 +9210,8 @@ mod tests {
         assert!(matches!(
             e,
             Effect::Scry {
-                count: QuantityExpr::Fixed { value: 2 }
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
             }
         ));
     }
@@ -9233,7 +9243,8 @@ mod tests {
                 Effect::Scry {
                     count: QuantityExpr::Ref {
                         qty: QuantityRef::Variable { .. }
-                    }
+                    },
+                    ..
                 }
             ),
             "Expected Scry with Variable, got {:?}",

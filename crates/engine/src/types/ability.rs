@@ -2951,9 +2951,17 @@ pub enum Effect {
         #[serde(default = "default_zone_graveyard")]
         destination: Zone,
     },
+    /// CR 701.22a: Scry N — look at the top N cards, then put any number on
+    /// the bottom in any order and the rest on top in any order.
+    /// CR 115.1 + CR 601.2c: When `target` is `TargetFilter::Player` (or any
+    /// other non-context-ref filter), the scrying player is chosen during
+    /// spell announcement. The default `TargetFilter::Controller` preserves
+    /// "you scry" / "scry N" semantics where no player is targeted.
     Scry {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        #[serde(default = "default_target_filter_controller")]
+        target: TargetFilter,
     },
     PumpAll {
         #[serde(default = "default_pt_value_zero")]
@@ -3069,9 +3077,17 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
+    /// CR 701.25a: Surveil N — look at the top N cards, then put any number
+    /// into the graveyard and the rest on top in any order.
+    /// CR 115.1 + CR 601.2c: When `target` is `TargetFilter::Player` (or any
+    /// other non-context-ref filter), the surveiling player is chosen during
+    /// spell announcement. The default `TargetFilter::Controller` preserves
+    /// "you surveil" / "surveil N" semantics where no player is targeted.
     Surveil {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        #[serde(default = "default_target_filter_controller")]
+        target: TargetFilter,
     },
     Fight {
         #[serde(default = "default_target_filter_any")]
@@ -4117,6 +4133,8 @@ impl Effect {
             // --- Effects with a `target: TargetFilter` field ---
             Effect::DealDamage { target, .. }
             | Effect::Draw { target, .. }
+            | Effect::Scry { target, .. }
+            | Effect::Surveil { target, .. }
             | Effect::Pump { target, .. }
             | Effect::Destroy { target, .. }
             | Effect::Regenerate { target, .. }
@@ -4194,7 +4212,6 @@ impl Effect {
             Effect::StartYourEngines { .. }
             | Effect::IncreaseSpeed { .. }
             | Effect::GainLife { .. }
-            | Effect::Scry { .. }
             | Effect::PumpAll { .. }
             | Effect::DamageAll { .. }
             | Effect::DamageEachPlayer { .. }
@@ -4203,7 +4220,6 @@ impl Effect {
             | Effect::UntapAll { .. }
             | Effect::ChangeZoneAll { .. }
             | Effect::Dig { .. }
-            | Effect::Surveil { .. }
             | Effect::PutCounterAll { .. }
             | Effect::DoublePTAll { .. }
             | Effect::Explore

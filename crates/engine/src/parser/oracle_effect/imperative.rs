@@ -274,12 +274,16 @@ pub(super) fn parse_numeric_imperative_ast(
         }
     }
 
-    // Keyword action verbs with numeric count: scry N, surveil N, mill N
+    // Keyword action verbs with numeric count: scry N, surveil N, mill N.
+    // CR 701.22a + CR 701.25a: Oracle uses third-person conjugations
+    // ("Target player scries 2", "Target opponent surveils 1") — match both
+    // the bare-form imperative and the conjugated form. `mills` is included
+    // for symmetry with the "Target player mills N" pattern.
     if let Some((verb, rest)) = nom_on_lower(text, lower, |input| {
         alt((
-            value("scry", tag("scry ")),
-            value("surveil", tag("surveil ")),
-            value("mill", tag("mill ")),
+            value("scry", alt((tag("scry "), tag("scries ")))),
+            value("surveil", alt((tag("surveil "), tag("surveils ")))),
+            value("mill", alt((tag("mill "), tag("mills ")))),
         ))
         .parse(input)
     }) {
@@ -322,7 +326,14 @@ fn try_parse_half_life_amount(lower: &str) -> Option<QuantityExpr> {
 
 pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect {
     match ast {
-        NumericImperativeAst::Draw { count } => Effect::Draw { count },
+        // CR 121.1: Default `target: TargetFilter::Controller` — the imperative
+        // path doesn't see the subject, which is later threaded via
+        // `inject_subject_target` for "target player draws ..." patterns
+        // (CR 601.2c per-mode targeting).
+        NumericImperativeAst::Draw { count } => Effect::Draw {
+            count,
+            target: TargetFilter::Controller,
+        },
         NumericImperativeAst::GainLife { amount } => Effect::GainLife {
             amount,
             player: GainLifePlayer::Controller,
@@ -339,8 +350,18 @@ pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect 
             toughness,
             target: TargetFilter::Any,
         },
-        NumericImperativeAst::Scry { count } => Effect::Scry { count },
-        NumericImperativeAst::Surveil { count } => Effect::Surveil { count },
+        // CR 701.22a + CR 601.2c: Default Controller target — `inject_subject_target`
+        // upgrades to `TargetFilter::Player` for "target player scrys ..." subjects.
+        NumericImperativeAst::Scry { count } => Effect::Scry {
+            count,
+            target: TargetFilter::Controller,
+        },
+        // CR 701.25a + CR 601.2c: Same Controller default; subject promotion
+        // wires "target opponent surveils ..." through inject_subject_target.
+        NumericImperativeAst::Surveil { count } => Effect::Surveil {
+            count,
+            target: TargetFilter::Controller,
+        },
         NumericImperativeAst::Mill { count } => Effect::Mill {
             count,
             // CR 701.17a: "Mill" with no subject defaults to the controller.
@@ -2649,6 +2670,7 @@ pub(super) fn parse_imperative_family_ast(
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::EventContextAmount,
                 },
+                target: TargetFilter::Controller,
             }))
         }
         "draw" => parse_numeric_imperative_ast(text, lower)

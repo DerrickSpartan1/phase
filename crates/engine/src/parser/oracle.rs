@@ -2767,6 +2767,78 @@ mod tests {
     }
 
     #[test]
+    fn target_player_scrys_carries_player_filter() {
+        // CR 701.22a + CR 601.2c: "Target player scrys N" surfaces an
+        // independent player target on the parsed Scry effect — the resolver
+        // routes the scry to the chosen player, not the spell's controller.
+        let r = parse(
+            "Target player scries 2.",
+            "Test Permanent",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let Effect::Scry { count, target } = &*r.abilities[0].effect else {
+            panic!("expected Effect::Scry, got {:?}", r.abilities[0].effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+        assert!(
+            matches!(target, TargetFilter::Player),
+            "expected TargetFilter::Player for 'Target player scries 2.', got {target:?}",
+        );
+    }
+
+    #[test]
+    fn target_player_surveils_carries_player_filter() {
+        // CR 701.25a + CR 601.2c: "Target player surveils N" surfaces an
+        // independent player target on the parsed Surveil effect — the
+        // resolver routes the surveil to the chosen player, not the spell's
+        // controller. (Mirrors the Draw + Scry tests above.)
+        let r = parse(
+            "Target player surveils 2.",
+            "Test Permanent",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let Effect::Surveil { count, target } = &*r.abilities[0].effect else {
+            panic!("expected Effect::Surveil, got {:?}", r.abilities[0].effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 2 });
+        assert!(
+            matches!(target, TargetFilter::Player),
+            "expected TargetFilter::Player for 'Target player surveils 2.', got {target:?}",
+        );
+    }
+
+    #[test]
+    fn target_player_mills_carries_player_filter() {
+        // CR 701.13a + CR 601.2c: "Target player mills N" surfaces an
+        // independent player target on the parsed Mill effect — the resolver
+        // routes the mill to the chosen player, not the spell's controller.
+        // Mirror coverage for the Scry/Surveil tests above so the conjugated
+        // verb path ("mills" via y/s normalization) is pinned for regression.
+        let r = parse(
+            "Target player mills 3.",
+            "Test Permanent",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let Effect::Mill { count, target, .. } = &*r.abilities[0].effect else {
+            panic!("expected Effect::Mill, got {:?}", r.abilities[0].effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+        assert!(
+            matches!(target, TargetFilter::Player),
+            "expected TargetFilter::Player for 'Target player mills 3.', got {target:?}",
+        );
+    }
+
+    #[test]
     fn non_spell_conditional_sentence_routes_to_effect_parser() {
         let r = parse(
             "If you sacrificed a Food this turn, draw a card.",
