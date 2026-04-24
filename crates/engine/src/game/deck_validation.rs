@@ -270,6 +270,13 @@ fn evaluate_commander(
 /// Commander all use 100-card-singleton deck shape with a command zone; only
 /// the legality table and display label differ. DuelCommander's 30-life /
 /// 1v1-only rules are expressed in `FormatConfig`, not deck validation.
+///
+/// Known gap for Pauper Commander (PDH): the PDH community rule that the
+/// commander must be an **uncommon** creature/planeswalker is not yet
+/// structurally enforced — `is_commander_eligible` is rarity-agnostic, and
+/// the card-pool check relies solely on `LegalityFormat::PauperCommander`
+/// status for non-commander slots. Pool legality works; commander rarity
+/// validation needs a future rarity-aware commander-eligibility predicate.
 fn evaluate_commander_with_format(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,

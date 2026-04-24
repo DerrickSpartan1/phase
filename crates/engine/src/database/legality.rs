@@ -175,10 +175,12 @@ mod tests {
         let mut raw = HashMap::new();
         raw.insert("standard".to_string(), "Legal".to_string());
         raw.insert("commander".to_string(), "Banned".to_string());
-        // Unsupported MTGJSON keys: `oldschool` and `premodern` are community
-        // formats we do not yet model; they must be dropped silently.
-        raw.insert("oldschool".to_string(), "Legal".to_string());
-        raw.insert("premodern".to_string(), "Legal".to_string());
+        // Deliberately nonsense keys so this test remains meaningful even if
+        // we later add support for any real-but-currently-unsupported format
+        // like `oldschool` or `premodern`. The contract being tested is
+        // "unknown keys are dropped", not "any specific format is unknown".
+        raw.insert("nonexistent_fmt_a".to_string(), "Legal".to_string());
+        raw.insert("nonexistent_fmt_b".to_string(), "Legal".to_string());
 
         let result = normalize_legalities(&raw);
         assert_eq!(
