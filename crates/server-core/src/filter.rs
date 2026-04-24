@@ -194,18 +194,18 @@ mod tests {
         state.deck_pools = vec![
             engine::types::game_state::PlayerDeckPool {
                 player: PlayerId(0),
-                registered_main: vec![entry.clone()],
-                registered_sideboard: vec![entry.clone()],
-                current_main: vec![entry.clone()],
-                current_sideboard: vec![entry.clone()],
+                registered_main: Arc::new(vec![entry.clone()]),
+                registered_sideboard: Arc::new(vec![entry.clone()]),
+                current_main: Arc::new(vec![entry.clone()]),
+                current_sideboard: Arc::new(vec![entry.clone()]),
                 ..Default::default()
             },
             engine::types::game_state::PlayerDeckPool {
                 player: PlayerId(1),
-                registered_main: vec![entry.clone()],
-                registered_sideboard: vec![entry.clone()],
-                current_main: vec![entry.clone()],
-                current_sideboard: vec![entry],
+                registered_main: Arc::new(vec![entry.clone()]),
+                registered_sideboard: Arc::new(vec![entry.clone()]),
+                current_main: Arc::new(vec![entry.clone()]),
+                current_sideboard: Arc::new(vec![entry]),
                 ..Default::default()
             },
         ];

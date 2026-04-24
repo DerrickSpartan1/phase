@@ -701,17 +701,27 @@ pub struct PhyrexianShard {
     pub options: ShardOptions,
 }
 
+/// Per-player deck pool — registered (initial) and current (live) card
+/// lists for main deck, sideboard, and commander zone.
+///
+/// All six `Vec<DeckEntry>` fields are wrapped in `Arc<Vec<_>>` so
+/// `GameState::clone()` shares the underlying deck slice via refcount
+/// bump instead of deep-cloning every card's `CardFace` (and its nested
+/// `Vec<AbilityDefinition>`) on every AI search-node clone. Mutations
+/// (shuffle, draw-from-library, tutor removal) go through `Arc::make_mut`
+/// for copy-on-write semantics. Subsequent mutations on a unique-refcount
+/// Arc are in-place — only the first mutation of a shared Arc allocates.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct PlayerDeckPool {
     pub player: PlayerId,
-    pub registered_main: Vec<DeckEntry>,
-    pub registered_sideboard: Vec<DeckEntry>,
-    pub current_main: Vec<DeckEntry>,
-    pub current_sideboard: Vec<DeckEntry>,
+    pub registered_main: std::sync::Arc<Vec<DeckEntry>>,
+    pub registered_sideboard: std::sync::Arc<Vec<DeckEntry>>,
+    pub current_main: std::sync::Arc<Vec<DeckEntry>>,
+    pub current_sideboard: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
-    pub registered_commander: Vec<DeckEntry>,
+    pub registered_commander: std::sync::Arc<Vec<DeckEntry>>,
     #[serde(default)]
-    pub current_commander: Vec<DeckEntry>,
+    pub current_commander: std::sync::Arc<Vec<DeckEntry>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

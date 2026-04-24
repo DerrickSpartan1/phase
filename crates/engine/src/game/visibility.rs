@@ -242,10 +242,14 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
 
     for pool in &mut filtered.deck_pools {
         if pool.player != viewer {
-            pool.registered_main.clear();
-            pool.registered_sideboard.clear();
-            pool.current_main.clear();
-            pool.current_sideboard.clear();
+            // Per-seat redaction: replace the Arc'd decks with fresh empties.
+            // Cheaper than `make_mut + clear` because we discard the contents;
+            // the original Arcs remain shared by the unfiltered state and any
+            // other viewer's filter.
+            pool.registered_main = Arc::new(Vec::new());
+            pool.registered_sideboard = Arc::new(Vec::new());
+            pool.current_main = Arc::new(Vec::new());
+            pool.current_sideboard = Arc::new(Vec::new());
         }
     }
 

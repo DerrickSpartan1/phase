@@ -259,10 +259,13 @@ pub fn handle_declare_companion(
             if *sb_idx < pool.current_sideboard.len() {
                 // Remove the companion from the sideboard
                 let card_entry = pool.current_sideboard[*sb_idx].clone();
-                if pool.current_sideboard[*sb_idx].count > 1 {
-                    pool.current_sideboard[*sb_idx].count -= 1;
+                // CR 702.139: Companion promotion mutates the sideboard; first
+                // mutation of the shared Arc triggers copy-on-write via make_mut.
+                let sideboard = std::sync::Arc::make_mut(&mut pool.current_sideboard);
+                if sideboard[*sb_idx].count > 1 {
+                    sideboard[*sb_idx].count -= 1;
                 } else {
-                    pool.current_sideboard.remove(*sb_idx);
+                    sideboard.remove(*sb_idx);
                 }
 
                 // Set companion on the player

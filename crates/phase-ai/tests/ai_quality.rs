@@ -542,13 +542,13 @@ fn threat_profile_influences_scoring_against_blue_deck() {
         state.waiting_for = WaitingFor::Priority { player: P0 };
 
         // Opponent has a deck pool full of counterspells
-        let entries = vec![counterspell_entry(8)];
+        let entries = std::sync::Arc::new(vec![counterspell_entry(8)]);
         state.deck_pools.push(PlayerDeckPool {
             player: P1,
-            registered_main: entries.clone(),
-            registered_sideboard: Vec::new(),
+            registered_main: std::sync::Arc::clone(&entries),
+            registered_sideboard: std::sync::Arc::new(Vec::new()),
             current_main: entries,
-            current_sideboard: Vec::new(),
+            current_sideboard: std::sync::Arc::new(Vec::new()),
             ..Default::default()
         });
         // Give opponent some cards in hand so threat profile is non-trivial
@@ -608,13 +608,13 @@ fn threat_profile_influences_scoring_against_control_deck() {
         state.waiting_for = WaitingFor::Priority { player: P0 };
 
         // Opponent deck pool: full of wraths
-        let entries = vec![wrath_entry(8)];
+        let entries = std::sync::Arc::new(vec![wrath_entry(8)]);
         state.deck_pools.push(PlayerDeckPool {
             player: P1,
-            registered_main: entries.clone(),
-            registered_sideboard: Vec::new(),
+            registered_main: std::sync::Arc::clone(&entries),
+            registered_sideboard: std::sync::Arc::new(Vec::new()),
             current_main: entries,
-            current_sideboard: Vec::new(),
+            current_sideboard: std::sync::Arc::new(Vec::new()),
             ..Default::default()
         });
         state.players[1].hand = engine::im::vector![

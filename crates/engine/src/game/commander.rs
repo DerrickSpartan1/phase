@@ -61,7 +61,7 @@ pub fn should_redirect_to_command_zone(
 pub fn commander_color_identity(state: &GameState, player: PlayerId) -> Vec<ManaColor> {
     let mut identity: Vec<ManaColor> = Vec::new();
     if let Some(pool) = state.deck_pools.iter().find(|pool| pool.player == player) {
-        for entry in &pool.current_commander {
+        for entry in pool.current_commander.iter() {
             for color in card_face_color_identity(&entry.card) {
                 push_identity_color(&mut identity, color);
             }
@@ -437,7 +437,7 @@ mod tests {
         let mut state = setup_commander_game();
         state.deck_pools.push(PlayerDeckPool {
             player: PlayerId(0),
-            current_commander: vec![DeckEntry {
+            current_commander: std::sync::Arc::new(vec![DeckEntry {
                 card: CardFace {
                     color_identity: vec![
                         ManaColor::White,
@@ -449,7 +449,7 @@ mod tests {
                     ..CardFace::default()
                 },
                 count: 1,
-            }],
+            }]),
             ..PlayerDeckPool::default()
         });
         create_commander_in_command_zone(&mut state, PlayerId(0), "Ramos", vec![]);

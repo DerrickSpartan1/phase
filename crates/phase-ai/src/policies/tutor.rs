@@ -380,7 +380,7 @@ mod tests {
         };
         state.deck_pools.push(PlayerDeckPool {
             player: PlayerId(0),
-            current_main: vec![engine::game::deck_loading::DeckEntry {
+            current_main: std::sync::Arc::new(vec![engine::game::deck_loading::DeckEntry {
                 card: CardFace {
                     name: "Deck Titan".to_string(),
                     mana_cost: ManaCost::Cost {
@@ -397,7 +397,7 @@ mod tests {
                     ..Default::default()
                 },
                 count: 1,
-            }],
+            }]),
             ..Default::default()
         });
         for index in 0..4 {

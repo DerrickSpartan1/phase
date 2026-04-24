@@ -31,7 +31,7 @@ pub fn known_remaining_deck_counts(
     };
 
     let mut counts = HashMap::new();
-    for entry in &pool.current_main {
+    for entry in pool.current_main.iter() {
         if entry.count == 0 {
             continue;
         }
@@ -167,10 +167,10 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.deck_pools.push(PlayerDeckPool {
             player: PlayerId(0),
-            current_main: vec![
+            current_main: std::sync::Arc::new(vec![
                 deck_entry("Alpha", 2, Some("a")),
                 deck_entry("Beta", 1, None),
-            ],
+            ]),
             ..Default::default()
         });
 
@@ -202,7 +202,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.deck_pools.push(PlayerDeckPool {
             player: PlayerId(0),
-            current_main: vec![deck_entry("Alpha", 1, None)],
+            current_main: std::sync::Arc::new(vec![deck_entry("Alpha", 1, None)]),
             ..Default::default()
         });
 
@@ -242,7 +242,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
         state.deck_pools.push(PlayerDeckPool {
             player: PlayerId(0),
-            current_main: vec![deck_entry("Alpha", 1, None)],
+            current_main: std::sync::Arc::new(vec![deck_entry("Alpha", 1, None)]),
             ..Default::default()
         });
 

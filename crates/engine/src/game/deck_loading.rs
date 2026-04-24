@@ -145,40 +145,51 @@ pub fn load_deck_into_state(state: &mut GameState, payload: &DeckPayload) {
     state.deck_pools.clear();
     state.sideboard_submitted.clear();
 
+    // Build each Arc<Vec<_>> once and share between registered_X and current_X —
+    // they start identical and diverge via Arc::make_mut on first mutation.
+    let p0_main = std::sync::Arc::new(payload.player.main_deck.clone());
+    let p0_side = std::sync::Arc::new(payload.player.sideboard.clone());
+    let p0_cmdr = std::sync::Arc::new(payload.player.commander.clone());
     state
         .deck_pools
         .push(crate::types::game_state::PlayerDeckPool {
             player: PlayerId(0),
-            registered_main: payload.player.main_deck.clone(),
-            registered_sideboard: payload.player.sideboard.clone(),
-            current_main: payload.player.main_deck.clone(),
-            current_sideboard: payload.player.sideboard.clone(),
-            registered_commander: payload.player.commander.clone(),
-            current_commander: payload.player.commander.clone(),
+            registered_main: std::sync::Arc::clone(&p0_main),
+            registered_sideboard: std::sync::Arc::clone(&p0_side),
+            current_main: p0_main,
+            current_sideboard: p0_side,
+            registered_commander: std::sync::Arc::clone(&p0_cmdr),
+            current_commander: p0_cmdr,
         });
+    let p1_main = std::sync::Arc::new(payload.opponent.main_deck.clone());
+    let p1_side = std::sync::Arc::new(payload.opponent.sideboard.clone());
+    let p1_cmdr = std::sync::Arc::new(payload.opponent.commander.clone());
     state
         .deck_pools
         .push(crate::types::game_state::PlayerDeckPool {
             player: PlayerId(1),
-            registered_main: payload.opponent.main_deck.clone(),
-            registered_sideboard: payload.opponent.sideboard.clone(),
-            current_main: payload.opponent.main_deck.clone(),
-            current_sideboard: payload.opponent.sideboard.clone(),
-            registered_commander: payload.opponent.commander.clone(),
-            current_commander: payload.opponent.commander.clone(),
+            registered_main: std::sync::Arc::clone(&p1_main),
+            registered_sideboard: std::sync::Arc::clone(&p1_side),
+            current_main: p1_main,
+            current_sideboard: p1_side,
+            registered_commander: std::sync::Arc::clone(&p1_cmdr),
+            current_commander: p1_cmdr,
         });
     for (i, ai_deck) in payload.ai_decks.iter().enumerate() {
         let player_id = PlayerId((2 + i) as u8);
+        let main = std::sync::Arc::new(ai_deck.main_deck.clone());
+        let side = std::sync::Arc::new(ai_deck.sideboard.clone());
+        let cmdr = std::sync::Arc::new(ai_deck.commander.clone());
         state
             .deck_pools
             .push(crate::types::game_state::PlayerDeckPool {
                 player: player_id,
-                registered_main: ai_deck.main_deck.clone(),
-                registered_sideboard: ai_deck.sideboard.clone(),
-                current_main: ai_deck.main_deck.clone(),
-                current_sideboard: ai_deck.sideboard.clone(),
-                registered_commander: ai_deck.commander.clone(),
-                current_commander: ai_deck.commander.clone(),
+                registered_main: std::sync::Arc::clone(&main),
+                registered_sideboard: std::sync::Arc::clone(&side),
+                current_main: main,
+                current_sideboard: side,
+                registered_commander: std::sync::Arc::clone(&cmdr),
+                current_commander: cmdr,
             });
     }
 
