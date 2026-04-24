@@ -1884,6 +1884,7 @@ function AbilityChoiceModal() {
     <ChoiceModal
       title={obj.name}
       subtitle={subtitle}
+      previewCardName={obj.name}
       options={pending.actions.map((action, i) => {
         const { label, description } = abilityChoiceLabel(
           action,
