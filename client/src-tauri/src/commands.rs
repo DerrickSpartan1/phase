@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 
 use engine::ai_support::{auto_pass_recommended, legal_actions_full};
+use engine::database::CardDatabase;
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::ManaCost;
 use std::collections::HashMap;
@@ -18,6 +19,12 @@ use phase_ai::config::{create_config_for_players, AiDifficulty, Platform};
 
 pub struct AppState {
     pub game: Mutex<Option<GameState>>,
+    /// Loaded by the frontend at adapter init via `load_card_database`.
+    /// Needed by `initialize_game` so `load_and_hydrate_decks` can populate
+    /// `back_face` on dual-faced cards (Adventure, Omen, MDFC, Transform,
+    /// Meld, Prepare). Without it, dual-faced-card behavior silently no-ops
+    /// on desktop. Mirrors `CARD_DB` in the WASM bridge.
+    pub card_db: Mutex<Option<CardDatabase>>,
 }
 
 #[tauri::command]
@@ -33,20 +40,36 @@ pub fn initialize_game(
 
     if let Some(payload) = deck_data {
         // Canonical init sequence shared with WASM + server-core transports.
-        // Passing `None` here is a known gap: dual-faced cards (Adventure,
-        // Omen, MDFC, Transform, Meld, Prepare) won't have `back_face`
-        // populated on Tauri desktop until an `AppState::card_db` is wired
-        // and threaded through. `load_and_hydrate_decks` emits a `warn!`
-        // so the gap is visible in logs rather than silent.
-        // TODO(#102): load card-data.json into a `CardDatabase` at app
-        // startup and pass it here to unlock dual-faced cards on desktop.
-        load_and_hydrate_decks(&mut game, &payload, None);
+        // Passes the CardDatabase so `load_and_hydrate_decks` can populate
+        // `back_face` on dual-faced cards (Adventure, Omen, MDFC, Transform,
+        // Meld, Prepare). Frontend loads the DB once at adapter startup via
+        // `load_card_database` — if that hasn't happened yet, `db` is None
+        // and `load_and_hydrate_decks` logs a once-per-process warn.
+        let db_guard = state.card_db.lock().map_err(|e| e.to_string())?;
+        load_and_hydrate_decks(&mut game, &payload, db_guard.as_ref());
     }
 
     let result = start_game(&mut game);
     *state.game.lock().map_err(|e| e.to_string())? = Some(game);
 
     Ok(result)
+}
+
+/// Parse `card-data.json` contents into a `CardDatabase` and stash it on
+/// `AppState`. Frontend calls this once at adapter init so `initialize_game`
+/// can rehydrate dual-faced cards. Returns the number of faces loaded so
+/// the frontend can sanity-check the parse. Mirrors the WASM bridge's
+/// `load_card_database`.
+#[tauri::command]
+pub fn load_card_database(
+    state: tauri::State<AppState>,
+    json_str: String,
+) -> Result<u32, String> {
+    let db = CardDatabase::from_json_str(&json_str)
+        .map_err(|e| format!("Failed to parse card database: {e}"))?;
+    let count = db.card_count() as u32;
+    *state.card_db.lock().map_err(|e| e.to_string())? = Some(db);
+    Ok(count)
 }
 
 #[tauri::command]

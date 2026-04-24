@@ -28,6 +28,29 @@ export class TauriAdapter implements EngineAdapter {
     // that would require 'unsafe-eval' in the Tauri CSP.
     const tauriCore = await import("@tauri-apps/api/core");
     this.invoke = tauriCore.invoke as InvokeFn;
+
+    // Ship card-data.json to the Tauri backend once per adapter session so
+    // the Rust CardDatabase is available to `initialize_game`. Without
+    // this, `load_and_hydrate_decks` runs with `db=None` and dual-faced
+    // cards (Adventure, Omen, MDFC, Transform, Meld, Prepare) silently
+    // lose their face-specific behavior on desktop. Same card-data.json
+    // the WASM path fetches — single source of truth.
+    try {
+      const resp = await fetch(__CARD_DATA_URL__);
+      if (resp.ok) {
+        const text = await resp.text();
+        await this.invoke("load_card_database", { jsonStr: text });
+      } else {
+        console.warn(
+          `TauriAdapter: card-data.json fetch failed (${resp.status}); dual-faced cards will be disabled.`,
+        );
+      }
+    } catch (err) {
+      console.warn(
+        "TauriAdapter: card-data.json load failed; dual-faced cards will be disabled.",
+        err,
+      );
+    }
   }
 
   async initializeGame(
