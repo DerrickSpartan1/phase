@@ -6466,6 +6466,39 @@ mod tests {
         )));
     }
 
+    /// CR 603.4 + CR 701.9: "at the beginning of each end step, if an opponent
+    /// discarded a card this turn, ..." — intervening-if must be hoisted as a
+    /// `QuantityComparison` against `OpponentDiscardedCardThisTurn`. Regression
+    /// for Tinybones, Trinket Thief (previously `condition: null`).
+    #[test]
+    fn trigger_intervening_if_opponent_discarded_this_turn() {
+        let def = parse_trigger_line(
+            "At the beginning of each end step, if an opponent discarded a card this turn, you draw a card and you lose 1 life.",
+            "Tinybones, Trinket Thief",
+        );
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::End));
+        let Some(TriggerCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        }) = &def.condition
+        else {
+            panic!(
+                "expected QuantityComparison intervening-if, got {:?}",
+                def.condition
+            );
+        };
+        assert_eq!(*comparator, Comparator::GE);
+        assert_eq!(*rhs, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(
+            *lhs,
+            QuantityExpr::Ref {
+                qty: QuantityRef::OpponentDiscardedCardThisTurn,
+            }
+        );
+    }
+
     // --- ControlCount condition tests ---
 
     #[test]

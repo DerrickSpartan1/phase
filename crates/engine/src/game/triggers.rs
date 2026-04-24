@@ -6441,4 +6441,48 @@ mod dedup_regression_tests {
             "Drivnod must double the observer's dies trigger to 2 instances"
         );
     }
+
+    /// CR 603.4 + CR 701.9: Intervening-if "if an opponent discarded a card this
+    /// turn" evaluates against the per-turn discard set. Verifies both the
+    /// positive (opponent discarded → condition met) and negative (no opponent
+    /// discarded → condition unmet, as well as only-controller-discarded →
+    /// condition unmet) paths for Tinybones, Trinket Thief.
+    #[test]
+    fn intervening_if_opponent_discarded_this_turn_gates_trigger() {
+        use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, TriggerCondition};
+
+        let mut state = GameState::new_two_player(42);
+        let controller = PlayerId(0);
+        let opponent = PlayerId(1);
+
+        let condition = TriggerCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::OpponentDiscardedCardThisTurn,
+            },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        };
+
+        // No one has discarded yet → condition not met.
+        assert!(
+            !check_trigger_condition(&state, &condition, controller, None, None),
+            "empty discard set must fail the intervening-if"
+        );
+
+        // Only the controller discarded → still no opponent discard → condition unmet.
+        state
+            .players_who_discarded_card_this_turn
+            .insert(controller);
+        assert!(
+            !check_trigger_condition(&state, &condition, controller, None, None),
+            "self-discard must not satisfy 'an opponent discarded a card this turn'"
+        );
+
+        // Opponent discarded → condition met.
+        state.players_who_discarded_card_this_turn.insert(opponent);
+        assert!(
+            check_trigger_condition(&state, &condition, controller, None, None),
+            "opponent-discard must satisfy 'an opponent discarded a card this turn'"
+        );
+    }
 }

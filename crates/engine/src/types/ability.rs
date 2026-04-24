@@ -1783,6 +1783,12 @@ pub enum QuantityRef {
     OpponentLifeLostThisTurn,
     /// CR 122.1: Whether the controller added any counter to any permanent this turn.
     CounterAddedThisTurn,
+    /// CR 701.9 + CR 603.4: Whether any opponent of the controller discarded a
+    /// card this turn. Resolves to 1 when at least one opponent is recorded in
+    /// `players_who_discarded_card_this_turn`, else 0. Used by intervening-if
+    /// clauses like "if an opponent discarded a card this turn" (Tinybones,
+    /// Trinket Thief and similar).
+    OpponentDiscardedCardThisTurn,
     /// CR 119: Maximum life total among the controller's opponents.
     /// Used for "an opponent has more life than you" cross-player comparisons.
     OpponentLifeTotal,

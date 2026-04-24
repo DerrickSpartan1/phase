@@ -961,6 +961,20 @@ fn resolve_ref(
                 0
             }
         }
+        // CR 701.9 + CR 603.4: Whether any opponent of the controller discarded
+        // a card this turn. Mirrors OpponentLifeLostThisTurn semantics — scans
+        // the per-turn discard set for any player != controller.
+        QuantityRef::OpponentDiscardedCardThisTurn => {
+            if state
+                .players_who_discarded_card_this_turn
+                .iter()
+                .any(|&p| p != controller)
+            {
+                1
+            } else {
+                0
+            }
+        }
         // CR 119.3: Maximum life total among opponents.
         QuantityRef::OpponentLifeTotal => state
             .players

@@ -929,6 +929,14 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
                 tag("that player lost life this turn"),
             )),
         ),
+        // CR 701.9 + CR 603.4: "an opponent discarded a card this turn"
+        value(
+            make_quantity_ge(QuantityRef::OpponentDiscardedCardThisTurn, 1),
+            alt((
+                tag("an opponent discarded a card this turn"),
+                tag("any opponent discarded a card this turn"),
+            )),
+        ),
         // "you attacked this turn" (without "you've" prefix)
         value(
             make_quantity_ge(QuantityRef::AttackedThisTurn, 1),
