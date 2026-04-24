@@ -667,6 +667,20 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         return Some(def);
     }
 
+    // CR 613.1e + CR 105.1 / CR 105.2c / CR 105.3: "All [subject] are [color(s)]."
+    // — a global color-defining static (Layer 5) that sets every matching object
+    // to a new color or to colorless. Covers Darkest Hour, Thran Lens, Ghostflame
+    // Sliver, and the wider class of "All X are Y" color-setting cards. Must
+    // dispatch AFTER the "are [type] in addition..." branch (that is a
+    // type-addition, not a color set) and AFTER `parse_continuous_gets_has`-driven
+    // branches (those require a verb like "gets"/"has", so they cleanly return
+    // None for "are black" predicates). Must dispatch BEFORE
+    // `parse_land_type_change` — color-rejected "All lands are Plains."-shaped
+    // lines fall through to that branch correctly.
+    if let Some(def) = parse_all_subject_are_color(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 508.1d / CR 509.1c: Subject-scoped "attack/block each combat if able" patterns.
     // These apply MustAttack/MustBlock to a class of creatures (not just self).
     // Compound forms ("attacks or blocks") produce multiple statics; return the first here.
@@ -6699,6 +6713,74 @@ fn parse_all_permanents_are_type(tp: &TextPair<'_>, description: &str) -> Option
     )
 }
 
+/// CR 613.1e + CR 105.1 / CR 105.2c / CR 105.3: Parse "All [subject] are [color(s)]."
+/// — a global color-defining static ability (Layer 5).
+///
+/// - CR 105.1 enumerates the five colors.
+/// - CR 105.2c: "A colorless object has no color." → empty color set.
+/// - CR 105.3 authorizes color-changing effects (new color replaces previous
+///   colors unless the effect says "in addition").
+/// - CR 613.1e places color-changing effects in Layer 5.
+///
+/// Covers the class of "All X are Y" color-setting statics — Darkest Hour
+/// ("All creatures are black."), Thran Lens ("All permanents are colorless."),
+/// Ghostflame Sliver ("All Slivers are colorless."), and every future card
+/// sharing this shape. Composes existing building blocks rather than writing
+/// one-off string dispatch:
+///
+/// - `nom_target::parse_type_filter_word` recognizes every plural core-type
+///   subject (creatures, permanents, lands, artifacts, enchantments,
+///   planeswalkers, battles) AND every plural subtype in the shared subtype
+///   table (Slivers, Elves, Treasures, Zombies, ...).
+/// - `parse_color_predicate` composes a `tag("colorless")` combinator with
+///   the shared `parse_color_list` (giving single colors, "X and Y", and
+///   "X, Y, and Z" forms for free per CR 105.1).
+/// - `typed_filter_for_subtype` routes artifact/land/enchantment subtypes to
+///   their correct core type (e.g., Treasure → Artifact, not Creature).
+///
+/// Dispatch ordering constraints are documented at the call site in
+/// `parse_static_line_inner` and pinned by three regression tests below.
+fn parse_all_subject_are_color(tp: &TextPair<'_>, description: &str) -> Option<StaticDefinition> {
+    let rest_tp = nom_tag_tp(tp, "all ")?;
+    // Subject: single shared combinator for both core types and plural subtypes.
+    let (after_subject, type_filter) = nom_target::parse_type_filter_word(rest_tp.lower).ok()?;
+    // Copula — require " are " with surrounding whitespace so we never eat
+    // words like "aren't" or "area".
+    let after_verb = nom_tag_lower(after_subject, after_subject, " are ")?;
+    // Strip the terminal period (structural cleanup on a post-combinator
+    // chunk — the subject and copula have already been consumed), then the
+    // predicate must fully parse as a color expression or follow-on clauses
+    // route elsewhere.
+    let predicate = after_verb.trim().trim_end_matches('.');
+    let colors = parse_color_predicate(predicate)?;
+
+    let affected = match type_filter {
+        TypeFilter::Subtype(s) => TargetFilter::Typed(typed_filter_for_subtype(&s)),
+        other => TargetFilter::Typed(TypedFilter::new(other)),
+    };
+    Some(
+        StaticDefinition::continuous()
+            .affected(affected)
+            .modifications(vec![ContinuousModification::SetColor { colors }])
+            .description(description.to_string()),
+    )
+}
+
+/// CR 105.1 / CR 105.2c: Parse a color expression terminating an
+/// "All [subject] are ___" static. Accepts either the literal word "colorless"
+/// (→ empty color set, CR 105.2c) or any color list recognized by
+/// `parse_color_list` — single color, "X and Y", or "X, Y, and Z" (CR 105.1).
+/// Input must be fully consumed by the combinator path; trailing content
+/// returns `None` so the outer dispatcher falls through.
+fn parse_color_predicate(text: &str) -> Option<Vec<ManaColor>> {
+    if let Some(rest) = nom_tag_lower(text, text, "colorless") {
+        if rest.is_empty() {
+            return Some(Vec::new());
+        }
+    }
+    parse_color_list(text)
+}
+
 /// CR 305.7: Parse "[Subject] lands are [type]" land type-changing static abilities.
 /// Handles replacement ("Nonbasic lands are Mountains"), additive ("Each land is a
 /// Swamp in addition to its other land types"), and all-basic-types ("Lands you control
@@ -11534,6 +11616,210 @@ mod tests {
                     core_type: crate::types::card_type::CoreType::Enchantment,
                 }),
             "Expected AddType Enchantment"
+        );
+    }
+
+    // --- Group C2: All [subject] are [color] (global color-defining statics) ---
+
+    #[test]
+    fn static_all_creatures_are_black() {
+        // CR 613.1e + CR 105.1: Darkest Hour — "All creatures are black."
+        let def = parse_static_line("All creatures are black.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "Expected Creature type filter, got {:?}",
+                tf.type_filters
+            );
+        } else {
+            panic!("Expected Typed filter, got {:?}", def.affected);
+        }
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor {
+                colors: vec![ManaColor::Black]
+            }]
+        );
+    }
+
+    #[test]
+    fn static_all_permanents_are_colorless() {
+        // CR 613.1e + CR 105.2c: Thran Lens — "All permanents are colorless."
+        let def = parse_static_line("All permanents are colorless.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Permanent),
+                "Expected Permanent type filter, got {:?}",
+                tf.type_filters
+            );
+        } else {
+            panic!("Expected Typed filter, got {:?}", def.affected);
+        }
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor { colors: vec![] }]
+        );
+    }
+
+    #[test]
+    fn static_all_slivers_are_colorless() {
+        // CR 613.1e + CR 105.2c: Ghostflame Sliver — "All Slivers are colorless."
+        // Plural subtype path: parse_subtype canonicalizes "Slivers" → "Sliver".
+        let def = parse_static_line("All Slivers are colorless.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype("Sliver".to_string())),
+                "Expected Sliver subtype filter, got {:?}",
+                tf.type_filters
+            );
+        } else {
+            panic!("Expected Typed filter, got {:?}", def.affected);
+        }
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor { colors: vec![] }]
+        );
+    }
+
+    #[test]
+    fn static_all_subject_are_color_does_not_eat_get_plus_lines() {
+        // Regression guard: "All creatures get +1/+1." must still reach the
+        // gets_has branch, not be swallowed by the color-set handler.
+        let def = parse_static_line("All creatures get +1/+1.").unwrap();
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 1 }));
+        for m in &def.modifications {
+            assert!(
+                !matches!(m, ContinuousModification::SetColor { .. }),
+                "Unexpected SetColor in gets-pump line, got {:?}",
+                def.modifications
+            );
+        }
+    }
+
+    #[test]
+    fn static_all_subject_are_color_rejects_in_addition_type_form() {
+        // Regression guard: "All permanents are artifacts in addition to ..."
+        // must route to parse_all_permanents_are_type (AddType), not be mis-parsed
+        // here. parse_color_predicate rejects the trailing " in addition..." suffix
+        // because it's not a bare color word.
+        let def =
+            parse_static_line("All permanents are artifacts in addition to their other types.")
+                .unwrap();
+        for m in &def.modifications {
+            assert!(
+                !matches!(m, ContinuousModification::SetColor { .. }),
+                "Unexpected SetColor for type-addition line, got {:?}",
+                def.modifications
+            );
+        }
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Artifact,
+            }));
+    }
+
+    #[test]
+    fn static_all_elves_are_green() {
+        // CR 613.1e + CR 105.1: non-black, non-colorless color on a plural
+        // creature subtype — exercises the parse_color_list single-color path
+        // plus typed_filter_for_subtype routing.
+        let def = parse_static_line("All Elves are green.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Creature),
+                "Expected Creature type filter (Elves route via typed_filter_for_subtype), \
+                 got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype("Elf".to_string())),
+                "Expected Elf subtype filter, got {:?}",
+                tf.type_filters
+            );
+        } else {
+            panic!("Expected Typed filter, got {:?}", def.affected);
+        }
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor {
+                colors: vec![ManaColor::Green]
+            }]
+        );
+    }
+
+    #[test]
+    fn static_all_treasures_are_colorless() {
+        // CR 613.1e + CR 105.2c: artifact-subtype subject — `typed_filter_for_subtype`
+        // must route Treasure → Artifact core type, not default to Creature.
+        let def = parse_static_line("All Treasures are colorless.").unwrap();
+        if let Some(TargetFilter::Typed(ref tf)) = def.affected {
+            assert!(
+                tf.type_filters.contains(&TypeFilter::Artifact),
+                "Expected Artifact core type for Treasures, got {:?}",
+                tf.type_filters
+            );
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Subtype("Treasure".to_string())),
+                "Expected Treasure subtype filter, got {:?}",
+                tf.type_filters
+            );
+        } else {
+            panic!("Expected Typed filter, got {:?}", def.affected);
+        }
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor { colors: vec![] }]
+        );
+    }
+
+    #[test]
+    fn static_all_creatures_are_white_and_blue() {
+        // CR 105.1: multi-color predicate via parse_color_list. Verifies the
+        // predicate path is not limited to single colors.
+        let def = parse_static_line("All creatures are white and blue.").unwrap();
+        assert_eq!(
+            def.modifications,
+            vec![ContinuousModification::SetColor {
+                colors: vec![ManaColor::White, ManaColor::Blue]
+            }]
+        );
+    }
+
+    #[test]
+    fn static_all_subject_are_color_falls_through_to_land_type_change() {
+        // Regression guard: "All lands are Plains." has a non-color predicate,
+        // so parse_color_predicate must reject and allow the outer dispatcher
+        // to continue through to parse_land_type_change. Expect SetBasicLandType
+        // (or equivalent land-type machinery) — not SetColor.
+        let def = parse_static_line("All lands are Plains.").unwrap();
+        assert!(
+            !def.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::SetColor { .. })),
+            "land type-change line must not produce SetColor, got {:?}",
+            def.modifications
+        );
+        assert!(
+            def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::SetBasicLandType { .. }
+                    | ContinuousModification::AddSubtype { .. }
+            )),
+            "expected a land-type modification, got {:?}",
+            def.modifications
         );
     }
 
