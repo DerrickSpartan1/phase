@@ -2712,6 +2712,61 @@ mod tests {
     }
 
     #[test]
+    fn ashlings_command_modal_target_player_creates_tokens_carries_player_filter() {
+        // CR 111.2 + CR 601.2c: Each "Target player creates ..." mode-clause
+        // of a modal spell is an independent target chosen during spell
+        // announcement. Mode 4 of Ashling's Command MUST surface a Player
+        // filter on the parsed Token effect's `owner` field so
+        // `collect_target_slots` emits an independent slot per token mode
+        // (otherwise the caster always creates the tokens).
+        let r = parse(
+            "Choose two —\n\
+             • Create a token that's a copy of target Elemental you control.\n\
+             • Target player draws two cards.\n\
+             • Ashling's Command deals 2 damage to each creature target player controls.\n\
+             • Target player creates two Treasure tokens.",
+            "Ashling's Command",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        fn find_token(
+            ab: &crate::types::ability::AbilityDefinition,
+        ) -> Option<&crate::types::ability::TargetFilter> {
+            if let Effect::Token { owner, .. } = &*ab.effect {
+                return Some(owner);
+            }
+            ab.sub_ability.as_deref().and_then(find_token)
+        }
+        // Find a Token effect whose owner is `Player` (mode 4). Mode 1 also
+        // creates a token but its owner is `Controller`, so we keep searching.
+        let mut owner_target = None;
+        for ab in &r.abilities {
+            // Walk the entire chain, collecting any Player-owner Token we see.
+            let mut cur: Option<&crate::types::ability::AbilityDefinition> = Some(ab);
+            while let Some(node) = cur {
+                if let Some(t) = find_token(node) {
+                    if matches!(t, TargetFilter::Player) {
+                        owner_target = Some(t);
+                        break;
+                    }
+                }
+                cur = node.sub_ability.as_deref();
+            }
+            if owner_target.is_some() {
+                break;
+            }
+        }
+        let target = owner_target
+            .expect("expected a Token effect with TargetFilter::Player owner in the modal chain");
+        assert!(
+            matches!(target, TargetFilter::Player),
+            "Mode 4 Token must carry owner=TargetFilter::Player so each modal \
+             mode surfaces an independent target slot, got {target:?}",
+        );
+    }
+
+    #[test]
     fn non_spell_conditional_sentence_routes_to_effect_parser() {
         let r = parse(
             "If you sacrificed a Food this turn, draw a card.",

@@ -4177,6 +4177,13 @@ impl Effect {
 
             Effect::ExileTop { player, .. } => Some(player),
 
+            // CR 111.2 + CR 601.2c: "Target player creates ..." token modes
+            // (e.g. Ashling's Command mode 4, Brigid's Command, Prismari Command)
+            // surface their token-creation target as the `owner` filter — the
+            // player who creates the token is its owner. The default
+            // `TargetFilter::Controller` preserves "you create ..." semantics.
+            Effect::Token { owner, .. } => Some(owner),
+
             // GenericEffect and LoseLife have Option<TargetFilter>
             Effect::GenericEffect { target, .. } | Effect::LoseLife { target, .. } => {
                 target.as_ref()
@@ -4186,7 +4193,6 @@ impl Effect {
             // These use filters, zone-level operations, or have no targeting at all.
             Effect::StartYourEngines { .. }
             | Effect::IncreaseSpeed { .. }
-            | Effect::Token { .. }
             | Effect::GainLife { .. }
             | Effect::Scry { .. }
             | Effect::PumpAll { .. }

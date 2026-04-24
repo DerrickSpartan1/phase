@@ -2033,6 +2033,74 @@ mod tests {
     }
 
     #[test]
+    fn chained_token_player_plus_damageall_targetplayer_assigns_both_targets() {
+        // CR 111.2 + CR 601.2c: Mirror of the Draw chain test for the Token
+        // owner-target pathway. With Token{owner: Player} as mode 4 of a modal
+        // spell paired with DamageAll{controller: TargetPlayer} as mode 3,
+        // collect_target_slots must surface 2 slots (one per mode) and
+        // assign_targets_in_chain must distribute both selected players —
+        // one to Token.targets, one to DamageAll.targets.
+        let mode_token = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Token {
+                name: "Treasure".to_string(),
+                power: crate::types::ability::PtValue::Fixed(0),
+                toughness: crate::types::ability::PtValue::Fixed(0),
+                types: vec!["Artifact".to_string(), "Treasure".to_string()],
+                colors: vec![],
+                keywords: vec![],
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 2 },
+                owner: TargetFilter::Player,
+                attach_to: None,
+                enters_attacking: false,
+                supertypes: vec![],
+                static_abilities: vec![],
+                enter_with_counters: vec![],
+            },
+        );
+        let mode_damageall = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::TargetPlayer),
+                ),
+                player_filter: None,
+            },
+        );
+
+        let abilities = vec![mode_token, mode_damageall];
+        let mut chain =
+            build_chained_resolved(&abilities, &[0, 1], ObjectId(1), PlayerId(0)).unwrap();
+
+        let p_a = TargetRef::Player(PlayerId(0));
+        let p_b = TargetRef::Player(PlayerId(1));
+        let result = assign_targets_in_chain(&mut chain, &[p_a.clone(), p_b.clone()]);
+        assert!(
+            result.is_ok(),
+            "assigning two player targets to [Token{{Player}}, DamageAll{{TargetPlayer}}] \
+             chain must succeed, got {result:?}"
+        );
+
+        // Token root should have first selected player.
+        assert_eq!(
+            chain.targets,
+            vec![p_a.clone()],
+            "Token should get target 0"
+        );
+        let sub = chain
+            .sub_ability
+            .as_deref()
+            .expect("sub_ability must exist");
+        assert_eq!(
+            sub.targets,
+            vec![p_b],
+            "DamageAll should get target 1 (the second player slot)"
+        );
+    }
+
+    #[test]
     fn build_resolved_copies_optional_targeting() {
         let def = AbilityDefinition::new(
             AbilityKind::Activated,
