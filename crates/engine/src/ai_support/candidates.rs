@@ -1947,7 +1947,7 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
                 .players
                 .iter()
                 .find(|p| p.id == player)
-                .map(|p| p.graveyard.to_vec())
+                .map(|p| p.graveyard.iter().copied().collect::<Vec<_>>())
                 .unwrap_or_default();
             let any_color =
                 crate::game::static_abilities::player_can_spend_as_any_color(state, player);
@@ -2242,7 +2242,7 @@ fn named_choice_actions(
 
 fn bottom_card_actions(state: &GameState, player: PlayerId, count: u8) -> Vec<CandidateAction> {
     let p = &state.players[player.0 as usize];
-    let hand: Vec<_> = p.hand.clone();
+    let hand: Vec<_> = p.hand.iter().copied().collect();
 
     if count == 0 || hand.is_empty() {
         return vec![candidate(

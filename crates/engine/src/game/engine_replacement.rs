@@ -636,7 +636,7 @@ mod tests {
                 .description("Shield".to_string()),
         );
         state.objects.insert(id, obj);
-        state.battlefield.push(id);
+        state.battlefield.push_back(id);
         id
     }
 
@@ -802,7 +802,7 @@ mod tests {
                 .description("Rest in Peace".to_string()),
         );
         state.objects.insert(rip_id, rip);
-        state.battlefield.push(rip_id);
+        state.battlefield.push_back(rip_id);
 
         // Surface the outer Destroy replacement choice to the player.
         let mut events = Vec::new();

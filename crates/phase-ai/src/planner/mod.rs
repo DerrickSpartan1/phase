@@ -1035,7 +1035,7 @@ mod tests {
         }
 
         // Put the creature on the stack
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: creature_id,
             source_id: creature_id,
             controller: PlayerId(0),
@@ -1125,7 +1125,7 @@ mod tests {
         state_b.players[0].hand.retain(|&id| id != creature_in_hand);
         let obj = state_b.objects.get_mut(&creature_in_hand).unwrap();
         obj.zone = Zone::Stack;
-        state_b.stack.push(StackEntry {
+        state_b.stack.push_back(StackEntry {
             id: creature_in_hand,
             source_id: creature_in_hand,
             controller: PlayerId(0),

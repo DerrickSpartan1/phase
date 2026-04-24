@@ -536,7 +536,7 @@ pub(crate) fn deterministic_choice(
             .get(player)
             .unwrap_or(&default_features);
         let plan = ctx.session.plan.get(player).unwrap_or(&default_plan);
-        let hand = state.players[player.0 as usize].hand.clone();
+        let hand: Vec<_> = state.players[player.0 as usize].hand.iter().copied().collect();
         let turn_order = crate::policies::mulligan::turn_order_for(state, *player);
         let decision = crate::policies::mulligan::MulliganRegistry::default().evaluate_hand(
             &hand,

@@ -244,7 +244,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 606.3: Loyalty abilities may be activated only once per turn per permanent.
     let active = state.active_player;
-    for obj in state.objects.values_mut() {
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
         if obj.controller == active && obj.loyalty_activated_this_turn {
             obj.loyalty_activated_this_turn = false;
         }
@@ -582,7 +582,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // CR 701.19b: Regeneration shields expire at cleanup.
     // CR 615: Prevention effects also expire.
     // Also prune any consumed shields from earlier this turn.
-    for obj in state.objects.values_mut() {
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
         obj.replacement_definitions
             .retain(|r| !r.shield_kind.is_shield());
     }
@@ -647,7 +647,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
         let hand_size = player.hand.len();
         if hand_size > max_hand_size {
             let count = hand_size - max_hand_size;
-            let cards = player.hand.clone();
+            let cards = player.hand.iter().copied().collect();
             return Some(WaitingFor::DiscardToHandSize {
                 player: active,
                 count,
@@ -681,7 +681,7 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // CR 702.171b: "Once a permanent has become saddled, it stays saddled until
     // the end of the turn or it leaves the battlefield." Clear the designation
     // at cleanup (CR 514).
-    for obj in state.objects.values_mut() {
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
         if obj.is_saddled {
             obj.is_saddled = false;
         }
@@ -2240,7 +2240,7 @@ mod tests {
         }
         obj.replacement_definitions = vec![def].into();
         state.objects.insert(obj_id, obj);
-        state.battlefield.push(obj_id);
+        state.battlefield.push_back(obj_id);
     }
 
     #[test]
@@ -2353,7 +2353,7 @@ mod tests {
         )]
         .into();
         state.objects.insert(ObjectId(200), obj);
-        state.battlefield.push(ObjectId(200));
+        state.battlefield.push_back(ObjectId(200));
 
         let mut events = Vec::new();
 

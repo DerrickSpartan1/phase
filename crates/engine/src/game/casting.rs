@@ -230,7 +230,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
         .find(|p| p.id == player)
         .expect("player exists");
 
-    let mut objects = player_data.hand.clone();
+    let mut objects: Vec<ObjectId> = player_data.hand.iter().copied().collect();
     if state.format_config.command_zone {
         objects.extend(
             state
@@ -242,7 +242,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
     }
 
     // CR 715.3d: Cards in exile with casting permissions are castable by their owner.
-    objects.extend(state.exile.iter().filter(|&&obj_id| {
+    objects.extend(state.exile.iter().copied().filter(|&obj_id| {
         state.objects.get(&obj_id).is_some_and(|obj| {
             obj.owner == player && has_exile_cast_permission(obj, state.turn_number)
         })
@@ -250,7 +250,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
 
     // CR 601.2a: Opponent's exiled cards with ExileWithAltCost are castable by any player.
     // CastFromZone effects (e.g. Silent-Blade Oni, Etali) grant these permissions.
-    objects.extend(state.exile.iter().filter(|&&obj_id| {
+    objects.extend(state.exile.iter().copied().filter(|&obj_id| {
         state
             .objects
             .get(&obj_id)
@@ -259,7 +259,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
 
     // CR 702.34 / CR 702.138 / CR 702.180: Cards in graveyard with graveyard-cast keywords.
     // Escape requires enough other graveyard cards to exile; Flashback and Harmonize have no such restriction.
-    objects.extend(player_data.graveyard.iter().filter(|&&obj_id| {
+    objects.extend(player_data.graveyard.iter().copied().filter(|&obj_id| {
         state.objects.get(&obj_id).is_some_and(|obj| {
             obj.owner == player
                 && has_effective_graveyard_cast_keyword(state, obj_id, obj)
@@ -5505,7 +5505,7 @@ mod tests {
         add_mana(&mut state, PlayerId(0), ManaType::Blue, 3);
 
         // Put something on the stack
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: ObjectId(99),
             source_id: ObjectId(99),
             controller: PlayerId(1),
@@ -6911,7 +6911,7 @@ mod tests {
             obj.power = Some(2);
             obj.toughness = Some(2);
         }
-        state.battlefield.push(creature);
+        state.battlefield.push_back(creature);
 
         let mut events = Vec::new();
         let result =
@@ -7169,7 +7169,7 @@ mod tests {
             swap_to_adventure_face(obj);
         }
 
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: obj_id,
             source_id: obj_id,
             controller: PlayerId(0),
@@ -7219,7 +7219,7 @@ mod tests {
 
         // Manually put an Adventure spell on the stack
         zones::move_to_zone(&mut state, obj_id, Zone::Stack, &mut Vec::new());
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: obj_id,
             source_id: obj_id,
             controller: PlayerId(0),
@@ -7241,7 +7241,7 @@ mod tests {
         });
 
         // Counter the spell (remove from stack, move to graveyard)
-        state.stack.pop();
+        state.stack.pop_back();
         zones::move_to_zone(&mut state, obj_id, Zone::Graveyard, &mut Vec::new());
 
         // Card should be in graveyard, NOT exile
@@ -7986,7 +7986,7 @@ mod tests {
             let obj = state.objects.get_mut(&creature_spell).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
         }
-        state.stack.push(StackEntry {
+        state.stack.push_back(StackEntry {
             id: creature_spell,
             source_id: creature_spell,
             controller: PlayerId(1),
@@ -10272,7 +10272,7 @@ mod tests {
             obj.base_keywords = obj.keywords.clone();
             // Ensure graveyard list is consistent.
             if !state.players[0].graveyard.contains(&sneak_card_id) {
-                state.players[0].graveyard.push(sneak_card_id);
+                state.players[0].graveyard.push_back(sneak_card_id);
             }
         }
 
@@ -10391,7 +10391,7 @@ mod tests {
                 shards: vec![],
             };
             if !state.players[0].graveyard.contains(&plain_card) {
-                state.players[0].graveyard.push(plain_card);
+                state.players[0].graveyard.push_back(plain_card);
             }
         }
         let card_id = state.objects.get(&plain_card).unwrap().card_id;

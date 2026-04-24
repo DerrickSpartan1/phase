@@ -281,7 +281,7 @@ mod auto_pass_decision_tests {
         // Opponent spell/trigger on top must interrupt auto-pass so the player
         // always gets a chance to respond.
         let mut state = GameState::default();
-        state.stack.push(stack_entry(PlayerId(1)));
+        state.stack.push_back(stack_entry(PlayerId(1)));
         state
             .auto_pass
             .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
@@ -292,7 +292,7 @@ mod auto_pass_decision_tests {
     fn until_end_of_turn_passes_through_own_stack_activity() {
         // MTGA-style: resolve your own spells without pausing.
         let mut state = GameState::default();
-        state.stack.push(stack_entry(PlayerId(0)));
+        state.stack.push_back(stack_entry(PlayerId(0)));
         state
             .auto_pass
             .insert(PlayerId(0), AutoPassMode::UntilEndOfTurn);
@@ -6211,7 +6211,7 @@ mod tests {
 
             // Try with non-empty stack - should fail
             state.phase = Phase::PreCombatMain;
-            state.stack.push(crate::types::game_state::StackEntry {
+            state.stack.push_back(crate::types::game_state::StackEntry {
                 id: ObjectId(99),
                 source_id: ObjectId(99),
                 controller: PlayerId(1),
@@ -8228,7 +8228,7 @@ mod phase_trigger_regression_tests {
             .card_types
             .core_types
             .push(CoreType::Creature);
-        state.stack.push(crate::types::game_state::StackEntry {
+        state.stack.push_back(crate::types::game_state::StackEntry {
             id: creature_spell,
             source_id: creature_spell,
             controller: PlayerId(0),
@@ -10523,7 +10523,7 @@ mod keyword_action_stack_tests {
     fn simulate_counter_top_of_stack(state: &mut GameState) {
         let popped = state
             .stack
-            .pop()
+            .pop_back()
             .expect("stack must have an entry to counter");
         assert!(
             matches!(

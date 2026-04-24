@@ -1934,17 +1934,17 @@ pub struct GameState {
     pub turn_decision_controller: Option<PlayerId>,
 
     // Central object store
-    pub objects: HashMap<ObjectId, GameObject>,
+    pub objects: im::HashMap<ObjectId, GameObject>,
     pub next_object_id: u64,
 
     // Shared zones
-    pub battlefield: Vec<ObjectId>,
-    pub stack: Vec<StackEntry>,
-    pub exile: Vec<ObjectId>,
+    pub battlefield: im::Vector<ObjectId>,
+    pub stack: im::Vector<StackEntry>,
+    pub exile: im::Vector<ObjectId>,
 
     /// Objects in the command zone (commanders, emblems).
     #[serde(default)]
-    pub command_zone: Vec<ObjectId>,
+    pub command_zone: im::Vector<ObjectId>,
 
     // RNG
     pub rng_seed: u64,
@@ -2483,12 +2483,12 @@ impl GameState {
             players,
             priority_player: PlayerId(0),
             turn_decision_controller: None,
-            objects: HashMap::new(),
+            objects: im::HashMap::new(),
             next_object_id: 1,
-            battlefield: Vec::new(),
-            stack: Vec::new(),
-            exile: Vec::new(),
-            command_zone: Vec::new(),
+            battlefield: im::Vector::new(),
+            stack: im::Vector::new(),
+            exile: im::Vector::new(),
+            command_zone: im::Vector::new(),
             rng_seed: seed,
             rng: ChaCha20Rng::seed_from_u64(seed),
             combat: None,
