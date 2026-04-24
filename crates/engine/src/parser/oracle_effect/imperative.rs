@@ -227,10 +227,12 @@ pub(super) fn parse_numeric_imperative_ast(
             // quantity parser so "that much" resolves to `EventContextAmount`
             // rather than defaulting to 1.
             let after_lower = after_gain.to_ascii_lowercase();
-            let amount_phrase = after_lower
-                .split_once(" life")
-                .map(|(before, _)| before.trim())
-                .unwrap_or(after_lower.trim_end_matches('.').trim());
+            let amount_phrase = take_until::<_, _, VerboseError<&str>>(" life")
+                .parse(after_lower.as_str())
+                .map(|(_, before)| before.trim())
+                .unwrap_or_else(|_: nom::Err<VerboseError<&str>>| {
+                    after_lower.trim_end_matches('.').trim()
+                });
             if let Some(qty) =
                 crate::parser::oracle_quantity::parse_event_context_quantity(amount_phrase)
             {
@@ -269,10 +271,12 @@ pub(super) fn parse_numeric_imperative_ast(
             .unwrap_or("");
             if !after_verb.is_empty() {
                 let after_lower = after_verb.to_ascii_lowercase();
-                let amount_phrase = after_lower
-                    .split_once(" life")
-                    .map(|(b, _)| b.trim())
-                    .unwrap_or(after_lower.trim_end_matches('.').trim());
+                let amount_phrase = take_until::<_, _, VerboseError<&str>>(" life")
+                    .parse(after_lower.as_str())
+                    .map(|(_, before)| before.trim())
+                    .unwrap_or_else(|_: nom::Err<VerboseError<&str>>| {
+                        after_lower.trim_end_matches('.').trim()
+                    });
                 if let Some(qty) =
                     crate::parser::oracle_quantity::parse_event_context_quantity(amount_phrase)
                 {

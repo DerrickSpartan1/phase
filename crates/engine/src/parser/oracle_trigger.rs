@@ -1042,9 +1042,11 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     // and hard-casts both satisfy the gate (per the WotC ruling: "causes you
     // to sacrifice it if you didn't cast it, or if it was cast using any
     // permission other than an escape ability").
-    if let Some(pos) = tp.find("unless it escaped") {
+    if let Some((prefix, _)) = scan_split_at_phrase(&lower, |i| {
+        tag::<_, _, VerboseError<&str>>("unless it escaped").parse(i)
+    }) {
         return (
-            strip_condition_clause(text, pos, "unless it escaped".len()),
+            strip_condition_clause(text, prefix.len(), "unless it escaped".len()),
             Some(TriggerCondition::CastVariantPaid {
                 variant: CastVariantPaid::Escape,
                 negated: true,
@@ -2260,6 +2262,51 @@ fn parse_damage_to_qualifier(after_verb: &str) -> Option<TargetFilter> {
         .map(|(_, filter)| filter)
 }
 
+/// CR 603.6a + CR 611.2b: After consuming the `"enter"` prefix in a ChangesZone
+/// trigger clause, recognize an optional tapped-state rider — `"enters tapped"`
+/// or `"enters untapped"` — and produce the corresponding intervening-if
+/// condition so the trigger only fires when the source's post-ETB tapped state
+/// matches.
+///
+/// The `input` here is the remainder after `tag("enter")`, so the rider begins
+/// with `"s "` (the rest of "enters" plus a space) followed by the state word.
+/// A trailing word-boundary check ensures we don't swallow `"untapped creatures"`
+/// or similar accidental prefix matches — only an exact phrase terminator
+/// (end-of-string, space, or punctuation) is accepted.
+///
+/// Covers the Throne of Eldraine dual-land cycle triggers
+/// (Gingerbread Cabin, Idyllic Grange, Dwarven Mine, Mystic Sanctuary,
+/// Witch's Cottage), Charismatic Conqueror's untapped-ETB trigger, and the
+/// parallel `"enters tapped"` class (Amulet of Vigor, Tiller Engine).
+fn parse_enters_tapped_state_rider(input: &str) -> Option<TriggerCondition> {
+    // Must start with "s " (completing the "enters" event verb) followed by
+    // the state word. Using nom tags keeps dispatch structural, not string-
+    // matched.
+    let (after_state, negated) = preceded(
+        tag::<_, _, VerboseError<&str>>("s "),
+        alt((
+            value(true, tag::<_, _, VerboseError<&str>>("untapped")),
+            value(false, tag::<_, _, VerboseError<&str>>("tapped")),
+        )),
+    )
+    .parse(input)
+    .ok()?;
+
+    // Word-boundary: reject false prefix matches like "untapped creatures".
+    // Accept end-of-string or any non-alphanumeric terminator (space, comma,
+    // period, etc.).
+    if !after_state.is_empty()
+        && after_state
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_')
+    {
+        return None;
+    }
+
+    Some(TriggerCondition::SourceIsTapped { negated })
+}
+
 /// Try to parse an event verb and build a TriggerDefinition from subject + event.
 fn try_parse_event(
     subject: &TargetFilter,
@@ -2296,7 +2343,7 @@ fn try_parse_event(
     }
 
     // "enters [the battlefield]" / "enter [the battlefield]" (plural for "one or more" subjects)
-    if tag::<_, _, VerboseError<&str>>("enter").parse(rest).is_ok() {
+    if let Ok((after_enter, ())) = value((), tag::<_, _, VerboseError<&str>>("enter")).parse(rest) {
         let mut def = make_base();
         def.mode = TriggerMode::ChangesZone;
         def.destination = Some(Zone::Battlefield);
@@ -2306,6 +2353,18 @@ fn try_parse_event(
         let rest_lower = rest.to_lowercase();
         if scan_contains(&rest_lower, "from your hand") {
             def.origin = Some(Zone::Hand);
+        }
+
+        // CR 603.6a + CR 611.2b: "enters untapped" / "enters tapped" — conditional
+        // ETB trigger gated on the source's tapped state at resolution time. The
+        // tapped-state check examines the object after ETB replacement effects
+        // (e.g. "enters tapped unless you control three or more Forests") have
+        // resolved, per CR 603.6a's "check at the moment the event fires". The
+        // `SourceIsTapped` runtime evaluator (game/triggers.rs) inspects
+        // `obj.tapped` on the triggering object, which by then reflects the
+        // post-replacement state.
+        if let Some(cond) = parse_enters_tapped_state_rider(after_enter) {
+            def.condition = Some(cond);
         }
 
         return Some((TriggerMode::ChangesZone, def));
@@ -5418,6 +5477,80 @@ mod tests {
         assert_eq!(def.destination, Some(Zone::Battlefield));
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
         assert!(def.execute.is_some());
+    }
+
+    // CR 603.6a + CR 611.2b: "When this land enters untapped, ..." — Gingerbread
+    // Cabin class. The trigger must carry `SourceIsTapped { negated: true }` so
+    // it only fires when the ETB-tapped replacement did NOT apply.
+    #[test]
+    fn trigger_etb_self_enters_untapped_attaches_condition() {
+        let def = parse_trigger_line(
+            "When this land enters untapped, create a Food token.",
+            "Gingerbread Cabin",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::SourceIsTapped { negated: true })
+        );
+        assert!(def.execute.is_some());
+    }
+
+    // CR 603.6a + CR 611.2b: "Whenever a permanent you control enters tapped, ..." —
+    // Amulet of Vigor class. The `enters tapped` rider must set
+    // `SourceIsTapped { negated: false }` (fires only when entering tapped).
+    #[test]
+    fn trigger_etb_subject_enters_tapped_attaches_condition() {
+        let def = parse_trigger_line(
+            "Whenever a permanent you control enters tapped, untap it.",
+            "Amulet of Vigor",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::SourceIsTapped { negated: false })
+        );
+    }
+
+    // Guard: a bare "enters" (no tapped-state rider) must NOT attach a
+    // SourceIsTapped condition.
+    #[test]
+    fn trigger_etb_bare_enters_has_no_tapped_condition() {
+        let def = parse_trigger_line(
+            "When this creature enters, draw a card.",
+            "Elvish Visionary",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert!(
+            !matches!(def.condition, Some(TriggerCondition::SourceIsTapped { .. })),
+            "bare `enters` must not attach SourceIsTapped; got {:?}",
+            def.condition
+        );
+    }
+
+    // Word-boundary guard: "enters untapped creatures" (hypothetical) must not
+    // accidentally match — the combinator requires a terminator after the
+    // state word.
+    #[test]
+    fn trigger_etb_untapped_rider_requires_word_boundary() {
+        assert!(parse_enters_tapped_state_rider("s untappedness").is_none());
+        assert!(parse_enters_tapped_state_rider("s tappedly").is_none());
+        // Valid terminators:
+        assert_eq!(
+            parse_enters_tapped_state_rider("s untapped"),
+            Some(TriggerCondition::SourceIsTapped { negated: true })
+        );
+        assert_eq!(
+            parse_enters_tapped_state_rider("s untapped "),
+            Some(TriggerCondition::SourceIsTapped { negated: true })
+        );
+        assert_eq!(
+            parse_enters_tapped_state_rider("s tapped,"),
+            Some(TriggerCondition::SourceIsTapped { negated: false })
+        );
     }
 
     // B1: ETB-rider combinator for "~ enters prepared.". Must synthesize the
