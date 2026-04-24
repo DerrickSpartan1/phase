@@ -310,6 +310,11 @@ impl GameScenario {
         obj.base_power = Some(power);
         obj.base_toughness = Some(toughness);
         obj.entered_battlefield_turn = Some(entered_turn);
+        // CR 302.6: Scenario builder places pre-existing creatures (entered
+        // on a prior turn), so they are not summoning-sick. `create_object`
+        // sets the flag true for battlefield ETB; override here to match
+        // the "already on battlefield" semantics the builder expresses.
+        obj.summoning_sick = false;
         obj.timestamp = ts;
 
         CardBuilder {
@@ -351,6 +356,8 @@ impl GameScenario {
         obj.card_types.supertypes.push(Supertype::Basic);
         obj.base_card_types = obj.card_types.clone();
         obj.entered_battlefield_turn = Some(self.state.turn_number.saturating_sub(1));
+        // Pre-existing land — see `add_creature` for the parallel rationale.
+        obj.summoning_sick = false;
         // Add mana ability
         let ability = AbilityDefinition::new(
             AbilityKind::Activated,
@@ -769,7 +776,9 @@ impl<'a> CardBuilder<'a> {
     /// Mark this creature as having summoning sickness (entered this turn).
     pub fn with_summoning_sickness(&mut self) -> &mut Self {
         let turn = self.state.turn_number;
-        self.obj().entered_battlefield_turn = Some(turn);
+        let obj = self.obj();
+        obj.entered_battlefield_turn = Some(turn);
+        obj.summoning_sick = true;
         self
     }
 

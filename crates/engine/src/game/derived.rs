@@ -19,7 +19,6 @@ use crate::types::statics::StaticMode;
 /// - `GameObject::commander_tax` (CR 903.8 commander tax)
 /// - `Player::can_look_at_top_of_library`
 pub fn derive_display_state(state: &mut GameState) {
-    let turn = state.turn_number;
     let dirty = &state.public_state_dirty;
 
     let object_ids: Vec<_> = if dirty.all_objects_dirty {
@@ -50,7 +49,7 @@ pub fn derive_display_state(state: &mut GameState) {
             (
                 unimplemented_mechanics(obj),
                 // CR 302.6: Creature must have been under controller's control since turn began to attack or {T}.
-                has_summoning_sickness(obj, turn),
+                has_summoning_sickness(obj),
                 mana_idx,
             )
         };
@@ -257,14 +256,15 @@ mod tests {
             "Bear".to_string(),
             Zone::Battlefield,
         );
-        state
-            .objects
-            .get_mut(&id)
-            .unwrap()
-            .card_types
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types
             .core_types
             .push(crate::types::card_type::CoreType::Creature);
-        state.objects.get_mut(&id).unwrap().entered_battlefield_turn = Some(1);
+        obj.entered_battlefield_turn = Some(1);
+        // CR 302.6: State-flip model — ETB-time sickness is a persistent flag,
+        // set true on real ETB by `reset_for_battlefield_entry`. The test uses
+        // `create_object` (scaffolding path) so we set it explicitly here.
+        obj.summoning_sick = true;
 
         derive_display_state(&mut state);
 
@@ -290,6 +290,7 @@ mod tests {
             .core_types
             .push(crate::types::card_type::CoreType::Creature);
         state.objects.get_mut(&id).unwrap().entered_battlefield_turn = Some(1);
+        // `summoning_sick` defaults to false — "old creature, not sick".
 
         derive_display_state(&mut state);
 

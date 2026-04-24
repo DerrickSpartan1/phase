@@ -155,7 +155,14 @@ pub fn create_object(
     state.objects.insert(id, obj);
     add_to_zone(state, id, zone, owner);
 
-    // CR 302.6 + CR 403.4: Track when objects enter the battlefield (for summoning sickness).
+    // CR 302.6 + CR 403.4: Record ETB turn as a global counter (used by
+    // "this turn" triggers and filters). NOTE: this helper is used both for
+    // initial test/scenario setup and for a few synthesis paths. The
+    // summoning-sickness flag (`summoning_sick`) is NOT set here — it's set
+    // on the real ETB pipeline via `GameObject::reset_for_battlefield_entry`
+    // (invoked by `move_to_zone`). This keeps test scaffolding that places
+    // "pre-existing" creatures directly on the battlefield (before any turn
+    // has run) from spuriously starting sick.
     if zone == Zone::Battlefield {
         if let Some(obj) = state.objects.get_mut(&id) {
             obj.entered_battlefield_turn = Some(state.turn_number);

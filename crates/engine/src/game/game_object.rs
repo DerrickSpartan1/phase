@@ -183,8 +183,20 @@ pub struct GameObject {
     // Timestamp for layer ordering
     pub timestamp: u64,
 
-    // Summoning sickness
+    // CR 603.6a: Turn on which this object entered the battlefield (global turn
+    // counter). Used for "entered this turn" triggers and `EnteredThisTurn`
+    // filters — NOT for summoning-sickness (see `summoning_sick`).
     pub entered_battlefield_turn: Option<u32>,
+
+    /// CR 302.6: Summoning-sickness state flag. True when this permanent has
+    /// NOT been continuously under its controller's control since that player's
+    /// most recent turn began — i.e., it can't attack or pay `{T}`/`{Q}` costs
+    /// (haste overrides at query time). Event-driven: set true on ETB; cleared
+    /// to false at the start of controller's next turn (see `start_next_turn`).
+    /// Query via `combat::has_summoning_sickness` which folds in Haste +
+    /// non-creature short-circuits.
+    #[serde(default)]
+    pub summoning_sick: bool,
 
     /// CR 702.49 + CR 702.190a: Which alt-cost cast/activation variant was paid to put this
     /// permanent onto the battlefield, and on which turn. Used by trigger conditions and
@@ -518,6 +530,7 @@ impl GameObject {
             base_characteristics_initialized: false,
             timestamp: 0,
             entered_battlefield_turn: None,
+            summoning_sick: false,
             cast_variant_paid: None,
             cost_x_paid: None,
             unimplemented_mechanics: Vec::new(),
@@ -563,6 +576,13 @@ impl GameObject {
     /// existence. Callers that need enter_tapped=true override `tapped` after this call.
     pub fn reset_for_battlefield_entry(&mut self, turn_number: u32) {
         self.entered_battlefield_turn = Some(turn_number);
+        // CR 302.6: A permanent that enters the battlefield has not been
+        // continuously under its controller's control since that player's
+        // most recent turn began. Cleared at controller's next turn start
+        // (see `turns::start_next_turn`). Haste is folded in at query time
+        // by `combat::has_summoning_sickness`, so the flag is set
+        // unconditionally here; the query short-circuits for non-creatures.
+        self.summoning_sick = true;
         self.tapped = false;
         self.damage_marked = 0;
         self.dealt_deathtouch_damage = false;

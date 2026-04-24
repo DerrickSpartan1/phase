@@ -125,7 +125,10 @@ pub fn resolve(
             token.base_static_definitions = values.static_definitions.clone();
             token.static_definitions = values.static_definitions.clone().into();
             token.base_characteristics_initialized = true;
-            token.entered_battlefield_turn = Some(state.turn_number);
+            // CR 400.7 + CR 302.6: Single authority for ETB state. Haste
+            // granted below via `extra_keywords` (Twinflame, etc.) is folded
+            // in at query time by `has_summoning_sickness`.
+            token.reset_for_battlefield_entry(state.turn_number);
 
             // CR 707.2 + CR 702: "except it has [keyword]" — grant additional
             // keywords on top of the copied characteristics. Twinflame's haste

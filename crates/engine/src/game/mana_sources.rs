@@ -223,7 +223,7 @@ pub fn activatable_mana_options(
         return Vec::new();
     }
     // CR 602.5a + CR 302.6: Creatures with summoning sickness cannot activate tap abilities.
-    if combat::has_summoning_sickness(obj, state.turn_number) {
+    if combat::has_summoning_sickness(obj) {
         return Vec::new();
     }
     scan_mana_abilities(state, obj, object_id, controller, true)
@@ -249,7 +249,7 @@ fn land_mana_options(
     }
     // CR 602.5a + CR 302.6: Land-creatures (e.g., Dryad Arbor) have summoning sickness and
     // cannot activate tap abilities the turn they enter the battlefield.
-    if require_untapped && combat::has_summoning_sickness(obj, state.turn_number) {
+    if require_untapped && combat::has_summoning_sickness(obj) {
         return Vec::new();
     }
 
@@ -826,6 +826,7 @@ mod tests {
         obj.card_types.core_types.push(CoreType::Creature);
         obj.abilities.push(verge_ability(ManaColor::Green));
         obj.entered_battlefield_turn = Some(1);
+        obj.summoning_sick = true;
         state.turn_number = 1; // Same turn — summoning sickness
 
         let options = activatable_mana_options(&state, elf, PlayerId(0));

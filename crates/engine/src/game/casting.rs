@@ -10951,9 +10951,11 @@ mod tests {
                 "Tappy McTap".to_string(),
                 Zone::Battlefield,
             );
+            let current_turn = state.turn_number;
             let obj = state.objects.get_mut(&id).unwrap();
             obj.card_types.core_types.push(CoreType::Creature);
             obj.entered_battlefield_turn = Some(entered_turn);
+            obj.summoning_sick = entered_turn >= current_turn;
             obj.abilities.push(
                 AbilityDefinition::new(
                     AbilityKind::Activated,
@@ -11060,6 +11062,7 @@ mod tests {
                 // Animation: the permanent is currently a creature too.
                 obj.card_types.core_types.push(CoreType::Creature);
                 obj.entered_battlefield_turn = Some(turn);
+                obj.summoning_sick = true;
                 obj.abilities.push(
                     AbilityDefinition::new(
                         AbilityKind::Activated,
@@ -11094,6 +11097,7 @@ mod tests {
                 let obj = state.objects.get_mut(&creature).unwrap();
                 obj.card_types.core_types.push(CoreType::Creature);
                 obj.entered_battlefield_turn = Some(turn);
+                obj.summoning_sick = true;
                 // Already tapped so Untap cost is payable mechanically.
                 obj.tapped = true;
                 obj.abilities.push(

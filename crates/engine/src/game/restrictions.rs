@@ -297,14 +297,14 @@ pub fn check_activation_restrictions(
 /// creatures are correctly subject to the rule because the check reads the current
 /// `GameObject::card_types` after layer evaluation.
 pub(crate) fn check_summoning_sickness_for_cost(
-    state: &crate::types::game_state::GameState,
+    _state: &crate::types::game_state::GameState,
     source: &GameObject,
     cost: &AbilityCost,
 ) -> Result<(), EngineError> {
     if !cost_contains_tap_or_untap(cost) {
         return Ok(());
     }
-    if super::combat::has_summoning_sickness(source, state.turn_number) {
+    if super::combat::has_summoning_sickness(source) {
         return Err(EngineError::ActionNotAllowed(
             "Creature has summoning sickness: activated abilities with {T} or {Q} \
              can't be activated this turn (CR 302.6)"

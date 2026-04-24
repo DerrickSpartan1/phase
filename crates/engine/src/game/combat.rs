@@ -213,6 +213,15 @@ pub fn place_attacking_alongside(
     if let Some(obj) = state.objects.get_mut(&object_id) {
         obj.tapped = true;
         obj.entered_battlefield_turn = Some(state.turn_number);
+        // CR 302.6: Ninjutsu/Sneak places a new permanent already attacking.
+        // The attack declaration itself bypasses the normal summoning-
+        // sickness check for attacking, but the flag remains true so {T}
+        // activations are still gated. Cannot call `reset_for_battlefield_entry`
+        // here because `cast_variant_paid` was set by the Sneak/Ninjutsu
+        // pipeline upstream and must be preserved (the reset clears it
+        // under CR 400.7's new-object semantics, but these keywords set it
+        // at entry time, not re-entry).
+        obj.summoning_sick = true;
     }
     if let Some(combat) = state.combat.as_mut() {
         combat.attackers.push(AttackerInfo::new(
@@ -288,17 +297,10 @@ pub fn validate_attackers(state: &GameState, attacker_ids: &[ObjectId]) -> Resul
             return Err(format!("{:?} is detained", id));
         }
 
-        // CR 302.6: Summoning sickness — must have haste or have been under controller's
-        // control since the beginning of the turn.
-        if !obj.has_keyword(&Keyword::Haste) {
-            if let Some(etb_turn) = obj.entered_battlefield_turn {
-                if etb_turn >= state.turn_number {
-                    return Err(format!("{:?} has summoning sickness", id));
-                }
-            } else {
-                // No ETB turn recorded -- treat as summoning sick
-                return Err(format!("{:?} has summoning sickness (no ETB turn)", id));
-            }
+        // CR 302.6: Summoning sickness — delegate to the canonical query
+        // (folds in Haste + non-creature short-circuits).
+        if has_summoning_sickness(obj) {
+            return Err(format!("{:?} has summoning sickness", id));
         }
     }
 
@@ -1054,7 +1056,7 @@ pub fn declare_attackers(
             }
         }
         // CR 302.6: Summoning sickness — reuse existing helper.
-        if has_summoning_sickness(obj, state.turn_number) {
+        if has_summoning_sickness(obj) {
             continue;
         }
         // Creature could legally attack but wasn't declared
@@ -1316,17 +1318,24 @@ pub fn unblocked_attackers(state: &GameState) -> Vec<ObjectId> {
         .collect()
 }
 
-/// Check if a creature has summoning sickness (entered this turn without Haste).
-/// CR 302.6: Creature must have been under controller's control continuously since turn began.
-pub fn has_summoning_sickness(obj: &GameObject, turn_number: u32) -> bool {
+/// CR 302.6: Returns true iff this creature can't attack or pay `{T}`/`{Q}`
+/// costs due to summoning sickness — i.e., it has NOT been continuously under
+/// its controller's control since that player's most recent turn began.
+///
+/// Implementation reads the persistent `GameObject::summoning_sick` flag,
+/// which is set true on ETB (`reset_for_battlefield_entry` +
+/// `create_object_in_zone`) and cleared to false at the start of
+/// controller's next turn by `turns::start_next_turn`. Haste is folded in
+/// here at query time so dynamically-granted haste (e.g., "creatures you
+/// control gain haste" statics) takes effect without mutating the flag.
+pub fn has_summoning_sickness(obj: &GameObject) -> bool {
     if !obj.card_types.core_types.contains(&CoreType::Creature) {
         return false;
     }
     if obj.has_keyword(&Keyword::Haste) {
         return false;
     }
-    obj.entered_battlefield_turn
-        .is_some_and(|etb| etb >= turn_number)
+    obj.summoning_sick
 }
 
 /// CR 508.1a / CR 302.6: Untapped creature controlled since turn started, without Defender.
@@ -1913,8 +1922,9 @@ mod tests {
     fn summoning_sick_creature_cannot_attack() {
         let mut state = setup();
         let id = create_creature(&mut state, PlayerId(0), "Bear", 2, 2);
-        // Entered this turn
-        state.objects.get_mut(&id).unwrap().entered_battlefield_turn = Some(2);
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.entered_battlefield_turn = Some(2);
+        obj.summoning_sick = true;
         assert!(validate_attackers(&state, &[id]).is_err());
     }
 
@@ -3027,12 +3037,9 @@ mod tests {
     fn must_attack_enforcement_summoning_sick_exempt() {
         let mut state = setup_combat_phase();
         let must_attacker = create_must_attack_creature(&mut state, PlayerId(0));
-        // Set entered_battlefield_turn to current turn (summoning sick)
-        state
-            .objects
-            .get_mut(&must_attacker)
-            .unwrap()
-            .entered_battlefield_turn = Some(state.turn_number);
+        let obj = state.objects.get_mut(&must_attacker).unwrap();
+        obj.entered_battlefield_turn = Some(state.turn_number);
+        obj.summoning_sick = true;
         assert!(declare_attackers(&mut state, &[], &mut vec![]).is_ok());
     }
 
@@ -3127,12 +3134,9 @@ mod tests {
     fn goad_enforcement_summoning_sick_exempt() {
         let mut state = setup_combat_phase();
         let goaded = create_goaded_creature(&mut state, PlayerId(0), PlayerId(1));
-        // Set ETB turn to current turn → summoning sick.
-        state
-            .objects
-            .get_mut(&goaded)
-            .unwrap()
-            .entered_battlefield_turn = Some(state.turn_number);
+        let obj = state.objects.get_mut(&goaded).unwrap();
+        obj.entered_battlefield_turn = Some(state.turn_number);
+        obj.summoning_sick = true;
         assert!(declare_attackers(&mut state, &[], &mut vec![]).is_ok());
     }
 

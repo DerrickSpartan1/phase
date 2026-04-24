@@ -242,11 +242,20 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
         player.bending_types_this_turn.clear();
     }
 
-    // CR 606.3: Loyalty abilities may be activated only once per turn per permanent.
+    // CR 302.6: At the start of a player's turn, any permanent they have
+    // controlled continuously since before this moment has now been under
+    // their control "since that player's most recent turn began" — clear
+    // summoning sickness. CR 606.3: Loyalty abilities may be activated only
+    // once per turn per permanent — reset the per-turn flag in the same pass.
     let active = state.active_player;
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        if obj.controller == active && obj.loyalty_activated_this_turn {
-            obj.loyalty_activated_this_turn = false;
+        if obj.controller == active {
+            if obj.summoning_sick {
+                obj.summoning_sick = false;
+            }
+            if obj.loyalty_activated_this_turn {
+                obj.loyalty_activated_this_turn = false;
+            }
         }
     }
 

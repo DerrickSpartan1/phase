@@ -159,9 +159,9 @@ fn create_gift_token(
         obj.base_card_types = card_type;
     }
 
-    // Set entered_battlefield_turn for summoning sickness (relevant for creature tokens).
+    // CR 400.7 + CR 302.6 + CR 603.6a: Single authority for ETB state.
     if let Some(obj) = state.objects.get_mut(&obj_id) {
-        obj.entered_battlefield_turn = Some(state.turn_number);
+        obj.reset_for_battlefield_entry(state.turn_number);
     }
 
     state.layers_dirty = true;
