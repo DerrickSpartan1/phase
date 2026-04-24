@@ -70,6 +70,112 @@ fn self_recursion_trigger_zone(ability: &crate::types::ability::AbilityDefinitio
     }
 }
 
+/// CR 107.3a + CR 107.3i + CR 601.2f + CR 603.2: In an ETB trigger on a spell
+/// cast for `{X}`, bare "X" in the trigger body refers to the value paid for
+/// `{X}` during the cast. At runtime the `QuantityRef::Variable{name:"X"}`
+/// branch of `resolve_ref` can read the trigger-event source's
+/// `cost_x_paid`, but `PtValue::Variable("X"/"-X")` in `Effect::Pump`/
+/// `Effect::PumpAll` has no such resolution — the runtime treats it as a
+/// no-op. Rewriting to `CostXPaid` (wrapped in `Multiply{factor:-1,..}` for
+/// the negative form) routes both paths through the same typed expression
+/// machinery that already reads `cost_x_paid` from the entering permanent.
+///
+/// Mirrors `rewrite_variable_x_to_cost_x_paid` in `oracle_replacement.rs`
+/// (enters-with-counters replacement effects) so ETB triggers and ETB
+/// replacements share one convention for X propagation.
+fn rewrite_trigger_pt_variable_x(value: &mut crate::types::ability::PtValue) {
+    use crate::types::ability::{PtValue, QuantityExpr, QuantityRef};
+    match value {
+        PtValue::Variable(alias) if alias.eq_ignore_ascii_case("X") => {
+            *value = PtValue::Quantity(QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid,
+            });
+        }
+        PtValue::Variable(alias) if alias.eq_ignore_ascii_case("-X") => {
+            *value = PtValue::Quantity(QuantityExpr::Multiply {
+                factor: -1,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::CostXPaid,
+                }),
+            });
+        }
+        PtValue::Quantity(expr) => {
+            super::oracle_replacement::rewrite_variable_x_to_cost_x_paid(expr);
+        }
+        _ => {}
+    }
+}
+
+/// Walk an `Effect` and rewrite any `Variable("X")` / `PtValue::Variable("X"|"-X")`
+/// occurrences to read from `cost_x_paid` on the entering permanent. See
+/// `rewrite_trigger_pt_variable_x` for the rationale.
+fn rewrite_cost_x_in_effect(effect: &mut crate::types::ability::Effect) {
+    use super::oracle_replacement::rewrite_variable_x_to_cost_x_paid;
+    use crate::types::ability::Effect;
+    match effect {
+        Effect::DealDamage { amount, .. }
+        | Effect::GainLife { amount, .. }
+        | Effect::LoseLife { amount, .. }
+        | Effect::IncreaseSpeed { amount, .. }
+        | Effect::Draw { count: amount, .. }
+        | Effect::Mill { count: amount, .. }
+        | Effect::PutCounter { count: amount, .. }
+        | Effect::PutCounterAll { count: amount, .. }
+        | Effect::Token { count: amount, .. }
+        | Effect::Dig { count: amount, .. }
+        | Effect::DamageAll { amount, .. } => {
+            rewrite_variable_x_to_cost_x_paid(amount);
+        }
+        Effect::Pump {
+            power, toughness, ..
+        }
+        | Effect::PumpAll {
+            power, toughness, ..
+        } => {
+            rewrite_trigger_pt_variable_x(power);
+            rewrite_trigger_pt_variable_x(toughness);
+        }
+        _ => {}
+    }
+}
+
+/// Walk an `AbilityDefinition` tree and rewrite Variable("X") → CostXPaid.
+/// Mirrors `apply_where_x_ability_expression` (`oracle_effect/mod.rs`) so
+/// sub-abilities, else branches, and modal alternatives all inherit the rewrite.
+fn rewrite_cost_x_in_ability(def: &mut crate::types::ability::AbilityDefinition) {
+    rewrite_cost_x_in_effect(def.effect.as_mut());
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_cost_x_in_ability(sub);
+    }
+    if let Some(else_ability) = def.else_ability.as_mut() {
+        rewrite_cost_x_in_ability(else_ability);
+    }
+    for mode_ability in &mut def.mode_abilities {
+        rewrite_cost_x_in_ability(mode_ability);
+    }
+}
+
+/// Decide whether a trigger's execute body should have its bare `X`
+/// references rewritten to read the entering permanent's `cost_x_paid`.
+///
+/// CR 603.6a + CR 107.3e: An ETB trigger on the source itself fires as the
+/// source enters the battlefield; the cast that paid `{X}` is this permanent's
+/// most recent cast, and `cost_x_paid` is stamped on the object by
+/// `finalize_cast`. SelfRef/self-inclusive compound ETBs ("when ~ enters",
+/// "when ~ or another creature enters") route through this rewrite.
+fn trigger_should_rewrite_cost_x(def: &TriggerDefinition) -> bool {
+    if def.mode != TriggerMode::ChangesZone {
+        return false;
+    }
+    if def.destination != Some(Zone::Battlefield) {
+        return false;
+    }
+    match def.valid_card.as_ref() {
+        Some(filter) => filter_references_self(filter),
+        None => false,
+    }
+}
+
 /// Parse a trigger line that may contain compound trigger events into multiple
 /// `TriggerDefinition`s. Compound patterns like "When X and when Y, effect" or
 /// "Whenever X or deals combat damage to a player, effect" produce one trigger
@@ -412,6 +518,20 @@ pub fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
         def.trigger_zones = vec![zone];
     }
 
+    // CR 107.3a + CR 107.3i + CR 601.2f: For ETB-self triggers on a spell
+    // with `{X}` in its cost, bare `X` in the trigger body refers to the
+    // value paid for `{X}` at cast time. Rewrite the execute ability tree so
+    // `Variable{name:"X"}` and `PtValue::Variable("X"/"-X")` both read the
+    // entering permanent's `cost_x_paid` via `QuantityRef::CostXPaid`.
+    // Applies to Wan Shi Tong (PutCounter count + Draw HalfRounded), The
+    // Meathook Massacre (PumpAll -X/-X), Hangarback Walker, Walking Ballista
+    // ETB, Primordial Hydra, and all future X-cost ETB-self triggers.
+    if trigger_should_rewrite_cost_x(&def) {
+        if let Some(execute) = def.execute.as_deref_mut() {
+            rewrite_cost_x_in_ability(execute);
+        }
+    }
+
     def
 }
 
@@ -625,6 +745,68 @@ fn parse_where_x_is_trigger(text: &str) -> Option<QuantityExpr> {
     }
 }
 
+/// CR 603.4: Rewrite any `FilterProp::Another` inside a `TargetFilter` to
+/// `FilterProp::OtherThanTriggerObject` for trigger-scope quantity
+/// comparisons. Recurses through `And`/`Or`/`Not` combinators and `Typed`
+/// property lists so nested filters are covered.
+fn substitute_another_in_filter(filter: &TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            let mut rewritten = tf.clone();
+            for prop in &mut rewritten.properties {
+                if matches!(prop, FilterProp::Another) {
+                    *prop = FilterProp::OtherThanTriggerObject;
+                }
+            }
+            TargetFilter::Typed(rewritten)
+        }
+        TargetFilter::Not { filter: inner } => TargetFilter::Not {
+            filter: Box::new(substitute_another_in_filter(inner)),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters.iter().map(substitute_another_in_filter).collect(),
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters.iter().map(substitute_another_in_filter).collect(),
+        },
+        other => other.clone(),
+    }
+}
+
+/// CR 603.4: Rewrite `Another` inside any `ObjectCount` / `ObjectCountDistinctNames`
+/// filter carried by a `QuantityExpr`. Leaves non-object-count refs untouched.
+fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
+    match expr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } => QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: substitute_another_in_filter(filter),
+            },
+        },
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountDistinctNames { filter },
+        } => QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCountDistinctNames {
+                filter: substitute_another_in_filter(filter),
+            },
+        },
+        QuantityExpr::Offset { inner, offset } => QuantityExpr::Offset {
+            inner: Box::new(substitute_another_in_expr(inner)),
+            offset: *offset,
+        },
+        QuantityExpr::HalfRounded { inner, rounding } => QuantityExpr::HalfRounded {
+            inner: Box::new(substitute_another_in_expr(inner)),
+            rounding: *rounding,
+        },
+        QuantityExpr::Multiply { factor, inner } => QuantityExpr::Multiply {
+            factor: *factor,
+            inner: Box::new(substitute_another_in_expr(inner)),
+        },
+        other => other.clone(),
+    }
+}
+
 /// Bridge a `StaticCondition` (from the nom condition parser) to a `TriggerCondition`.
 ///
 /// Parallel to `static_condition_to_ability_condition` in `oracle_effect/mod.rs`.
@@ -634,15 +816,22 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
     match sc {
         StaticCondition::DuringYourTurn => Some(TriggerCondition::DuringYourTurn),
 
-        // CR 608.2c: Quantity comparisons map 1:1 (same fields).
+        // CR 608.2c: Quantity comparisons map 1:1 (same fields). The only
+        // asymmetry is the `Another` → `OtherThanTriggerObject` substitution
+        // inside filters: "other <type>" in a trigger's intervening-if means
+        // "other than the triggering object" (CR 603.4, Valakut's ruling), not
+        // "other than the ability source". The substitution is scoped to this
+        // bridge so static-context `Another` (e.g. a land's ETB "if you control
+        // two or more other lands" where source == the land that just entered)
+        // keeps its source-exclusion semantics.
         StaticCondition::QuantityComparison {
             lhs,
             comparator,
             rhs,
         } => Some(TriggerCondition::QuantityComparison {
-            lhs: lhs.clone(),
+            lhs: substitute_another_in_expr(lhs),
             comparator: *comparator,
-            rhs: rhs.clone(),
+            rhs: substitute_another_in_expr(rhs),
         }),
 
         // CR 702.178a: Speed condition.
@@ -663,14 +852,16 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
         StaticCondition::Not { condition } => match condition.as_ref() {
             StaticCondition::DuringYourTurn => Some(TriggerCondition::NotYourTurn),
             // Negate a quantity comparison by flipping the comparator.
+            // Apply the same `Another` → `OtherThanTriggerObject` substitution
+            // as the affirmative branch (CR 603.4).
             StaticCondition::QuantityComparison {
                 lhs,
                 comparator,
                 rhs,
             } => Some(TriggerCondition::QuantityComparison {
-                lhs: lhs.clone(),
+                lhs: substitute_another_in_expr(lhs),
                 comparator: comparator.negate(),
-                rhs: rhs.clone(),
+                rhs: substitute_another_in_expr(rhs),
             }),
             // Negate an IsPresent → ObjectCount == 0
             StaticCondition::IsPresent { filter } => {
@@ -10203,5 +10394,118 @@ mod tests {
                 "non-attack-player trigger should not emit TargetPlayer",
             );
         }
+    }
+
+    /// CR 107.3a + CR 601.2f: Wan Shi Tong's ETB trigger pays `{X}` at cast
+    /// and must put X +1/+1 counters on himself. Verify the pronoun "him"
+    /// routes through `resolve_it_pronoun` → `SelfRef` (not `ParentTarget`),
+    /// and that `Variable{name:"X"}` is rewritten to `CostXPaid` on both the
+    /// primary PutCounter count and the chained Draw's `HalfRounded` inner.
+    #[test]
+    fn wan_shi_tong_etb_cost_x_and_self_pronoun() {
+        let def = parse_trigger_line(
+            "When Wan Shi Tong enters, put X +1/+1 counters on him. Then draw half X cards, rounded down.",
+            "Wan Shi Tong, Librarian",
+        );
+        let execute = def.execute.as_ref().expect("execute should exist");
+        match execute.effect.as_ref() {
+            Effect::PutCounter {
+                count,
+                target,
+                counter_type,
+            } => {
+                assert_eq!(counter_type, "P1P1");
+                assert_eq!(
+                    count,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::CostXPaid
+                    },
+                    "PutCounter count should be CostXPaid, got {count:?}"
+                );
+                assert_eq!(
+                    target,
+                    &TargetFilter::SelfRef,
+                    "'on him' should resolve to SelfRef for ETB-self trigger, got {target:?}"
+                );
+            }
+            other => panic!("expected PutCounter, got {other:?}"),
+        }
+        let sub = execute.sub_ability.as_ref().expect("sub ability");
+        match sub.effect.as_ref() {
+            Effect::Draw { count, .. } => match count {
+                QuantityExpr::HalfRounded { inner, .. } => {
+                    assert_eq!(
+                        **inner,
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::CostXPaid
+                        },
+                        "HalfRounded inner should be CostXPaid, got {inner:?}"
+                    );
+                }
+                other => panic!("expected HalfRounded, got {other:?}"),
+            },
+            other => panic!("expected Draw, got {other:?}"),
+        }
+    }
+
+    /// CR 107.3a + CR 601.2f: The Meathook Massacre's ETB trigger applies
+    /// -X/-X to each creature. Verify `PtValue::Variable("-X")` is rewritten
+    /// to `PtValue::Quantity(Multiply{factor:-1, inner:Ref(CostXPaid)})`
+    /// so the runtime pump handler's `PtValue::Quantity` branch evaluates
+    /// the X paid at cast time instead of short-circuiting to zero.
+    #[test]
+    fn meathook_massacre_etb_cost_x_pumpall() {
+        let def = parse_trigger_line(
+            "When The Meathook Massacre enters, each creature gets -X/-X until end of turn.",
+            "The Meathook Massacre",
+        );
+        let execute = def.execute.as_ref().expect("execute should exist");
+        let expected = PtValue::Quantity(QuantityExpr::Multiply {
+            factor: -1,
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::CostXPaid,
+            }),
+        });
+        match execute.effect.as_ref() {
+            Effect::PumpAll {
+                power, toughness, ..
+            } => {
+                assert_eq!(
+                    power, &expected,
+                    "PumpAll power should be Multiply(-1, CostXPaid), got {power:?}"
+                );
+                assert_eq!(
+                    toughness, &expected,
+                    "PumpAll toughness should be Multiply(-1, CostXPaid), got {toughness:?}"
+                );
+            }
+            other => panic!("expected PumpAll, got {other:?}"),
+        }
+    }
+
+    /// Regression: the cost-X rewrite must be scoped to ETB-self triggers.
+    /// A dies / attacks / activated-ability trigger that mentions `X` must
+    /// NOT be rewritten, because `cost_x_paid` on the dying permanent refers
+    /// to a historical cast and the modern trigger body's X has a different
+    /// meaning (or no meaning, which falls back to the existing Variable
+    /// resolver). We spot-check a non-ETB dies trigger to ensure the
+    /// Variable name survives.
+    #[test]
+    fn cost_x_rewrite_skips_non_etb_triggers() {
+        // Pure dies trigger — not ETB, must not be rewritten.
+        let def = parse_trigger_line(
+            "When ~ dies, put X +1/+1 counters on target creature you control.",
+            "Fake Card",
+        );
+        assert_ne!(
+            def.destination,
+            Some(Zone::Battlefield),
+            "sanity: dies trigger is Graveyard destination, not Battlefield"
+        );
+        // `trigger_should_rewrite_cost_x` must return false.
+        assert!(
+            !trigger_should_rewrite_cost_x(&def),
+            "dies trigger should NOT have X rewritten to CostXPaid"
+        );
     }
 }

@@ -24,11 +24,29 @@ fn is_self_ref(text: &str) -> bool {
     .is_some()
 }
 
-/// Check if text is or starts with an "it" pronoun: "it", "it ", "itself"
+/// Check if text is or starts with a bare object pronoun: "it"/"itself",
+/// "him"/"himself", "her"/"herself", "them"/"themselves". CR 608.2k: these
+/// anaphoric references resolve against the parse context's subject rather
+/// than an outer targeted object. Gendered pronouns ("him", "her") must route
+/// through the same resolver so ETB-self triggers like "put X counters on
+/// him" bind to `SelfRef` when the trigger subject is the source permanent.
 fn is_it_pronoun(text: &str) -> bool {
-    text == "it"
+    matches!(text, "it" | "him" | "her" | "them")
         || nom_on_lower(text, text, |i| {
-            value((), alt((tag("itself"), tag("it ")))).parse(i)
+            value(
+                (),
+                alt((
+                    tag("itself"),
+                    tag("himself"),
+                    tag("herself"),
+                    tag("themselves"),
+                    tag("it "),
+                    tag("him "),
+                    tag("her "),
+                    tag("them "),
+                )),
+            )
+            .parse(i)
         })
         .is_some()
 }

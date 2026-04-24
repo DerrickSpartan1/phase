@@ -1287,7 +1287,7 @@ fn extract_life_payment(text: &str) -> Option<i32> {
 /// `finalize_cast` and survives the stack → battlefield move. Walks the
 /// expression tree so `Multiply { factor: 2, inner: Variable("X") }` (Primo)
 /// and `HalfRounded { inner: Variable("X"), .. }` also get the rewrite.
-fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
+pub(crate) fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
     match expr {
         QuantityExpr::Ref { qty } => {
             if matches!(qty, QuantityRef::Variable { name } if name == "X") {
