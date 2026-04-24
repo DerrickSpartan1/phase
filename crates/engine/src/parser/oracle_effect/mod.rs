@@ -37,8 +37,8 @@ use crate::types::ability::{
     ChooseFromZoneConstraint, ConjureCard, ContinuousModification, ControllerRef, DamageSource,
     DelayedTriggerCondition, Duration, Effect, FilterProp, GameRestriction, MultiTargetSpec,
     PlayerFilter, PtValue, QuantityExpr, QuantityRef, RestrictionExpiry, RestrictionPlayerScope,
-    RoundingMode, StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
-    UnlessCost,
+    RoundingMode, StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter,
+    TypedFilter, UnlessCost,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{DistributionUnit, NextSpellModifier, RetargetScope};
@@ -47,6 +47,7 @@ use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
 use crate::types::statics::StaticMode;
+use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 pub(crate) use self::conditions::split_leading_conditional;
@@ -1177,6 +1178,7 @@ fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
 
     Some(Effect::CreateEmblem {
         statics: vec![StaticDefinition::new(StaticMode::NoMaximumHandSize)],
+        triggers: Vec::new(),
     })
 }
 
@@ -4436,17 +4438,45 @@ fn try_parse_emblem_creation(lower: &str, original: &str) -> Option<Effect> {
         return None;
     }
 
-    // Try to parse the emblem text as a static ability line
+    // CR 113.1c + CR 114.4: An emblem's ability may be a triggered ability
+    // ("Whenever ...", "At the beginning of ..."), a static ability, or the
+    // Unknown fallback. Try the triggered-ability parser first; fall through
+    // to the static-ability parser only if `parse_trigger_lines` does not
+    // recognise a trigger phrase (returns `TriggerMode::Unknown`). Both
+    // detectors ARE the parsers — no string heuristics.
+    let trig_defs = super::oracle_trigger::parse_trigger_lines(inner, "~");
+    let all_known = !trig_defs.is_empty()
+        && trig_defs
+            .iter()
+            .all(|t| !matches!(t.mode, TriggerMode::Unknown(_)));
+    if all_known {
+        // CR 114.4: An emblem's triggers function in the command zone, so the
+        // `collect_matching_triggers` zone guard must admit them. Declare
+        // `trigger_zones = [Zone::Command]` explicitly (the default empty
+        // vector is interpreted as battlefield-only by the scanner).
+        let triggers: Vec<TriggerDefinition> = trig_defs
+            .into_iter()
+            .map(|t| t.trigger_zones(vec![Zone::Command]))
+            .collect();
+        return Some(Effect::CreateEmblem {
+            statics: Vec::new(),
+            triggers,
+        });
+    }
+
+    // Try to parse the emblem text as a static ability line.
     if let Some(static_def) = super::oracle_static::parse_static_line(inner) {
         Some(Effect::CreateEmblem {
             statics: vec![static_def],
+            triggers: Vec::new(),
         })
     } else {
-        // Fallback: create an emblem with an unimplemented static
+        // Fallback: create an emblem with an unimplemented static.
         Some(Effect::CreateEmblem {
             statics: vec![
                 StaticDefinition::new(StaticMode::EmblemStatic).description(inner.to_string())
             ],
+            triggers: Vec::new(),
         })
     }
 }
@@ -11134,7 +11164,7 @@ mod tests {
     fn effect_emblem_ninjas_get_plus_one() {
         let e = parse_effect("You get an emblem with \"Ninjas you control get +1/+1.\"");
         match e {
-            Effect::CreateEmblem { statics } => {
+            Effect::CreateEmblem { statics, .. } => {
                 assert_eq!(statics.len(), 1);
                 let def = &statics[0];
                 assert_eq!(def.mode, StaticMode::Continuous);
@@ -11158,7 +11188,7 @@ mod tests {
         // of the game" creates an emblem with NoMaximumHandSize.
         let e = parse_effect("You have no maximum hand size for the rest of the game.");
         match e {
-            Effect::CreateEmblem { statics } => {
+            Effect::CreateEmblem { statics, .. } => {
                 assert_eq!(statics.len(), 1);
                 assert_eq!(statics[0].mode, StaticMode::NoMaximumHandSize);
             }
@@ -11171,11 +11201,54 @@ mod tests {
         // Bare form without "for the rest of the game" suffix.
         let e = parse_effect("You have no maximum hand size.");
         match e {
-            Effect::CreateEmblem { statics } => {
+            Effect::CreateEmblem { statics, .. } => {
                 assert_eq!(statics.len(), 1);
                 assert_eq!(statics[0].mode, StaticMode::NoMaximumHandSize);
             }
             other => panic!("expected CreateEmblem, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn effect_emblem_with_whenever_trigger_extracts_trigger_definition() {
+        // CR 113.1c + CR 114.4: Emblem-hosted triggers must be extracted as
+        // typed `TriggerDefinition`s, not dropped into `EmblemStatic` blobs.
+        // Chandra, Torch of Defiance −7 is the canonical example.
+        let e = parse_effect(
+            "You get an emblem with \"Whenever you cast a spell, this emblem deals 5 damage to any target.\"",
+        );
+        match e {
+            Effect::CreateEmblem { statics, triggers } => {
+                assert!(
+                    statics.is_empty(),
+                    "trigger-only emblem should not install statics, got {statics:?}"
+                );
+                assert_eq!(triggers.len(), 1);
+                let t = &triggers[0];
+                assert!(
+                    !matches!(t.mode, crate::types::triggers::TriggerMode::Unknown(_)),
+                    "emblem trigger must not be Unknown, got {:?}",
+                    t.mode
+                );
+                // CR 114.4: trigger_zones must include Command so the
+                // scanner's zone guard admits the fire.
+                assert_eq!(t.trigger_zones, vec![Zone::Command]);
+            }
+            other => panic!("expected CreateEmblem with triggers, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn effect_emblem_with_static_still_parses_as_static() {
+        // Regression: pure static emblems continue to lower to `statics`
+        // even after the trigger-first dispatch.
+        let e = parse_effect("You get an emblem with \"Ninjas you control get +1/+1.\"");
+        match e {
+            Effect::CreateEmblem { statics, triggers } => {
+                assert_eq!(statics.len(), 1);
+                assert!(triggers.is_empty());
+            }
+            other => panic!("expected CreateEmblem static-only, got {other:?}"),
         }
     }
 

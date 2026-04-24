@@ -3543,11 +3543,18 @@ pub enum Effect {
         counter_type: String,
         count: QuantityExpr,
     },
-    /// CR 114.1: Create an emblem with the specified static abilities in the command zone.
-    /// Emblems persist for the rest of the game and cannot be removed.
+    /// CR 114.1 + CR 114.4: Create an emblem with the specified abilities in
+    /// the command zone. Emblems persist for the rest of the game and cannot
+    /// be removed. Per CR 114.4 their abilities (statics AND triggers)
+    /// function in the command zone.
     CreateEmblem {
         #[serde(default)]
         statics: Vec<StaticDefinition>,
+        /// CR 113.1c + CR 114.4: Triggered abilities hosted on the emblem.
+        /// Each has `trigger_zones = [Zone::Command]` so the scan gate in
+        /// `collect_matching_triggers` admits them.
+        #[serde(default)]
+        triggers: Vec<TriggerDefinition>,
     },
     /// CR 118.1: Pay a cost during effect resolution (mana or life).
     PayCost {

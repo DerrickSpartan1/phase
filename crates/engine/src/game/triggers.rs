@@ -228,7 +228,23 @@ fn trigger_source_ids_for_zone(state: &GameState, zone: Zone) -> Vec<ObjectId> {
                 | StackEntryKind::KeywordAction { .. } => None,
             })
             .collect(),
-        Zone::Hand | Zone::Library | Zone::Command => Vec::new(),
+        // CR 114.4: Abilities of emblems function in the command zone.
+        // Non-emblem command-zone objects (commanders before casting, etc.)
+        // do NOT have their abilities function per CR 114.4, so this filter
+        // is the single authority — mirrored by `object_functions` in
+        // `functioning_abilities`.
+        Zone::Command => state
+            .command_zone
+            .iter()
+            .copied()
+            .filter(|id| {
+                state
+                    .objects
+                    .get(id)
+                    .is_some_and(|o| o.is_emblem && !o.is_phased_out())
+            })
+            .collect(),
+        Zone::Hand | Zone::Library => Vec::new(),
     }
 }
 
@@ -621,8 +637,16 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
             }
         }
 
-        // CR 113.6k: Non-battlefield trigger zones are opt-in via trigger_zones.
-        for zone in [Zone::Graveyard, Zone::Exile, Zone::Stack] {
+        // CR 113.6k + CR 114.4: Non-battlefield trigger zones are opt-in via
+        // `trigger_zones`. CR 114.4: abilities of emblems function in the
+        // command zone, so emblem-hosted triggers whose `trigger_zones`
+        // include `Zone::Command` are picked up here. Non-emblem command-
+        // zone objects (commanders pre-cast) are filtered out by
+        // `trigger_source_ids_for_zone(Zone::Command)` which applies the
+        // `is_emblem` gate. Synthetic battlefield-only keyword triggers
+        // (prowess / ward / firebending / exploit) deliberately do NOT run
+        // in this loop — emblems have no keywords.
+        for zone in [Zone::Graveyard, Zone::Exile, Zone::Stack, Zone::Command] {
             for obj_id in trigger_source_ids_for_zone(state, zone) {
                 let matched_triggers = {
                     let obj = match state.objects.get(&obj_id) {

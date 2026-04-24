@@ -144,6 +144,7 @@ fn setup_kaito_on_battlefield(phase: Phase) -> (GameRunner, ObjectId) {
             AbilityKind::Activated,
             Effect::CreateEmblem {
                 statics: vec![ninja_pump_static()],
+                triggers: Vec::new(),
             },
         )
         .cost(AbilityCost::Loyalty { amount: 1 });
