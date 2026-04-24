@@ -118,8 +118,62 @@ pub(crate) fn resolve_quantity_for_trigger_check(
         if let Some(value) = resolve_event_scoped_ref(state, expr, event) {
             return value;
         }
+        // CR 603.4: Make the triggering event visible to the resolver for
+        // detection-time `ObjectCount` checks that need to subtract the
+        // triggering object ("other <type>" intervening-if patterns). The TLS
+        // override avoids a full `GameState` clone (which would be O(objects))
+        // every time a trigger condition is checked.
+        return with_detection_trigger_event(event, || {
+            resolve_quantity(state, expr, controller, source_id)
+        });
     }
     resolve_quantity(state, expr, controller, source_id)
+}
+
+std::thread_local! {
+    /// Detection-time trigger event override. Populated only inside
+    /// `resolve_quantity_for_trigger_check` when `state.current_trigger_event`
+    /// is `None`. Consumed by `ObjectCount` evaluation (see `resolve_ref`) to
+    /// implement `FilterProp::OtherThanTriggerObject` semantics.
+    static DETECTION_TRIGGER_EVENT: std::cell::RefCell<Option<crate::types::events::GameEvent>>
+        = const { std::cell::RefCell::new(None) };
+}
+
+fn with_detection_trigger_event<R>(
+    event: &crate::types::events::GameEvent,
+    f: impl FnOnce() -> R,
+) -> R {
+    DETECTION_TRIGGER_EVENT.with(|slot| {
+        let prev = slot.replace(Some(event.clone()));
+        let result = f();
+        slot.replace(prev);
+        result
+    })
+}
+
+/// Read the detection-time trigger event override, if set. Returns `None`
+/// outside `resolve_quantity_for_trigger_check`.
+fn detection_trigger_event() -> Option<crate::types::events::GameEvent> {
+    DETECTION_TRIGGER_EVENT.with(|slot| slot.borrow().clone())
+}
+
+/// CR 603.4 + CR 109.3: Recursively check whether a `TargetFilter` carries
+/// `FilterProp::OtherThanTriggerObject` anywhere in its property tree. Used
+/// by the `ObjectCount` resolver to decide whether to subtract the triggering
+/// object from a count (Valakut, the Molten Pinnacle — "five other Mountains").
+fn filter_contains_other_than_trigger_object(filter: &crate::types::ability::TargetFilter) -> bool {
+    use crate::types::ability::{FilterProp, TargetFilter};
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|p| matches!(p, FilterProp::OtherThanTriggerObject)),
+        TargetFilter::Not { filter: inner } => filter_contains_other_than_trigger_object(inner),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .any(filter_contains_other_than_trigger_object),
+        _ => false,
+    }
 }
 
 /// Substitute an event-scoped `QuantityRef` (currently only
@@ -322,12 +376,47 @@ fn resolve_ref(
             let zone = filter
                 .extract_in_zone()
                 .unwrap_or(crate::types::zones::Zone::Battlefield);
-            usize_to_i32_saturating(
-                crate::game::targeting::zone_object_ids(state, zone)
-                    .iter()
-                    .filter(|&&id| matches_target_filter(state, id, filter, &filter_ctx))
-                    .count(),
-            )
+            let raw = crate::game::targeting::zone_object_ids(state, zone)
+                .iter()
+                .filter(|&&id| matches_target_filter(state, id, filter, &filter_ctx))
+                .count();
+            // CR 603.4 + CR 109.3: If the filter carries `OtherThanTriggerObject`,
+            // exclude the triggering object from the count (e.g., Valakut's "five
+            // other Mountains" — the newly-entered Mountain is counted by the
+            // per-object filter as a pass-through, then subtracted here). Uses
+            // the currently-resolving trigger event; at detection time the event
+            // is threaded in via `resolve_quantity_for_trigger_check`, which sets
+            // a scoped override read here.
+            //
+            // When the trigger event carries no object subject (e.g. a `PhaseChanged`
+            // event for "at the beginning of your upkeep" / "end step"), the
+            // "other" modifier degrades to "other than the ability source" — this
+            // matches CR 109.3's general sense of "other" as "not the speaking
+            // object" and preserves Platoon-Dispenser-style "two or more other
+            // creatures" semantics where source == the only entity to exclude.
+            let adjusted = if filter_contains_other_than_trigger_object(filter) {
+                // Prefer the live `current_trigger_event` (resolution-time);
+                // fall back to the detection-time TLS override populated by
+                // `resolve_quantity_for_trigger_check`.
+                let triggering_id = state
+                    .current_trigger_event
+                    .as_ref()
+                    .and_then(crate::game::targeting::extract_source_from_event)
+                    .or_else(|| {
+                        detection_trigger_event()
+                            .as_ref()
+                            .and_then(crate::game::targeting::extract_source_from_event)
+                    })
+                    .unwrap_or(source_id);
+                if matches_target_filter(state, triggering_id, filter, &filter_ctx) {
+                    raw.saturating_sub(1)
+                } else {
+                    raw
+                }
+            } else {
+                raw
+            };
+            usize_to_i32_saturating(adjusted)
         }
         // CR 201.2 + CR 603.4: Count of distinct names among matching objects.
         // Field of the Dead: "seven or more lands with different names". Two

@@ -1202,6 +1202,15 @@ pub enum FilterProp {
     },
     /// Matches any object that is NOT the trigger source (for "another creature" triggers).
     Another,
+    /// CR 603.4 + CR 109.3: Matches any object that is NOT the object that caused
+    /// the currently-evaluating trigger to fire (the "triggering object"). Distinct
+    /// from `Another`, which excludes the *ability source*. Used for intervening-if
+    /// count predicates like Valakut, the Molten Pinnacle's "if you control at
+    /// least five other Mountains" — here "other" means "other than the newly-
+    /// entered Mountain," not "other than Valakut." Resolves against
+    /// `FilterContext::triggering_object_id`, populated at trigger-condition
+    /// evaluation from the current `GameEvent`.
+    OtherThanTriggerObject,
     /// Matches objects with a specific color (for "white creature", "red spell", etc.).
     HasColor {
         color: ManaColor,

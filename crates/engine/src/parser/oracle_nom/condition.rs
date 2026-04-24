@@ -574,6 +574,35 @@ fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     .parse(input)
 }
 
+/// Parse a "≥ N" threshold prefix: either `"N or more "` or `"at least N "`.
+///
+/// Single authority used by all `you control` / `an opponent controls` count
+/// arms so "at least five other Mountains" (Valakut) and "three or more
+/// creatures" (Defense of the Heart) share the same parse path. Returns the
+/// threshold N and the remaining input positioned at the type phrase.
+///
+/// CR 603.4: Intervening-if conditions are evaluated as written — both
+/// idioms are grammatically equivalent `>= N` thresholds.
+fn parse_ge_threshold(input: &str) -> OracleResult<'_, u32> {
+    alt((
+        // "N or more "
+        |i| {
+            let (rest, n) = parse_number(i)?;
+            let rest = rest.trim_start();
+            let (rest, _) = tag("or more ").parse(rest)?;
+            Ok((rest, n))
+        },
+        // "at least N "
+        |i| {
+            let (rest, _) = tag("at least ").parse(i)?;
+            let (rest, n) = parse_number(rest)?;
+            let rest = rest.trim_start();
+            Ok((rest, n))
+        },
+    ))
+    .parse(input)
+}
+
 /// CR 201.2 + CR 603.4: Parse "you control N or more [type] with different names"
 /// → `QuantityComparison { ObjectCountDistinctNames(filter) >= N }`.
 ///
@@ -583,9 +612,7 @@ fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
 /// extends to other distinct-name threshold cards without per-card code.
 fn parse_control_count_ge_distinct_names(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you control ").parse(input)?;
-    let (rest, n) = parse_number(rest)?;
-    let rest = rest.trim_start();
-    let (rest, _) = tag("or more ").parse(rest)?;
+    let (rest, n) = parse_ge_threshold(rest)?;
     let type_text = rest.trim_end_matches('.');
     let (filter, remainder) = parse_type_phrase(type_text);
     if matches!(filter, TargetFilter::Any) {
@@ -620,9 +647,7 @@ fn parse_control_count_ge_distinct_names(input: &str) -> OracleResult<'_, Static
 /// Returns the remainder after the type phrase (may be non-empty for trailing text).
 pub fn parse_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you control ").parse(input)?;
-    let (rest, n) = parse_number(rest)?;
-    let rest = rest.trim_start();
-    let (rest, _) = tag("or more ").parse(rest)?;
+    let (rest, n) = parse_ge_threshold(rest)?;
     let type_text = rest.trim_end_matches('.');
     let (filter, remainder) = parse_type_phrase(type_text);
     if matches!(filter, TargetFilter::Any) {
@@ -1406,6 +1431,40 @@ fn parse_there_exists_condition(input: &str) -> OracleResult<'_, StaticCondition
 /// refs on the LHS and controller-scoped refs on the RHS.
 fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("an opponent ").parse(input)?;
+
+    // CR 109.3 + CR 603.4: "an opponent controls N or more [type]" /
+    // "an opponent controls at least N [type]" → ObjectCount(filter w/
+    // ControllerRef::Opponent) >= N. Shares `parse_ge_threshold` with the
+    // `you control` arms so both idioms work uniformly. Defense of the Heart
+    // ("if an opponent controls three or more creatures") is the canonical
+    // card for this pattern.
+    if let Ok((rest2, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("controls ").parse(rest)
+    {
+        if let Ok((rest3, n)) = parse_ge_threshold(rest2) {
+            let type_text = rest3.trim_end_matches('.');
+            let (filter, remainder) = parse_type_phrase(type_text);
+            if !matches!(filter, TargetFilter::Any) {
+                let filter = match filter {
+                    TargetFilter::Typed(tf) => {
+                        TargetFilter::Typed(tf.controller(ControllerRef::Opponent))
+                    }
+                    other => other,
+                };
+                let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
+                return Ok((
+                    &input[consumed..],
+                    StaticCondition::QuantityComparison {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::ObjectCount { filter },
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: n as i32 },
+                    },
+                ));
+            }
+        }
+    }
 
     // "an opponent controls more [type] than you"
     if let Ok((rest2, _)) =
@@ -3141,5 +3200,85 @@ mod tests {
                 maximum: Some(0),
             }
         );
+    }
+
+    /// CR 603.4: Valakut's "at least five other Mountains" must parse as an
+    /// `ObjectCount >= 5` with `controller = You`, `Subtype::Mountain`, and
+    /// `FilterProp::Another` (rewritten to `OtherThanTriggerObject` by the
+    /// trigger bridge). The "at least" idiom shares a parse path with "N or
+    /// more" via `parse_ge_threshold`.
+    #[test]
+    fn test_parse_condition_you_control_at_least_n_other_type() {
+        use crate::types::ability::{FilterProp, TypedFilter};
+        let (_rest, c) =
+            parse_inner_condition("you control at least five other mountains").unwrap();
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            } => match filter {
+                TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::You),
+                    properties,
+                    ..
+                }) => {
+                    assert!(
+                        properties.iter().any(|p| matches!(p, FilterProp::Another)),
+                        "expected Another prop, got {properties:?}"
+                    );
+                }
+                other => panic!("expected Typed filter You, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount GE 5, got {other:?}"),
+        }
+    }
+
+    /// CR 109.3 + CR 603.4: Defense of the Heart's "if an opponent controls
+    /// three or more creatures" parses as `ObjectCount(controller=Opponent,
+    /// Creature) >= 3`.
+    #[test]
+    fn test_parse_condition_an_opponent_controls_n_or_more_type() {
+        use crate::types::ability::TypedFilter;
+        let (_rest, c) =
+            parse_inner_condition("an opponent controls three or more creatures").unwrap();
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 3 },
+            } => match filter {
+                TargetFilter::Typed(TypedFilter {
+                    controller: Some(ControllerRef::Opponent),
+                    ..
+                }) => {}
+                other => panic!("expected Typed filter Opponent, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount GE 3, got {other:?}"),
+        }
+    }
+
+    /// CR 109.3: "an opponent controls at least N <filter>" must share the
+    /// threshold idiom with "N or more".
+    #[test]
+    fn test_parse_condition_an_opponent_controls_at_least_n_type() {
+        let (_rest, c) =
+            parse_inner_condition("an opponent controls at least two artifacts").unwrap();
+        assert!(matches!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount { .. }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            }
+        ));
     }
 }

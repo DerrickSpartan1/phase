@@ -71,6 +71,10 @@ fn main() {
     println!("GameState clone:  {:?} (avg over 100)", t_clone);
     println!("turn_number:      {}", state.turn_number);
     println!("active_player:    {:?}", state.active_player);
+    println!(
+        "acting_player:    {:?} (from waiting_for)",
+        state.waiting_for.acting_player()
+    );
     println!("players:          {}", state.players.len());
     println!("objects:          {}", state.objects.len());
     println!("battlefield:      {}", state.battlefield.len());
@@ -81,7 +85,10 @@ fn main() {
     );
     println!();
 
-    let ai_player = state.active_player;
+    let ai_player = state
+        .waiting_for
+        .acting_player()
+        .unwrap_or(state.active_player);
     let config = create_config_for_players(difficulty, Platform::Native, state.players.len() as u8);
 
     println!(

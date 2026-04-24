@@ -57,3 +57,11 @@ panic = 'unwind'
 inherits = "dev"
 opt-level = 1
 codegen-backend = "llvm"
+
+# Profiling: native-optimized like server-release, with debug info retained
+# so samply/flamegraph attribute samples to real symbols.
+# Usage: cargo build --profile profiling --bin ai-bench-state
+[profile.profiling]
+inherits = "server-release"
+debug = "line-tables-only"
+strip = false

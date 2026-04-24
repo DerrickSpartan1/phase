@@ -308,6 +308,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 }
             }
             FilterProp::Another => parts.push("another".into()),
+            FilterProp::OtherThanTriggerObject => parts.push("other".into()),
             FilterProp::HasColor { color } => parts.push(format!("{color:?}").to_lowercase()),
             FilterProp::PowerLE { value } => parts.push(format!("power ≤{}", fmt_quantity(value))),
             FilterProp::PowerGE { value } => parts.push(format!("power ≥{}", fmt_quantity(value))),

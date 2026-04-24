@@ -950,6 +950,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::EquippedBy
         | FilterProp::HasAttachment { .. }
         | FilterProp::Another
+        | FilterProp::OtherThanTriggerObject
         | FilterProp::PowerLE { .. }
         | FilterProp::PowerGE { .. }
         | FilterProp::ToughnessLE { .. }
@@ -1255,6 +1256,14 @@ fn matches_filter_prop(
             }
         }),
         FilterProp::Another => object_id != source.id,
+        // CR 603.4 + CR 109.3: `OtherThanTriggerObject` is a typed marker that
+        // signals "exclude the triggering object" for count semantics. The
+        // exclusion is applied at the `QuantityRef::ObjectCount` resolver level
+        // (see `game::quantity`) using the current trigger event, not here —
+        // this variant acts as a transparent pass-through for per-object
+        // filter evaluation so that the marker does not spuriously exclude
+        // every object from individual match checks.
+        FilterProp::OtherThanTriggerObject => true,
         FilterProp::HasColor { color } => obj.color.contains(color),
         // CR 208.1: Power comparison against a dynamic threshold. Dynamic thresholds
         // (`QuantityRef::Variable { "X" }`) resolve against the ability's `chosen_x`
@@ -1473,6 +1482,10 @@ fn zone_change_record_matches_property(
         // -------- Group 2: source/event relational --------
         // CR 109.1 "another": same-object check against the triggering source.
         FilterProp::Another => record.object_id != source.id,
+        // CR 603.4 + CR 109.3: Record-variant of OtherThanTriggerObject. See the
+        // comment in `matches_property_typed` — the exclusion is applied at the
+        // quantity-resolver layer; here the prop is a transparent pass-through.
+        FilterProp::OtherThanTriggerObject => true,
         // CR 400.1: "from [zone]" — the record's origin zone.
         // CR 111.1 + CR 603.6a: Token creation produces `from_zone = None`,
         // which cannot match any specific origin zone — correct for triggers
