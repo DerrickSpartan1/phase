@@ -436,6 +436,20 @@ pub fn evaluate_condition_for_test(
 ///
 /// CR 613.1: Evaluate all continuous effects in layer order (1–7e).
 pub fn evaluate_layers(state: &mut GameState) {
+    // CR 302.6 + CR 613.1b + CR 702.26c: Snapshot effective controllers for
+    // phased-in permanents BEFORE the Step 1 reset below wipes them. The
+    // post-pass diff at the end of this function compares against this
+    // snapshot to detect effective-controller transitions (Layer 2 control-
+    // changing effect start/end, exchange-control, gain-control expiry) and
+    // re-applies summoning sickness per CR 302.6 ("continuously under that
+    // player's control since that player's most recent turn began").
+    // Phased-out permanents are excluded per CR 702.26c.
+    let prev_controllers: Vec<(ObjectId, PlayerId)> = state
+        .battlefield_phased_in_ids()
+        .into_iter()
+        .filter_map(|id| state.objects.get(&id).map(|o| (id, o.controller)))
+        .collect();
+
     // Step 1: Reset computed characteristics to base values.
     // Only reset fields where base values were explicitly set; objects without
     // base values (e.g., from older test helpers) retain their current values.
@@ -595,6 +609,26 @@ pub fn evaluate_layers(state: &mut GameState) {
             // reverts obj.loyalty to base_loyalty, re-derive it from the actual counter.
             if let Some(&loyalty_counters) = obj.counters.get(&CounterType::Loyalty) {
                 obj.loyalty = Some(loyalty_counters);
+            }
+        }
+    }
+
+    // CR 302.6: Re-apply summoning sickness for any permanent whose effective
+    // controller changed during this evaluation. The diff is taken against
+    // `prev_controllers` snapshotted at the top of the function. Layer 2
+    // (CR 613.1b) is the single authority for post-ETB control changes, so
+    // every relevant transition — Act of Treason / Threaten cast and expiry,
+    // Control Magic / Mind Control on/off, exchange-control, "until end of
+    // combat" duration termination — produces a diff here. Newly-ETB'd
+    // permanents are absent from the snapshot and therefore unaffected
+    // (their `summoning_sick` was set true upstream by
+    // `GameObject::reset_for_battlefield_entry`). Clearing back to false is
+    // the sole responsibility of `turns::start_next_turn` for the active
+    // player's permanents.
+    for (id, prev) in prev_controllers {
+        if let Some(obj) = state.objects.get_mut(&id) {
+            if obj.controller != prev {
+                obj.summoning_sick = true;
             }
         }
     }
@@ -4349,5 +4383,159 @@ mod tests {
             1,
             "two Ragosts must not stack the granted Food ability",
         );
+    }
+
+    // -- CR 302.6 control-change sickness diff --
+    //
+    // Helper: add a Layer 2 ChangeController effect targeting `target_id`,
+    // controlled by `new_controller` (i.e., they become the effect's controller
+    // and per CR 613.1b the new effective controller of `target_id`).
+    fn add_change_controller_effect(
+        state: &mut GameState,
+        source_id: ObjectId,
+        target_id: ObjectId,
+        new_controller: PlayerId,
+        duration: Duration,
+    ) -> u64 {
+        state.add_transient_continuous_effect(
+            source_id,
+            new_controller,
+            duration,
+            TargetFilter::SpecificObject { id: target_id },
+            vec![ContinuousModification::ChangeController],
+            None,
+        )
+    }
+
+    /// CR 302.6 + CR 613.1b: Act-of-Treason-style mid-game control change.
+    /// A creature whose effective controller flips from P0 to P1 must become
+    /// summoning-sick for P1 (the new controller has not had it
+    /// "continuously since their most recent turn began").
+    #[test]
+    fn control_change_sicks_new_controller() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        // Pre-existing creature — clear sickness as if controller had a prior turn.
+        state.objects.get_mut(&bear).unwrap().summoning_sick = false;
+        evaluate_layers(&mut state);
+        assert!(
+            !state.objects[&bear].summoning_sick,
+            "stable creature, no control change → not sick"
+        );
+
+        // Apply Act-of-Treason-style control change: P1 takes control of bear.
+        let _eid = add_change_controller_effect(
+            &mut state,
+            bear,
+            bear,
+            PlayerId(1),
+            Duration::UntilEndOfTurn,
+        );
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(1),
+            "Layer 2 should have applied the ChangeController effect"
+        );
+        assert!(
+            state.objects[&bear].summoning_sick,
+            "control change P0→P1 must re-apply summoning sickness (CR 302.6)"
+        );
+    }
+
+    /// CR 302.6: When a control-changing effect expires, the permanent
+    /// reverts to its owner per CR 613.1b's owner-reset. That reversion is
+    /// itself a control transition and must re-sick the original owner —
+    /// continuity broke during the opponent's tenure.
+    #[test]
+    fn control_change_expiry_resicks_original_controller() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state.objects.get_mut(&bear).unwrap().summoning_sick = false;
+
+        let eid = add_change_controller_effect(
+            &mut state,
+            bear,
+            bear,
+            PlayerId(1),
+            Duration::UntilEndOfTurn,
+        );
+        evaluate_layers(&mut state);
+        // Simulate the original owner clearing sickness via their next turn.
+        state.objects.get_mut(&bear).unwrap().summoning_sick = false;
+        // Re-eval with effect still present: stable, no flip.
+        evaluate_layers(&mut state);
+        assert!(
+            !state.objects[&bear].summoning_sick,
+            "stable Control Magic must not re-sick on every eval"
+        );
+
+        // Effect expires — drop it from the transient list.
+        state.transient_continuous_effects.retain(|e| e.id != eid);
+        state.layers_dirty = true;
+        evaluate_layers(&mut state);
+
+        assert_eq!(
+            state.objects[&bear].controller,
+            PlayerId(0),
+            "owner-reset (CR 613.1b) reverts controller to owner on expiry"
+        );
+        assert!(
+            state.objects[&bear].summoning_sick,
+            "expiry-revert P1→P0 is a control transition → sick again (CR 302.6)"
+        );
+    }
+
+    /// CR 302.6: Exchange-control sicks BOTH permanents — each side sees a
+    /// new effective controller, so continuity breaks symmetrically.
+    #[test]
+    fn exchange_control_sicks_both_permanents() {
+        let mut state = setup();
+        let bear_a = make_creature(&mut state, "Bear A", 2, 2, PlayerId(0));
+        let bear_b = make_creature(&mut state, "Bear B", 2, 2, PlayerId(1));
+        for id in [bear_a, bear_b] {
+            state.objects.get_mut(&id).unwrap().summoning_sick = false;
+        }
+
+        // Swap: A becomes controlled by P1, B becomes controlled by P0.
+        add_change_controller_effect(&mut state, bear_a, bear_a, PlayerId(1), Duration::Permanent);
+        add_change_controller_effect(&mut state, bear_b, bear_b, PlayerId(0), Duration::Permanent);
+        evaluate_layers(&mut state);
+
+        assert_eq!(state.objects[&bear_a].controller, PlayerId(1));
+        assert_eq!(state.objects[&bear_b].controller, PlayerId(0));
+        assert!(
+            state.objects[&bear_a].summoning_sick,
+            "exchanged permanent A: new controller, sick (CR 302.6)"
+        );
+        assert!(
+            state.objects[&bear_b].summoning_sick,
+            "exchanged permanent B: new controller, sick (CR 302.6)"
+        );
+    }
+
+    /// Defensive: a permanent that exits the battlefield mid-pass (e.g., SBA
+    /// destroys it during a chained effect) still appears in the pre-pass
+    /// snapshot. The post-pass `get_mut` must None-guard gracefully.
+    #[test]
+    fn permanent_removed_during_eval_does_not_panic() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state.objects.get_mut(&bear).unwrap().summoning_sick = false;
+
+        // Snapshot will capture `bear` once eval starts; remove it before the
+        // diff runs by simulating a mid-pass drop. The cleanest reproduction
+        // here is to evaluate normally (stable), then manually drop the
+        // object and evaluate again — the snapshot at the second eval will
+        // include `bear`, but mid-pass we delete it. We approximate by
+        // dropping it from `state.objects` between snapshot and diff via a
+        // direct call boundary; here we just verify the post-eval-get-after-
+        // remove doesn't crash on a separate eval cycle.
+        evaluate_layers(&mut state);
+        state.objects.remove(&bear);
+        state.layers_dirty = true;
+        // No panic; the diff loop's `get_mut(...).if let Some` swallows it.
+        evaluate_layers(&mut state);
     }
 }
