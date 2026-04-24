@@ -53,7 +53,6 @@ export function GameSetupPage() {
   const [firstPlayer, setFirstPlayer] = useState<"random" | "play" | "draw">("random");
 
   // Preferences (persisted)
-  const difficulty = usePreferencesStore((s) => s.aiDifficulty);
   const lastFormat = usePreferencesStore((s) => s.lastFormat);
   const lastMatchType = usePreferencesStore((s) => s.lastMatchType);
   const lastPlayerCount = usePreferencesStore((s) => s.lastPlayerCount);
@@ -110,11 +109,26 @@ export function GameSetupPage() {
     if (!activeDeckName || !formatConfig) return;
     touchDeckPlayed(activeDeckName);
     const gameId = crypto.randomUUID();
-    saveActiveGame({ id: gameId, mode: "ai", difficulty });
+    // Snapshot the per-seat AI config from preferences into the active-game
+    // record. `AiOpponentConfig`'s `ensureAiSeatCount` effect normally syncs
+    // the seat list before the user can click Start, but we re-invoke it
+    // here defensively — zustand setters are synchronous, so this is a
+    // no-op when the effect already ran and a correctness guarantee if the
+    // click beat the effect to the commit boundary.
+    const opponentCount = Math.max(1, playerCount - 1);
+    const prefs = usePreferencesStore.getState();
+    prefs.ensureAiSeatCount(opponentCount);
+    const prefSeats = usePreferencesStore.getState().aiSeats.slice(0, opponentCount);
+    const aiSeats = prefSeats.map((s) => ({
+      difficulty: s.difficulty,
+      deckName: s.deckName === "Random" ? null : s.deckName,
+    }));
+    const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
+    saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats });
     useGameStore.setState({ gameId });
     const firstParam = firstPlayer !== "random" ? `&first=${firstPlayer}` : "";
     navigate(
-      `/game/${gameId}?mode=ai&difficulty=${difficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${firstParam}`,
+      `/game/${gameId}?mode=ai&difficulty=${headDifficulty}&format=${formatConfig.format}&players=${playerCount}&match=${matchType.toLowerCase()}${firstParam}`,
     );
   };
 
@@ -342,7 +356,10 @@ export function GameSetupPage() {
               <div className="border-t border-white/8" />
 
               {/* AI opponent configuration */}
-              <AiOpponentConfig format={formatConfig?.format} />
+              <AiOpponentConfig
+                format={formatConfig?.format}
+                opponentCount={Math.max(1, playerCount - 1)}
+              />
 
               {/* Separator */}
               <div className="border-t border-white/8" />
