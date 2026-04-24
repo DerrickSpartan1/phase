@@ -138,15 +138,25 @@ pub(crate) fn parse_token_description(text: &str) -> Option<TokenDescription> {
     // single-clause form; the trailing "It enters tapped and attacking"
     // sentence form is patched via `ContinuationAst::EntersTappedAttacking`.
     let lower_trimmed = text.to_lowercase();
-    let tp = TextPair::new(text, &lower_trimmed);
-    let (text, enters_attacking) = if let Some(rest) = tp
-        .strip_suffix(" that's tapped and attacking")
-        .or_else(|| tp.strip_suffix(" that is tapped and attacking"))
-        .or_else(|| tp.strip_suffix(" thats tapped and attacking"))
-    {
-        (rest.original, true)
-    } else {
-        (text, false)
+    // Single combinator for the whole clause: relative-pronoun variants
+    // factored into one `alt`, shared tail appears once, `eof` anchors the
+    // match at the string's end.
+    let tapped_attacking_clause = |i| -> OracleResult<'_, ()> {
+        let (i, _) = alt((tag(" that's"), tag(" that is"), tag(" thats"))).parse(i)?;
+        let (i, _) = tag(" tapped and attacking").parse(i)?;
+        let (i, _) = nom::combinator::eof(i)?;
+        Ok((i, ()))
+    };
+    // Nom parses forward; scan byte positions (only those starting with the
+    // leading space the clause requires) for the first place where the clause
+    // consumes the remainder to EOF. That byte offset is the body length.
+    let body_len = (0..lower_trimmed.len()).find(|&pos| {
+        lower_trimmed.as_bytes().get(pos) == Some(&b' ')
+            && tapped_attacking_clause(&lower_trimmed[pos..]).is_ok()
+    });
+    let (text, enters_attacking) = match body_len {
+        Some(len) => (&text[..len], true),
+        None => (text, false),
     };
     let (mut count, leading_name, mut rest) =
         if let Some((count, rest)) = parse_token_count_prefix(text) {
