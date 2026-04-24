@@ -1,6 +1,10 @@
 use std::sync::Mutex;
 
-use engine::ai_support::legal_actions;
+use engine::ai_support::{auto_pass_recommended, legal_actions_full};
+use engine::types::identifiers::ObjectId;
+use engine::types::mana::ManaCost;
+use std::collections::HashMap;
+use serde::Serialize;
 use engine::game::combat::has_summoning_sickness;
 use engine::game::coverage::unimplemented_mechanics;
 use engine::game::engine::apply;
@@ -100,12 +104,32 @@ pub fn get_game_state(
     })
 }
 
+/// Mirror of the `LegalActionsResult` shape exposed by `engine-wasm`. Keeps
+/// the Tauri desktop adapter aligned with the browser/WASM path so the
+/// frontend's `collectObjectActions(legalActionsByObject, objectId)` lookup
+/// works identically on both transports.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegalActionsPayload {
+    actions: Vec<GameAction>,
+    auto_pass_recommended: bool,
+    spell_costs: HashMap<ObjectId, ManaCost>,
+    legal_actions_by_object: HashMap<ObjectId, Vec<GameAction>>,
+}
+
 #[tauri::command]
-pub fn get_legal_actions(state: tauri::State<AppState>) -> Result<Vec<GameAction>, String> {
+pub fn get_legal_actions(state: tauri::State<AppState>) -> Result<LegalActionsPayload, String> {
     let guard = state.game.lock().map_err(|e| e.to_string())?;
     let game = guard.as_ref().ok_or("Game not initialized")?;
 
-    Ok(legal_actions(game))
+    let (actions, spell_costs, legal_actions_by_object) = legal_actions_full(game);
+    let auto_pass_recommended = auto_pass_recommended(game, &actions);
+    Ok(LegalActionsPayload {
+        actions,
+        auto_pass_recommended,
+        spell_costs,
+        legal_actions_by_object,
+    })
 }
 
 #[tauri::command]

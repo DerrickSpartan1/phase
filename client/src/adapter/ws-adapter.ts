@@ -444,7 +444,7 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "GameStarted": {
-        const data = msg.data as { state: GameState; your_player: PlayerId; opponent_name?: string; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; spell_costs?: Record<string, ManaCost>; derived?: GameState["derived"]; player_token?: string };
+        const data = msg.data as { state: GameState; your_player: PlayerId; opponent_name?: string; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; derived?: GameState["derived"]; player_token?: string };
         if (this.reconnectInFlight) {
           this.reconnectInFlight = false;
           this.reconnectAttempt = 0;
@@ -456,6 +456,7 @@ export class WebSocketAdapter implements EngineAdapter {
           actions: data.legal_actions ?? [],
           autoPassRecommended: data.auto_pass_recommended ?? false,
           spellCosts: data.spell_costs,
+          legalActionsByObject: data.legal_actions_by_object,
         };
         // Joiners receive their player_token here (hosts get it via GameCreated).
         // Set _gameCode from joinGameCode if not already set (host sets it via GameCreated).
@@ -484,7 +485,7 @@ export class WebSocketAdapter implements EngineAdapter {
       }
 
       case "StateUpdate": {
-        const data = msg.data as { state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; spell_costs?: Record<string, ManaCost>; log_entries?: GameLogEntry[]; derived?: GameState["derived"] };
+        const data = msg.data as { state: GameState; events: GameEvent[]; legal_actions?: GameAction[]; auto_pass_recommended?: boolean; spell_costs?: Record<string, ManaCost>; legal_actions_by_object?: Record<string, GameAction[]>; log_entries?: GameLogEntry[]; derived?: GameState["derived"] };
         // Attach the engine-authored derived views to the state snapshot so
         // components (e.g. CommanderDamage) can read them via gameState.derived
         // without a separate subscription path. See
@@ -494,6 +495,7 @@ export class WebSocketAdapter implements EngineAdapter {
           actions: data.legal_actions ?? [],
           autoPassRecommended: data.auto_pass_recommended ?? false,
           spellCosts: data.spell_costs,
+          legalActionsByObject: data.legal_actions_by_object,
         };
         if (this.pendingResolve) {
           this.emit({ type: "actionPendingChanged", pending: false });
