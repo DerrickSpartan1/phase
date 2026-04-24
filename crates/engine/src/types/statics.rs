@@ -509,6 +509,15 @@ pub enum StaticMode {
     /// Used for creatures like Ornithopter of Paradise and various Walls that can
     /// attack/block but deal 0 combat damage.
     AssignNoCombatDamage,
+    /// CR 502.3 + CR 113.6: Continuous static that grants a second untap pass
+    /// during each OTHER player's untap step. The source's controller untaps
+    /// the permanents matching `StaticDefinition.affected` — NOT the active
+    /// player's permanents. Canonical card: Seedborn Muse ("Untap all
+    /// permanents you control during each other player's untap step.").
+    /// Runtime: `turns::execute_untap` runs a second pass after the active
+    /// player's normal untap, scanning the battlefield for this variant on
+    /// permanents whose controller != active_player.
+    UntapsDuringEachOtherPlayersUntapStep,
     /// Fallback for unrecognized static mode strings.
     Other(String),
 }
@@ -675,6 +684,9 @@ impl fmt::Display for StaticMode {
             StaticMode::SpendManaAsAnyColor => write!(f, "SpendManaAsAnyColor"),
             StaticMode::CanAttackWithDefender => write!(f, "CanAttackWithDefender"),
             StaticMode::AssignNoCombatDamage => write!(f, "AssignNoCombatDamage"),
+            StaticMode::UntapsDuringEachOtherPlayersUntapStep => {
+                write!(f, "UntapsDuringEachOtherPlayersUntapStep")
+            }
             // Fallback
             StaticMode::Other(s) => write!(f, "{s}"),
         }
@@ -813,6 +825,9 @@ impl FromStr for StaticMode {
             "CantWinTheGame" => StaticMode::CantWinTheGame,
             "CantLoseTheGame" => StaticMode::CantLoseTheGame,
             "CanAttackWithDefender" => StaticMode::CanAttackWithDefender,
+            "UntapsDuringEachOtherPlayersUntapStep" => {
+                StaticMode::UntapsDuringEachOtherPlayersUntapStep
+            }
             // Parameterized
             other => {
                 if let Some(inner) = other

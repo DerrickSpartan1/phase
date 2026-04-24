@@ -143,6 +143,14 @@ pub fn build_static_registry() -> HashMap<StaticMode, StaticAbilityHandler> {
     // CR 510.1a: AssignNoCombatDamage — creature assigns no combat damage.
     // Runtime enforcement is in combat_damage.rs::combat_damage_amount().
     registry.insert(StaticMode::AssignNoCombatDamage, handle_rule_mod);
+    // CR 502.3 + CR 113.6: UntapsDuringEachOtherPlayersUntapStep — second untap
+    // pass during each other player's untap step (Seedborn Muse). Runtime
+    // enforcement is in turns.rs::execute_untap, which scans for this variant
+    // after the active player's normal untap pass.
+    registry.insert(
+        StaticMode::UntapsDuringEachOtherPlayersUntapStep,
+        handle_rule_mod,
+    );
 
     // CR 614.1d: Zone-based restriction handlers.
     // Enforcement happens in zones.rs (CantEnterBattlefieldFrom) and casting.rs (CantCastFrom),

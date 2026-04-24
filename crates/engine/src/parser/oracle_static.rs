@@ -446,6 +446,49 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         );
     }
 
+    // --- "Untap all <type> you control during each other player's untap step." ---
+    // CR 502.3 + CR 113.6: Seedborn Muse class — continuous static granting a
+    // second untap pass during each OTHER player's untap step. The parser lowers
+    // this to `StaticMode::UntapsDuringEachOtherPlayersUntapStep` with the
+    // `affected` filter carrying the permanent class to untap (typically
+    // "permanents you control"). Runtime integration lives in
+    // `turns::execute_untap`, which scans the battlefield for this variant
+    // after the active player's normal untap step.
+    if let Some(rest) = nom_tag_tp(&tp, "untap all ") {
+        // The subject is the thing being untapped (e.g. "permanents you
+        // control", "creatures you control"). Delegate to `parse_type_phrase`
+        // which handles the full range of type + controller phrases.
+        let (filter, remainder) = parse_type_phrase(rest.original);
+        let remainder_lower = remainder.to_lowercase();
+        // Accept "during each other player's untap step" with straight and curly apostrophes.
+        let tail = remainder_lower.trim().trim_end_matches('.');
+        let during_ok = nom_on_lower(tail, tail, |i| {
+            value(
+                (),
+                alt((
+                    tag("during each other player's untap step"),
+                    tag("during each other player\u{2019}s untap step"),
+                )),
+            )
+            .parse(i)
+        })
+        .is_some();
+        // Require the subject filter to be controlled by "you" — rules text
+        // variations outside this ("each player's permanents") would not be
+        // Seedborn semantics and fall through.
+        let controller_is_you = matches!(
+            &filter,
+            TargetFilter::Typed(tf) if tf.controller == Some(ControllerRef::You)
+        );
+        if during_ok && controller_is_you {
+            return Some(
+                StaticDefinition::new(StaticMode::UntapsDuringEachOtherPlayersUntapStep)
+                    .affected(filter)
+                    .description(text.to_string()),
+            );
+        }
+    }
+
     // --- "Play with the top card of your library revealed" ---
     // CR 400.2: Continuous effect making top card public information.
     if nom_primitives::scan_contains(tp.lower, "play with the top card") {
