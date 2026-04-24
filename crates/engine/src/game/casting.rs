@@ -3164,6 +3164,45 @@ pub fn pay_ability_cost(
                     .to_string(),
             ));
         }
+        // CR 701.43a: "To exert a permanent, its controller chooses to have it
+        // not untap during its controller's next untap step." Modeled as a
+        // transient continuous effect with `StaticMode::CantUntap` scoped to
+        // `Duration::UntilControllerNextUntapStep` on the source permanent,
+        // identical to the "doesn't untap during its controller's next untap
+        // step" pattern already handled by the layer system (see
+        // `layers::prune_controller_untap_step_effects`).
+        //
+        // CR 701.43b: "A permanent can be exerted even if it's not tapped or
+        // has already been exerted in a turn." Pushing a second identical
+        // effect is harmless — both expire during the same untap step.
+        //
+        // CR 701.43c: "An object that isn't on the battlefield can't be
+        // exerted." Enforced here so off-battlefield activations (which
+        // shouldn't reach this site for Exert costs on permanents) fail
+        // loudly rather than creating a dangling effect.
+        AbilityCost::Exert => {
+            let obj = state.objects.get(&source_id).ok_or_else(|| {
+                EngineError::InvalidAction("Source object not found for exert cost".to_string())
+            })?;
+            if obj.zone != Zone::Battlefield {
+                return Err(EngineError::ActionNotAllowed(
+                    "Cannot exert: source is not on the battlefield".to_string(),
+                ));
+            }
+            let controller = obj.controller;
+            state.add_transient_continuous_effect(
+                source_id,
+                controller,
+                crate::types::ability::Duration::UntilControllerNextUntapStep,
+                TargetFilter::SpecificObject { id: source_id },
+                vec![
+                    crate::types::ability::ContinuousModification::AddStaticMode {
+                        mode: StaticMode::CantUntap,
+                    },
+                ],
+                None,
+            );
+        }
         // Other cost types (Exile, PayLife, etc.) require interactive resolution
         // and are intercepted before reaching pay_ability_cost, or are not yet auto-payable.
         AbilityCost::Untap
@@ -3174,7 +3213,6 @@ pub fn pay_ability_cost(
         | AbilityCost::TapCreatures { .. }
         | AbilityCost::ReturnToHand { .. }
         | AbilityCost::Mill { .. }
-        | AbilityCost::Exert
         | AbilityCost::Blight { .. }
         | AbilityCost::Reveal { .. }
         | AbilityCost::NinjutsuFamily { .. } => {}
@@ -11307,6 +11345,208 @@ mod tests {
                 matches!(*def.effect, Effect::DestroyAll { .. }),
                 "expected DestroyAll after overload transform, got {:?}",
                 def.effect
+            );
+        }
+    }
+
+    /// CR 701.43a / CR 701.43b / CR 502.3: Exert cost — Arena of Glory class.
+    mod exert_cost {
+        use super::*;
+        use crate::game::turns::execute_untap;
+
+        fn make_battlefield_permanent(state: &mut GameState) -> ObjectId {
+            let id = create_object(
+                state,
+                CardId(10),
+                PlayerId(0),
+                "Arena of Glory".to_string(),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&id).unwrap().card_types.core_types = vec![CoreType::Land];
+            id
+        }
+
+        /// CR 701.43a: Paying the Exert cost marks the source so it skips its
+        /// controller's next untap step. CR 502.3: On that next untap step the
+        /// permanent stays tapped and the marker is pruned; on the following
+        /// untap step it untaps normally.
+        #[test]
+        fn exert_skips_next_untap_then_untaps() {
+            let mut state = setup_game_at_main_phase();
+            let id = make_battlefield_permanent(&mut state);
+            // Tap it to mirror Arena of Glory's combined {T}, Exert cost path:
+            // the tap is part of the composite cost; we model post-payment state.
+            state.objects.get_mut(&id).unwrap().tapped = true;
+
+            let mut events = Vec::new();
+            pay_ability_cost(
+                &mut state,
+                PlayerId(0),
+                id,
+                &AbilityCost::Exert,
+                &mut events,
+            )
+            .expect("exert cost pays");
+
+            // Effect was added for this permanent with the correct duration.
+            let effects: Vec<_> = state
+                .transient_continuous_effects
+                .iter()
+                .filter(
+                    |e| matches!(e.affected, TargetFilter::SpecificObject { id: oid } if oid == id),
+                )
+                .collect();
+            assert_eq!(effects.len(), 1);
+            assert_eq!(
+                effects[0].duration,
+                crate::types::ability::Duration::UntilControllerNextUntapStep
+            );
+            assert!(effects[0].modifications.iter().any(|m| matches!(
+                m,
+                crate::types::ability::ContinuousModification::AddStaticMode {
+                    mode: StaticMode::CantUntap,
+                }
+            )));
+
+            // CR 502.3: Next untap step — permanent stays tapped, marker pruned.
+            state.active_player = PlayerId(0);
+            let mut events = Vec::new();
+            execute_untap(&mut state, &mut events);
+            assert!(
+                state.objects[&id].tapped,
+                "exerted permanent must not untap during its controller's next untap step"
+            );
+            assert!(
+                !state.transient_continuous_effects.iter().any(|e| {
+                    matches!(e.affected, TargetFilter::SpecificObject { id: oid } if oid == id)
+                }),
+                "exert marker must be pruned after the skipped untap step"
+            );
+
+            // Following untap step — untaps normally.
+            let mut events = Vec::new();
+            execute_untap(&mut state, &mut events);
+            assert!(!state.objects[&id].tapped);
+        }
+
+        /// CR 701.43b: A permanent can be exerted even if already exerted. Two
+        /// effects stack harmlessly — both expire during the same untap step.
+        #[test]
+        fn exert_is_idempotent() {
+            let mut state = setup_game_at_main_phase();
+            let id = make_battlefield_permanent(&mut state);
+
+            let mut events = Vec::new();
+            pay_ability_cost(
+                &mut state,
+                PlayerId(0),
+                id,
+                &AbilityCost::Exert,
+                &mut events,
+            )
+            .expect("first exert");
+            pay_ability_cost(
+                &mut state,
+                PlayerId(0),
+                id,
+                &AbilityCost::Exert,
+                &mut events,
+            )
+            .expect("second exert");
+
+            let count = state
+                .transient_continuous_effects
+                .iter()
+                .filter(
+                    |e| matches!(e.affected, TargetFilter::SpecificObject { id: oid } if oid == id),
+                )
+                .count();
+            assert_eq!(count, 2);
+
+            // Tap then untap step — still stays tapped; both markers pruned together.
+            state.objects.get_mut(&id).unwrap().tapped = true;
+            state.active_player = PlayerId(0);
+            let mut events = Vec::new();
+            execute_untap(&mut state, &mut events);
+            assert!(state.objects[&id].tapped);
+            assert_eq!(
+                state
+                    .transient_continuous_effects
+                    .iter()
+                    .filter(|e| matches!(e.affected, TargetFilter::SpecificObject { id: oid } if oid == id))
+                    .count(),
+                0
+            );
+        }
+
+        /// CR 701.43c: An object that isn't on the battlefield can't be exerted.
+        #[test]
+        fn exert_rejects_off_battlefield_source() {
+            let mut state = setup_game_at_main_phase();
+            let id = create_object(
+                &mut state,
+                CardId(11),
+                PlayerId(0),
+                "Not On Field".to_string(),
+                Zone::Hand,
+            );
+
+            let mut events = Vec::new();
+            let result = pay_ability_cost(
+                &mut state,
+                PlayerId(0),
+                id,
+                &AbilityCost::Exert,
+                &mut events,
+            );
+            assert!(matches!(result, Err(EngineError::ActionNotAllowed(_))));
+            assert_eq!(state.transient_continuous_effects.len(), 0);
+        }
+
+        /// CR 502.3: Exert marker on player P's permanent is NOT pruned during
+        /// opponent Q's untap step — it persists until P's next untap step.
+        #[test]
+        fn exert_marker_persists_through_opponent_untap_step() {
+            let mut state = setup_game_at_main_phase();
+            let id = make_battlefield_permanent(&mut state);
+
+            let mut events = Vec::new();
+            pay_ability_cost(
+                &mut state,
+                PlayerId(0),
+                id,
+                &AbilityCost::Exert,
+                &mut events,
+            )
+            .expect("exert cost pays");
+
+            // Opponent's untap step runs first — effect must survive.
+            state.active_player = PlayerId(1);
+            let mut events = Vec::new();
+            execute_untap(&mut state, &mut events);
+            assert_eq!(
+                state
+                    .transient_continuous_effects
+                    .iter()
+                    .filter(|e| matches!(e.affected, TargetFilter::SpecificObject { id: oid } if oid == id))
+                    .count(),
+                1,
+                "exert marker must survive opponent's untap step"
+            );
+
+            // Now P's untap step — marker applies and is then pruned.
+            state.active_player = PlayerId(0);
+            state.objects.get_mut(&id).unwrap().tapped = true;
+            let mut events = Vec::new();
+            execute_untap(&mut state, &mut events);
+            assert!(state.objects[&id].tapped);
+            assert_eq!(
+                state
+                    .transient_continuous_effects
+                    .iter()
+                    .filter(|e| matches!(e.affected, TargetFilter::SpecificObject { id: oid } if oid == id))
+                    .count(),
+                0
             );
         }
     }

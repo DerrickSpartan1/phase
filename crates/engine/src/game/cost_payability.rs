@@ -221,8 +221,9 @@ impl AbilityCost {
             // CR 701.13b: A player can mill fewer than N cards if their library
             // has fewer than N; the cost is always payable.
             AbilityCost::Mill { .. } => true,
-            // CR 702.38: Exert is applied at attack declaration; the cost itself
-            // is always payable — legality is enforced elsewhere in combat.
+            // CR 701.43b: A permanent can be exerted even if it's not tapped
+            // or has already been exerted; the cost itself is always payable.
+            // CR 701.43c (off-battlefield) is enforced at payment time.
             AbilityCost::Exert => true,
             // CR 601.2b: Blight requires N creatures controlled by the player.
             AbilityCost::Blight { count } => {
