@@ -5544,7 +5544,8 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
                 }
             }
         }
-        let (is_optional, opponent_may_scope, text) = strip_optional_effect_prefix(&text);
+        let (is_optional, opponent_may_scope, implicit_player_scope, text) =
+            strip_optional_effect_prefix(&text);
         let (repeat_for, text) = strip_for_each_prefix(&text);
         // CR 609.3: "twice" / "N times" suffix — same mechanism as "for each" prefix.
         let (repeat_count, text) = if repeat_for.is_none() {
@@ -5554,6 +5555,10 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         };
         let repeat_for = repeat_for.or(repeat_count);
         let (player_scope, text) = strip_player_scope_subject(&text);
+        // CR 608.2d: When the optional prefix ("each opponent may") carries an
+        // implicit per-player iteration, propagate it to the ability so the
+        // OptionalEffectChoice is emitted once per matching player.
+        let player_scope = player_scope.or(implicit_player_scope);
 
         // CR 603.7a: Check for temporal prefix before suffix. When present, parse the
         // inner effect through the full pipeline and wrap in CreateDelayedTrigger.
@@ -6308,30 +6313,48 @@ pub(crate) fn capitalize(s: &str) -> String {
     }
 }
 
-/// Strip "you may " prefix, returning whether the effect is optional.
+/// Strip optional-effect prefixes, returning whether the effect is optional,
+/// which opponent-may scope applies (if any), and an implicit player_scope to
+/// propagate to the containing ability (set when the prefix itself carries a
+/// per-player iteration, e.g. "each opponent may").
+///
+/// CR 608.2d + CR 603.2: "each opponent may X" differs from "any opponent
+/// may X" — every opponent independently decides yes/no, rather than first
+/// accept wins. It lowers to `optional: true` + `player_scope: Opponent`:
+/// the outer `player_scope` iteration rebinds controller to each opponent,
+/// and each scoped clone enters the standard OptionalEffectChoice prompt.
 fn strip_optional_effect_prefix(
     text: &str,
 ) -> (
     bool,
     Option<crate::types::ability::OpponentMayScope>,
+    Option<PlayerFilter>,
     String,
 ) {
     let lower = text.to_lowercase();
-    // CR 608.2d: "any opponent may" — opponent-choice optional effect.
+    // CR 608.2d: "each opponent may" — per-opponent optional effect.
+    // "any opponent may" — first-accept-wins opponent-choice optional effect.
     // "you may" — standard optional effect prefix.
-    if let Some((scope, rest)) = nom_on_lower(text, &lower, |input| {
+    if let Some(((scope, player_scope), rest)) = nom_on_lower(text, &lower, |input| {
         alt((
             value(
-                Some(crate::types::ability::OpponentMayScope::AnyOpponent),
+                (None, Some(PlayerFilter::Opponent)),
+                tag("each opponent may "),
+            ),
+            value(
+                (
+                    Some(crate::types::ability::OpponentMayScope::AnyOpponent),
+                    None,
+                ),
                 tag("any opponent may "),
             ),
-            value(None, tag("you may ")),
+            value((None, None), tag("you may ")),
         ))
         .parse(input)
     }) {
-        (true, scope, rest.to_string())
+        (true, scope, player_scope, rest.to_string())
     } else {
-        (false, None, text.to_string())
+        (false, None, None, text.to_string())
     }
 }
 
@@ -13736,6 +13759,36 @@ mod tests {
         assert!(def.optional);
         let sub = def.sub_ability.as_ref().expect("should have sub_ability");
         assert_eq!(sub.condition, Some(AbilityCondition::IfAPlayerDoes));
+    }
+
+    /// CR 608.2d + CR 603.2: "each opponent may X" — each opponent independently
+    /// decides yes/no. Lowered to `optional: true` + `player_scope: Opponent`
+    /// (not `OpponentMayScope::AnyOpponent`, which is first-accept-wins).
+    /// At runtime the outer player_scope iteration rebinds controller per
+    /// opponent, and each scoped clone enters OptionalEffectChoice for that
+    /// opponent. Source: Fandaniel, Telophoroi Ascian Oracle.
+    #[test]
+    fn each_opponent_may_sets_optional_with_opponent_scope() {
+        let def = parse_effect_chain(
+            "each opponent may sacrifice a nontoken creature of their choice",
+            AbilityKind::Spell,
+        );
+        assert!(def.optional, "expected optional=true, got {def:?}");
+        assert_eq!(
+            def.optional_for, None,
+            "each-opponent-may must NOT set optional_for (which is AnyOpponent-only)"
+        );
+        assert_eq!(
+            def.player_scope,
+            Some(PlayerFilter::Opponent),
+            "expected player_scope=Opponent, got {:?}",
+            def.player_scope
+        );
+        assert!(
+            matches!(*def.effect, Effect::Sacrifice { .. }),
+            "effect should be Sacrifice, got {:?}",
+            def.effect
+        );
     }
 
     #[test]
