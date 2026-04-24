@@ -442,28 +442,27 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
             // CR 702.190b: Sneak-cast permanent enters tapped (already seeded on
             // the ZoneChange replacement) AND attacking the same defender as the
-            // returned creature. Also tag `cast_variant_paid` so the
-            // `CastVariantPaid { variant: Sneak }` trigger/ability condition
-            // used by intrinsic-sneak cards fires on resolved Sneak casts.
-            if let CastingVariant::Sneak {
-                defender,
-                attack_target,
-                ..
-            } = casting_variant
-            {
+            // returned creature. Placement is `Some` only for permanent spells;
+            // non-permanent Sneak casts (instants/sorceries) resolve normally.
+            // Also tag `cast_variant_paid` so the `CastVariantPaid { variant:
+            // Sneak }` trigger/ability condition fires on resolved Sneak casts
+            // regardless of card type.
+            if let CastingVariant::Sneak { placement, .. } = casting_variant {
                 if let Some(obj) = state.objects.get_mut(&entry.id) {
                     obj.cast_variant_paid = Some((
                         crate::types::ability::CastVariantPaid::Sneak,
                         state.turn_number,
                     ));
                 }
-                super::combat::place_attacking_alongside(
-                    state,
-                    entry.id,
-                    defender,
-                    attack_target,
-                    events,
-                );
+                if let Some(p) = placement {
+                    super::combat::place_attacking_alongside(
+                        state,
+                        entry.id,
+                        p.defender,
+                        p.attack_target,
+                        events,
+                    );
+                }
             }
 
             // CR 702.74a: Evoke-cast permanent gets the `cast_variant_paid` tag
@@ -828,6 +827,30 @@ fn is_permanent_type(state: &GameState, object_id: ObjectId) -> bool {
                 | CoreType::Enchantment
                 | CoreType::Planeswalker
                 | CoreType::Land
+        )
+    })
+}
+
+/// CR 110.4b: A permanent spell — "an artifact, battle, creature, enchantment,
+/// or planeswalker spell." Lands are excluded because they aren't spells
+/// (they're played, not cast). Used by resolution paths that distinguish
+/// "spell that will enter the battlefield" from "non-permanent spell"
+/// (e.g., Sneak's CR 702.190b alongside-attacker placement, which applies
+/// only to permanent spells).
+pub(crate) fn is_permanent_spell(state: &GameState, object_id: ObjectId) -> bool {
+    use crate::types::card_type::CoreType;
+
+    let Some(obj) = state.objects.get(&object_id) else {
+        return false;
+    };
+    obj.card_types.core_types.iter().any(|ct| {
+        matches!(
+            ct,
+            CoreType::Artifact
+                | CoreType::Battle
+                | CoreType::Creature
+                | CoreType::Enchantment
+                | CoreType::Planeswalker
         )
     })
 }

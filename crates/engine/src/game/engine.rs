@@ -1778,11 +1778,14 @@ fn apply_action(
             .map_err(EngineError::InvalidAction)?;
             WaitingFor::Priority { player: p }
         }
-        // CR 702.190a: Sneak — cast creature from graveyard during declare blockers.
+        // CR 702.190a: Sneak — cast a spell from hand during declare blockers
+        // by paying the Sneak cost and returning an unblocked attacker.
+        // Applies to any card type; permanent-spell placement (CR 702.190b)
+        // is handled at resolution based on the variant's `placement`.
         (
             WaitingFor::Priority { player },
             GameAction::CastSpellAsSneak {
-                gy_object,
+                hand_object,
                 card_id,
                 creature_to_return,
             },
@@ -1791,7 +1794,7 @@ fn apply_action(
             super::casting::handle_cast_spell_as_sneak(
                 state,
                 p,
-                gy_object,
+                hand_object,
                 card_id,
                 creature_to_return,
                 &mut events,
