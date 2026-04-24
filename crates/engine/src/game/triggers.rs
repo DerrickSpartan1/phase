@@ -2406,6 +2406,98 @@ pub mod tests {
         }
     }
 
+    /// CR 603.6a + CR 107.3: "Whenever another creature enters, put X +1/+1
+    /// counters on ~, where X is that creature's power" (Hamletback Goliath).
+    /// The ETB trigger (CR 603.6a) fires for the entering creature; the trigger
+    /// body's X is defined by the ability text (CR 107.3) as the entering
+    /// creature's power, which the parser lowers to
+    /// `QuantityRef::EventContextSourcePower`. At resolution the event's source
+    /// is the entering creature, so that variant must read THAT creature's
+    /// power, not default to 0. Covers the class of ETB triggers that scale
+    /// a self-counter by the entering object's power/toughness (~20 cards:
+    /// Hamletback Goliath, Kresh the Bloodbraided, Nantuko Mentor, ...).
+    #[test]
+    fn hamletback_etb_trigger_scales_counter_count_by_triggering_creature_power() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        // Source creature: has the "whenever another creature enters" trigger.
+        let goliath = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hamletback-like".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&goliath).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(6);
+            obj.toughness = Some(6);
+            obj.entered_battlefield_turn = Some(0);
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::PutCounter {
+                            counter_type: "P1P1".to_string(),
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::EventContextSourcePower,
+                            },
+                            target: TargetFilter::SelfRef,
+                        },
+                    ))
+                    .destination(Zone::Battlefield)
+                    .valid_card(TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::Another]),
+                    )),
+            );
+        }
+
+        // Entering creature: the "another creature" with power 4.
+        let entering = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Entering 4/4".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&entering).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(4);
+            obj.toughness = Some(4);
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        // Fire the ETB event and enqueue the trigger.
+        let events_in = vec![zone_changed_event(
+            entering,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        )];
+        process_triggers(&mut state, &events_in);
+        assert_eq!(state.stack.len(), 1, "ETB trigger should be on the stack");
+
+        // Resolve the trigger: this sets current_trigger_event and executes PutCounter.
+        let mut out_events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut out_events);
+
+        // Goliath should gain 4 (= entering creature's power) +1/+1 counters.
+        let p1p1 = state.objects[&goliath]
+            .counters
+            .get(&crate::types::counter::CounterType::Plus1Plus1)
+            .copied()
+            .unwrap_or(0);
+        assert_eq!(
+            p1p1, 4,
+            "EventContextSourcePower must resolve to the entering creature's power (4), \
+             yielding 4 +1/+1 counters on the source (got {p1p1})"
+        );
+    }
+
     #[test]
     fn multiple_triggers_from_same_event() {
         let mut state = setup();
