@@ -221,6 +221,21 @@ pub(super) fn parse_numeric_imperative_ast(
         .map(|(_, rest)| rest)
         .unwrap_or("");
         if !after_gain.is_empty() {
+            // CR 603.7c + CR 119.1: "gain that much life" / "gain that many life" —
+            // amount is the triggering event's amount (Exquisite Blood). Extract the
+            // amount phrase before " life" and route through the event-context
+            // quantity parser so "that much" resolves to `EventContextAmount`
+            // rather than defaulting to 1.
+            let after_lower = after_gain.to_ascii_lowercase();
+            let amount_phrase = after_lower
+                .split_once(" life")
+                .map(|(before, _)| before.trim())
+                .unwrap_or(after_lower.trim_end_matches('.').trim());
+            if let Some(qty) =
+                crate::parser::oracle_quantity::parse_event_context_quantity(amount_phrase)
+            {
+                return Some(NumericImperativeAst::GainLife { amount: qty });
+            }
             let amount = parse_count_expr(after_gain)
                 .map(|(q, _)| q)
                 .unwrap_or(QuantityExpr::Fixed { value: 1 });
@@ -243,19 +258,37 @@ pub(super) fn parse_numeric_imperative_ast(
                 return Some(NumericImperativeAst::LoseLife { amount: qty });
             }
         }
-        // Extract count before "life": "lose 3 life", "you lose X life", etc.
-        let amount = if let Ok((_, before_life)) =
-            take_until::<_, _, VerboseError<&str>>("life").parse(lower)
-        {
+        // CR 603.7c + CR 119.3: "lose that much life" / "lose that many life" —
+        // amount is the triggering event's amount. Probe for event-context phrases
+        // before falling back to the numeric last-word extractor.
+        if let Ok((_, before_life)) = take_until::<_, _, VerboseError<&str>>("life").parse(lower) {
+            let after_verb = nom_on_lower(text, lower, |input| {
+                value((), alt((tag("you lose "), tag("lose ")))).parse(input)
+            })
+            .map(|(_, rest)| rest)
+            .unwrap_or("");
+            if !after_verb.is_empty() {
+                let after_lower = after_verb.to_ascii_lowercase();
+                let amount_phrase = after_lower
+                    .split_once(" life")
+                    .map(|(b, _)| b.trim())
+                    .unwrap_or(after_lower.trim_end_matches('.').trim());
+                if let Some(qty) =
+                    crate::parser::oracle_quantity::parse_event_context_quantity(amount_phrase)
+                {
+                    return Some(NumericImperativeAst::LoseLife { amount: qty });
+                }
+            }
             let before_life = before_life.trim();
             let last_word = before_life.split_whitespace().next_back().unwrap_or("");
-            parse_count_expr(last_word)
+            let amount = parse_count_expr(last_word)
                 .map(|(q, _)| q)
-                .unwrap_or(QuantityExpr::Fixed { value: 1 })
-        } else {
-            QuantityExpr::Fixed { value: 1 }
-        };
-        return Some(NumericImperativeAst::LoseLife { amount });
+                .unwrap_or(QuantityExpr::Fixed { value: 1 });
+            return Some(NumericImperativeAst::LoseLife { amount });
+        }
+        return Some(NumericImperativeAst::LoseLife {
+            amount: QuantityExpr::Fixed { value: 1 },
+        });
     }
 
     if nom_primitives::scan_contains(lower, "gets +")

@@ -2504,6 +2504,46 @@ fn try_parse_event(
         return Some(result);
     }
 
+    // CR 119.3 + CR 603.2: "Whenever [subject] loses life" — player-scoped life-loss
+    // trigger. Subject filter (`a player`, `an opponent`, etc.) becomes `valid_target`
+    // so the matcher's `valid_player_matches` honors the scoping.
+    // Covers Exquisite Blood ("Whenever an opponent loses life, ..."),
+    // Vito, Thorn of the Dusk Rose ("Whenever you gain life, each opponent loses..."),
+    // Bloodchief Ascension-adjacent cards.
+    fn parse_life_verb(input: &str) -> OracleResult<'_, TriggerMode> {
+        alt((
+            value(TriggerMode::LifeLost, tag("loses life")),
+            value(TriggerMode::LifeLost, tag("lose life")),
+            value(TriggerMode::LifeGained, tag("gains life")),
+            value(TriggerMode::LifeGained, tag("gain life")),
+        ))
+        .parse(input)
+    }
+    if let Ok((_, mode)) = parse_life_verb.parse(rest) {
+        let mut def = make_base();
+        def.mode = mode.clone();
+        def.valid_target = Some(subject.clone());
+        return Some((mode, def));
+    }
+
+    // CR 120.1 + CR 603.2: "Whenever [subject] draws a card" — generic draw trigger
+    // (e.g. Rhystic Study, Sylvan Library patterns where subject is `a player`; Sheoldred's
+    // first trigger where subject is `~`/you). Subject filter flows into `valid_target`
+    // so `match_drawn` correctly scopes to the right player.
+    fn parse_draws_card(input: &str) -> OracleResult<'_, ()> {
+        alt((
+            value((), tag("draws a card")),
+            value((), tag("draw a card")),
+        ))
+        .parse(input)
+    }
+    if parse_draws_card.parse(rest).is_ok() {
+        let mut def = make_base();
+        def.mode = TriggerMode::Drawn;
+        def.valid_target = Some(subject.clone());
+        return Some((TriggerMode::Drawn, def));
+    }
+
     None
 }
 
@@ -3865,8 +3905,12 @@ fn try_parse_player_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefiniti
     }
 
     if scan_contains(lower, "you draw a card") {
+        // CR 120.1 + CR 603.2: "Whenever you draw a card" — scope to the trigger's
+        // controller. Without this filter, `match_drawn` would fire for all players'
+        // draws (Sheoldred's first trigger misfires on opponent draws).
         let mut def = make_base();
         def.mode = TriggerMode::Drawn;
+        def.valid_target = Some(TargetFilter::Controller);
         return Some((TriggerMode::Drawn, def));
     }
 
@@ -6774,6 +6818,49 @@ mod tests {
                 TypedFilter::default().controller(ControllerRef::Opponent)
             ))
         );
+    }
+
+    #[test]
+    fn trigger_you_draw_a_card_scopes_to_controller() {
+        // CR 120.1 + CR 603.2: Sheoldred's first trigger must scope to the
+        // controller so it does not fire on opponent draws.
+        let def = parse_trigger_line(
+            "Whenever you draw a card, you gain 2 life.",
+            "Sheoldred, the Apocalypse",
+        );
+        assert_eq!(def.mode, TriggerMode::Drawn);
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn trigger_opponent_loses_life_exquisite_blood() {
+        // CR 119.3 + CR 603.2 + CR 603.7c: Exquisite Blood — opponent-scoped
+        // life-loss trigger whose effect reads "that much" from the event.
+        let def = parse_trigger_line(
+            "Whenever an opponent loses life, you gain that much life.",
+            "Exquisite Blood",
+        );
+        assert_eq!(def.mode, TriggerMode::LifeLost);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::Opponent)
+            ))
+        );
+        // Effect amount should be the triggering event's amount, not Fixed 1.
+        let execute = def.execute.as_ref().expect("execute ability present");
+        match &*execute.effect {
+            crate::types::ability::Effect::GainLife { amount, .. } => {
+                assert_eq!(
+                    amount,
+                    &QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                    "Exquisite Blood: gain amount must reference event's life-loss amount"
+                );
+            }
+            other => panic!("expected GainLife effect, got {other:?}"),
+        }
     }
 
     #[test]
