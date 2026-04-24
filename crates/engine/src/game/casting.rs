@@ -991,6 +991,18 @@ fn prepare_spell_cast_with_variant_override(
             CastingVariant::Normal
         }
     });
+    // CR 702.96a: When the caller explicitly opted into Overload (via
+    // `variant_override = Some(CastingVariant::Overload)`), substitute the
+    // overload mana cost taken from the hand object's `Keyword::Overload(cost)`
+    // payload. Mirrors the Evoke/Warp cost-selection pattern below.
+    let overload_cost = if casting_variant == CastingVariant::Overload {
+        obj.keywords.iter().find_map(|k| match k {
+            crate::types::keywords::Keyword::Overload(cost) => Some(cost.clone()),
+            _ => None,
+        })
+    } else {
+        None
+    };
     // CR 702.74a: When the caller explicitly opted into Evoke (via
     // `variant_override = Some(CastingVariant::Evoke)`), substitute the evoke
     // mana cost taken from the hand object's `Keyword::Evoke(cost)` payload.
@@ -1067,6 +1079,7 @@ fn prepare_spell_cast_with_variant_override(
         miracle_cost
             .or(madness_cost)
             .or(evoke_cost)
+            .or(overload_cost)
             .or(escape_cost)
             .or(harmonize_cost)
             .or(flashback_mana_cost)
@@ -1148,6 +1161,18 @@ fn prepare_spell_cast_with_variant_override(
 
     // CR 601.2f: Apply one-shot pending cost reductions ("the next spell costs {N} less").
     apply_pending_spell_cost_reductions(state, player, object_id, &mut mana_cost);
+
+    // CR 702.96b-c: When casting with Overload, transform the spell's ability
+    // tree so every target-bearing effect is promoted to its all-matching
+    // counterpart (Destroy→DestroyAll, Pump→PumpAll, DealDamage→DamageAll,
+    // Tap→TapAll, Bounce→ChangeZoneAll). The transformed effects carry no
+    // TargetRef slots, so target selection is naturally skipped (CR 702.96c).
+    let mut ability_def = ability_def;
+    if casting_variant == CastingVariant::Overload {
+        if let Some(def) = ability_def.as_mut() {
+            super::effects::overload::transform_ability_def(def);
+        }
+    }
 
     let origin_zone = obj.zone;
     Ok(PreparedSpellCast {
@@ -1678,6 +1703,31 @@ pub fn handle_warp_cost_choice(
     continue_cast_from_prepared(state, player, object_id, events)
 }
 
+/// CR 702.96a: Handle Overload cost choice and proceed with casting. When
+/// `use_overload` is true, the cast is prepared with `CastingVariant::Overload`
+/// — the overload mana cost substitutes for the printed cost and the spell's
+/// ability tree is transformed (target → each, CR 702.96b-c). When false, the
+/// cast proceeds normally (no variant override → `Normal`).
+pub fn handle_overload_cost_choice(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    _card_id: CardId,
+    use_overload: bool,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    if use_overload {
+        let prepared = prepare_spell_cast_with_variant_override(
+            state,
+            player,
+            object_id,
+            Some(CastingVariant::Overload),
+        )?;
+        return continue_with_prepared(state, player, prepared, events);
+    }
+    continue_cast_from_prepared(state, player, object_id, events)
+}
+
 /// CR 702.74a: Handle Evoke cost choice and proceed with casting. When
 /// `use_evoke` is true, the cast is prepared with `CastingVariant::Evoke`
 /// (which substitutes the evoke mana cost for the printed mana cost). When
@@ -2081,6 +2131,41 @@ pub fn handle_cast_spell(
                 if !normal_affordable && evoke_affordable {
                     // Only evoke is payable — proceed via the evoke path.
                     return handle_evoke_cost_choice(
+                        state, player, object_id, card_id, true, events,
+                    );
+                }
+                // Otherwise (normal-only or neither): fall through to normal cast.
+            }
+        }
+    }
+
+    // CR 702.96a: Overload — when a hand card has Keyword::Overload and both
+    // costs are affordable, present a choice. Auto-skip when only one cost is
+    // viable. Mirrors the Evoke opt-in flow: Overload is opt-in via
+    // variant_override (the printed mana cost remains the default) so the only
+    // routing needed is when the player picks the overload cost.
+    if let Some(obj) = state.objects.get(&object_id) {
+        if obj.zone == Zone::Hand {
+            if let Some(overload_cost) = obj.keywords.iter().find_map(|k| match k {
+                crate::types::keywords::Keyword::Overload(cost) => Some(cost.clone()),
+                _ => None,
+            }) {
+                let normal_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &obj.mana_cost);
+                let overload_affordable =
+                    can_pay_cost_after_auto_tap(state, player, object_id, &overload_cost);
+                if normal_affordable && overload_affordable {
+                    return Ok(WaitingFor::OverloadCostChoice {
+                        player,
+                        object_id,
+                        card_id,
+                        normal_cost: obj.mana_cost.clone(),
+                        overload_cost,
+                    });
+                }
+                if !normal_affordable && overload_affordable {
+                    // Only overload is payable — proceed via the overload path.
+                    return handle_overload_cost_choice(
                         state, player, object_id, card_id, true, events,
                     );
                 }
@@ -11133,6 +11218,95 @@ mod tests {
                     .unwrap_or(0),
                 2,
                 "one counter removed, two remain"
+            );
+        }
+    }
+
+    /// CR 702.96a-c: Overload end-to-end — `handle_cast_spell` on a hand card
+    /// with `Keyword::Overload(cost)` offers `WaitingFor::OverloadCostChoice`
+    /// when both costs are affordable, and selecting overload prepares the
+    /// spell with `CastingVariant::Overload`, substitutes the overload cost,
+    /// and transforms the ability's `Destroy { target }` into `DestroyAll`.
+    mod overload_cast_flow {
+        use super::*;
+        use crate::types::keywords::Keyword;
+        use crate::types::mana::ManaCost;
+
+        fn create_damn_in_hand(state: &mut GameState, player: PlayerId) -> ObjectId {
+            let obj_id = create_object(state, CardId(42), player, "Damn".to_string(), Zone::Hand);
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Sorcery);
+            // Printed cost: {1}{B}. Overload cost: {2}{W}{W}.
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 1,
+            };
+            obj.abilities.push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Destroy {
+                    target: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: None,
+                        properties: vec![],
+                    }),
+                    cant_regenerate: true,
+                },
+            ));
+            obj.keywords.push(Keyword::Overload(ManaCost::Cost {
+                shards: vec![ManaCostShard::White, ManaCostShard::White],
+                generic: 2,
+            }));
+            obj_id
+        }
+
+        #[test]
+        fn offer_overload_when_both_costs_affordable() {
+            let mut state = setup_game_at_main_phase();
+            // Pay both printed ({1}{B}) and overload ({2}{W}{W}) from a
+            // generous mana pool so the offer path is taken.
+            add_mana(&mut state, PlayerId(0), ManaType::Black, 2);
+            add_mana(&mut state, PlayerId(0), ManaType::White, 4);
+            let obj = create_damn_in_hand(&mut state, PlayerId(0));
+            let mut events = Vec::new();
+            let wf =
+                handle_cast_spell(&mut state, PlayerId(0), obj, CardId(42), &mut events).unwrap();
+            assert!(
+                matches!(wf, WaitingFor::OverloadCostChoice { .. }),
+                "expected OverloadCostChoice offer, got {:?}",
+                wf
+            );
+        }
+
+        #[test]
+        fn opting_into_overload_transforms_destroy_to_destroy_all() {
+            let mut state = setup_game_at_main_phase();
+            add_mana(&mut state, PlayerId(0), ManaType::White, 4);
+            let obj = create_damn_in_hand(&mut state, PlayerId(0));
+            let prepared = prepare_spell_cast_with_variant_override(
+                &state,
+                PlayerId(0),
+                obj,
+                Some(CastingVariant::Overload),
+            )
+            .expect("overload prepare succeeds");
+            assert_eq!(prepared.casting_variant, CastingVariant::Overload);
+            // Overload mana cost substituted for printed cost.
+            match prepared.mana_cost {
+                ManaCost::Cost {
+                    ref shards,
+                    generic,
+                } => {
+                    assert_eq!(generic, 2);
+                    assert_eq!(shards.len(), 2);
+                }
+                other => panic!("expected overload cost substituted, got {:?}", other),
+            }
+            // Destroy → DestroyAll.
+            let def = prepared.ability_def.expect("spell ability present");
+            assert!(
+                matches!(*def.effect, Effect::DestroyAll { .. }),
+                "expected DestroyAll after overload transform, got {:?}",
+                def.effect
             );
         }
     }

@@ -74,6 +74,7 @@ pub mod manifest;
 pub mod manifest_dread;
 pub mod mill;
 pub mod monstrosity;
+pub mod overload;
 pub mod paradigm;
 pub mod pay;
 pub mod phase_out;

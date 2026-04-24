@@ -1063,6 +1063,19 @@ pub enum WaitingFor {
         /// The Evoke keyword's alternative mana cost (for display in the choice modal).
         evoke_cost: ManaCost,
     },
+    /// CR 702.96a: Player chooses between normal cast and Overload cast from hand.
+    /// Overload substitutes the overload mana cost and transforms every "target"
+    /// in the spell's text to "each" (CR 702.96b). Only presented when both costs
+    /// are affordable.
+    OverloadCostChoice {
+        player: PlayerId,
+        object_id: ObjectId,
+        card_id: CardId,
+        /// The card's normal mana cost (for display in the choice modal).
+        normal_cost: ManaCost,
+        /// The Overload keyword's alternative mana cost (for display in the choice modal).
+        overload_cost: ManaCost,
+    },
     /// CR 601.2c: Player chooses any number of legal targets from a set.
     /// Used for "exile any number of" and similar variable-count targeting.
     MultiTargetSelection {
@@ -1604,6 +1617,7 @@ impl WaitingFor {
             | WaitingFor::ModalFaceChoice { player, .. }
             | WaitingFor::WarpCostChoice { player, .. }
             | WaitingFor::EvokeCostChoice { player, .. }
+            | WaitingFor::OverloadCostChoice { player, .. }
             | WaitingFor::ChooseRingBearer { player, .. }
             | WaitingFor::ChooseDungeon { player, .. }
             | WaitingFor::ChooseDungeonRoom { player, .. }
@@ -1898,6 +1912,16 @@ pub enum CastingVariant {
     /// strictly greater than `turn_plotted`. Zeroes the mana cost and routes
     /// through the normal cast pipeline; no special resolution-time behavior.
     Plot,
+    /// CR 702.96a-c: Cast from hand via Overload's alternative cost. The
+    /// printed mana cost is replaced by `Keyword::Overload(cost)` at cast
+    /// preparation (mirrors `Evoke`/`Warp`). Per CR 702.96b, every "target"
+    /// in the spell's text is replaced by "each" — applied as a cast-time
+    /// transformation of the spell's ability tree (`Destroy`→`DestroyAll`,
+    /// `Pump`→`PumpAll`, `DealDamage`→`DamageAll`, `Tap`→`TapAll`,
+    /// `Bounce`→`ChangeZoneAll`). Per CR 702.96c, the resulting spell has
+    /// no targets, so target selection is naturally skipped because the
+    /// transformed effects carry no `TargetRef` slots.
+    Overload,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

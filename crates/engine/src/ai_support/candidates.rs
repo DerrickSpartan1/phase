@@ -1083,6 +1083,20 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 Some(*player),
             ),
         ],
+        WaitingFor::OverloadCostChoice { player, .. } => vec![
+            candidate(
+                GameAction::ChooseOverloadCost { use_overload: true },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::ChooseOverloadCost {
+                    use_overload: false,
+                },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
         WaitingFor::OptionalEffectChoice { .. }
         | WaitingFor::OpponentMayChoice { .. }
         | WaitingFor::TributeChoice { .. } => {

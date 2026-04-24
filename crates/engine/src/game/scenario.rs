@@ -1056,6 +1056,7 @@ impl GameRunner {
             WaitingFor::ModalFaceChoice { .. } => "ModalFaceChoice",
             WaitingFor::WarpCostChoice { .. } => "WarpCostChoice",
             WaitingFor::EvokeCostChoice { .. } => "EvokeCostChoice",
+            WaitingFor::OverloadCostChoice { .. } => "OverloadCostChoice",
             WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",
             WaitingFor::AbilityModeChoice { .. } => "AbilityModeChoice",
             WaitingFor::OptionalEffectChoice { .. } => "OptionalEffectChoice",

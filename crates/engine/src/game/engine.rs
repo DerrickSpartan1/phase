@@ -793,6 +793,23 @@ fn apply_action(
             use_evoke,
             &mut events,
         )?,
+        // CR 702.96a: Player chooses normal cast or Overload cast from hand.
+        (
+            WaitingFor::OverloadCostChoice {
+                player,
+                object_id,
+                card_id,
+                ..
+            },
+            GameAction::ChooseOverloadCost { use_overload },
+        ) => casting::handle_overload_cost_choice(
+            state,
+            *player,
+            *object_id,
+            *card_id,
+            use_overload,
+            &mut events,
+        )?,
         (WaitingFor::ModeChoice { player, .. }, GameAction::SelectModes { indices }) => {
             casting::handle_select_modes(state, *player, indices, &mut events)?
         }

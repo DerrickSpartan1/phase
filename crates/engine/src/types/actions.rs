@@ -146,6 +146,12 @@ pub enum GameAction {
     ChooseEvokeCost {
         use_evoke: bool,
     },
+    /// CR 702.96a: Choose normal cast (false) or Overload cast (true) from hand.
+    /// Overload cast substitutes the overload mana cost and transforms every
+    /// "target" in the spell's text to "each" (CR 702.96b-c).
+    ChooseOverloadCost {
+        use_overload: bool,
+    },
     /// CR 702.49: Activate a Ninjutsu-family keyword from hand or command zone during combat.
     ActivateNinjutsu {
         ninjutsu_card_id: CardId,
@@ -454,6 +460,7 @@ impl GameAction {
             | GameAction::ChooseModalFace { .. }
             | GameAction::ChooseWarpCost { .. }
             | GameAction::ChooseEvokeCost { .. }
+            | GameAction::ChooseOverloadCost { .. }
             | GameAction::ActivateNinjutsu { .. }
             | GameAction::DecideOptionalEffect { .. }
             | GameAction::PayUnlessCost { .. }
