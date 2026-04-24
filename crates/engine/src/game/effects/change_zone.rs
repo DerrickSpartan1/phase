@@ -6,7 +6,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{ExileLink, ExileLinkKind, GameState, WaitingFor};
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 use crate::types::zones::Zone;
@@ -564,6 +564,26 @@ pub fn resolve_all(
     } else {
         crate::game::effects::resolved_object_filter(ability, &target_filter)
     };
+
+    // CR 603.7: Resolve the `TrackedSetId(0)` sentinel emitted by the parser for
+    // inline "the exiled card[s]" continuations (e.g., Sword of Hearth and Home's
+    // chain: exile creature → search land → return the exiled card). The
+    // delayed-trigger resolver performs the same binding at delayed-trigger
+    // creation time; inline chains must bind here so `ChangeZoneAll` scans the
+    // correct set. Mirrors the sentinel handling in `grant_permission.rs`.
+    let effective_filter = match effective_filter {
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        } => state
+            .tracked_object_sets
+            .iter()
+            .filter(|(_, objects)| !objects.is_empty())
+            .max_by_key(|(id, _)| id.0)
+            .map(|(&real_id, _)| TargetFilter::TrackedSet { id: real_id })
+            .unwrap_or(effective_filter),
+        other => other,
+    };
+
     let filter_controller =
         crate::game::effects::controller_for_relative_filter(ability, &effective_filter);
 
@@ -2212,6 +2232,49 @@ mod tests {
                 }
             )),
             "Fail-to-find put-step must emit EffectResolved so the chain advances to Shuffle"
+        );
+    }
+
+    /// CR 603.7 + CR 400.7: Sword of Hearth and Home's triggered ability chains
+    /// `ChangeZone` (exile target creature) → `SearchLibrary` → `ChangeZone`
+    /// (land → battlefield) → `ChangeZoneAll { target: TrackedSet(0) }` (return
+    /// the exiled creature). The final step uses the sentinel `TrackedSetId(0)`
+    /// emitted by the parser, which `resolve_all` must rebind to the most recent
+    /// populated tracked set — otherwise the exiled card is stranded in exile.
+    #[test]
+    fn change_zone_all_resolves_tracked_set_sentinel_inline() {
+        let mut state = GameState::new_two_player(42);
+        let exiled = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Exiled Creature".to_string(),
+            Zone::Exile,
+        );
+        // Simulate the upstream exile step having published a tracked set.
+        let set_id = TrackedSetId(state.next_tracked_set_id);
+        state.next_tracked_set_id += 1;
+        state.tracked_object_sets.insert(set_id, vec![exiled]);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Exile),
+                destination: Zone::Battlefield,
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+        resolve_all(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&exiled].zone,
+            Zone::Battlefield,
+            "Exiled creature must return to the battlefield when TrackedSetId(0) is resolved"
         );
     }
 }
