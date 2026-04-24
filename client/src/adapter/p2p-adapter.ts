@@ -17,6 +17,7 @@ import { AdapterError } from "./types";
 import { WasmAdapter } from "./wasm-adapter";
 import { createPeerSession, type PeerSession } from "../network/peer";
 import type { P2PMessage } from "../network/protocol";
+import { legalActionsFromWire, legalActionsToWire } from "../network/protocol";
 import type {
   PlayerSlot,
   SeatKind,
@@ -889,11 +890,8 @@ export class P2PHostAdapter implements EngineAdapter {
           playerToken: token,
           state: filteredState,
           events: result.events,
-          legalActions: legal.actions,
-          autoPassRecommended: legal.autoPassRecommended,
-          legalActionsByObject: legal.legalActionsByObject,
-          spellCosts: legal.spellCosts,
           playerNames: allNames,
+          ...legalActionsToWire(legal),
         });
       }
 
@@ -933,10 +931,7 @@ export class P2PHostAdapter implements EngineAdapter {
         type: "state_update",
         state: filteredState,
         events,
-        legalActions: legal.actions,
-        autoPassRecommended: legal.autoPassRecommended,
-        legalActionsByObject: legal.legalActionsByObject,
-        spellCosts: legal.spellCosts,
+        ...legalActionsToWire(legal),
       });
     }
   }
@@ -1227,10 +1222,7 @@ export class P2PHostAdapter implements EngineAdapter {
         type: "reconnect_ack",
         assignedPlayerId: pid as PlayerId,
         state: filteredState,
-        legalActions: legal.actions,
-        autoPassRecommended: legal.autoPassRecommended,
-        legalActionsByObject: legal.legalActionsByObject,
-        spellCosts: legal.spellCosts,
+        ...legalActionsToWire(legal),
       });
     })();
 
@@ -1591,12 +1583,7 @@ export class P2PGuestAdapter implements EngineAdapter {
           playerId: msg.assignedPlayerId,
         });
         this.gameState = msg.state;
-        this.legalActions = {
-          actions: msg.legalActions,
-          autoPassRecommended: msg.autoPassRecommended ?? false,
-          legalActionsByObject: msg.legalActionsByObject,
-          spellCosts: msg.spellCosts,
-        };
+        this.legalActions = legalActionsFromWire(msg);
         this.emit({ type: "playerIdentity", playerId: msg.assignedPlayerId, playerNames: msg.playerNames });
         this.settleGameSetup({ events: msg.events });
         break;
@@ -1610,12 +1597,7 @@ export class P2PGuestAdapter implements EngineAdapter {
           });
         }
         this.gameState = msg.state;
-        this.legalActions = {
-          actions: msg.legalActions,
-          autoPassRecommended: msg.autoPassRecommended,
-          legalActionsByObject: msg.legalActionsByObject,
-          spellCosts: msg.spellCosts,
-        };
+        this.legalActions = legalActionsFromWire(msg);
         this.emit({ type: "playerIdentity", playerId: msg.assignedPlayerId });
         this.emit({
           type: "stateChanged",
@@ -1658,12 +1640,7 @@ export class P2PGuestAdapter implements EngineAdapter {
       }
       case "state_update": {
         this.gameState = msg.state;
-        this.legalActions = {
-          actions: msg.legalActions,
-          autoPassRecommended: msg.autoPassRecommended ?? false,
-          legalActionsByObject: msg.legalActionsByObject,
-          spellCosts: msg.spellCosts,
-        };
+        this.legalActions = legalActionsFromWire(msg);
         if (this.pendingResolve) {
           this.pendingResolve({ events: msg.events });
           this.pendingResolve = null;
