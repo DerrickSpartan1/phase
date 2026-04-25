@@ -9403,6 +9403,46 @@ mod tests {
         ));
     }
 
+    /// CR 701.10b: "double ~'s power" — self-reference possessive form
+    /// (Devilish Valet, Okaun, Casey Jones, Grunn, Overclocked Electromancer class).
+    /// `~` is the parser's normalized form of the card's own name.
+    #[test]
+    fn effect_double_self_ref_power() {
+        let e = parse_effect("double ~'s power");
+        assert!(matches!(
+            e,
+            Effect::DoublePT {
+                mode: DoublePTMode::Power,
+                target: TargetFilter::SelfRef,
+            }
+        ));
+    }
+
+    #[test]
+    fn effect_double_self_ref_power_and_toughness() {
+        let e = parse_effect("double ~'s power and toughness");
+        assert!(matches!(
+            e,
+            Effect::DoublePT {
+                mode: DoublePTMode::PowerAndToughness,
+                target: TargetFilter::SelfRef,
+            }
+        ));
+    }
+
+    /// "double target creature's power" — Bulk Up class possessive form.
+    #[test]
+    fn effect_double_target_creatures_power() {
+        let e = parse_effect("Double target creature's power");
+        assert!(matches!(
+            e,
+            Effect::DoublePT {
+                mode: DoublePTMode::Power,
+                target: TargetFilter::Typed(_),
+            }
+        ));
+    }
+
     #[test]
     fn effect_gain_life() {
         let e = parse_effect("You gain 3 life");
