@@ -6,11 +6,12 @@ use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ControllerRef,
-    DelayedTriggerCondition, Duration, Effect, EffectError, EffectKind, GainLifePlayer,
-    ManaContribution, ManaProduction, PtValue, QuantityExpr, QuantityRef, ResolvedAbility,
-    TargetFilter, TargetRef, TypedFilter,
+    AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction, ContinuousModification,
+    ControllerRef, DelayedTriggerCondition, Duration, Effect, EffectError, EffectKind, FilterProp,
+    GainLifePlayer, ManaContribution, ManaProduction, PtValue, QuantityExpr, QuantityRef,
+    ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TypedFilter,
 };
+use crate::types::keywords::WardCost;
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
@@ -995,25 +996,108 @@ fn predefined_token_abilities(subtype: &str) -> Vec<AbilityDefinition> {
     }
 }
 
-/// Inject predefined token abilities based on the token's subtypes.
-/// Called after token creation to ensure Treasure/Food/Clue/etc. have their
-/// standard activated abilities.
+/// CR 111.10m: Static abilities granted by a Royal Role token Aura.
+///
+/// Oracle text: "Enchanted creature gets +1/+1 and has ward {1}."
+///
+/// `FilterProp::EnchantedBy` is source-relative when the source is an Aura
+/// (CR 303.4) — at layer-evaluation time the filter resolves to whichever
+/// creature this specific Role is attached to, so two different Royal
+/// Role tokens on two different creatures pump only their own enchanted
+/// creature.
+///
+/// The other six Role variants (Cursed, Monster, Sorcerer, Virtuous, Wicked,
+/// Young Hero — CR 111.10j/k/n/p/q/r) are also unimplemented predefined
+/// tokens; adding them follows the same pattern but is deferred to a
+/// follow-up change because each requires at least one additional ability
+/// shape the parser/engine do not yet exercise for Aura tokens (e.g. base
+/// P/T override, granted triggered abilities, token-LTB triggers).
+fn royal_role_statics() -> Vec<StaticDefinition> {
+    vec![StaticDefinition::continuous()
+        .affected(TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+        ))
+        .modifications(vec![
+            ContinuousModification::AddPower { value: 1 },
+            ContinuousModification::AddToughness { value: 1 },
+            ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Ward(WardCost::Mana(
+                    crate::types::mana::ManaCost::generic(1),
+                )),
+            },
+        ])
+        .description("Enchanted creature gets +1/+1 and has ward {1}.".to_string())]
+}
+
+/// CR 111.10j–r: Return the predefined static abilities for a Role token
+/// identified by display name, or `None` if `name` is not an implemented Role.
+///
+/// All Role tokens share the `Role` subtype, so dispatch must be by display
+/// name — subtype alone cannot distinguish the seven variants.
+fn predefined_role_token_statics(name: &str) -> Option<Vec<StaticDefinition>> {
+    match name {
+        "Royal" => Some(royal_role_statics()),
+        // TODO(CR 111.10j/k/n/p/q/r): Cursed, Monster, Sorcerer, Virtuous,
+        // Wicked, Young Hero. Tracked as follow-up to issue #100.
+        _ => None,
+    }
+}
+
+/// Inject predefined token abilities based on the token's subtypes and name.
+///
+/// Two dispatch paths:
+/// - **Subtype** (CR 111.10a–i, s–v): Treasure, Food, Clue, Blood, Powerstone,
+///   Map, Spawn — each subtype contributes a single activated ability
+///   (`predefined_token_abilities`).
+/// - **Name** (CR 111.10j–r): Role tokens. All seven Roles share the `Role`
+///   subtype, so dispatch is by display name via `predefined_role_token_statics`.
+///   Roles contribute static abilities that modify the enchanted creature,
+///   which go into both the base and live `static_definitions` sets so the
+///   first layer pass picks them up.
+///
+/// Written to mirror updates onto both `base_*` and live definition fields;
+/// the layer pass rebuilds live from base on each pass, but several code
+/// paths (SBAs, action enumeration) consult the live set directly between
+/// passes so keeping them in sync here avoids a one-frame lag.
 pub(super) fn inject_predefined_token_abilities(
     state: &mut GameState,
     obj_id: crate::types::identifiers::ObjectId,
 ) {
-    let subtypes = match state.objects.get(&obj_id) {
-        Some(obj) => obj.card_types.subtypes.clone(),
+    let (subtypes, name) = match state.objects.get(&obj_id) {
+        Some(obj) => (obj.card_types.subtypes.clone(), obj.name.clone()),
         None => return,
     };
     let mut abilities_to_add = Vec::new();
     for subtype in &subtypes {
         abilities_to_add.extend(predefined_token_abilities(subtype));
     }
+    let role_statics = if subtypes.iter().any(|s| s == "Role") {
+        predefined_role_token_statics(&name)
+    } else {
+        None
+    };
+
+    if abilities_to_add.is_empty() && role_statics.is_none() {
+        return;
+    }
+
+    let Some(obj) = state.objects.get_mut(&obj_id) else {
+        return;
+    };
+
     if !abilities_to_add.is_empty() {
-        if let Some(obj) = state.objects.get_mut(&obj_id) {
-            Arc::make_mut(&mut obj.abilities).extend(abilities_to_add.clone());
-            Arc::make_mut(&mut obj.base_abilities).extend(abilities_to_add);
+        Arc::make_mut(&mut obj.abilities).extend(abilities_to_add.clone());
+        Arc::make_mut(&mut obj.base_abilities).extend(abilities_to_add);
+    }
+
+    if let Some(statics) = role_statics {
+        if !statics.is_empty() {
+            let mut base = (*obj.base_static_definitions).clone();
+            base.extend(statics.iter().cloned());
+            obj.base_static_definitions = Arc::new(base);
+            for s in &statics {
+                obj.static_definitions.push(s.clone());
+            }
         }
     }
 }
@@ -1608,6 +1692,111 @@ mod tests {
     fn non_predefined_token_gets_no_abilities() {
         let abilities = predefined_token_abilities("Soldier");
         assert!(abilities.is_empty());
+    }
+
+    // ── Role token predefined statics (CR 111.10j–r) ────────────────────
+
+    #[test]
+    fn predefined_royal_role_has_pump_and_ward() {
+        // CR 111.10m: Royal Role — "Enchanted creature gets +1/+1 and has ward {1}."
+        let statics =
+            predefined_role_token_statics("Royal").expect("Royal is an implemented Role");
+        assert_eq!(statics.len(), 1);
+        let s = &statics[0];
+        assert!(
+            matches!(
+                &s.affected,
+                Some(TargetFilter::Typed(tf))
+                    if tf.properties.contains(&FilterProp::EnchantedBy)
+            ),
+            "Royal Role static must affect the enchanted creature, got {:?}",
+            s.affected
+        );
+        assert!(s
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(s
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 1 }));
+        assert!(s.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: crate::types::keywords::Keyword::Ward(WardCost::Mana(
+                    crate::types::mana::ManaCost::Cost { generic: 1, .. }
+                ))
+            }
+        )));
+    }
+
+    #[test]
+    fn predefined_role_statics_unimplemented_roles_return_none() {
+        // CR 111.10j/k/n/p/q/r: Cursed, Monster, Sorcerer, Virtuous, Wicked,
+        // Young Hero — intentionally deferred; see `predefined_role_token_statics`.
+        for name in [
+            "Cursed",
+            "Monster",
+            "Sorcerer",
+            "Virtuous",
+            "Wicked",
+            "Young Hero",
+        ] {
+            assert!(
+                predefined_role_token_statics(name).is_none(),
+                "{name} should still be unimplemented in this change"
+            );
+        }
+        assert!(predefined_role_token_statics("Not A Role").is_none());
+    }
+
+    #[test]
+    fn inject_adds_royal_role_static_to_token() {
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Royal".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types
+                .subtypes
+                .extend(["Aura".to_string(), "Role".to_string()]);
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.is_token = true;
+        }
+
+        inject_predefined_token_abilities(&mut state, obj_id);
+
+        let obj = &state.objects[&obj_id];
+        assert_eq!(
+            obj.static_definitions.len(),
+            1,
+            "Royal Role must contribute exactly one static"
+        );
+        assert_eq!(
+            obj.base_static_definitions.len(),
+            1,
+            "base_static_definitions must mirror live statics"
+        );
+        // Non-Role tokens with the same name must not receive Role statics.
+        let obj2 = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Royal".to_string(),
+            Zone::Battlefield,
+        );
+        inject_predefined_token_abilities(&mut state, obj2);
+        assert_eq!(
+            state.objects[&obj2].static_definitions.len(),
+            0,
+            "A 'Royal' named token without the Role subtype must not get Role statics"
+        );
     }
 
     #[test]
