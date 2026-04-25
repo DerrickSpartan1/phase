@@ -9,7 +9,7 @@ use nom_language::error::VerboseError;
 
 use super::oracle_effect::{parse_effect_chain, try_parse_named_choice};
 use super::oracle_keyword::parse_keyword_from_oracle;
-use super::oracle_nom::bridge::nom_on_lower;
+use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::duration::parse_duration;
 use super::oracle_nom::primitives as nom_primitives;
@@ -2695,8 +2695,7 @@ fn parse_damage_prevention_replacement(
 /// follow-up (the common case: pure prevention).
 fn extract_prevention_followup(original_text: &str) -> Option<String> {
     let lower = original_text.to_lowercase();
-    let idx = lower.find("prevent that damage. ")?;
-    let after = &original_text[idx + "prevent that damage. ".len()..];
+    let (_, after) = split_once_on_lower(original_text, &lower, "prevent that damage. ")?;
     let trimmed = after.trim();
     if trimmed.is_empty() {
         return None;
