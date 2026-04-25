@@ -11,12 +11,12 @@ use crate::types::ability::{
     GainLifePlayer, ManaContribution, ManaProduction, PtValue, QuantityExpr, QuantityRef,
     ResolvedAbility, StaticDefinition, TargetFilter, TargetRef, TypedFilter,
 };
-use crate::types::keywords::WardCost;
 use crate::types::card_type::{CardType, CoreType, Supertype};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{DelayedTrigger, GameState};
 use crate::types::identifiers::CardId;
 use crate::types::keywords::Keyword;
+use crate::types::keywords::WardCost;
 use crate::types::mana::ManaColor;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
@@ -1712,12 +1712,8 @@ mod tests {
             "Royal Role static must affect the enchanted creature, got {:?}",
             s.affected
         );
-        assert!(s
-            .modifications
-            .contains(&ContinuousModification::AddPower { value: 1 }));
-        assert!(s
-            .modifications
-            .contains(&ContinuousModification::AddToughness { value: 1 }));
+        assert!(s.modifications.contains(&ContinuousModification::AddPower { value: 1 }));
+        assert!(s.modifications.contains(&ContinuousModification::AddToughness { value: 1 }));
         assert!(s.modifications.iter().any(|m| matches!(
             m,
             ContinuousModification::AddKeyword {
