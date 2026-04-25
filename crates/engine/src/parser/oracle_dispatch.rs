@@ -12,6 +12,7 @@ pub(super) fn dispatch_line_nom(line: &str, card_name: &str) -> Effect {
     let ctx = ParseContext {
         subject: None,
         card_name: Some(card_name.to_string()),
+        actor: None,
         ..Default::default()
     };
 

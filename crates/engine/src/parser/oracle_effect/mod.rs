@@ -84,6 +84,15 @@ pub(crate) struct ParseContext {
     /// `None` for non-trigger contexts (replacements, instants, sorceries),
     /// in which case the "has this ability" arm declines gracefully.
     pub current_trigger_index: Option<usize>,
+    /// CR 701.21a + CR 608.2k: The actor performing the effect, when the effect
+    /// body has been stripped of an actor prefix ("you (may) ", "an opponent
+    /// (may) ", "each opponent ", "each player "). Used by targeted-action
+    /// parsers to default `TargetFilter::Typed.controller` from `None` to the
+    /// actor when the target phrase itself doesn't specify a controller (e.g.
+    /// "you may sacrifice a non-Demon creature" → `controller: Some(You)`).
+    /// CR 701.21a forbids sacrificing a permanent you don't control, so the
+    /// default must be enforced at parse time, not at resolution.
+    pub actor: Option<ControllerRef>,
 }
 
 /// CR 608.2k: True when `text` is a standalone object pronoun referring to
@@ -4252,7 +4261,7 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
 /// compound filters like "target creature or planeswalker". Filters that
 /// already carry a controller constraint are left untouched so an explicit
 /// "creature you control" clause is never silently rewritten.
-fn attach_controller_if_absent(filter: &mut TargetFilter, ctrl: ControllerRef) {
+pub(super) fn attach_controller_if_absent(filter: &mut TargetFilter, ctrl: ControllerRef) {
     match filter {
         TargetFilter::Typed(tf) if tf.controller.is_none() => {
             tf.controller = Some(ctrl);
@@ -5681,6 +5690,30 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         // implicit per-player iteration, propagate it to the ability so the
         // OptionalEffectChoice is emitted once per matching player.
         let player_scope = player_scope.or(implicit_player_scope);
+
+        // CR 701.21a + CR 608.2k: Derive the actor performing this chunk's effect
+        // from any actor prefix that was just stripped ("you (may) ", "an
+        // opponent (may) ", "each opponent ", "each player "). Threaded via
+        // `ParseContext.actor` so targeted-action parsers can default
+        // `TargetFilter::Typed.controller` to the actor when the target phrase
+        // itself doesn't specify one (e.g. "you may sacrifice a non-Demon
+        // creature" → controller defaults to You). Without this default, the
+        // resolver would treat `controller: None` as Any and let the actor
+        // sacrifice an opponent's permanent — violating CR 701.21a.
+        let chunk_actor = match (is_optional, opponent_may_scope, player_scope) {
+            (true, None, None) => Some(ControllerRef::You),
+            (true, Some(_), _) => Some(ControllerRef::Opponent),
+            (_, _, Some(PlayerFilter::Opponent)) => Some(ControllerRef::Opponent),
+            (_, _, Some(PlayerFilter::Controller)) => Some(ControllerRef::You),
+            _ => None,
+        }
+        .or_else(|| ctx.actor.clone());
+        let chunk_ctx = ParseContext {
+            subject: ctx.subject.clone(),
+            card_name: ctx.card_name.clone(),
+            actor: chunk_actor,
+        };
+        let ctx = &chunk_ctx;
 
         // CR 603.7a: Check for temporal prefix before suffix. When present, parse the
         // inner effect through the full pipeline and wrap in CreateDelayedTrigger.
@@ -10450,6 +10483,7 @@ mod tests {
             &ParseContext {
                 subject: Some(TargetFilter::SelfRef),
                 card_name: None,
+                actor: None,
                 ..Default::default()
             },
         );
@@ -10475,6 +10509,7 @@ mod tests {
             &ParseContext {
                 subject: Some(TargetFilter::SelfRef),
                 card_name: None,
+                actor: None,
                 ..Default::default()
             },
         );
@@ -16181,6 +16216,34 @@ mod tests {
             !matches!(&*ability.effect, Effect::ChooseOneOf { .. }),
             "target-phrase disjunction must not be split into ChooseOneOf"
         );
+    }
+
+    /// CR 701.21a + CR 608.2k: Promise of Aclazotz / Burnt Offering / Greater
+    /// Good class — when the chunk loop strips a "you may " optional prefix,
+    /// the chunk-scoped `ParseContext.actor = Some(You)` is consumed by the
+    /// Sacrifice arm of `parse_targeted_action_ast` so the parsed
+    /// `TargetFilter::Typed.controller` defaults to ControllerRef::You.
+    /// Without this default the resolver treats `controller: None` as Any and
+    /// lets the actor sacrifice an opponent's creature, violating CR 701.21a.
+    #[test]
+    fn parse_effect_chain_actor_default_propagates_through_you_may() {
+        let ability =
+            parse_effect_chain("you may sacrifice a non-Demon creature", AbilityKind::Spell);
+        assert!(
+            ability.optional,
+            "'you may' prefix must mark the ability optional"
+        );
+        match &*ability.effect {
+            Effect::Sacrifice { target, .. } => match target {
+                TargetFilter::Typed(tf) => assert_eq!(
+                    tf.controller,
+                    Some(ControllerRef::You),
+                    "actor=You must be applied as default Sacrifice target controller, got {tf:?}"
+                ),
+                other => panic!("expected Typed Sacrifice target, got {other:?}"),
+            },
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
     }
 
     /// False-positive guard: if only one half parses (the other is

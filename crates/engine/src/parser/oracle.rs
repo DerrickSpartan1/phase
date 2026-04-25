@@ -1489,6 +1489,7 @@ pub fn parse_oracle_text(
                 &ParseContext {
                     subject: None,
                     card_name: Some(card_name.to_string()),
+                    actor: None,
                     ..Default::default()
                 },
             );
@@ -1686,6 +1687,7 @@ pub fn parse_oracle_text(
                 &ParseContext {
                     subject: None,
                     card_name: Some(card_name.to_string()),
+                    actor: None,
                     ..Default::default()
                 },
             );
