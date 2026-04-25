@@ -1,6 +1,7 @@
 mod abigale_integration;
 mod adapter_contract_fixtures;
 mod cr_annotations;
+mod elusive_otter_repro;
 #[cfg(feature = "proptest")]
 mod engine_invariants;
 mod export_runtime_canaries;
