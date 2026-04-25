@@ -6306,7 +6306,62 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         rewrite_rounding_mode(&mut result, mode);
     }
 
+    // CR 303.4f + CR 301.5b + CR 603.7d: Wire `forward_result: true` on a
+    // parent zone-change to Battlefield when the chained sub-ability is an
+    // `Attach` gated by `ZoneChangedThisWay`. Without this, the runtime
+    // resolves the sub-ability with `source_id` = the original ability source
+    // (the trigger source / Saga / activated permanent), so the Attach tries
+    // to equip *that* object to the chosen creature — wrong for Armored
+    // Skyhunter (Skyhunter cannot equip itself), wrong for Vault 101: Birthday
+    // Party (a Saga is not Equipment), wrong for Quest for the Holy Relic and
+    // Stonehewer Giant (the searcher is not the moved Equipment).
+    //
+    // The `forward_result` flag makes the runtime forward the just-moved
+    // card's id as the sub-ability's `source_id` (see `effects/mod.rs`
+    // forward_result branch), so `Attach::resolve` operates on the correct
+    // attaching object.
+    rewire_attach_forward_result(&mut result);
+
     result
+}
+
+/// CR 303.4f / CR 301.5b / CR 603.7d: Walk the chain and set
+/// `forward_result: true` on every `Dig`/`ChangeZone` whose `destination`
+/// is `Battlefield` and whose chained sub-ability is an `Attach` carrying
+/// the `ZoneChangedThisWay` condition. The condition is the parser-side
+/// signal that the Oracle text said "If a[n] [type] is/was put onto the
+/// battlefield this way, [attach it]" — i.e. the just-moved card must
+/// become the attaching object.
+///
+/// Recurses through nested sub-abilities so chains of arbitrary depth
+/// (e.g. Skyhunter's Dig → Attach → PutAtLibraryPosition) are covered.
+fn rewire_attach_forward_result(def: &mut AbilityDefinition) {
+    if let Some(sub) = def.sub_ability.as_ref() {
+        let sub_is_attach_with_zone_changed_cond = matches!(*sub.effect, Effect::Attach { .. })
+            && matches!(
+                sub.condition,
+                Some(AbilityCondition::ZoneChangedThisWay { .. })
+            );
+        let parent_moves_to_battlefield = matches!(
+            *def.effect,
+            Effect::Dig {
+                destination: Some(Zone::Battlefield),
+                ..
+            } | Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                ..
+            }
+        );
+        if sub_is_attach_with_zone_changed_cond && parent_moves_to_battlefield {
+            def.forward_result = true;
+        }
+    }
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewire_attach_forward_result(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewire_attach_forward_result(else_branch);
+    }
 }
 
 /// CR 702.33d + CR 608.2e: Resolve "create [N] of those tokens [instead]"
@@ -17670,5 +17725,181 @@ mod tests {
             }
             other => panic!("expected ChangeZone, got {other:?}"),
         }
+    }
+
+    // -------------------------------------------------------------------
+    // L9-43 + L9-44: attach-the-just-moved-card primitive.
+    //
+    // CR 303.4f + CR 301.5b + CR 603.7d + CR 608.2c: when the chain is
+    // `Dig|ChangeZone(destination=Battlefield)` → `Attach` with a
+    // `ZoneChangedThisWay` condition, the parent must carry
+    // `forward_result: true` so the runtime forwards the just-moved card
+    // as the Attach's `source_id` instead of the trigger source / Saga /
+    // searcher.
+    // -------------------------------------------------------------------
+
+    /// Armored Skyhunter's attack trigger: Dig(6, Battlefield) →
+    /// Attach(creature you control) with the "If an Equipment is put onto
+    /// the battlefield this way" condition. Asserts the `forward_result`
+    /// rewire fires AND the condition is recognized AND the Attach target
+    /// slot is preserved.
+    #[test]
+    fn attach_just_moved_armored_skyhunter_dig_with_zone_changed_this_way() {
+        let def = parse_effect_chain(
+            "Look at the top six cards of your library. You may put an Aura or Equipment card from among them onto the battlefield. If an Equipment is put onto the battlefield this way, you may attach it to a creature you control. Put the rest of those cards on the bottom of your library in a random order.",
+            AbilityKind::Spell,
+        );
+
+        // Parent: Dig{destination: Battlefield} with forward_result: true.
+        match &*def.effect {
+            Effect::Dig { destination, .. } => {
+                assert_eq!(*destination, Some(Zone::Battlefield));
+            }
+            other => panic!("expected outer Dig, got {other:?}"),
+        }
+        assert!(
+            def.forward_result,
+            "Dig parent must forward the just-moved card to the Attach sub_ability"
+        );
+
+        // Walk the sub_ability chain: Attach with ZoneChangedThisWay condition.
+        let attach = def
+            .sub_ability
+            .as_ref()
+            .expect("expected Attach sub_ability");
+        match &*attach.effect {
+            Effect::Attach { target } => {
+                // Target slot must not be vacuous (Any) — either a typed
+                // "creature you control" filter or `ParentTarget` (chain
+                // composition routes the player-chosen target through the
+                // parent's slot). Both are valid post-assembly shapes; what
+                // matters is that the runtime has a target binding to fill.
+                assert!(
+                    !matches!(target, TargetFilter::Any),
+                    "Attach target slot must not be Any, got {target:?}"
+                );
+                if let TargetFilter::Typed(t) = target {
+                    assert_eq!(t.controller, Some(ControllerRef::You));
+                    assert!(
+                        t.type_filters
+                            .iter()
+                            .any(|f| matches!(f, TypeFilter::Creature)),
+                        "expected Creature type_filter, got {:?}",
+                        t.type_filters
+                    );
+                }
+            }
+            other => panic!("expected Attach sub_ability, got {other:?}"),
+        }
+        match &attach.condition {
+            Some(AbilityCondition::ZoneChangedThisWay { filter }) => match filter {
+                TargetFilter::Typed(t) => assert!(
+                    t.type_filters
+                        .iter()
+                        .any(|f| matches!(f, TypeFilter::Subtype(s) if s.eq_ignore_ascii_case("Equipment"))),
+                    "expected Equipment subtype filter on ZoneChangedThisWay, got {:?}",
+                    t.type_filters
+                ),
+                other => panic!("expected Typed Equipment filter, got {other:?}"),
+            },
+            other => panic!("expected ZoneChangedThisWay condition on Attach, got {other:?}"),
+        }
+    }
+
+    /// Quest for the Holy Relic / Stonehewer Giant pattern:
+    /// SearchLibrary → ChangeZone(destination=Battlefield) → Attach. The
+    /// rewire detects the ChangeZone-to-battlefield parent and sets
+    /// forward_result regardless of how many shuffles / cleanups follow.
+    #[test]
+    fn attach_just_moved_change_zone_to_battlefield_attach_sub() {
+        // Synthetic minimal pattern that exercises the same chain shape as
+        // Stonehewer Giant ("you may search your library for an Equipment
+        // card, put it onto the battlefield, then shuffle. If that
+        // Equipment is put onto the battlefield this way, attach it to a
+        // creature you control."). Phrased with present-tense "is put"
+        // because that's the new pattern the combinator must recognize.
+        let def = parse_effect_chain(
+            "Search your library for an Equipment card and put it onto the battlefield. If an Equipment is put onto the battlefield this way, attach it to a creature you control. Then shuffle.",
+            AbilityKind::Spell,
+        );
+
+        // Walk the chain to find the ChangeZone(Battlefield) node — the
+        // outermost effect may be SearchLibrary depending on parser
+        // composition. The post-pass recurses, so any Dig/ChangeZone-to-
+        // Battlefield parent in the tree should be marked.
+        fn find_battlefield_change_zone_with_attach_sub(
+            def: &AbilityDefinition,
+        ) -> Option<&AbilityDefinition> {
+            let dest_is_bf = matches!(
+                &*def.effect,
+                Effect::ChangeZone {
+                    destination: Zone::Battlefield,
+                    ..
+                } | Effect::Dig {
+                    destination: Some(Zone::Battlefield),
+                    ..
+                }
+            );
+            if dest_is_bf {
+                if let Some(sub) = def.sub_ability.as_ref() {
+                    if matches!(*sub.effect, Effect::Attach { .. })
+                        && matches!(
+                            sub.condition,
+                            Some(AbilityCondition::ZoneChangedThisWay { .. })
+                        )
+                    {
+                        return Some(def);
+                    }
+                }
+            }
+            if let Some(sub) = def.sub_ability.as_ref() {
+                if let Some(found) = find_battlefield_change_zone_with_attach_sub(sub) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+
+        let parent = find_battlefield_change_zone_with_attach_sub(&def).expect(
+            "expected a ChangeZone|Dig to Battlefield with an Attach sub gated by ZoneChangedThisWay",
+        );
+        assert!(
+            parent.forward_result,
+            "battlefield-bound parent of conditional Attach must have forward_result: true"
+        );
+    }
+
+    /// Negative regression: Stoneforge Mystic-style "put an Equipment from
+    /// your hand onto the battlefield" must NOT receive `forward_result:
+    /// true` because the pattern has no Attach sub-ability — it's just a
+    /// ChangeZone, no chained attach. Guards against the rewire over-firing.
+    #[test]
+    fn attach_just_moved_negative_no_attach_sub_no_rewire() {
+        let def = parse_effect_chain(
+            "You may put an Equipment card from your hand onto the battlefield.",
+            AbilityKind::Spell,
+        );
+        // The chain may be wrapped (optional / target) but no descendant
+        // should carry forward_result: true since there's no Attach.
+        fn any_forward_result(def: &AbilityDefinition) -> bool {
+            if def.forward_result {
+                return true;
+            }
+            if let Some(sub) = def.sub_ability.as_ref() {
+                if any_forward_result(sub) {
+                    return true;
+                }
+            }
+            if let Some(else_branch) = def.else_ability.as_ref() {
+                if any_forward_result(else_branch) {
+                    return true;
+                }
+            }
+            false
+        }
+        assert!(
+            !any_forward_result(&def),
+            "ChangeZone-only (no Attach sub) must not be marked forward_result"
+        );
     }
 }

@@ -243,27 +243,30 @@ pub(super) fn strip_if_you_do_conditional(text: &str) -> (Option<AbilityConditio
         return (Some(condition), rest.to_string());
     }
 
-    if let Some(after_article) = {
-        let result: Option<&str> = alt((tag::<_, _, VerboseError<&str>>("if a "), tag("if an ")))
-            .parse(lower.as_str())
-            .ok()
-            .map(|(rest, _)| rest);
-        result
-    } {
-        if let Some((noun_phrase, after_was)) = after_article.split_once(" was ") {
-            let mut words = after_was.splitn(3, ' ');
-            if let (Some(_verb), Some("this"), Some(rest_with_way)) =
-                (words.next(), words.next(), words.next())
-            {
-                if let Some(body) = rest_with_way.strip_prefix("way, ") {
-                    let (filter, _) = parse_type_phrase(noun_phrase);
-                    let offset = text.len() - body.len();
-                    return (
-                        Some(AbilityCondition::ZoneChangedThisWay { filter }),
-                        text[offset..].to_string(),
-                    );
-                }
-            }
+    // CR 400.7 + CR 608.2c + CR 303.4f + CR 301.5b: "if a[n] [type] (is|was)
+    // [verb] this way, [body]" — delegate to the shared
+    // `parse_zone_changed_this_way_clause` combinator in `oracle_nom::condition`.
+    // The combinator covers past + present tense, single-word imperatives
+    // (destroyed/exiled/sacrificed/returned/discarded/milled/countered) AND
+    // the multi-word "put onto the battlefield" verb, with subtype filters
+    // (Aura/Equipment/...) via `parse_type_phrase`. Replaces the prior
+    // hand-rolled past-tense / single-word / top-level-type-only matcher.
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("if ").parse(lower.as_str()) {
+        if let Ok((after_clause, (filter, _negated))) =
+            crate::parser::oracle_nom::condition::parse_zone_changed_this_way_clause(rest)
+        {
+            // Strip leading punctuation/space between "this way" and the body.
+            // Possible separators: ", ", ". ", " ".
+            let body_lower = after_clause
+                .strip_prefix(", ") // allow-noncombinator: structural separator after parsed clause
+                .or_else(|| after_clause.strip_prefix(". ")) // allow-noncombinator: structural separator after parsed clause
+                .or_else(|| after_clause.strip_prefix(' ')) // allow-noncombinator: structural separator after parsed clause
+                .unwrap_or(after_clause);
+            let offset = text.len() - body_lower.len();
+            return (
+                Some(AbilityCondition::ZoneChangedThisWay { filter }),
+                text[offset..].to_string(),
+            );
         }
     }
     (None, text.to_string())
@@ -1185,6 +1188,18 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
 /// Used by Shredder's Technique ("if an enchantment was destroyed this way")
 /// and parallel patterns where a conditional in the same clause tests the type
 /// of the single parent target after the preceding effect resolved.
+///
+/// CR 303.4f / CR 301.5b: Also handles the present-tense "is [verb]ed this
+/// way" form and the multi-word "put onto the battlefield" verb so that
+/// future LKI-style cards using these tenses (e.g. "if a creature is
+/// destroyed this way") parse without code change. The Aura/Equipment ETB
+/// continuations (Armored Skyhunter, Vault 101: Birthday Party, Quest for
+/// the Holy Relic, Stonehewer Giant) take the dedicated `ZoneChangedThisWay`
+/// path in `strip_if_you_do_conditional` because the runtime semantic for
+/// "the just-moved card" requires `state.last_zone_changed_ids`, not LKI of
+/// the parent target — but extending this function keeps the parser
+/// permissive for the LKI-semantic patterns and keeps the two combinators in
+/// lockstep on tense + verb coverage.
 fn parse_a_type_was_verbed_this_way(lower: &str) -> Option<(TypeFilter, bool)> {
     let (rest, _) = alt((
         tag::<_, _, VerboseError<&str>>("an "),
@@ -1208,16 +1223,26 @@ fn parse_a_type_was_verbed_this_way(lower: &str) -> Option<(TypeFilter, bool)> {
     .parse(rest)
     .ok()?;
 
+    // CR 400.7 + CR 608.2c: Tense + verb are orthogonal axes. Compose with
+    // independent `alt` chains so adding a new verb (or tense) is a single
+    // tag arm, not an N×M permutation expansion.
     let (rest, negated) = alt((
         value(true, tag::<_, _, VerboseError<&str>>(" wasn't ")),
+        value(true, tag(" isn't ")),
         value(true, tag(" was not ")),
+        value(true, tag(" is not ")),
         value(false, tag(" was ")),
+        value(false, tag(" is ")),
     ))
     .parse(rest)
     .ok()?;
 
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("destroyed"),
+        // Multi-word verb listed first: longest-match-wins keeps the
+        // single-word `tag("put")` (no such tag here, but defensive against
+        // future additions) from short-circuiting the multi-word phrase.
+        tag::<_, _, VerboseError<&str>>("put onto the battlefield"),
+        tag("destroyed"),
         tag("exiled"),
         tag("sacrificed"),
         tag("returned"),
