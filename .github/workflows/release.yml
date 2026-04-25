@@ -82,7 +82,7 @@ jobs:
         run: |
           mkdir -p client/src-tauri/binaries client/public
           touch client/src-tauri/binaries/phase-server-x86_64-unknown-linux-gnu
-          [ -f client/public/card-data.json ] || echo '{}' > client/public/card-data.json
+          touch client/public/card-data.json
 
       - name: cargo check phase-tauri
         # phase-tauri is excluded from the root workspace (client/src-tauri),
