@@ -6094,6 +6094,20 @@ pub struct ReplacementDefinition {
     /// reflected in the Squirrel count per CR 616.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_token_spec: Option<Box<crate::types::proposed_event::TokenSpec>>,
+    /// CR 614.1a + CR 111.1: Ensure-all token-creation replacement. Used by
+    /// Academy Manufactor ("If you would create a Clue, Food, or Treasure
+    /// token, instead create one of each"). Each listed spec whose subtype
+    /// is *not already present* in the proposed event's `TokenSpec.subtypes`
+    /// is emitted as an additional `CreateToken` event via the same recursive
+    /// `replace_event` path Chatterfang uses, preserving CR 616.1 ordering
+    /// and idempotence (the `applied: HashSet<ReplacementId>` set on each
+    /// spawned event blocks re-application of the same Manufactor).
+    ///
+    /// Distinct from `additional_token_spec` (which always appends): this
+    /// field is *conditional* on subtype absence. The two fields are
+    /// orthogonal — a single replacement may set either, but not both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ensure_token_specs: Option<Vec<crate::types::proposed_event::TokenSpec>>,
 }
 
 impl ReplacementDefinition {
@@ -6120,6 +6134,7 @@ impl ReplacementDefinition {
             redirect_target: None,
             mana_modification: None,
             additional_token_spec: None,
+            ensure_token_specs: None,
         }
     }
 
@@ -6214,6 +6229,17 @@ impl ReplacementDefinition {
     /// overwritten with the replacement source at apply time.
     pub fn additional_token_spec(mut self, spec: crate::types::proposed_event::TokenSpec) -> Self {
         self.additional_token_spec = Some(Box::new(spec));
+        self
+    }
+
+    /// CR 614.1a + CR 111.1: Attach the ensure-all token-spec list (Manufactor).
+    /// At apply time, only specs whose subtype is missing from the proposed
+    /// event's `TokenSpec.subtypes` are emitted.
+    pub fn ensure_token_specs(
+        mut self,
+        specs: Vec<crate::types::proposed_event::TokenSpec>,
+    ) -> Self {
+        self.ensure_token_specs = Some(specs);
         self
     }
 }
