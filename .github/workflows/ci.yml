@@ -118,6 +118,28 @@ jobs:
       - name: WASM compile check
         run: cargo check --package engine-wasm --target wasm32-unknown-unknown
 
+      - name: Install Linux Tauri build deps
+        # Required by phase-tauri's transitive dependencies (webkit2gtk, gtk).
+        # Without these, `cargo check -p phase-tauri` fails at the linker.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev
+
+      - name: Stub frontend dist for tauri::generate_context!
+        # phase-tauri's build.rs runs `tauri::generate_context!()` which
+        # requires `frontendDist` (../dist per tauri.conf.json) to exist.
+        # An empty stub is enough for type-checking — we don't bundle assets.
+        run: |
+          mkdir -p client/dist
+          echo '<!doctype html><html></html>' > client/dist/index.html
+
+      - name: Tauri compile check
+        # phase-tauri is excluded from the workspace clippy and nextest runs
+        # above (no proptest support, no tests). Without this step, compile
+        # errors in the desktop crate only surface at release time during the
+        # 30-45min build-tauri matrix. Catches them on every PR in ~3 min.
+        run: cargo check -p phase-tauri
+
   frontend:
     name: Frontend (lint, type-check, test)
     runs-on: ubuntu-latest
