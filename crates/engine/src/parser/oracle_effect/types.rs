@@ -654,6 +654,17 @@ pub(super) enum ChooseImperativeAst {
         categories: Vec<crate::types::card_type::CoreType>,
         chooser_scope: crate::types::ability::CategoryChooserScope,
     },
+    /// CR 115.1c + CR 601.2c: "choose target X and target Y" — two independent
+    /// target slots declared in a single targeting clause (Goblin Welder shape).
+    /// Each `target` becomes its own `Effect::TargetOnly` slot so that the
+    /// caster announces both targets at activation time per CR 601.2c. The
+    /// later sub_ability sentence ("If both targets are still legal …")
+    /// references them via `TargetFilter::ParentTarget` chained through the
+    /// sub_ability lattice.
+    TwoTargets {
+        target_a: TargetFilter,
+        target_b: TargetFilter,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

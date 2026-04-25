@@ -1337,6 +1337,17 @@ pub(super) fn parse_choose_ast(text: &str, lower: &str) -> Option<ChooseImperati
         }
 
         if super::is_choose_as_targeting(rest_lower) {
+            // CR 115.1c + CR 601.2c: "Choose target X and target Y" declares
+            // two independent target slots on the same activated/triggered
+            // ability. Detect the compound "target ... and target ..." shape
+            // BEFORE falling through to `parse_effect` (which collapses
+            // target slot B into the surrounding effect text and yields a
+            // single-target Reparse) so the second slot (e.g., Goblin
+            // Welder's "artifact card in that player's graveyard") is
+            // preserved instead of being silently dropped.
+            if let Some(ast) = try_parse_two_targets(rest) {
+                return Some(ast);
+            }
             let inner = super::parse_effect(rest);
             if !matches!(inner, Effect::Unimplemented { .. }) {
                 return Some(ChooseImperativeAst::Reparse {
@@ -1368,6 +1379,77 @@ pub(super) fn parse_choose_ast(text: &str, lower: &str) -> Option<ChooseImperati
     }
 
     None
+}
+
+/// CR 115.1c + CR 601.2c + CR 608.2c: Detect "target X and target Y" wording
+/// after a "Choose " prefix and split it into two independent target slots.
+///
+/// CR 115.1c: "An activated ability is targeted if it identifies something it
+/// will affect by using the phrase 'target [something]' …" — both halves are
+/// part of the same activated ability.
+///
+/// CR 601.2c: "If the spell uses the word 'target' in multiple places, the
+/// same object or player can be chosen once for each instance of the word
+/// 'target' (as long as it fits the targeting criteria)."
+///
+/// Strategy: scan the lowercased text for an "and target " (or "and another
+/// target ") connector at a word boundary using nom combinators. If present,
+/// split the text there and run `parse_target` independently on each side —
+/// the prefix becomes slot A's filter, the suffix becomes slot B's. This
+/// keeps the second slot intact even when `parse_target` on the prefix
+/// stops short of "a player controls" (an unrecognized controller suffix
+/// today): the connector is anchored on "and target", not on the precise
+/// length of slot A's filter.
+///
+/// The combinator-based "and target " split also rejects non-target
+/// continuations ("target creature and put a counter on it") that would
+/// otherwise look like compound targeting.
+///
+/// Returns `None` when the connector is absent, when either target parses
+/// as `TargetFilter::Any` (failed extraction), or when the prefix isn't a
+/// targeting phrase (`is_choose_as_targeting`-style check) — caller handles
+/// the single-target fallback.
+fn try_parse_two_targets(rest: &str) -> Option<ChooseImperativeAst> {
+    type E<'a> = VerboseError<&'a str>;
+
+    // CR 601.2c connector parser: "and target " or "and another target ".
+    // `scan_split_at_phrase` advances at word boundaries (jumping past each
+    // space), so the connector body itself is matched without a leading
+    // space — the word boundary is enforced by the scan loop. Trailing
+    // space is required so the next character is the start of the second
+    // target's type/quantity phrase.
+    fn parse_connector(input: &str) -> nom::IResult<&str, (), E<'_>> {
+        value((), alt((tag("and target "), tag("and another target ")))).parse(input)
+    }
+
+    let lower = rest.to_ascii_lowercase();
+    let (lower_prefix, lower_match_start) =
+        nom_primitives::scan_split_at_phrase(lower.as_str(), parse_connector)?;
+
+    // Map both the prefix and the match-start back to original-case slices
+    // so `parse_target` operates on unmodified text. The prefix ends at the
+    // word boundary just before "and target …"; the trailing space (if any)
+    // is part of the prefix.
+    let prefix_orig = &rest[..lower_prefix.len()];
+    let match_start_orig = &rest[rest.len() - lower_match_start.len()..];
+
+    // CR 115.1c slot A: the prefix must be a targeting phrase. `parse_target`
+    // returning `Any` means "no recognized target" — we refuse to split.
+    let (target_a, _rem_a) = parse_target(prefix_orig.trim_end());
+    if matches!(target_a, TargetFilter::Any) {
+        return None;
+    }
+
+    // CR 115.1c slot B: skip the leading "and " on the matched connector
+    // and parse the second target. `tag("and ").parse(input)` returns
+    // `(remainder, matched)` so we bind the first element.
+    let (after_and_orig, _) = tag::<_, _, E>("and ").parse(match_start_orig).ok()?;
+    let (target_b, _rem_b) = parse_target(after_and_orig);
+    if matches!(target_b, TargetFilter::Any) {
+        return None;
+    }
+
+    Some(ChooseImperativeAst::TwoTargets { target_a, target_b })
 }
 
 /// Parse anaphoric "choose N of them/those [cards]" patterns using nom combinators.
@@ -1591,6 +1673,14 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             categories,
             chooser_scope,
         },
+        // CR 115.1c + CR 601.2c: Two independent target slots. The bare-Effect
+        // lowering surfaces only the first slot — the chained `TargetOnly`
+        // sub_ability for the second slot is attached by
+        // `lower_imperative_family_ast`, which can express a `sub_ability`
+        // chain (a single `Effect` cannot). Direct callers of
+        // `lower_choose_ast` are restricted to single-effect contexts and do
+        // not exercise this variant.
+        ChooseImperativeAst::TwoTargets { target_a, .. } => Effect::TargetOnly { target: target_a },
     }
 }
 
@@ -3788,6 +3878,30 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             target,
             multi_target,
         }) => lower_put_counter_list(entries, target, multi_target),
+        // CR 115.1c + CR 601.2c: "Choose target X and target Y" — two
+        // independent target slots. Lowered to a primary `Effect::TargetOnly`
+        // (slot A) with a chained `TargetOnly` sub_ability (slot B). At
+        // resolution time both targets are announced as part of the same cast
+        // (CR 601.2c: "if the spell uses the word 'target' in multiple
+        // places, the same object or player can be chosen once for each
+        // instance"). Intercepted here because a bare `Effect` cannot express
+        // the sub_ability chain — only `ParsedEffectClause` can. Sentences
+        // following the targeting clause that reference the chosen objects
+        // (e.g., Goblin Welder's "If both targets are still legal …") chain
+        // further sub_abilities and resolve their target slots via
+        // `TargetFilter::ParentTarget` walking the chain (CR 608.2c:
+        // instructions are followed in order; later text may modify earlier
+        // text).
+        ImperativeFamilyAst::Structured(ImperativeAst::Choose(
+            ChooseImperativeAst::TwoTargets { target_a, target_b },
+        )) => {
+            let mut clause = parsed_clause(Effect::TargetOnly { target: target_a });
+            clause.sub_ability = Some(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::TargetOnly { target: target_b },
+            )));
+            clause
+        }
         // CR 701.23a + CR 107.1: Dual/N-way search ("a X card and a Y card") lowers
         // to a chain of independent `SearchLibrary` effects linked via sub_ability,
         // mirroring `lower_put_counter_list`. Intercepted here because the bare
@@ -5388,6 +5502,147 @@ mod tests {
                 );
             }
             other => panic!("Expected CategoryAndSacrificeRest, got {other:?}"),
+        }
+    }
+
+    /// CR 115.1c + CR 601.2c: Goblin Welder activated ability.
+    /// "Choose target artifact a player controls and target artifact card in
+    /// that player's graveyard." must yield two distinct target slots.
+    #[test]
+    fn parse_choose_two_targets_goblin_welder() {
+        use crate::types::ability::{FilterProp, TypeFilter};
+        let text = "choose target artifact a player controls and target artifact card in that player's graveyard";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower);
+        match result {
+            Some(ChooseImperativeAst::TwoTargets { target_a, target_b }) => {
+                let tf_a = match &target_a {
+                    TargetFilter::Typed(tf) => tf,
+                    other => panic!("target_a should be Typed, got {other:?}"),
+                };
+                assert_eq!(
+                    tf_a.type_filters,
+                    vec![TypeFilter::Artifact],
+                    "target_a should be Artifact"
+                );
+                let tf_b = match &target_b {
+                    TargetFilter::Typed(tf) => tf,
+                    other => panic!("target_b should be Typed, got {other:?}"),
+                };
+                assert!(
+                    tf_b.type_filters.contains(&TypeFilter::Artifact)
+                        || tf_b.type_filters.contains(&TypeFilter::Card),
+                    "target_b should reference an artifact card, got type_filters={:?}",
+                    tf_b.type_filters
+                );
+                // CR 400.1: The second slot must anchor to the graveyard zone
+                // via `FilterProp::InZone(Graveyard)` — the canonical zone
+                // marker on a `TargetFilter::Typed`. The `parse_zone_qual`
+                // combinator emits this for "in/from <player>'s graveyard"
+                // suffixes (verified for Goblin Engineer's correct AST in
+                // the L9-12b brief).
+                assert!(
+                    tf_b.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::InZone {
+                            zone: Zone::Graveyard
+                        }
+                    )),
+                    "target_b should carry FilterProp::InZone(Graveyard); got properties={:?}",
+                    tf_b.properties
+                );
+            }
+            other => panic!("Expected TwoTargets, got {other:?}"),
+        }
+    }
+
+    /// CR 115.1c + CR 601.2c: TwoTargets lowering must emit a primary
+    /// `TargetOnly` for slot A with a chained `TargetOnly` sub_ability for
+    /// slot B so both targets are announced at activation.
+    #[test]
+    fn lower_choose_two_targets_emits_chained_target_only() {
+        use crate::types::ability::TypeFilter;
+        let ast = ImperativeFamilyAst::Structured(ImperativeAst::Choose(
+            ChooseImperativeAst::TwoTargets {
+                target_a: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Artifact],
+                    ..Default::default()
+                }),
+                target_b: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Card],
+                    ..Default::default()
+                }),
+            },
+        ));
+        let clause = lower_imperative_family_ast(ast);
+        match &clause.effect {
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Artifact]);
+            }
+            other => panic!("primary effect should be TargetOnly(Artifact), got {other:?}"),
+        }
+        let sub = clause
+            .sub_ability
+            .as_ref()
+            .expect("TwoTargets must produce a chained sub_ability for slot B");
+        match &*sub.effect {
+            Effect::TargetOnly {
+                target: TargetFilter::Typed(tf),
+            } => {
+                assert_eq!(tf.type_filters, vec![TypeFilter::Card]);
+            }
+            other => panic!("sub_ability effect should be TargetOnly(Card), got {other:?}"),
+        }
+        assert!(
+            sub.sub_ability.is_none(),
+            "TwoTargets sub_ability should not chain further; resolution-time semantics live in higher-level continuation parsing"
+        );
+    }
+
+    /// CR 115.1c regression: single-target "choose target X" must keep
+    /// emitting the existing `TargetOnly` AST — the two-target detector must
+    /// not steal single-slot wordings.
+    #[test]
+    fn parse_choose_single_target_unchanged() {
+        let text = "choose a creature they control";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower);
+        match result {
+            Some(ChooseImperativeAst::TargetOnly { .. })
+            | Some(ChooseImperativeAst::Reparse { .. }) => {
+                // Either path is acceptable — what matters is that we did NOT
+                // accidentally promote this to TwoTargets.
+            }
+            Some(ChooseImperativeAst::TwoTargets { .. }) => {
+                panic!("single-target wording must not be promoted to TwoTargets")
+            }
+            other => {
+                panic!("Expected TargetOnly or Reparse for single-target wording, got {other:?}")
+            }
+        }
+    }
+
+    /// CR 115.1c + CR 608.2c regression: "target X and put a counter on it"
+    /// must NOT be split into two target slots. The "and ..." continuation
+    /// is a compound action handled by `try_split_targeted_compound`, not a
+    /// second target slot. (This wording is not actually a "choose" form,
+    /// but the unit-level guard ensures the two-target detector requires
+    /// "and target Y" specifically — not just any "and" continuation.)
+    #[test]
+    fn parse_choose_target_and_non_target_continuation() {
+        // "Choose target creature and put a +1/+1 counter on it" — the
+        // second clause is NOT a target slot. The two-target detector must
+        // refuse this and let single-target dispatch claim it.
+        let text = "choose target creature and put a +1/+1 counter on it";
+        let lower = text.to_lowercase();
+        let result = parse_choose_ast(text, &lower);
+        // Any non-TwoTargets variant (TargetOnly with the creature filter, or
+        // Reparse routing into the compound-action splitter) is fine — the
+        // contract is just "no false positive on TwoTargets".
+        if let Some(ChooseImperativeAst::TwoTargets { .. }) = result {
+            panic!("non-target 'and ...' continuation must not be promoted to TwoTargets");
         }
     }
 
