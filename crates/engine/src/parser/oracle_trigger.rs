@@ -4428,6 +4428,12 @@ fn try_parse_nth_spell_you(lower: &str) -> Option<(TriggerMode, TriggerDefinitio
     let filter = extract_spell_type_filter(rest);
     let mut def = make_base();
     def.mode = TriggerMode::SpellCast;
+    // CR 603.2: Trigger event must match — gate on caster=you so opponent's
+    // Nth spell does not fire this trigger. Mirrors the `Opponent` branch below
+    // that sets `valid_target` for symmetric per-caster scoping.
+    def.valid_target = Some(TargetFilter::Typed(
+        TypedFilter::default().controller(ControllerRef::You),
+    ));
     def.constraint = Some(TriggerConstraint::NthSpellThisTurn { n, filter });
     if timing == NthSpellTimingKind::DuringOpponentsTurn {
         def.condition = Some(TriggerCondition::DuringOpponentsTurn);
@@ -5229,16 +5235,38 @@ fn try_parse_discard_trigger(
     let mut def = make_base();
     def.mode = TriggerMode::Discarded;
 
-    let type_filter = match controller_ref {
-        Some(cr) => TypedFilter::new(TypeFilter::Card).controller(cr),
-        None => TypedFilter::new(TypeFilter::Card),
+    // CR 701.9a + CR 603.2c: parse the type qualifier on the discarded card
+    // ("a land card", "a creature card", "a nonland card") so the trigger only
+    // fires when the matching card type is discarded. Reuses `parse_type_phrase`
+    // (the same building block `parse_discard_card_filter` uses for cost-form
+    // discards in `oracle_effect/imperative.rs`). The actor-derived
+    // `controller_ref` is preserved on the resulting filter.
+    let parsed_typed = {
+        let (filter, _rest) = parse_type_phrase(after_verb);
+        match filter {
+            TargetFilter::Typed(tf) => Some(tf),
+            _ => None,
+        }
+    };
+    let type_filter = match parsed_typed {
+        Some(tf)
+            if tf
+                .type_filters
+                .iter()
+                .any(|t| !matches!(t, TypeFilter::Card | TypeFilter::Any))
+                || !tf.properties.is_empty() =>
+        {
+            match controller_ref {
+                Some(cr) => tf.controller(cr),
+                None => tf,
+            }
+        }
+        _ => match controller_ref {
+            Some(cr) => TypedFilter::new(TypeFilter::Card).controller(cr),
+            None => TypedFilter::new(TypeFilter::Card),
+        },
     };
     def.valid_card = Some(TargetFilter::Typed(type_filter));
-
-    // Parse optional type filter from remainder: "a card", "a creature card", "a nonland card"
-    // For now, the basic "a card" / "one or more cards" is sufficient.
-    // Future: parse "a creature card" → add CardType filter property.
-    let _ = after_verb; // remainder available for future type-filter parsing
 
     Some((TriggerMode::Discarded, def))
 }
@@ -7462,6 +7490,25 @@ mod tests {
         );
     }
 
+    /// CR 603.2: "you cast your Nth spell" must be gated on caster=you so the
+    /// trigger does not fire for opponents' casts. Mirrors the symmetric
+    /// `controller(Opponent)` scoping on the "an opponent casts their Nth"
+    /// branch (Alphinaud Leveilleur class).
+    #[test]
+    fn trigger_nth_spell_you_scopes_to_controller() {
+        let def = parse_trigger_line(
+            "Whenever you cast your second spell each turn, scry 1.",
+            "Alphinaud Leveilleur",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(
+            def.valid_target,
+            Some(TargetFilter::Typed(
+                TypedFilter::default().controller(ControllerRef::You),
+            ))
+        );
+    }
+
     #[test]
     fn trigger_nth_draw_second() {
         let def = parse_trigger_line(
@@ -7956,6 +8003,29 @@ mod tests {
                 TypedFilter::new(TypeFilter::Card).controller(ControllerRef::Opponent)
             ))
         );
+    }
+
+    /// CR 701.9a + CR 603.2c: type qualifier on the discarded card must be
+    /// preserved so a "discards a land card" trigger fires only on land
+    /// discards (Aclazotz, Deepest Betrayal class).
+    #[test]
+    fn trigger_opponent_discards_a_land_card() {
+        let def = parse_trigger_line(
+            "Whenever an opponent discards a land card, create a 1/1 black Bat creature token with flying.",
+            "Aclazotz, Deepest Betrayal",
+        );
+        assert_eq!(def.mode, TriggerMode::Discarded);
+        match def.valid_card.as_ref().expect("valid_card must be set") {
+            TargetFilter::Typed(tf) => {
+                assert!(
+                    tf.type_filters.contains(&TypeFilter::Land),
+                    "expected Land in type_filters, got {:?}",
+                    tf.type_filters
+                );
+                assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
     }
 
     #[test]
