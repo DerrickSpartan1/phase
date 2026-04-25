@@ -6,6 +6,7 @@ mod engine_invariants;
 mod export_runtime_canaries;
 mod floodpits_drowner;
 mod gran_gran_integration;
+mod harrow_regression;
 mod integration_adventure;
 mod integration_bending;
 mod integration_landfall;
