@@ -1699,29 +1699,23 @@ mod tests {
     #[test]
     fn predefined_royal_role_has_pump_and_ward() {
         // CR 111.10m: Royal Role — "Enchanted creature gets +1/+1 and has ward {1}."
-        let statics =
-            predefined_role_token_statics("Royal").expect("Royal is an implemented Role");
+        let statics = predefined_role_token_statics("Royal").unwrap();
         assert_eq!(statics.len(), 1);
         let s = &statics[0];
         let Some(TargetFilter::Typed(tf)) = s.affected.as_ref() else {
-            panic!("affected must be a TypedFilter, got {:?}", s.affected);
+            panic!("affected must be a TypedFilter");
         };
-        assert!(
-            tf.properties.contains(&FilterProp::EnchantedBy),
-            "Royal Role static must affect the enchanted creature"
-        );
+        assert!(tf.properties.contains(&FilterProp::EnchantedBy));
         assert!(s.modifications.contains(&ContinuousModification::AddPower { value: 1 }));
         assert!(s.modifications.contains(&ContinuousModification::AddToughness { value: 1 }));
         let ward = s.modifications.iter().find_map(|m| match m {
-            ContinuousModification::AddKeyword {
-                keyword: Keyword::Ward(cost),
-            } => Some(cost),
+            ContinuousModification::AddKeyword { keyword: Keyword::Ward(cost) } => Some(cost),
             _ => None,
         });
         let Some(WardCost::Mana(ManaCost::Cost { generic, .. })) = ward else {
             panic!("Royal Role must grant ward, got {:?}", ward);
         };
-        assert_eq!(*generic, 1, "Royal Role ward should be {{1}}");
+        assert_eq!(*generic, 1);
     }
 
     #[test]
