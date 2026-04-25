@@ -51,6 +51,10 @@ pub fn find_legal_targets(
                 if player.is_phased_out() {
                     continue;
                 }
+                // CR 800.4a: Eliminated players are not legal targets.
+                if player.is_eliminated {
+                    continue;
+                }
                 // CR 702.16b + CR 702.16j: A player with protection from
                 // everything can't be targeted by spells or abilities.
                 if super::static_abilities::player_has_protection_from_everything(state, player.id)
@@ -1058,11 +1062,18 @@ mod tests {
             "eliminated player must not appear in legal targets"
         );
 
-        let any_targets =
-            find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), ObjectId(99));
+        let any_targets = find_legal_targets(&state, &TargetFilter::Any, PlayerId(0), ObjectId(99));
         assert!(
             !any_targets.contains(&TargetRef::Player(PlayerId(1))),
             "eliminated player must not appear under TargetFilter::Any either"
+        );
+
+        let opponent_filter =
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent));
+        let opp_targets = find_legal_targets(&state, &opponent_filter, PlayerId(0), ObjectId(99));
+        assert!(
+            !opp_targets.contains(&TargetRef::Player(PlayerId(1))),
+            "eliminated opponent must not match 'target opponent'"
         );
     }
 
