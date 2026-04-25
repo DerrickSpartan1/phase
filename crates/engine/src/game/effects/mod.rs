@@ -2164,6 +2164,104 @@ mod tests {
         );
     }
 
+    /// CR 609.3 + CR 608.2c building-block regression: a synchronous chain of
+    /// `ChangeZoneAll(Battlefield → Hand)` followed by
+    /// `Token { count: Ref(TrackedSetSize) }` produces one token per object
+    /// moved by the parent. Covers the "Return all <X> to their owners' hands.
+    /// If you do, create N Treasure tokens, where N is the number of permanents
+    /// returned this way" pattern (Item 1 of the design doc) at the
+    /// primitive level — the parser arm is deferred until a real card surfaces.
+    ///
+    /// Asserts both the K-object case and the K=0 case so the
+    /// `chain_tracked_set_id` plumbing can be trusted by future callers.
+    #[test]
+    fn change_zone_all_battlefield_to_hand_publishes_chain_for_tracked_set_size_cr_609_3() {
+        fn run_with_count(k: usize) -> (Vec<ObjectId>, GameState) {
+            let mut state = GameState::new_two_player(42);
+            let mut moving_ids = Vec::with_capacity(k);
+            for i in 0..k {
+                moving_ids.push(create_object(
+                    &mut state,
+                    CardId(100 + i as u64),
+                    PlayerId(0),
+                    format!("Equipment {i}"),
+                    Zone::Battlefield,
+                ));
+            }
+            let initial_battlefield = state.battlefield.len();
+
+            let token_sub = ResolvedAbility::new(
+                Effect::Token {
+                    name: "Treasure".to_string(),
+                    power: PtValue::Fixed(0),
+                    toughness: PtValue::Fixed(0),
+                    types: vec!["Artifact".to_string(), "Treasure".to_string()],
+                    colors: vec![],
+                    keywords: vec![],
+                    tapped: false,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::TrackedSetSize,
+                    },
+                    owner: TargetFilter::Controller,
+                    attach_to: None,
+                    enters_attacking: false,
+                    supertypes: vec![],
+                    static_abilities: vec![],
+                    enter_with_counters: vec![],
+                },
+                vec![],
+                ObjectId(900),
+                PlayerId(0),
+            );
+            let ability = ResolvedAbility::new(
+                Effect::ChangeZoneAll {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Hand,
+                    target: TargetFilter::Any,
+                },
+                vec![],
+                ObjectId(900),
+                PlayerId(0),
+            )
+            .sub_ability(token_sub);
+
+            let mut events = Vec::new();
+            resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+            // Sanity: the K originals left the battlefield, the new tokens entered.
+            // Battlefield count = initial - K (originals returned) + K (tokens minted).
+            assert_eq!(state.battlefield.len(), initial_battlefield);
+            (moving_ids, state)
+        }
+
+        // Three objects → three Treasure tokens; originals are in Hand.
+        let (moved, state) = run_with_count(3);
+        for id in &moved {
+            assert_eq!(state.objects[id].zone, Zone::Hand);
+        }
+        let treasures: Vec<_> = state
+            .battlefield
+            .iter()
+            .filter_map(|id| state.objects.get(id))
+            .filter(|o| o.name == "Treasure")
+            .collect();
+        assert_eq!(
+            treasures.len(),
+            3,
+            "TrackedSetSize must equal the number of permanents moved by the parent ChangeZoneAll"
+        );
+
+        // Zero objects → zero Treasure tokens (no spurious creation when chain is empty).
+        let (_, state0) = run_with_count(0);
+        let treasures0 = state0
+            .battlefield
+            .iter()
+            .filter_map(|id| state0.objects.get(id))
+            .filter(|o| o.name == "Treasure")
+            .count();
+        assert_eq!(treasures0, 0, "Empty chain must mint zero tokens");
+    }
+
     #[test]
     fn empty_targets_record_empty_tracked_set_for_downstream_context() {
         let mut state = GameState::new_two_player(42);
