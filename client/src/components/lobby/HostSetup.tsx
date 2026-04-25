@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import type { FormatConfig, GameFormat, MatchType } from "../../adapter/types";
+import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { FORMAT_DEFAULTS, useMultiplayerStore } from "../../stores/multiplayerStore";
 import type { AiSeatConfig, HostingSettings } from "../../stores/multiplayerStore";
 import { MenuPanel } from "../menu/MenuShell";
@@ -21,20 +22,15 @@ interface HostSetupProps {
   hostDisabledReason?: string;
 }
 
-// Descriptions are mirrored from `FormatPicker.tsx` so the two pickers
-// explain each format the same way. Shown as a `title` tooltip on each
-// button. Two-Headed Giant is intentionally omitted — the engine doesn't
-// support team-based play yet, so advertising it here would ship a dead end.
-const FORMAT_OPTIONS: { format: GameFormat; label: string; description: string }[] = [
-  { format: "Standard", label: "Standard", description: "Rotating card pool, 60-card minimum, 4-of limit." },
-  { format: "Pioneer", label: "Pioneer", description: "Non-rotating format with sets from 2012 onward." },
-  { format: "Historic", label: "Historic", description: "Arena's eternal format — every Arena-legal card." },
-  { format: "Pauper", label: "Pauper", description: "Commons only — every card must have been printed at common." },
-  { format: "Commander", label: "Commander", description: "100-card singleton with a legendary commander, 2–4 players." },
-  { format: "Brawl", label: "Brawl", description: "60-card Standard singleton with a legendary commander." },
-  { format: "HistoricBrawl", label: "Historic Brawl", description: "60-card eternal singleton with a legendary commander." },
-  { format: "FreeForAll", label: "Free-for-All", description: "3–6 player battle royale — last player standing wins." },
-];
+// Format options derive from the engine-authored FORMAT_REGISTRY so new
+// formats added in `crates/engine/src/types/format.rs` flow through to this
+// picker automatically. Two-Headed Giant is intentionally absent from the
+// registry (team-based play unsupported), so it never appears here either.
+const FORMAT_OPTIONS: { format: GameFormat; label: string; description: string }[] = FORMAT_REGISTRY.map((m) => ({
+  format: m.format,
+  label: m.label,
+  description: m.description,
+}));
 
 const DIFFICULTY_OPTIONS = ["VeryEasy", "Easy", "Medium", "Hard", "VeryHard"];
 

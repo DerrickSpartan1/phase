@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { GameFormat } from "../../adapter/types";
+import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { parseJoinCode } from "../../services/serverDetection";
 import { FORMAT_DEFAULTS, isLobbyEntryCompatible, useMultiplayerStore } from "../../stores/multiplayerStore";
 import { MenuPanel } from "../menu/MenuShell";
@@ -28,15 +29,12 @@ interface LobbyViewProps {
   onServerOffline?: () => void;
 }
 
+// Filter chips derive from the engine-authored FORMAT_REGISTRY so adding a
+// format in `crates/engine/src/types/format.rs` automatically surfaces it
+// here. The "All" entry stays hand-rolled — it has no engine analog.
 const FORMAT_FILTERS: { value: GameFormat | null; label: string }[] = [
   { value: null, label: "All" },
-  { value: "Standard", label: "STD" },
-  { value: "Pioneer", label: "PIO" },
-  { value: "Pauper", label: "PAU" },
-  { value: "Commander", label: "CMD" },
-  { value: "Brawl", label: "BRL" },
-  { value: "HistoricBrawl", label: "HBR" },
-  { value: "FreeForAll", label: "FFA" },
+  ...FORMAT_REGISTRY.map((m) => ({ value: m.format, label: m.short_label })),
 ];
 
 type RoomTypeFilter = "all" | "p2p" | "server";
