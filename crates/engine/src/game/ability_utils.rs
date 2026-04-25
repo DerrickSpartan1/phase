@@ -649,6 +649,14 @@ fn effect_references_target_player(effect: &Effect) -> bool {
     // target slots (PutCounterAll, DestroyAll, PumpAll, DamageAll, etc. —
     // their `target_filter()` returns None because the field is a mass
     // filter, not a targeting filter).
+    //
+    // CR 115.1 + CR 404 + CR 406: A mass filter set to `TargetFilter::Player`
+    // (e.g. `ChangeZoneAll { origin: Graveyard, target: Player }` for
+    // "exile target player's graveyard" — Nihil Spellbomb, Bojuka Bog,
+    // Tormod's Crypt class) parameterizes the scan by a player target. Surface
+    // the companion player slot so the resolver's `player_scope` branch
+    // reads the chosen target out of `ability.targets` instead of falling
+    // back to the activator's own graveyard.
     match effect {
         Effect::PutCounterAll { target, .. }
         | Effect::DestroyAll { target, .. }
@@ -657,7 +665,9 @@ fn effect_references_target_player(effect: &Effect) -> bool {
         | Effect::TapAll { target, .. }
         | Effect::UntapAll { target, .. }
         | Effect::ChangeZoneAll { target, .. }
-        | Effect::DoublePTAll { target, .. } => filter_references_target_player(target),
+        | Effect::DoublePTAll { target, .. } => {
+            matches!(target, TargetFilter::Player) || filter_references_target_player(target)
+        }
         _ => false,
     }
 }
@@ -2793,6 +2803,43 @@ mod tests {
                 chosen.0
             );
         }
+    }
+
+    /// CR 115.1 + CR 404 + CR 406: Nihil Spellbomb / Bojuka Bog / Tormod's
+    /// Crypt regression guard. "Exile target player's graveyard" lowers to
+    /// `ChangeZoneAll { origin: Graveyard, destination: Exile, target: Player }`.
+    /// The mass `target: Player` filter parameterizes the scan by a player —
+    /// the resolver enumerates that player's graveyard at resolution time —
+    /// so a companion `TargetFilter::Player` slot must be surfaced; otherwise
+    /// `ability.targets` stays empty and `player_scope` falls back to the
+    /// activator, exiling the wrong (usually empty) graveyard.
+    #[test]
+    fn build_target_slots_surfaces_player_slot_for_change_zone_all_player_filter() {
+        let state = crate::types::game_state::GameState::new_two_player(42);
+
+        let ability = ResolvedAbility::new(
+            Effect::ChangeZoneAll {
+                origin: Some(Zone::Graveyard),
+                destination: Zone::Exile,
+                target: TargetFilter::Player,
+            },
+            vec![],
+            ObjectId(900),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("should build");
+        assert_eq!(
+            slots.len(),
+            1,
+            "expected a single TargetFilter::Player slot for graveyard-mass exile"
+        );
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(0))));
+        assert!(slots[0]
+            .legal_targets
+            .contains(&TargetRef::Player(PlayerId(1))));
     }
 
     /// CR 109.4 + CR 115.1 + CR 506.2: Karazikar regression guard.
