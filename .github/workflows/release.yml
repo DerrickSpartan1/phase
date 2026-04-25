@@ -530,7 +530,11 @@ jobs:
           if [ "$PLATFORMS" = "{}" ]; then
             echo "::warning::No signed updater artifacts found — skipping update.json"
           else
-            echo "{\"version\":\"${TAG}\",\"notes\":\"Release ${TAG}\",\"pub_date\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"platforms\":${PLATFORMS}}" \
+            # Tauri's plugin-updater parses `version` through Rust's `semver`
+            # crate, which rejects a leading `v`. Strip it (URL paths above
+            # already do this with `${TAG#v}`).
+            VERSION="${TAG#v}"
+            echo "{\"version\":\"${VERSION}\",\"notes\":\"Release ${TAG}\",\"pub_date\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\",\"platforms\":${PLATFORMS}}" \
               | jq . > artifacts/update.json
           fi
 

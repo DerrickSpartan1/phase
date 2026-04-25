@@ -16,6 +16,8 @@
     },
     "shell:allow-kill",
     "shell:allow-stdin-write",
-    "process:allow-exit"
+    "process:allow-exit",
+    "process:allow-restart",
+    "updater:default"
   ]
 }
