@@ -12,8 +12,8 @@ use std::sync::OnceLock;
 use engine::database::card_db::CardDatabase;
 use engine::game::scenario::{GameScenario, P0};
 use engine::game::scenario_db::GameScenarioDbExt;
-use engine::types::game_state::CastingVariant;
 use engine::types::actions::GameAction;
+use engine::types::game_state::CastingVariant;
 use engine::types::game_state::{StackEntryKind, WaitingFor};
 use engine::types::identifiers::ObjectId;
 use engine::types::mana::{ManaType, ManaUnit};
@@ -83,7 +83,9 @@ fn elusive_otter_creature_face_cast_does_not_panic() {
         .find(|e| e.id == otter_id)
         .expect("otter should be on the stack after creature-face cast");
     match entry.kind {
-        StackEntryKind::Spell { casting_variant, .. } => {
+        StackEntryKind::Spell {
+            casting_variant, ..
+        } => {
             assert_eq!(
                 casting_variant,
                 CastingVariant::Normal,
@@ -137,7 +139,9 @@ fn elusive_otter_adventure_face_cast_does_not_panic() {
         .find(|e| e.id == otter_id)
         .expect("otter should be on the stack after adventure-face cast");
     match entry.kind {
-        StackEntryKind::Spell { casting_variant, .. } => {
+        StackEntryKind::Spell {
+            casting_variant, ..
+        } => {
             assert_eq!(casting_variant, CastingVariant::Adventure);
         }
         ref other => panic!("expected Spell entry, got {other:?}"),

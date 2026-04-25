@@ -20,9 +20,7 @@
 
 use engine::game::effects;
 use engine::game::zones::create_object;
-use engine::types::ability::{
-    Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
-};
+use engine::types::ability::{Effect, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter};
 use engine::types::game_state::GameState;
 use engine::types::identifiers::{CardId, ObjectId};
 use engine::types::player::PlayerId;

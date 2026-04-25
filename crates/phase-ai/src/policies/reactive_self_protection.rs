@@ -22,7 +22,7 @@
 //! than burning it pre-emptively.
 
 use engine::types::ability::{
-    ContinuousModification, ControllerRef, Effect, StaticDefinition, TargetFilter,
+    ContinuousModification, ControllerRef, Effect, StaticDefinition, TargetFilter, TargetRef,
 };
 use engine::types::actions::GameAction;
 use engine::types::game_state::GameState;
@@ -99,10 +99,21 @@ impl TacticalPolicy for ReactiveSelfProtectionPolicy {
     }
 }
 
-/// Returns true if any opponent presents a meaningful threat to the AI,
-/// or the AI's own life total is low enough that defensive casts have
-/// resolution-time work even without an explicit attacker.
+/// Returns true if any of three threat signals is present:
+///   - Stack contains an opponent-controlled object whose targets include
+///     the AI player or any AI-controlled permanent (CR 117.1a — instants
+///     are how protection responds to spells already on the stack).
+///   - The AI's own life total is below 40% of starting life.
+///   - Some opponent's `threat_level` is at or above `THREAT_FLOOR`.
+///
+/// Stack-targeted threats are the load-bearing signal for the user-reported
+/// "opponent casts Doom Blade on my commander" scenario — neither board
+/// pressure nor life ratio change in that moment, but Heroic Intervention
+/// is exactly the right cast.
 fn any_immediate_threat(state: &GameState, ai_player: PlayerId) -> bool {
+    if any_stack_targets_ai_or_ai_permanent(state, ai_player) {
+        return true;
+    }
     let starting_life = state.format_config.starting_life.max(1) as f64;
     let life_ratio = state.players[ai_player.0 as usize].life as f64 / starting_life;
     if life_ratio < 0.4 {
@@ -113,6 +124,29 @@ fn any_immediate_threat(state: &GameState, ai_player: PlayerId) -> bool {
             return false;
         }
         threat_level(state, ai_player, p.id) >= THREAT_FLOOR
+    })
+}
+
+/// Returns true if any opponent-controlled stack entry targets the AI or an
+/// AI-controlled object. Conservative — assumes any such target is hostile
+/// rather than classifying the effect's polarity. Over-permitting a defensive
+/// cast (rare false positives like opponent's "untap target permanent")
+/// is strictly better than under-permitting (false negative = blowout).
+fn any_stack_targets_ai_or_ai_permanent(state: &GameState, ai_player: PlayerId) -> bool {
+    state.stack.iter().any(|entry| {
+        if entry.controller == ai_player {
+            return false;
+        }
+        let Some(ability) = entry.ability() else {
+            return false;
+        };
+        ability.targets.iter().any(|t| match t {
+            TargetRef::Player(pid) => *pid == ai_player,
+            TargetRef::Object(obj_id) => state
+                .objects
+                .get(obj_id)
+                .is_some_and(|obj| obj.controller == ai_player),
+        })
     })
 }
 
@@ -255,6 +289,73 @@ mod tests {
     #[test]
     fn classifier_ignores_unrelated_proliferate_effect() {
         assert!(!is_self_protection_effect(&Effect::Proliferate));
+    }
+
+    /// Regression: opponent's Doom Blade on the stack targeting the AI's
+    /// commander is the canonical "cast Heroic Intervention now" trigger.
+    /// Prior to the fix, `any_immediate_threat` only inspected board pressure
+    /// and life ratio, so the policy still blocked the protection cast at
+    /// the exact moment it was needed.
+    #[test]
+    fn stack_targeting_ai_permanent_counts_as_threat() {
+        use engine::game::zones::create_object;
+        use engine::types::ability::{ResolvedAbility, TargetFilter, TargetRef};
+        use engine::types::game_state::{GameState, StackEntry, StackEntryKind};
+        use engine::types::identifiers::CardId;
+        use engine::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let ai_player = PlayerId(1);
+        let opp = PlayerId(0);
+
+        // AI controls a creature on battlefield.
+        let ai_creature = create_object(
+            &mut state,
+            CardId(1),
+            ai_player,
+            "AI Creature".to_string(),
+            Zone::Battlefield,
+        );
+        // Opponent has a Destroy spell on the stack targeting AI's creature.
+        let spell_id = create_object(
+            &mut state,
+            CardId(99),
+            opp,
+            "Doom Blade".to_string(),
+            Zone::Stack,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Any,
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(ai_creature)],
+            spell_id,
+            opp,
+        );
+        state.stack.push_back(StackEntry {
+            id: spell_id,
+            source_id: spell_id,
+            controller: opp,
+            kind: StackEntryKind::Spell {
+                card_id: CardId(99),
+                ability: Some(ability),
+                casting_variant: Default::default(),
+                actual_mana_spent: 0,
+            },
+        });
+
+        assert!(any_immediate_threat(&state, ai_player));
+    }
+
+    /// Sanity: with no stack, no attackers, full life, board empty → no
+    /// threat. Reactive protection must NOT fire.
+    #[test]
+    fn no_threat_on_empty_state() {
+        use engine::types::game_state::GameState;
+
+        let state = GameState::new_two_player(42);
+        assert!(!any_immediate_threat(&state, PlayerId(1)));
     }
 
     /// Regression: 570+ cards parse "this permanent gains X" with
