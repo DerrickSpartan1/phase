@@ -8295,11 +8295,29 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
         .strip_prefix("to ")
         .unwrap_or(after_target)
         .trim();
+    // CR 107.3i + CR 120.3: Trim a trailing "where X is <expr>" binding from
+    // the recipient phrase before classification. The binding has already been
+    // captured at chunk-build time and re-applied via
+    // `apply_where_x_ability_expression`; leaving it in the recipient phrase
+    // would cause `parse_damage_each_player_scope`'s exact-match check to
+    // reject "each player, where X is the number of descent counters on ~",
+    // forcing a fall-through to `DamageAll{Typed{empty}}`. Repro: Descent into
+    // Avernus. The strip is local to classification — it doesn't disturb the
+    // outer chunk-level where-X handling (Token P/T, Pump, SkipNextTurn).
+    let after_to_lower_full = after_to.to_lowercase();
+    let after_to_for_classification = {
+        let tp = TextPair::new(after_to, &after_to_lower_full);
+        let (stripped, _) = strip_trailing_where_x(tp);
+        // `stripped.original` is a prefix slice of `after_to` (TextPair::new
+        // requires byte-length equality, preserved for ASCII). Re-slice
+        // `after_to` by the stripped length to keep the outer lifetime.
+        &after_to[..stripped.original.len()]
+    };
     if tag::<_, _, VerboseError<&str>>("each ")
-        .parse(after_to)
+        .parse(after_to_for_classification)
         .is_ok()
     {
-        if let Some(player_filter) = parse_damage_each_player_scope(after_to) {
+        if let Some(player_filter) = parse_damage_each_player_scope(after_to_for_classification) {
             return Some((
                 Effect::DamageEachPlayer {
                     amount,
@@ -8308,7 +8326,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &str) -> Option<(Ef
                 "",
             ));
         }
-        let (target, rem) = parse_target(after_to);
+        let (target, rem) = parse_target(after_to_for_classification);
         return Some((
             Effect::DamageAll {
                 amount,
@@ -8617,6 +8635,8 @@ fn apply_where_x_quantity_expression(
 fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Option<&str>) {
     match effect {
         Effect::DealDamage { amount, .. }
+        | Effect::DamageAll { amount, .. }
+        | Effect::DamageEachPlayer { amount, .. }
         | Effect::GainLife { amount, .. }
         | Effect::LoseLife { amount, .. }
         | Effect::IncreaseSpeed { amount, .. }
@@ -9374,6 +9394,36 @@ mod tests {
             parse_damage_each_player_scope("each opponent,"),
             Some(PlayerFilter::Opponent)
         );
+    }
+
+    /// CR 107.3i + CR 120.3: Descent into Avernus chains
+    /// "each player creates X Treasure tokens AND ~ deals X damage to each player,
+    /// where X is the number of descent counters on ~."
+    /// The damage classifier in `try_parse_damage_with_remainder` must strip the
+    /// trailing "where X is <expr>" binding from the recipient phrase before
+    /// invoking `parse_damage_each_player_scope`; otherwise its exact-match
+    /// check on "each player" would reject the trailing clause and fall through
+    /// to `DamageAll{Typed{empty}}`. The where-X expression itself is captured
+    /// at chunk-build time and re-applied by `apply_where_x_ability_expression`,
+    /// so the local strip does not perturb Token P/T, Pump, or SkipNextTurn
+    /// where-X handling.
+    #[test]
+    fn descent_into_avernus_sentence_chain() {
+        let chain = parse_effect_chain(
+            "Then each player creates X Treasure tokens and ~ deals X damage to each player, where X is the number of descent counters on ~",
+            AbilityKind::Spell,
+        );
+        let sub = chain
+            .sub_ability
+            .as_ref()
+            .expect("expected damage sub_ability");
+        match &*sub.effect {
+            Effect::DamageEachPlayer {
+                player_filter: PlayerFilter::All,
+                ..
+            } => {}
+            other => panic!("expected DamageEachPlayer{{All}} for second clause, got {other:?}"),
+        }
     }
 
     #[test]
