@@ -35,8 +35,9 @@ export function partitionByType(objects: GameObject[]): BattlefieldPartition {
   const other: ObjectId[] = [];
 
   for (const obj of objects) {
-    // Attached permanents render on their host (see AttachmentStack on
-    // PermanentCard) — they must not also occupy a partition row.
+    // Attached permanents render as a tucked peek behind their host (see
+    // the attachments.map in PermanentCard) — they must not also occupy a
+    // partition row, which would double-render the same card.
     if (obj.attached_to !== null) continue;
     const coreTypes = obj.card_types.core_types;
 

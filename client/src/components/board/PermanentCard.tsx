@@ -8,7 +8,6 @@ import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
-import { AttachmentStack } from "./AttachmentStack.tsx";
 import { PTBox } from "./PTBox.tsx";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
@@ -27,6 +26,7 @@ interface PermanentCardProps {
 }
 
 const EXILE_GHOST_OFFSET_PX = 20;
+const ATTACHMENT_OFFSET_PX = 15;
 
 export const PermanentCard = memo(function PermanentCard({ objectId }: PermanentCardProps) {
   const playerId = usePlayerId();
@@ -294,6 +294,12 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
         filter: sicknessFilter,
         boxShadow: sicknessGlow,
         transformOrigin: "center center",
+        // Reserve space above for tucked attachments so the host's row
+        // layout accounts for the peek without overlapping the row above.
+        marginTop:
+          obj.attachments.length > 0
+            ? `${obj.attachments.length * ATTACHMENT_OFFSET_PX}px`
+            : undefined,
         // Reserve space below for exile ghost cards
         marginBottom:
           exileLinks.length > 0
@@ -311,6 +317,23 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
       onMouseLeave={handleMouseLeave}
       {...longPressHandlers}
     >
+      {/* Attachments rendered behind the host with their top edge peeking
+          out — the original (pre-df51a144e) tucked-card design. The recursive
+          PermanentCard render gives each attachment full click/hover/target
+          handling for free, mirroring how an Aura/Equipment behaves anywhere
+          else on the battlefield. */}
+      {obj.attachments.map((attachId, i) => (
+        <div
+          key={attachId}
+          className="absolute left-0 z-0"
+          style={{
+            top: `${-(i + 1) * ATTACHMENT_OFFSET_PX}px`,
+          }}
+        >
+          <PermanentCard objectId={attachId} />
+        </div>
+      ))}
+
       {/* Exile ghosts — cards held in exile by this permanent, peeking from below */}
       {exileLinks.map((link, i) => (
         <ExileGhostCard
@@ -394,13 +417,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
 
         </>
       )}
-
-      {/* Attached Equipment / Auras / etc. peek above the host as staggered
-          mini-cards so the player sees what's attached, not just an abstract
-          glyph. Rendered outside the art-crop/full-card ternary so the
-          indicator is visible in both display modes (the support-row card
-          was removed by the dedup work in df51a144e). */}
-      {obj.attachments.length > 0 && <AttachmentStack objectIds={obj.attachments} />}
 
     </motion.div>
   );
