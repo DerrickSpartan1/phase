@@ -15,6 +15,7 @@ use crate::types::ability::{
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{GameState, SpellCastRecord, ZoneChangeRecord};
 use crate::types::identifiers::{CardId, ObjectId};
+use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 use crate::types::player::PlayerId;
 use crate::types::proposed_event::{EtbTapState, ProposedEvent, TokenSpec};
@@ -266,7 +267,7 @@ fn filter_inner_for_object(
         }) => {
             // Type filters check (all must match — conjunction)
             for tf in type_filters {
-                if !type_filter_matches(tf, obj) {
+                if !type_filter_matches(tf, obj, &state.all_creature_types) {
                     return false;
                 }
             }
@@ -492,10 +493,9 @@ fn zone_change_filter_inner(
             controller,
             properties,
         }) => {
-            if !type_filters
-                .iter()
-                .all(|tf| zone_change_record_matches_type_filter(record, tf))
-            {
+            if !type_filters.iter().all(|tf| {
+                zone_change_record_matches_type_filter(record, tf, &state.all_creature_types)
+            }) {
                 return false;
             }
 
@@ -601,11 +601,54 @@ fn zone_change_filter_inner(
     }
 }
 
+/// CR 702.73a: Changeling subtype expansion — single authority for subtype
+/// matching across all zones.
+///
+/// Returns `true` if either:
+/// - the requested `subtype` appears literally in `subtypes` (printed or
+///   layer-applied), OR
+/// - `keywords` contains [`Keyword::Changeling`] AND `subtype` is a known
+///   creature subtype (i.e. it appears in `all_creature_types`, the
+///   game-state-wide catalog of every creature subtype seen across loaded
+///   decks). The CR 205.3m gate is essential — Changeling does NOT confer
+///   non-creature subtypes (artifact types like Equipment, land types like
+///   Plains, enchantment types like Aura, etc.).
+///
+/// On-battlefield objects also benefit from layer-system post-fixup
+/// (`game::layers`), which physically expands subtypes for permanents with
+/// Changeling. This helper is the canonical fallback for non-battlefield
+/// zones — library, hand, graveyard, exile, stack, plus zone-change snapshots
+/// and spell-cast records — where the layer system does not run.
+fn subtype_matches_with_changeling(
+    subtype: &str,
+    subtypes: &[String],
+    keywords: &[Keyword],
+    all_creature_types: &[String],
+) -> bool {
+    if subtypes.iter().any(|s| s.eq_ignore_ascii_case(subtype)) {
+        return true;
+    }
+    // CR 702.73a: "every creature type" — gated by the CR 205.3m creature
+    // subtype namespace via the runtime catalog.
+    if keywords.iter().any(|k| matches!(k, Keyword::Changeling))
+        && all_creature_types
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(subtype))
+    {
+        return true;
+    }
+    false
+}
+
 /// Check if an object matches a TypeFilter variant.
 /// Check if an object's card types match a `TypeFilter`.
 /// CR 205.2a: Each card type has its own rules for how it behaves.
 /// Public for use by trigger_matchers and other modules that need type checking.
-pub fn type_filter_matches(tf: &TypeFilter, obj: &GameObject) -> bool {
+pub fn type_filter_matches(
+    tf: &TypeFilter,
+    obj: &GameObject,
+    all_creature_types: &[String],
+) -> bool {
     match tf {
         TypeFilter::Creature => obj.card_types.core_types.contains(&CoreType::Creature),
         TypeFilter::Land => obj.card_types.core_types.contains(&CoreType::Land),
@@ -629,20 +672,29 @@ pub fn type_filter_matches(tf: &TypeFilter, obj: &GameObject) -> bool {
                 || obj.card_types.core_types.contains(&CoreType::Battle)
         }
         TypeFilter::Card | TypeFilter::Any => true,
-        TypeFilter::Non(inner) => !type_filter_matches(inner, obj),
-        // CR 205.3: Subtype matching — Changeling (CR 702.73) types are expanded
-        // by the layer system before this check, so obj.card_types.subtypes is complete.
-        TypeFilter::Subtype(ref sub) => obj
-            .card_types
-            .subtypes
-            .iter()
-            .any(|s| s.eq_ignore_ascii_case(sub)),
+        TypeFilter::Non(inner) => !type_filter_matches(inner, obj, all_creature_types),
+        // CR 205.3 + CR 702.73a: Subtype matching — battlefield layer system
+        // expands Changeling into `obj.card_types.subtypes`, but for cards in
+        // library/hand/graveyard/exile the helper below handles the expansion
+        // by inspecting `obj.keywords` and the runtime creature-type catalog.
+        TypeFilter::Subtype(ref sub) => subtype_matches_with_changeling(
+            sub,
+            &obj.card_types.subtypes,
+            &obj.keywords,
+            all_creature_types,
+        ),
         // CR 608.2b: Disjunction — matches if any inner filter matches.
-        TypeFilter::AnyOf(ref filters) => filters.iter().any(|f| type_filter_matches(f, obj)),
+        TypeFilter::AnyOf(ref filters) => filters
+            .iter()
+            .any(|f| type_filter_matches(f, obj, all_creature_types)),
     }
 }
 
-fn zone_change_record_matches_type_filter(record: &ZoneChangeRecord, tf: &TypeFilter) -> bool {
+fn zone_change_record_matches_type_filter(
+    record: &ZoneChangeRecord,
+    tf: &TypeFilter,
+    all_creature_types: &[String],
+) -> bool {
     match tf {
         TypeFilter::Creature => record.core_types.contains(&CoreType::Creature),
         TypeFilter::Land => record.core_types.contains(&CoreType::Land),
@@ -661,14 +713,21 @@ fn zone_change_record_matches_type_filter(record: &ZoneChangeRecord, tf: &TypeFi
                 || record.core_types.contains(&CoreType::Battle)
         }
         TypeFilter::Card | TypeFilter::Any => true,
-        TypeFilter::Non(inner) => !zone_change_record_matches_type_filter(record, inner),
-        TypeFilter::Subtype(subtype) => record
-            .subtypes
-            .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(subtype)),
+        TypeFilter::Non(inner) => {
+            !zone_change_record_matches_type_filter(record, inner, all_creature_types)
+        }
+        // CR 205.3 + CR 702.73a: Subtype match through the Changeling helper —
+        // zone-change records snapshot the object's keywords, so Changeling
+        // travels with the snapshot.
+        TypeFilter::Subtype(subtype) => subtype_matches_with_changeling(
+            subtype,
+            &record.subtypes,
+            &record.keywords,
+            all_creature_types,
+        ),
         TypeFilter::AnyOf(filters) => filters
             .iter()
-            .any(|inner| zone_change_record_matches_type_filter(record, inner)),
+            .any(|inner| zone_change_record_matches_type_filter(record, inner, all_creature_types)),
     }
 }
 
@@ -682,6 +741,7 @@ pub fn spell_record_matches_filter(
     record: &SpellCastRecord,
     filter: &TargetFilter,
     controller: PlayerId,
+    all_creature_types: &[String],
 ) -> bool {
     match filter {
         TargetFilter::Any => true,
@@ -704,21 +764,20 @@ pub fn spell_record_matches_filter(
                 }
             }
 
-            type_filters
+            type_filters.iter().all(|type_filter| {
+                spell_record_matches_type_filter(record, type_filter, all_creature_types)
+            }) && properties
                 .iter()
-                .all(|type_filter| spell_record_matches_type_filter(record, type_filter))
-                && properties
-                    .iter()
-                    .all(|prop| spell_record_matches_property(record, prop))
+                .all(|prop| spell_record_matches_property(record, prop))
         }
-        TargetFilter::Or { filters } => filters
-            .iter()
-            .any(|inner| spell_record_matches_filter(record, inner, controller)),
-        TargetFilter::And { filters } => filters
-            .iter()
-            .all(|inner| spell_record_matches_filter(record, inner, controller)),
+        TargetFilter::Or { filters } => filters.iter().any(|inner| {
+            spell_record_matches_filter(record, inner, controller, all_creature_types)
+        }),
+        TargetFilter::And { filters } => filters.iter().all(|inner| {
+            spell_record_matches_filter(record, inner, controller, all_creature_types)
+        }),
         TargetFilter::Not { filter: inner } => {
-            !spell_record_matches_filter(record, inner, controller)
+            !spell_record_matches_filter(record, inner, controller, all_creature_types)
         }
         // All remaining variants are inapplicable to spell snapshots.
         TargetFilter::None
@@ -765,8 +824,16 @@ pub fn spell_object_matches_filter(
     caster: PlayerId,
     filter: &TargetFilter,
     source_controller: PlayerId,
+    all_creature_types: &[String],
 ) -> bool {
-    spell_object_matches_filter_from(spell_obj, spell_obj.zone, caster, filter, source_controller)
+    spell_object_matches_filter_from(
+        spell_obj,
+        spell_obj.zone,
+        caster,
+        filter,
+        source_controller,
+        all_creature_types,
+    )
 }
 
 /// Variant of [`spell_object_matches_filter`] that treats the spell as being
@@ -779,6 +846,7 @@ pub fn spell_object_matches_filter_from(
     caster: PlayerId,
     filter: &TargetFilter,
     source_controller: PlayerId,
+    all_creature_types: &[String],
 ) -> bool {
     let record = SpellCastRecord {
         core_types: spell_obj.card_types.core_types.clone(),
@@ -789,7 +857,14 @@ pub fn spell_object_matches_filter_from(
         mana_value: spell_obj.mana_cost.mana_value(),
         has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
     };
-    spell_object_matches_filter_inner(&record, origin_zone, caster, filter, source_controller)
+    spell_object_matches_filter_inner(
+        &record,
+        origin_zone,
+        caster,
+        filter,
+        source_controller,
+        all_creature_types,
+    )
 }
 
 fn spell_object_matches_filter_inner(
@@ -798,6 +873,7 @@ fn spell_object_matches_filter_inner(
     caster: PlayerId,
     filter: &TargetFilter,
     source_controller: PlayerId,
+    all_creature_types: &[String],
 ) -> bool {
     match filter {
         TargetFilter::Any => true,
@@ -817,22 +893,40 @@ fn spell_object_matches_filter_inner(
                 }
             }
 
-            type_filters
+            type_filters.iter().all(|type_filter| {
+                spell_record_matches_type_filter(record, type_filter, all_creature_types)
+            }) && properties
                 .iter()
-                .all(|type_filter| spell_record_matches_type_filter(record, type_filter))
-                && properties
-                    .iter()
-                    .all(|prop| spell_object_matches_property(record, zone, prop))
+                .all(|prop| spell_object_matches_property(record, zone, prop))
         }
         TargetFilter::Or { filters } => filters.iter().any(|inner| {
-            spell_object_matches_filter_inner(record, zone, caster, inner, source_controller)
+            spell_object_matches_filter_inner(
+                record,
+                zone,
+                caster,
+                inner,
+                source_controller,
+                all_creature_types,
+            )
         }),
         TargetFilter::And { filters } => filters.iter().all(|inner| {
-            spell_object_matches_filter_inner(record, zone, caster, inner, source_controller)
+            spell_object_matches_filter_inner(
+                record,
+                zone,
+                caster,
+                inner,
+                source_controller,
+                all_creature_types,
+            )
         }),
-        TargetFilter::Not { filter: inner } => {
-            !spell_object_matches_filter_inner(record, zone, caster, inner, source_controller)
-        }
+        TargetFilter::Not { filter: inner } => !spell_object_matches_filter_inner(
+            record,
+            zone,
+            caster,
+            inner,
+            source_controller,
+            all_creature_types,
+        ),
         TargetFilter::None
         | TargetFilter::Player
         | TargetFilter::Controller
@@ -868,7 +962,11 @@ fn spell_object_matches_property(record: &SpellCastRecord, zone: Zone, prop: &Fi
     }
 }
 
-fn spell_record_matches_type_filter(record: &SpellCastRecord, filter: &TypeFilter) -> bool {
+fn spell_record_matches_type_filter(
+    record: &SpellCastRecord,
+    filter: &TypeFilter,
+    all_creature_types: &[String],
+) -> bool {
     match filter {
         TypeFilter::Creature => record.core_types.contains(&CoreType::Creature),
         TypeFilter::Land => record.core_types.contains(&CoreType::Land),
@@ -887,14 +985,21 @@ fn spell_record_matches_type_filter(record: &SpellCastRecord, filter: &TypeFilte
                 || record.core_types.contains(&CoreType::Battle)
         }
         TypeFilter::Card | TypeFilter::Any => true,
-        TypeFilter::Non(inner) => !spell_record_matches_type_filter(record, inner),
-        TypeFilter::Subtype(subtype) => record
-            .subtypes
-            .iter()
-            .any(|candidate| candidate.eq_ignore_ascii_case(subtype)),
+        TypeFilter::Non(inner) => {
+            !spell_record_matches_type_filter(record, inner, all_creature_types)
+        }
+        // CR 205.3 + CR 702.73a: Spell-cast records snapshot keywords, so
+        // Ur-Dragon's "Dragon spells you cast" matches Mistform Ultimus on the
+        // stack via Changeling.
+        TypeFilter::Subtype(subtype) => subtype_matches_with_changeling(
+            subtype,
+            &record.subtypes,
+            &record.keywords,
+            all_creature_types,
+        ),
         TypeFilter::AnyOf(filters) => filters
             .iter()
-            .any(|inner| spell_record_matches_type_filter(record, inner)),
+            .any(|inner| spell_record_matches_type_filter(record, inner, all_creature_types)),
     }
 }
 
@@ -1996,7 +2101,12 @@ mod tests {
                     },
                 ]),
         );
-        assert!(spell_record_matches_filter(&record, &filter, PlayerId(0)));
+        assert!(spell_record_matches_filter(
+            &record,
+            &filter,
+            PlayerId(0),
+            &[]
+        ));
     }
 
     /// CR 107.3 + CR 202.1: `FilterProp::HasXInManaCost` reads
@@ -2022,11 +2132,11 @@ mod tests {
             TypedFilter::default().properties(vec![FilterProp::HasXInManaCost]),
         );
         assert!(
-            spell_record_matches_filter(&x_record, &filter, PlayerId(0)),
+            spell_record_matches_filter(&x_record, &filter, PlayerId(0), &[]),
             "record with X in cost must match HasXInManaCost filter"
         );
         assert!(
-            !spell_record_matches_filter(&non_x_record, &filter, PlayerId(0)),
+            !spell_record_matches_filter(&non_x_record, &filter, PlayerId(0), &[]),
             "record without X in cost must NOT match HasXInManaCost filter"
         );
     }
@@ -2646,12 +2756,14 @@ mod tests {
             PlayerId(0),
             &filter,
             PlayerId(0),
+            &[],
         ));
         assert!(!spell_object_matches_filter(
             spell,
             PlayerId(1),
             &filter,
             PlayerId(0),
+            &[],
         ));
     }
 
@@ -3596,5 +3708,268 @@ mod tests {
             &nontoken_record,
             &source_ctx,
         ));
+    }
+
+    // ===========================================================================
+    // CR 702.73a — Changeling subtype expansion cascade.
+    //
+    // These tests pin the single-authority `subtype_matches_with_changeling`
+    // helper across every public consumer: on-battlefield filters, library/hand
+    // filters (SearchLibrary / RevealFromHand), spell-cast snapshots
+    // (ReduceCost on stack), and zone-change snapshots. They also pin the
+    // CR 205.3m gate — a Changeling object must NOT match non-creature subtypes.
+    // ===========================================================================
+
+    fn add_changeling_in_zone(
+        state: &mut GameState,
+        owner: PlayerId,
+        name: &str,
+        zone: Zone,
+    ) -> ObjectId {
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            owner,
+            name.to_string(),
+            zone,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        // Printed subtype is something narrow; Changeling must expand the rest.
+        obj.card_types.subtypes.push("Illusion".to_string());
+        obj.keywords.push(Keyword::Changeling);
+        id
+    }
+
+    fn make_subtype_filter(subtype: &str) -> TargetFilter {
+        TargetFilter::Typed(TypedFilter::card().with_type(TypeFilter::Subtype(subtype.to_string())))
+    }
+
+    /// CR 702.73a: A Changeling object on the battlefield matches every
+    /// creature-subtype filter in `state.all_creature_types` — covers
+    /// target-legality and static-affected cascade for tribal lords
+    /// ("Goblins you control get +1/+1") via the same code path.
+    #[test]
+    fn changeling_battlefield_matches_every_creature_subtype() {
+        let mut state = setup();
+        state.all_creature_types = vec![
+            "Elf".to_string(),
+            "Goblin".to_string(),
+            "Dragon".to_string(),
+        ];
+        let id = add_changeling_in_zone(
+            &mut state,
+            PlayerId(0),
+            "Mistform Ultimus",
+            Zone::Battlefield,
+        );
+
+        for subtype in ["Elf", "Goblin", "Dragon", "Illusion"] {
+            assert!(
+                matches_target_filter(&state, id, &make_subtype_filter(subtype), id),
+                "Changeling battlefield object should match Subtype({subtype})",
+            );
+        }
+    }
+
+    /// CR 702.73a + CR 205.3m: Changeling confers only creature subtypes — it
+    /// must NOT match non-creature subtypes (artifact / land / enchantment
+    /// types). The runtime catalog `state.all_creature_types` is the gate.
+    #[test]
+    fn changeling_does_not_match_non_creature_subtypes() {
+        let mut state = setup();
+        // Catalog only contains creature subtypes (per deck-loading), so
+        // Plains/Equipment/Aura are absent and must not match.
+        state.all_creature_types = vec!["Elf".to_string()];
+        let id = add_changeling_in_zone(
+            &mut state,
+            PlayerId(0),
+            "Mistform Ultimus",
+            Zone::Battlefield,
+        );
+
+        for non_creature in ["Plains", "Equipment", "Aura", "Saga"] {
+            assert!(
+                !matches_target_filter(&state, id, &make_subtype_filter(non_creature), id),
+                "Changeling must NOT match non-creature subtype {non_creature}",
+            );
+        }
+    }
+
+    /// CR 702.73a: Library cascade (Gilt-Leaf Palace search). A Changeling card
+    /// in the library matches `Subtype: Elf` even though the layer system
+    /// doesn't run on non-battlefield zones — the keyword carries through and
+    /// the filter helper does the expansion at evaluation time.
+    #[test]
+    fn changeling_in_library_matches_subtype_filter() {
+        let mut state = setup();
+        state.all_creature_types = vec!["Elf".to_string(), "Treefolk".to_string()];
+        let id = add_changeling_in_zone(&mut state, PlayerId(0), "Mistform Ultimus", Zone::Library);
+
+        assert!(matches_target_filter(
+            &state,
+            id,
+            &make_subtype_filter("Elf"),
+            id
+        ));
+        assert!(matches_target_filter(
+            &state,
+            id,
+            &make_subtype_filter("Treefolk"),
+            id
+        ));
+        // Library card must still gate — Plains is not a creature type.
+        assert!(!matches_target_filter(
+            &state,
+            id,
+            &make_subtype_filter("Plains"),
+            id
+        ));
+    }
+
+    /// CR 702.73a: Hand cascade (RevealFromHand). Equivalent to the library
+    /// case — same code path, different zone, same expected behavior.
+    #[test]
+    fn changeling_in_hand_matches_subtype_filter() {
+        let mut state = setup();
+        state.all_creature_types = vec!["Soldier".to_string()];
+        let id = add_changeling_in_zone(&mut state, PlayerId(0), "Mistform Ultimus", Zone::Hand);
+
+        assert!(matches_target_filter(
+            &state,
+            id,
+            &make_subtype_filter("Soldier"),
+            id
+        ));
+        // The card's printed subtype still matches.
+        assert!(matches_target_filter(
+            &state,
+            id,
+            &make_subtype_filter("Illusion"),
+            id
+        ));
+    }
+
+    /// CR 702.73a: Stack cascade (Ur-Dragon ReduceCost). Spell-record snapshots
+    /// must honour Changeling — `Subtype: Dragon` matches Mistform Ultimus on
+    /// the stack via `spell_record_matches_filter`.
+    #[test]
+    fn changeling_spell_record_matches_subtype_filter() {
+        let all_creature_types = vec!["Dragon".to_string(), "Goblin".to_string()];
+        let record = SpellCastRecord {
+            core_types: vec![CoreType::Creature],
+            supertypes: vec![],
+            subtypes: vec!["Illusion".to_string()],
+            keywords: vec![Keyword::Changeling],
+            colors: vec![],
+            mana_value: 7,
+            has_x_in_cost: false,
+        };
+        let dragon_filter = make_subtype_filter("Dragon");
+        let plains_filter = make_subtype_filter("Plains");
+
+        assert!(spell_record_matches_filter(
+            &record,
+            &dragon_filter,
+            PlayerId(0),
+            &all_creature_types,
+        ));
+        // CR 205.3m gate: non-creature subtype must NOT match.
+        assert!(!spell_record_matches_filter(
+            &record,
+            &plains_filter,
+            PlayerId(0),
+            &all_creature_types,
+        ));
+        // No catalog ⇒ no expansion (still falls back to printed subtypes).
+        assert!(!spell_record_matches_filter(
+            &record,
+            &dragon_filter,
+            PlayerId(0),
+            &[],
+        ));
+    }
+
+    /// CR 702.73a + CR 603.10: Zone-change snapshots carry keywords forward,
+    /// so look-back triggers ("when a Goblin dies, ...") see Changeling
+    /// objects via the same expansion. Pins the third subtype-match site.
+    #[test]
+    fn changeling_zone_change_record_matches_subtype_filter() {
+        let all_creature_types = vec!["Goblin".to_string()];
+        let record = ZoneChangeRecord {
+            object_id: ObjectId(99),
+            name: "Mistform Ultimus".to_string(),
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Illusion".to_string()],
+            supertypes: vec![],
+            keywords: vec![Keyword::Changeling],
+            power: Some(2),
+            toughness: Some(3),
+            colors: vec![],
+            mana_value: 5,
+            controller: PlayerId(0),
+            owner: PlayerId(0),
+            from_zone: Some(Zone::Battlefield),
+            to_zone: Zone::Graveyard,
+            attachments: vec![],
+            linked_exile_snapshot: vec![],
+            is_token: false,
+        };
+        let goblin_filter = make_subtype_filter("Goblin");
+        let plains_filter = make_subtype_filter("Plains");
+
+        assert!(zone_change_record_matches_type_filter(
+            &record,
+            &TypeFilter::Subtype("Goblin".to_string()),
+            &all_creature_types,
+        ));
+        // CR 205.3m gate.
+        assert!(!zone_change_record_matches_type_filter(
+            &record,
+            &TypeFilter::Subtype("Plains".to_string()),
+            &all_creature_types,
+        ));
+        // Sanity: positive cascade through the public TargetFilter API.
+        // (Use the type-filter level here since ZoneChangeRecord doesn't expose
+        // a public TargetFilter matcher with a free creature-types slice.)
+        let _ = (goblin_filter, plains_filter); // referenced for test cohesion
+    }
+
+    /// CR 702.73a: Non-Changeling object must NOT pick up creature-type
+    /// expansion — the helper short-circuits when the keyword is absent.
+    /// Guards against the helper "leaking" expansion to unrelated objects.
+    #[test]
+    fn non_changeling_does_not_expand_subtypes() {
+        let mut state = setup();
+        state.all_creature_types = vec![
+            "Elf".to_string(),
+            "Goblin".to_string(),
+            "Dragon".to_string(),
+        ];
+        // Vanilla bear: Creature — Bear, no keywords.
+        let card_id = CardId(state.next_object_id);
+        let id = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "Grizzly Bears".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.subtypes.push("Bear".to_string());
+
+        assert!(matches_target_filter(
+            &state,
+            id,
+            &make_subtype_filter("Bear"),
+            id
+        ));
+        for other in ["Elf", "Goblin", "Dragon"] {
+            assert!(
+                !matches_target_filter(&state, id, &make_subtype_filter(other), id),
+                "Non-changeling Bear must NOT match Subtype({other})",
+            );
+        }
     }
 }

@@ -408,6 +408,7 @@ fn granted_spell_keywords(
                 caster,
                 filter,
                 source_obj.controller,
+                &state.all_creature_types,
             )
         });
         if !matches {
@@ -1364,9 +1365,16 @@ fn spell_matches_cost_filter(
             caster,
             filter,
             source_obj.controller,
+            &state.all_creature_types,
         ),
         TargetFilter::Or { filters } => filters.iter().any(|f| {
-            super::filter::spell_object_matches_filter(spell_obj, caster, f, source_obj.controller)
+            super::filter::spell_object_matches_filter(
+                spell_obj,
+                caster,
+                f,
+                source_obj.controller,
+                &state.all_creature_types,
+            )
         }),
         // CR 601.2e: Cost modifications only apply when the filter explicitly matches.
         // Fail-closed: unrecognized filter shapes do not universally reduce costs.
@@ -4157,7 +4165,7 @@ fn is_blocked_by_cant_be_cast(
 /// Source-dependent filters (HasChosenName, IsChosenCardType) are resolved here
 /// because they need the source permanent's chosen attributes.
 fn cant_cast_filter_matches(
-    _state: &GameState,
+    state: &GameState,
     spell_obj: &super::game_object::GameObject,
     filter: &TargetFilter,
     source_obj: &super::game_object::GameObject,
@@ -4204,7 +4212,12 @@ fn cant_cast_filter_matches(
                 mana_value: spell_obj.mana_cost.mana_value(),
                 has_x_in_cost: super::casting_costs::cost_has_x(&spell_obj.mana_cost),
             };
-            super::filter::spell_record_matches_filter(&record, filter, source_obj.controller)
+            super::filter::spell_record_matches_filter(
+                &record,
+                filter,
+                source_obj.controller,
+                &state.all_creature_types,
+            )
         }
     }
 }
@@ -4252,6 +4265,7 @@ fn is_blocked_by_per_turn_cast_limit(
                     &current_record,
                     filter,
                     bf_obj.controller,
+                    &state.all_creature_types,
                 ) {
                     continue;
                 }
@@ -4268,7 +4282,12 @@ fn is_blocked_by_per_turn_cast_limit(
                     Some(filter) => records
                         .iter()
                         .filter(|r| {
-                            super::filter::spell_record_matches_filter(r, filter, bf_obj.controller)
+                            super::filter::spell_record_matches_filter(
+                                r,
+                                filter,
+                                bf_obj.controller,
+                                &state.all_creature_types,
+                            )
                         })
                         .count(),
                 })

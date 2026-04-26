@@ -951,7 +951,12 @@ fn resolve_ref(
                     Some(filter) => usize_to_i32_saturating(
                         list.iter()
                             .filter(|record| {
-                                spell_record_matches_filter(record, filter, controller)
+                                spell_record_matches_filter(
+                                    record,
+                                    filter,
+                                    controller,
+                                    &state.all_creature_types,
+                                )
                             })
                             .count(),
                     ),
@@ -1165,10 +1170,11 @@ fn matches_zone_card_filter(
     if card_types.is_empty() {
         return true;
     }
-    state
-        .objects
-        .get(&obj_id)
-        .is_some_and(|obj| card_types.iter().any(|tf| type_filter_matches(tf, obj)))
+    state.objects.get(&obj_id).is_some_and(|obj| {
+        card_types
+            .iter()
+            .any(|tf| type_filter_matches(tf, obj, &state.all_creature_types))
+    })
 }
 
 /// Return an iterator over players matching the given `CountScope`.
