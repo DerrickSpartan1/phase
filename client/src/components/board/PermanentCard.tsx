@@ -338,11 +338,6 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
           {/* P/T box for creatures */}
           {ptDisplay && <PTBox ptDisplay={ptDisplay} />}
 
-          {/* Attached Equipment / Auras / etc. summarized as chips along the
-              bottom edge of the host. Replaces the prior 15px top-peek of
-              tucked cards. Sibling of PTBox so it inherits tap rotation. */}
-          {obj.attachments.length > 0 && <AttachmentChipRow objectIds={obj.attachments} />}
-
           {/* Damage overlay for non-creatures only (creatures use P/T box) */}
           {!ptDisplay && obj.damage_marked > 0 && (
             <div className="absolute inset-x-0 bottom-0 z-20 flex h-6 items-center justify-center rounded-b-lg bg-red-600/60 text-xs font-bold text-white">
@@ -399,6 +394,13 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
 
         </>
       )}
+
+      {/* Attached Equipment / Auras / etc. summarized as chips along the
+          bottom edge of the host. Rendered outside the art-crop/full-card
+          ternary so the indicator is visible in both display modes —
+          otherwise art-crop users see no attachment indicator at all
+          (the support-row card was removed by the dedup work in df51a144e). */}
+      {obj.attachments.length > 0 && <AttachmentChipRow objectIds={obj.attachments} />}
 
     </motion.div>
   );
