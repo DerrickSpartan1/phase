@@ -26,7 +26,23 @@ interface PermanentCardProps {
 }
 
 const EXILE_GHOST_OFFSET_PX = 20;
-const ATTACHMENT_OFFSET_PX = 15;
+// 30px peek shows the title bar plus a sliver of art — enough to read the
+// attached card's name and a hint of its frame. The pre-df51a144e value
+// of 15 only revealed the bevel, which made attachments hard to identify
+// at a glance.
+const ATTACHMENT_OFFSET_PX = 30;
+
+// Subtype glyphs sit in the top-right of the peek (where the mana pips
+// would normally be) so the player can identify the attachment's role
+// without parsing the title. Glyph palette matches the original chip
+// design, intentionally disjoint from CardPreview's category icons so
+// the badge can never be confused with a parsed-ability pill.
+function attachmentTypeGlyph(subtypes: string[]): string | null {
+  if (subtypes.includes("Equipment")) return "⚒";
+  if (subtypes.includes("Aura")) return "✧";
+  if (subtypes.includes("Fortification")) return "▣";
+  return null;
+}
 
 export const PermanentCard = memo(function PermanentCard({ objectId }: PermanentCardProps) {
   const playerId = usePlayerId();
@@ -331,6 +347,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
           }}
         >
           <PermanentCard objectId={attachId} />
+          <AttachmentTypeBadge attachId={attachId} />
         </div>
       ))}
 
@@ -419,6 +436,32 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
       )}
 
     </motion.div>
+  );
+});
+
+/**
+ * Subtype glyph badge rendered in the top-right of an attached card's peek.
+ * Sits where the mana pips would normally be, so the player gets a clear
+ * "this is an Aura / Equipment / Fortification" hint at a glance without
+ * needing to read the title bar. Hidden when the card has no recognized
+ * attachment subtype (defensive — current MTG only attaches via the three
+ * Aura/Equipment/Fortification keywords, so this branch is rarely hit).
+ */
+const AttachmentTypeBadge = memo(function AttachmentTypeBadge({ attachId }: { attachId: number }) {
+  const subtypes = useGameStore((s) => s.gameState?.objects[attachId]?.card_types.subtypes);
+  if (!subtypes) return null;
+  const glyph = attachmentTypeGlyph(subtypes);
+  if (!glyph) return null;
+  return (
+    <span
+      aria-hidden
+      // pointer-events-none so the badge doesn't intercept clicks on the
+      // underlying PermanentCard — clicks must continue to reach the card's
+      // own click handler for targeting/selection.
+      className="pointer-events-none absolute right-1 top-1 z-30 flex h-4 w-4 items-center justify-center rounded-full bg-black/75 text-[10px] font-bold leading-none text-amber-300 shadow-sm ring-1 ring-amber-300/40"
+    >
+      {glyph}
+    </span>
   );
 });
 
