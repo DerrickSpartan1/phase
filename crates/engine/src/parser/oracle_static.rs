@@ -445,6 +445,17 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
         }
     }
 
+    // CR 401.5 + CR 118.9 + CR 601.2a: "You may [play|cast] [filter] from the
+    // top of your library [rider]." Top-of-library cast permission class
+    // (Realmwalker, Future Sight, Bolas's Citadel, Magus of the Future, Vivien
+    // on the Hunt static). Dispatched ahead of the graveyard helper because
+    // both anchor on "you may [play|cast]"; the library helper's anchor
+    // (" from the top of your library") is unique so there is no overlap, but
+    // ordering keeps the flow readable.
+    if let Some(result) = try_parse_top_of_library_cast_permission(&text, &lower) {
+        return Some(result);
+    }
+
     // CR 604.3 + CR 601.2a: "Once during each of your turns, you may cast [filter] from your graveyard."
     if let Some(result) = try_parse_graveyard_cast_permission(&text, &lower) {
         return Some(result);
@@ -6311,6 +6322,118 @@ fn try_parse_graveyard_cast_permission(text: &str, lower: &str) -> Option<Static
         .affected(affected)
         .description(text.to_string()),
     )
+}
+
+/// CR 401.5 + CR 118.9 + CR 601.2a: Parse "you may [play|cast] [filter] from
+/// the top of your library [rider]" — top-of-library cast permission class
+/// (Realmwalker, Future Sight, Magus of the Future, Bolas's Citadel, Vivien
+/// on the Hunt static). Mirror of `try_parse_graveyard_cast_permission` but
+/// anchored on " from the top of your library" instead of " from your
+/// graveyard". Recognises the compound Bolas form "you may play lands and
+/// cast spells from the top of your library" and lowers it to a single
+/// `play_mode: Play` static with `affected: TargetFilter::Any` (per CR 305.1,
+/// `Play` covers both lands and non-land spells).
+///
+/// The optional alt-cost rider (Bolas: "If you cast a spell this way, pay
+/// life equal to its mana value rather than paying its mana cost.") is
+/// recognised via the existing `oracle_effect::try_parse_alt_cost_rider`
+/// helper and stamped into `StaticMode::TopOfLibraryCastPermission.alt_cost`.
+fn try_parse_top_of_library_cast_permission(text: &str, lower: &str) -> Option<StaticDefinition> {
+    // Compound Bolas's Citadel form first — "you may play lands and cast
+    // spells from the top of your library". Both halves collapse to a single
+    // `Play` permission with `affected: Any`: under CR 305.1, `Play` mode
+    // already covers lands (played) and non-land spells (cast).
+    if let Some(rest) = nom_tag_lower(
+        lower,
+        lower,
+        "you may play lands and cast spells from the top of your library",
+    ) {
+        let alt_cost = parse_top_of_library_alt_cost_rider(rest, text);
+        return Some(
+            StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+                play_mode: CardPlayMode::Play,
+                alt_cost,
+            })
+            .affected(TargetFilter::Any)
+            .description(text.to_string()),
+        );
+    }
+
+    // Standard form: "you may [play|cast] [filter] from the top of your library".
+    let (rest, play_mode) = if let Some(r) = nom_tag_lower(lower, lower, "you may play ") {
+        (r, CardPlayMode::Play)
+    } else {
+        let r = nom_tag_lower(lower, lower, "you may cast ")?;
+        (r, CardPlayMode::Cast)
+    };
+
+    // Anchor on " from the top of your library". The split helper returns
+    // (consumed_so_far, after_split) — we need both halves: the filter text
+    // sits before the anchor; the optional alt-cost rider sits after.
+    let (filter_text, trailing) =
+        nom_primitives::split_once_on(rest, " from the top of your library")
+            .ok()
+            .map(|(_, pair)| pair)?;
+
+    // Strip leading article — `parse_type_phrase` expects the bare noun.
+    let filter_text = nom_tag_lower(filter_text, filter_text, "a ")
+        .or_else(|| nom_tag_lower(filter_text, filter_text, "an "))
+        .unwrap_or(filter_text);
+
+    // Drop trailing " spell"/" spells" so `parse_type_phrase` sees the bare
+    // type/subtype phrase. "lands" is already a valid type phrase.
+    let cleaned: Cow<str> = if nom_primitives::scan_contains(filter_text, "spells") {
+        Cow::Owned(filter_text.replacen(" spells", "", 1))
+    } else if nom_primitives::scan_contains(filter_text, "spell") {
+        Cow::Owned(filter_text.replacen(" spell", "", 1))
+    } else {
+        Cow::Borrowed(filter_text)
+    };
+
+    let (filter, _) = parse_type_phrase(&cleaned);
+
+    let alt_cost = parse_top_of_library_alt_cost_rider(trailing, text);
+
+    Some(
+        StaticDefinition::new(StaticMode::TopOfLibraryCastPermission {
+            play_mode,
+            alt_cost,
+        })
+        .affected(filter)
+        .description(text.to_string()),
+    )
+}
+
+/// CR 118.9 + CR 119.4: Helper to parse the optional alt-cost rider that may
+/// follow a top-of-library cast permission. Bolas's Citadel form: "If you
+/// cast a spell this way, pay life equal to its mana value rather than pay
+/// its mana cost." Scans for the rider's opening "if you cast" inside the
+/// trailing text and the full line, slicing from that index forward so the
+/// existing `try_parse_alt_cost_rider` (which expects the input to start at
+/// the rider) sees a clean prefix.
+fn parse_top_of_library_alt_cost_rider(
+    trailing: &str,
+    text: &str,
+) -> Option<crate::types::ability::AbilityCost> {
+    fn try_from(input: &str) -> Option<crate::types::ability::AbilityCost> {
+        // Scan past any leading text (the "you may play ... library."
+        // sentence) until the rider's opening anchor; pure-nom
+        // `take_until + alt` keeps this on the combinator path. Both
+        // anchors map to the same underlying rider parser.
+        let lower = input.to_lowercase();
+        type E<'a> = nom_language::error::VerboseError<&'a str>;
+        let mut anchor = nom::branch::alt((
+            nom::bytes::complete::take_until::<_, _, E>("if you cast a spell this way"),
+            nom::bytes::complete::take_until::<_, _, E>("if you cast it this way"),
+        ));
+        let (after_skip, _) = anchor.parse(lower.as_str()).ok()?;
+        // Slice the original (preserves casing) at the same offset; nom's
+        // `take_until` returned the consumed prefix, so the rider starts at
+        // `input.len() - after_skip.len()`.
+        let idx = input.len() - after_skip.len();
+        super::oracle_effect::try_parse_alt_cost_rider(&input[idx..])
+    }
+    try_from(trailing).or_else(|| try_from(text))
 }
 
 /// Parse the optional " using (its|their) <keyword> (ability|abilities)" rider on
@@ -13398,5 +13521,119 @@ mod tests {
         // Negative: must not match subtype-like words.
         assert!(parse_commander_subject_filter("zombies you control").is_none());
         assert!(parse_commander_subject_filter("commander spirits").is_none());
+    }
+
+    /// CR 401.5 + CR 118.9: Realmwalker's "You may cast creature spells of the
+    /// chosen type from the top of your library." should lower to a
+    /// `TopOfLibraryCastPermission { play_mode: Cast }` static with the
+    /// chosen-creature-type filter, NOT to an imperative `Effect::CastFromZone`
+    /// (which would exile the card via the impulse-draw resolver).
+    #[test]
+    fn top_of_library_cast_permission_realmwalker() {
+        let text = "You may cast creature spells of the chosen type from the top of your library.";
+        let lower = text.to_lowercase();
+        let def = try_parse_top_of_library_cast_permission(text, &lower)
+            .expect("Realmwalker static must parse");
+        match def.mode {
+            StaticMode::TopOfLibraryCastPermission {
+                play_mode,
+                ref alt_cost,
+            } => {
+                assert_eq!(play_mode, CardPlayMode::Cast);
+                assert!(alt_cost.is_none());
+            }
+            other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
+        }
+        // The chosen-creature-type filter must be carried on `affected`.
+        let affected = def.affected.expect("affected filter set");
+        match affected {
+            TargetFilter::Typed(tf) => {
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)));
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::IsChosenCreatureType)));
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    /// CR 401.5: Future Sight / Magus of the Future — compound "you may play
+    /// lands and cast spells from the top of your library" collapses to a
+    /// single `Play` permission with `affected: Any`.
+    #[test]
+    fn top_of_library_cast_permission_future_sight_compound() {
+        let text = "You may play lands and cast spells from the top of your library.";
+        let lower = text.to_lowercase();
+        let def = try_parse_top_of_library_cast_permission(text, &lower)
+            .expect("Future Sight static must parse");
+        match def.mode {
+            StaticMode::TopOfLibraryCastPermission {
+                play_mode,
+                ref alt_cost,
+            } => {
+                assert_eq!(play_mode, CardPlayMode::Play);
+                assert!(alt_cost.is_none());
+            }
+            other => panic!("expected TopOfLibraryCastPermission, got {other:?}"),
+        }
+        assert!(matches!(def.affected, Some(TargetFilter::Any)));
+    }
+
+    /// CR 118.9 + CR 119.4: Bolas's Citadel — compound permission line carrying
+    /// a same-line alt-cost rider must lower with `alt_cost: Some(PayLife {
+    /// SelfManaValue })`. Verifies the rider scanner correctly slices into the
+    /// "If you cast a spell this way, ..." sentence inside the same line.
+    #[test]
+    fn top_of_library_cast_permission_bolas_alt_cost() {
+        let text = "You may play lands and cast spells from the top of your library. \
+                    If you cast a spell this way, pay life equal to its mana value rather \
+                    than pay its mana cost.";
+        let lower = text.to_lowercase();
+        let def = try_parse_top_of_library_cast_permission(text, &lower)
+            .expect("Bolas's Citadel static must parse");
+        match def.mode {
+            StaticMode::TopOfLibraryCastPermission {
+                play_mode,
+                alt_cost: Some(crate::types::ability::AbilityCost::PayLife { amount }),
+            } => {
+                assert_eq!(play_mode, CardPlayMode::Play);
+                assert_eq!(
+                    amount,
+                    crate::types::ability::QuantityExpr::Ref {
+                        qty: crate::types::ability::QuantityRef::SelfManaValue
+                    }
+                );
+            }
+            other => panic!("expected PayLife alt_cost, got {other:?}"),
+        }
+    }
+
+    /// Negative: lines without "from the top of your library" must NOT match —
+    /// the existing impulse-draw / graveyard / hand-permission paths must
+    /// still own those lines.
+    #[test]
+    fn top_of_library_cast_permission_rejects_other_anchors() {
+        // Graveyard form — owned by `try_parse_graveyard_cast_permission`.
+        assert!(try_parse_top_of_library_cast_permission(
+            "You may cast a creature spell from your graveyard.",
+            "you may cast a creature spell from your graveyard.",
+        )
+        .is_none());
+        // Hand-free form — owned by `try_parse_cast_free_permission`.
+        assert!(try_parse_top_of_library_cast_permission(
+            "You may cast spells from your hand without paying their mana costs.",
+            "you may cast spells from your hand without paying their mana costs.",
+        )
+        .is_none());
+        // Imperative form (Discover-class) — owned by `try_parse_cast_effect`.
+        assert!(try_parse_top_of_library_cast_permission(
+            "Cast that card without paying its mana cost.",
+            "cast that card without paying its mana cost.",
+        )
+        .is_none());
     }
 }

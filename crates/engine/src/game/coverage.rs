@@ -40,6 +40,7 @@ fn is_data_carrying_static(mode: &StaticMode) -> bool {
             | StaticMode::PerTurnCastLimit { .. }
             | StaticMode::PerTurnDrawLimit { .. }
             | StaticMode::GraveyardCastPermission { .. }
+            | StaticMode::TopOfLibraryCastPermission { .. }
             | StaticMode::CastFromHandFree { .. }
             | StaticMode::CastWithKeyword { .. }
             | StaticMode::MaximumHandSize { .. }
@@ -5131,6 +5132,14 @@ fn audit_card_lines(oracle_text: &str, face: &CardFace) -> Vec<SemanticFinding> 
         // "can't cast spells during" (CantCastDuring/PerTurnCastLimit) lines.
         let covered_by_static_mode = face.static_abilities.iter().any(|s| match &s.mode {
             StaticMode::GraveyardCastPermission { .. } => {
+                effective_lower.contains("you may cast") || effective_lower.contains("you may play")
+            }
+            // CR 401.5 + CR 118.9: top-of-library cast permission descriptions
+            // match the same "you may cast/play" surface phrasing as graveyard
+            // grants. The discriminator ("from the top of your library") is
+            // already enforced by the parser; coverage just needs a phrase
+            // that the static description will contain.
+            StaticMode::TopOfLibraryCastPermission { .. } => {
                 effective_lower.contains("you may cast") || effective_lower.contains("you may play")
             }
             StaticMode::CantCastDuring { .. } => {

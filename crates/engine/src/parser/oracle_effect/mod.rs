@@ -4855,6 +4855,17 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
     .parse(lower)
     .ok()?;
 
+    // CR 401.5 + CR 118.9 + CR 601.2a: "from the top of your library" is the
+    // top-of-library cast permission class (Realmwalker, Future Sight,
+    // Bolas's Citadel). It belongs in `parse_static_line` →
+    // `StaticMode::TopOfLibraryCastPermission`, NOT in this imperative parser
+    // — resolving via this branch would (incorrectly) exile the card before
+    // granting an `ExileWithAltCost` permission (impulse-draw flow). Returning
+    // `None` here lets the static path own the line.
+    if scan_contains_phrase(rest, "from the top of your library") {
+        return None;
+    }
+
     let without_paying = scan_contains_phrase(rest, "without paying its mana cost")
         || scan_contains_phrase(rest, "without paying their mana cost");
 
@@ -4964,7 +4975,7 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
 /// equal to its mana value" form (Nashi, Moon Sage's Scion); the cost
 /// parser will accept other `AbilityCost` shapes naturally as they are
 /// added.
-fn try_parse_alt_cost_rider(text: &str) -> Option<crate::types::ability::AbilityCost> {
+pub(crate) fn try_parse_alt_cost_rider(text: &str) -> Option<crate::types::ability::AbilityCost> {
     type Vbe<'a> = VerboseError<&'a str>;
     let lower = text.to_lowercase();
     let trimmed_lower = lower.trim_end_matches('.').trim();
