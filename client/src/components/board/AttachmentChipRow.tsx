@@ -25,7 +25,7 @@ export const AttachmentChipRow = memo(function AttachmentChipRow({ objectIds }: 
   const collapsed = overflow.length > 0;
 
   return (
-    <div className="absolute bottom-7 left-1 right-1 z-20 flex max-w-full flex-wrap gap-0.5 overflow-hidden">
+    <div className="absolute -top-2 left-1 right-1 z-30 flex max-w-full flex-wrap justify-center gap-0.5 overflow-visible">
       {visible.map((id) => (
         <AttachmentChip key={id} id={id} glyphOnly={collapsed} />
       ))}

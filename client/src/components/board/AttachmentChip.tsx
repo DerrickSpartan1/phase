@@ -24,25 +24,31 @@ interface ChipStyle {
 // Glyph palette is deliberately disjoint from CardPreview.tsx's CATEGORY_STYLES
 // (◆/✦/⚡/🛡/↺/$) and from the under-attack badge (⚔ on PermanentCard) so a
 // chip can never be confused with a parsed-ability pill or a combat indicator.
+// Tints chosen for at-a-glance card-frame association: Auras get the
+// amber/gold of MTG enchantment frames, Equipment gets the brushed-zinc
+// of artifact frames, Fortifications track Equipment but a touch warmer.
+// Background opacity is /55 (was /15) so chips read against dark felt
+// without disappearing — the dedup commit's /15 was scoped for a 15px
+// peek surface and is not loud enough as a primary indicator.
 const STYLE_EQUIPMENT: ChipStyle = {
   glyph: "⚒",
-  className: "bg-zinc-400/15 text-zinc-200",
+  className: "bg-zinc-300/55 text-zinc-900",
 };
 const STYLE_AURA: ChipStyle = {
   glyph: "✧",
-  className: "bg-fuchsia-400/15 text-fuchsia-300",
+  className: "bg-amber-300/70 text-amber-950",
 };
 const STYLE_FORTIFICATION: ChipStyle = {
   glyph: "▣",
-  className: "bg-stone-400/15 text-stone-300",
+  className: "bg-stone-300/55 text-stone-900",
 };
 const STYLE_OTHER: ChipStyle = {
   glyph: "◇",
-  className: "bg-slate-400/15 text-slate-300",
+  className: "bg-slate-300/55 text-slate-900",
 };
 const STYLE_FACE_DOWN: ChipStyle = {
   glyph: "?",
-  className: "bg-slate-700/30 text-slate-400",
+  className: "bg-slate-700/70 text-slate-100",
 };
 
 function chipStyle(subtypes: string[], faceDown: boolean): ChipStyle {
@@ -182,7 +188,7 @@ export const AttachmentChip = memo(function AttachmentChip({ id, glyphOnly = fal
       onClick={handleClick}
       title={tooltip}
       aria-label={tooltip}
-      className={`flex h-4 max-w-full items-center gap-0.5 overflow-hidden rounded border border-l-2 px-1 text-[10px] font-semibold leading-none shadow-sm pointer-events-auto ${style.className} ${borderClass} ${targetingRing}`}
+      className={`flex h-5 max-w-full items-center gap-0.5 overflow-hidden rounded border border-l-2 border-black/40 px-1 text-[11px] font-bold leading-none shadow-md pointer-events-auto ${style.className} ${borderClass} ${targetingRing}`}
       {...handlers}
     >
       <span aria-hidden>{style.glyph}</span>
