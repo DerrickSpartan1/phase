@@ -1491,7 +1491,14 @@ fn check_trigger_constraint(
                     None => spells.len() as u32,
                     Some(filter) => spells
                         .iter()
-                        .filter(|record| spell_record_matches_filter(record, filter, caster))
+                        .filter(|record| {
+                            spell_record_matches_filter(
+                                record,
+                                filter,
+                                caster,
+                                &state.all_creature_types,
+                            )
+                        })
                         .count() as u32,
                 });
             count == *n
@@ -1769,9 +1776,14 @@ pub(crate) fn check_trigger_condition(
                 .spells_cast_this_turn_by_player
                 .get(&controller)
                 .is_some_and(|spells| {
-                    spells
-                        .iter()
-                        .any(|record| spell_record_matches_filter(record, filter, controller))
+                    spells.iter().any(|record| {
+                        spell_record_matches_filter(
+                            record,
+                            filter,
+                            controller,
+                            &state.all_creature_types,
+                        )
+                    })
                 }),
         },
         TriggerCondition::QuantityComparison {
