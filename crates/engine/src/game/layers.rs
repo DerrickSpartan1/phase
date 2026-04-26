@@ -5159,4 +5159,134 @@ mod tests {
                 ManaColor::Blue
             ))));
     }
+
+    /// CR 903.3d + CR 702.21: "Commanders you control have ward {2}." —
+    /// Codsworth, Handy Helper. The static must grant Ward to a controlled
+    /// commander on the battlefield, and must NOT grant it to a non-commander
+    /// creature you control. Verifies the FilterProp::IsCommander runtime path.
+    #[test]
+    fn codsworth_ward_grant_targets_only_commanders() {
+        use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+        use crate::types::keywords::WardCost;
+        use crate::types::mana::ManaCost;
+        let mut state = setup();
+
+        let codsworth = make_creature(&mut state, "Codsworth", 2, 3, PlayerId(0));
+        let commander = make_creature(&mut state, "MyCommander", 4, 4, PlayerId(0));
+        state.objects.get_mut(&commander).unwrap().is_commander = true;
+        // A vanilla creature you control — must not receive Ward.
+        let vanilla = make_creature(&mut state, "VanillaBear", 2, 2, PlayerId(0));
+
+        let ward = Keyword::Ward(WardCost::Mana(ManaCost::Cost {
+            generic: 2,
+            shards: vec![],
+        }));
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::IsCommander]),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: ward.clone(),
+            }]);
+        state
+            .objects
+            .get_mut(&codsworth)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&commander].keywords.contains(&ward),
+            "commander must receive Ward grant"
+        );
+        assert!(
+            !state.objects[&vanilla].keywords.contains(&ward),
+            "non-commander must NOT receive Ward grant"
+        );
+    }
+
+    /// CR 903.3d: When no commander is on the battlefield, a "commanders you
+    /// control" static is a no-op — it must not affect any other permanent.
+    #[test]
+    fn commanders_you_control_static_no_op_without_commander() {
+        use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+        let mut state = setup();
+        let codsworth = make_creature(&mut state, "Codsworth", 2, 3, PlayerId(0));
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::IsCommander]),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: Keyword::Hexproof,
+            }]);
+        state
+            .objects
+            .get_mut(&codsworth)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        assert!(!state.objects[&bear].keywords.contains(&Keyword::Hexproof));
+        assert!(!state.objects[&codsworth]
+            .keywords
+            .contains(&Keyword::Hexproof));
+    }
+
+    /// CR 903.3d: Each player's commander receives Ward only from their own
+    /// controller's Codsworth. A second Codsworth controlled by the opponent
+    /// does NOT grant Ward to your commander (filter is `controller=You`).
+    #[test]
+    fn commanders_you_control_filter_respects_per_player_scope() {
+        use crate::types::ability::{FilterProp, TargetFilter, TypedFilter};
+        use crate::types::keywords::WardCost;
+        use crate::types::mana::ManaCost;
+        let mut state = setup();
+
+        let codsworth_p0 = make_creature(&mut state, "Codsworth_P0", 2, 3, PlayerId(0));
+        let cmd_p0 = make_creature(&mut state, "Cmd_P0", 4, 4, PlayerId(0));
+        state.objects.get_mut(&cmd_p0).unwrap().is_commander = true;
+        let cmd_p1 = make_creature(&mut state, "Cmd_P1", 4, 4, PlayerId(1));
+        state.objects.get_mut(&cmd_p1).unwrap().is_commander = true;
+
+        let ward = Keyword::Ward(WardCost::Mana(ManaCost::Cost {
+            generic: 2,
+            shards: vec![],
+        }));
+        let def = StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::permanent()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::IsCommander]),
+            ))
+            .modifications(vec![ContinuousModification::AddKeyword {
+                keyword: ward.clone(),
+            }]);
+        state
+            .objects
+            .get_mut(&codsworth_p0)
+            .unwrap()
+            .static_definitions
+            .push(def);
+
+        evaluate_layers(&mut state);
+
+        assert!(
+            state.objects[&cmd_p0].keywords.contains(&ward),
+            "P0's commander must receive Ward from P0's Codsworth"
+        );
+        assert!(
+            !state.objects[&cmd_p1].keywords.contains(&ward),
+            "P1's commander must NOT receive Ward from P0's Codsworth"
+        );
+    }
 }

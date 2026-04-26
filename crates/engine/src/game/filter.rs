@@ -1146,6 +1146,11 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::SameName
         | FilterProp::SameNameAsParentTarget
         | FilterProp::NameMatchesAnyPermanent { .. }
+        // CR 903.3d: Commander designation is meaningful for permanents on the
+        // battlefield. The spell-cast record path is not currently plumbed with
+        // commander identity — fail closed until a "cast a commander" use-case
+        // requires it (CR 903.8 commander-tax tracking lives elsewhere).
+        | FilterProp::IsCommander
         | FilterProp::Other { .. } => false,
     }
 }
@@ -1660,6 +1665,10 @@ fn matches_filter_prop(
         // CR 115.9b: Permissive at per-object level; validated by trigger matchers against
         // the stack entry's actual targets.
         FilterProp::Targets { .. } => true,
+        // CR 903.3d: "If an effect refers to controlling a commander, it refers
+        // to a permanent on the battlefield that is a commander." `is_commander`
+        // is the deck-construction designation per CR 903.3.
+        FilterProp::IsCommander => obj.is_commander,
         FilterProp::Other { .. } => false, // Fail-closed for unrecognized properties
     }
 }
@@ -1852,6 +1861,11 @@ fn zone_change_record_matches_property(
         // meaning for a zone-change record (the object has already left the stack
         // or never was a spell). Fail closed — the snapshot carries no such info.
         | FilterProp::HasXInManaCost
+        // CR 903.3d + CR 903.3: Commander designation is preserved across zones,
+        // but zone-change records do not carry it. Fail closed — zone-change
+        // triggers that need to filter by commander status will require record
+        // plumbing (no current consumer).
+        | FilterProp::IsCommander
         | FilterProp::Other { .. } => false,
     }
 }

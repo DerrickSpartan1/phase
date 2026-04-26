@@ -2112,6 +2112,15 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                             .with_type(core_tf)
                             .controller(ControllerRef::You),
                     )
+                // CR 903.3d: "Commander creatures you control" — bare "Commander"
+                // descriptor on a creature subject is the commander designation,
+                // not an MTG subtype. Constrain to creatures + IsCommander.
+                } else if descriptor.eq_ignore_ascii_case("commander") {
+                    TargetFilter::Typed(
+                        TypedFilter::creature()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::IsCommander]),
+                    )
                 } else if is_capitalized_words(descriptor) {
                     TargetFilter::Typed(
                         typed_filter_for_subtype(descriptor).controller(ControllerRef::You),
@@ -2119,6 +2128,18 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                 } else {
                     return None;
                 }
+            } else if desc_remaining.eq_ignore_ascii_case("commander") {
+                // CR 903.3d: Combat-status prefix + "Commander creature" — same
+                // designation guard as the no-prefix branch above.
+                TargetFilter::Typed(
+                    TypedFilter::creature()
+                        .controller(ControllerRef::You)
+                        .properties({
+                            let mut p = extra_props.clone();
+                            p.push(FilterProp::IsCommander);
+                            p
+                        }),
+                )
             } else if is_capitalized_words(desc_remaining) {
                 // Combat-status prefix found + remaining is a subtype
                 TargetFilter::Typed(
@@ -2190,6 +2211,19 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                     try_parse_core_type_descriptor(&descriptor.to_lowercase())
                 {
                     TargetFilter::Typed(TypedFilter::new(core_tf).controller(ControllerRef::You))
+                // CR 903.3d: "Commander(s) you control" — commander designation is
+                // NOT an MTG subtype (CR 903.3); route to FilterProp::IsCommander
+                // before the capitalized-subtype fallback would synthesize a
+                // bogus `Subtype("Commander")`.
+                } else if matches!(
+                    descriptor.to_lowercase().as_str(),
+                    "commander" | "commanders"
+                ) {
+                    TargetFilter::Typed(
+                        TypedFilter::permanent()
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::IsCommander]),
+                    )
                 } else if is_capitalized_words(descriptor) {
                     // CR 205.3m: Normalize plural subtypes to canonical singular form
                     let subtype_name = parse_subtype(descriptor)
@@ -3455,6 +3489,14 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
         return Some(filter);
     }
 
+    // CR 903.3d: "commander(s) you control" / "commander(s)" subject phrase.
+    // Must run before parse_creature_subject_filter because the bare token
+    // "Commanders" otherwise falls into the capitalized-subtype fallback and
+    // emits a bogus `Subtype: "Commander"` (Commander is not an MTG subtype).
+    if let Some(filter) = parse_commander_subject_filter(trimmed) {
+        return Some(filter);
+    }
+
     if let Some(filter) = parse_creature_subject_filter(trimmed) {
         return Some(filter);
     }
@@ -3546,6 +3588,59 @@ fn parse_modified_creature_subject_filter(subject: &str) -> Option<TargetFilter>
     }
 
     None
+}
+
+/// CR 903.3d: Parse "commander(s) [you control | your opponents control]"
+/// subject phrases into a `TargetFilter` carrying `FilterProp::IsCommander`.
+/// "Commander" is the deck-construction designation (CR 903.3) — it is NOT
+/// an MTG subtype, so it must not be routed through `parse_subtype` or the
+/// capitalized-subtype fallback (which would synthesize `Subtype("Commander")`
+/// and match zero objects at runtime).
+///
+/// Covers Codsworth, Falthis, Anara, Champions of Archery, Vexilus Praetor,
+/// Guardian Augmenter, The Dilu Horse, Dancer's Chakrams ("other commanders
+/// you control"), and analogous "[other] commander(s) [you control | your
+/// opponents control]" subject phrases.
+fn parse_commander_subject_filter(subject: &str) -> Option<TargetFilter> {
+    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    let lower = subject.trim().to_lowercase();
+    let i = lower.as_str();
+
+    // Optional leading "other " — emits FilterProp::Another.
+    let (i, other) = opt(tag::<_, _, VE>("other ")).parse(i).ok()?;
+    let has_other = other.is_some();
+
+    // The bare commander token (singular or plural).
+    let (i, _) = alt((tag::<_, _, VE>("commanders"), tag::<_, _, VE>("commander")))
+        .parse(i)
+        .ok()?;
+
+    // Optional controller suffix.
+    let (i, controller) = alt((
+        value(Some(ControllerRef::You), tag::<_, _, VE>(" you control")),
+        value(
+            Some(ControllerRef::Opponent),
+            tag::<_, _, VE>(" your opponents control"),
+        ),
+        value(None, tag::<_, _, VE>("")),
+    ))
+    .parse(i)
+    .ok()?;
+
+    if !i.trim().is_empty() {
+        return None;
+    }
+
+    // CR 903.3d: a commander, when controlled, is a permanent on the battlefield.
+    let mut props = vec![FilterProp::IsCommander];
+    if has_other {
+        props.push(FilterProp::Another);
+    }
+    let mut typed = TypedFilter::permanent().properties(props);
+    if let Some(c) = controller {
+        typed = typed.controller(c);
+    }
+    Some(TargetFilter::Typed(typed))
 }
 
 fn parse_creature_subject_filter(subject: &str) -> Option<TargetFilter> {
@@ -13199,5 +13294,109 @@ mod tests {
             }
             _ => panic!("expected TargetFilter::Typed"),
         }
+    }
+
+    // CR 903.3d: "Commanders you control have <keyword>" — Codsworth, Falthis,
+    // Vexilus Praetor class. Must produce IsCommander, NOT a bogus
+    // Subtype("Commander") (Commander is not an MTG subtype per CR 903.3).
+    #[test]
+    fn parse_commanders_you_control_have_keyword() {
+        let def = parse_static_line("Commanders you control have ward {2}.")
+            .expect("should parse Commanders-you-control");
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.properties.contains(&FilterProp::IsCommander),
+                    "must carry IsCommander, got {:?}",
+                    tf.properties
+                );
+                // Must NOT synthesize a Commander subtype.
+                assert!(
+                    !tf.type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Commander")),
+                    "must not emit Subtype(\"Commander\") (CR 903.3 — not a subtype)"
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    // CR 903.3d + CR 700.4: "Other commanders you control" — must include Another.
+    #[test]
+    fn parse_other_commanders_you_control_have_keyword() {
+        let def = parse_static_line("Other commanders you control have menace.")
+            .expect("should parse other-commanders-you-control");
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.properties.contains(&FilterProp::IsCommander));
+                assert!(tf.properties.contains(&FilterProp::Another));
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    // CR 903.3d: "Commander creatures you control" — Guardian Augmenter class.
+    // The "Commander" adjective on a creature subject is the commander
+    // designation, not a subtype.
+    #[test]
+    fn parse_commander_creatures_you_control() {
+        let def = parse_static_line("Commander creatures you control get +2/+2.")
+            .expect("should parse Commander-creatures-you-control");
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert!(tf.properties.contains(&FilterProp::IsCommander));
+                assert!(
+                    !tf.type_filters
+                        .iter()
+                        .any(|t| matches!(t, TypeFilter::Subtype(s) if s == "Commander")),
+                    "must not emit Subtype(\"Commander\")"
+                );
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        }
+    }
+
+    // CR 903.3d: parse_commander_subject_filter as a raw subject helper.
+    // Unblocks subject-continuous-static dispatch (the secondary path).
+    #[test]
+    fn parse_commander_subject_filter_basic_variants() {
+        let f = parse_commander_subject_filter("commanders you control")
+            .expect("commanders you control");
+        match f {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.contains(&FilterProp::IsCommander));
+                assert!(tf.type_filters.contains(&TypeFilter::Permanent));
+            }
+            _ => panic!("expected Typed"),
+        }
+
+        let f = parse_commander_subject_filter("other commander you control")
+            .expect("other commander you control");
+        match f {
+            TargetFilter::Typed(tf) => {
+                assert!(tf.properties.contains(&FilterProp::IsCommander));
+                assert!(tf.properties.contains(&FilterProp::Another));
+            }
+            _ => panic!("expected Typed"),
+        }
+
+        // Bare "commander" (no controller) — used by `parse_subject_continuous_static`
+        // when an enclosing clause supplies the controller.
+        let f = parse_commander_subject_filter("commanders").expect("bare commanders");
+        match f {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.controller, None);
+                assert!(tf.properties.contains(&FilterProp::IsCommander));
+            }
+            _ => panic!("expected Typed"),
+        }
+
+        // Negative: must not match subtype-like words.
+        assert!(parse_commander_subject_filter("zombies you control").is_none());
+        assert!(parse_commander_subject_filter("commander spirits").is_none());
     }
 }

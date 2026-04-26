@@ -1500,6 +1500,13 @@ pub enum FilterProp {
     /// filter's source controller ("creatures attacking you"). Distinct from
     /// `Attacking`, which matches any attacker regardless of defender.
     AttackingController,
+    /// CR 903.3 + CR 903.3d: Matches permanents on the battlefield that are a
+    /// commander. Reads `GameObject::is_commander`, set during deck construction
+    /// per CR 903.3 (the legendary card designated as that deck's commander).
+    /// Used for "commander(s) you control", "your commander" subject phrases
+    /// and for "target commander" in commander-format effects (Codsworth, Falthis,
+    /// Anara, Champions of Archery, etc.).
+    IsCommander,
     Other {
         value: String,
     },
