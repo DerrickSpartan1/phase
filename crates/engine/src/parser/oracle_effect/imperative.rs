@@ -25,7 +25,7 @@ use crate::types::ability::{
     AbilityDefinition, AbilityKind, CategoryChooserScope, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, Duration, Effect, GainLifePlayer, LibraryPosition,
     MultiTargetSpec, PaymentCost, PreventionAmount, PreventionScope, PtValue, QuantityExpr,
-    QuantityRef, StaticDefinition, TargetFilter, TypedFilter,
+    QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter, TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::player::PlayerCounterKind;
@@ -1056,6 +1056,7 @@ pub(super) fn parse_search_and_creation_ast(
             reveal: details.reveal,
             target_player: details.target_player,
             up_to: details.up_to,
+            selection_constraint: details.selection_constraint,
             extra_filters: details.extra_filters,
             multi_destination: details.multi_destination,
             multi_enter_tapped: details.multi_enter_tapped,
@@ -1165,6 +1166,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             reveal,
             target_player,
             up_to,
+            selection_constraint,
             // Extras are consumed in `lower_imperative_family_ast` via
             // `lower_multi_filter_search_library`, which builds a chained
             // `ParsedEffectClause`. At this bare-Effect lowering site, multiple
@@ -1180,6 +1182,7 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             reveal,
             target_player,
             up_to,
+            selection_constraint,
         },
         SearchCreationImperativeAst::Dig { count, reveal } => Effect::Dig {
             count,
@@ -2480,6 +2483,7 @@ pub(super) fn lower_multi_filter_search_library(
     reveal: bool,
     target_player: Option<TargetFilter>,
     up_to: bool,
+    selection_constraint: SearchSelectionConstraint,
     extra_filters: Vec<TargetFilter>,
     destination: Zone,
     enter_tapped: bool,
@@ -2512,6 +2516,7 @@ pub(super) fn lower_multi_filter_search_library(
                 reveal,
                 target_player: target_player.clone(),
                 up_to,
+                selection_constraint: selection_constraint.clone(),
             },
         );
         search_def.sub_ability = tail;
@@ -2529,6 +2534,7 @@ pub(super) fn lower_multi_filter_search_library(
         reveal,
         target_player,
         up_to,
+        selection_constraint,
     });
     clause.sub_ability = tail;
     clause
@@ -3941,6 +3947,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 reveal,
                 target_player,
                 up_to,
+                selection_constraint,
                 extra_filters,
                 multi_destination,
                 multi_enter_tapped,
@@ -3951,6 +3958,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
             reveal,
             target_player,
             up_to,
+            selection_constraint,
             extra_filters,
             multi_destination,
             multi_enter_tapped,

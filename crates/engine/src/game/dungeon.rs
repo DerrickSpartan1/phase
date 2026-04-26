@@ -149,8 +149,8 @@ pub fn dungeon_sentinel_id(player: PlayerId) -> crate::types::identifiers::Objec
 
 use crate::types::ability::{
     AbilityCondition, CastingPermission, ContinuousModification, ControllerRef, Duration, Effect,
-    FilterProp, PlayerFilter, PtValue, QuantityExpr, ResolvedAbility, StaticDefinition,
-    TargetFilter, TypeFilter, TypedFilter,
+    FilterProp, PlayerFilter, PtValue, QuantityExpr, ResolvedAbility, SearchSelectionConstraint,
+    StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
 use crate::types::game_state::TargetSelectionConstraint;
@@ -957,6 +957,7 @@ fn search_basic_land(source_id: ObjectId, controller: PlayerId) -> ResolvedAbili
             reveal: true,
             target_player: None,
             up_to: false,
+            selection_constraint: SearchSelectionConstraint::None,
         },
         source_id,
         controller,

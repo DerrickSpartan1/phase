@@ -271,6 +271,7 @@ mod tests {
             reveal: false,
             target_player: None,
             up_to: false,
+            selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
         };
         let put_in_play = AbilityDefinition::new(
             AbilityKind::Activated,

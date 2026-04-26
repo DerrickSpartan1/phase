@@ -2,7 +2,8 @@ use crate::game::filter::{matches_target_filter, FilterContext};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::static_abilities::prohibition_scope_matches_player;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
+    Effect, EffectError, EffectKind, ResolvedAbility, SearchSelectionConstraint, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::{GameEvent, PlayerActionKind};
 use crate::types::game_state::{GameState, WaitingFor};
@@ -90,6 +91,31 @@ fn is_search_muzzled(state: &GameState, cause_controller: crate::types::player::
     false
 }
 
+/// CR 608.2c: Validate a chosen card-id set against the search-selection
+/// constraint propagated from `Effect::SearchLibrary.selection_constraint`.
+/// Centralized here so the resolver, the engine submission guard, and the AI
+/// candidate filter share one authority — adding a new constraint variant
+/// requires changes only at this single site (and the parser / enum).
+pub fn selection_satisfies_constraint(
+    state: &GameState,
+    chosen: &[crate::types::identifiers::ObjectId],
+    constraint: &SearchSelectionConstraint,
+) -> bool {
+    match constraint {
+        SearchSelectionConstraint::None => true,
+        SearchSelectionConstraint::DistinctNames => {
+            let mut seen = std::collections::HashSet::new();
+            chosen.iter().all(|id| match state.objects.get(id) {
+                // CR 201.2: Two cards "have the same name" iff their card-name
+                // strings match. Compare on the canonical printed name held by
+                // the GameObject; absent objects (defensive) fail the check.
+                Some(obj) => seen.insert(obj.name.as_str()),
+                None => false,
+            })
+        }
+    }
+}
+
 /// CR 701.23a + CR 401.2: Search a library — look through it, find card(s) matching criteria, then shuffle.
 /// CR 401.2: Libraries are normally face-down; searching is an exception that lets a player look through cards.
 pub fn resolve(
@@ -114,21 +140,31 @@ pub fn resolve(
     // `Variable("X")` picks up the caster's announced X. Fixed counts are unaffected.
     // CR 107.1c + CR 701.23d: `up_to` propagates to SearchChoice so "any number
     // of" / "up to N" searches accept 0..=count picks (vs. exactly-count).
-    let (filter, count, reveal, target_player, up_to) = match &ability.effect {
+    let (filter, count, reveal, target_player, up_to, selection_constraint) = match &ability.effect
+    {
         Effect::SearchLibrary {
             filter,
             count,
             reveal,
             target_player,
             up_to,
+            selection_constraint,
         } => (
             filter.clone(),
             resolve_quantity_with_targets(state, count, ability).max(0) as usize,
             *reveal,
             target_player.clone(),
             *up_to,
+            selection_constraint.clone(),
         ),
-        _ => (TargetFilter::Any, 1, false, None, false),
+        _ => (
+            TargetFilter::Any,
+            1,
+            false,
+            None,
+            false,
+            SearchSelectionConstraint::None,
+        ),
     };
 
     // CR 701.23a: Determine the library owner and the searcher.
@@ -183,12 +219,16 @@ pub fn resolve(
 
     let pick_count = count.min(matching.len());
 
+    // CR 608.2c: Propagate the printed-text selection restriction (e.g.,
+    // "with different names") into the choice state so the Select handler
+    // and AI candidate enumerator both see it.
     state.waiting_for = WaitingFor::SearchChoice {
         player: searcher_id,
         cards: matching,
         count: pick_count,
         reveal,
         up_to,
+        constraint: selection_constraint,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -217,6 +257,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 up_to: false,
+                selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(100),
@@ -233,6 +274,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 up_to: true,
+                selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(100),
@@ -488,6 +530,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 up_to: false,
+                selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(100),
@@ -576,6 +619,7 @@ mod tests {
                 reveal: true,
                 target_player: None,
                 up_to: false,
+                selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(100),
@@ -628,6 +672,7 @@ mod tests {
                 reveal: true,
                 target_player: None,
                 up_to: false,
+                selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(100),
@@ -692,6 +737,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 up_to: false,
+                selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(100),
@@ -735,6 +781,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 up_to: false,
+                selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(100),
@@ -775,6 +822,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 up_to: false,
+                selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(100),
@@ -840,6 +888,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 up_to: false,
+                selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(9999),
@@ -898,6 +947,7 @@ mod tests {
                 reveal: false,
                 target_player: None,
                 up_to: false,
+                selection_constraint: SearchSelectionConstraint::None,
             },
             vec![],
             ObjectId(9998),
@@ -951,6 +1001,7 @@ mod tests {
                 reveal: false,
                 target_player: Some(TargetFilter::ParentTargetController),
                 up_to: false,
+                selection_constraint: SearchSelectionConstraint::None,
             },
             vec![TargetRef::Object(destroyed)],
             ObjectId(9997),
@@ -1003,6 +1054,7 @@ mod tests {
                     TypedFilter::default().controller(ControllerRef::Opponent),
                 )),
                 up_to: false,
+                selection_constraint: SearchSelectionConstraint::None,
             },
             vec![TargetRef::Player(PlayerId(1))],
             ObjectId(9996),

@@ -90,6 +90,7 @@ fn make_fetch_ability() -> AbilityDefinition {
             reveal: false,
             target_player: None,
             up_to: false,
+            selection_constraint: engine::types::ability::SearchSelectionConstraint::None,
         },
     );
     ability.cost = Some(AbilityCost::Composite {

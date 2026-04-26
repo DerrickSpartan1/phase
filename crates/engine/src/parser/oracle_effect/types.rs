@@ -1,8 +1,8 @@
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, CastingPermission, Duration, Effect, ManaProduction,
-    ManaSpendRestriction, PaymentCost, PtValue, QuantityExpr, StaticDefinition, TargetFilter,
-    UnlessCost,
+    ManaSpendRestriction, PaymentCost, PtValue, QuantityExpr, SearchSelectionConstraint,
+    StaticDefinition, TargetFilter, UnlessCost,
 };
 use crate::types::game_state::DistributionUnit;
 use crate::types::keywords::Keyword;
@@ -83,6 +83,10 @@ pub(super) struct SearchLibraryDetails {
     pub(super) target_player: Option<TargetFilter>,
     /// CR 107.1c + CR 701.23d: "any number of" / "up to N" allow 0..=count picks.
     pub(super) up_to: bool,
+    /// CR 608.2c: Printed-text restriction on the chosen set ("with different
+    /// names"). Defaults to `None`; set by the parser when the corresponding
+    /// suffix is detected.
+    pub(super) selection_constraint: SearchSelectionConstraint,
     /// CR 701.23a + CR 107.1: "a X card and a Y card" — additional filters, each
     /// producing its own independent search. The primary filter is `filter`;
     /// each `extra_filters` entry becomes a chained `SearchLibrary` sub-ability.
@@ -547,6 +551,9 @@ pub(super) enum SearchCreationImperativeAst {
         target_player: Option<TargetFilter>,
         /// CR 107.1c + CR 701.23d: "any number of" / "up to N" allow 0..=count picks.
         up_to: bool,
+        /// CR 608.2c: Printed-text restriction on the chosen set ("with
+        /// different names").
+        selection_constraint: SearchSelectionConstraint,
         /// CR 701.23a + CR 107.1: Dual/N-way search — "a X card and a Y card".
         /// Each entry is an additional independent library search chained after
         /// the primary `filter`. Empty for the common single-filter case.

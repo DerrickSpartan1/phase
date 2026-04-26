@@ -156,6 +156,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         count,
         reveal,
         up_to,
+        ref constraint,
     } = state.waiting_for
     {
         if !can_view_private_for_player(player) {
@@ -165,6 +166,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
                 count,
                 reveal,
                 up_to,
+                constraint: constraint.clone(),
             };
         }
     }
@@ -331,6 +333,7 @@ mod tests {
             count: 1,
             reveal: false,
             up_to: false,
+            constraint: crate::types::ability::SearchSelectionConstraint::None,
         };
 
         let filtered = filter_state_for_viewer(&state, PlayerId(0));
@@ -363,6 +366,7 @@ mod tests {
             count: 1,
             reveal: false,
             up_to: false,
+            constraint: crate::types::ability::SearchSelectionConstraint::None,
         };
 
         let filtered = filter_state_for_viewer(&state, PlayerId(2));

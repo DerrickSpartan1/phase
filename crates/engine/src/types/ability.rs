@@ -54,6 +54,22 @@ pub enum ChooseFromZoneConstraint {
     DistinctCardTypes { categories: Vec<CoreType> },
 }
 
+/// Selection constraint applied to multi-card library searches at the
+/// `WaitingFor::SearchChoice` step. Lives one abstraction up from `count` /
+/// `up_to` so the engine can reject illegal combinations and the AI can
+/// prune its candidate space without bespoke per-card knowledge.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SearchSelectionConstraint {
+    /// CR 107.1c: No restriction beyond `count` (and `up_to`).
+    #[default]
+    None,
+    /// CR 608.2c: The spell's printed text dictates "with different names" —
+    /// no two chosen cards may share a name. Used by Gifts Ungiven and the
+    /// "for X cards with different names" tutor class.
+    DistinctNames,
+}
+
 /// CR 608.2d: Who may choose to perform an optional effect during resolution.
 /// Used with `AbilityDefinition::optional_for` to route the "you may" prompt to opponents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -3514,6 +3530,15 @@ pub enum Effect {
         /// by "any number of ..." and "up to N ..." Oracle phrasings.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         up_to: bool,
+        /// CR 608.2c: Printed-text restriction on the chosen set (e.g., "with
+        /// different names"). Defaults to `None` so the existing card-data.json
+        /// deserializes without churn; the parser populates it for tutors that
+        /// carry the restriction.
+        #[serde(
+            default,
+            skip_serializing_if = "is_default_search_selection_constraint"
+        )]
+        selection_constraint: SearchSelectionConstraint,
     },
     RevealHand {
         #[serde(default = "default_target_filter_any")]
@@ -4150,6 +4175,10 @@ fn default_one_i32() -> i32 {
 
 fn default_quantity_one() -> QuantityExpr {
     QuantityExpr::Fixed { value: 1 }
+}
+
+fn is_default_search_selection_constraint(c: &SearchSelectionConstraint) -> bool {
+    matches!(c, SearchSelectionConstraint::None)
 }
 
 fn default_zone_hand() -> Zone {

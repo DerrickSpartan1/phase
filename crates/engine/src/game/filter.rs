@@ -2852,6 +2852,7 @@ mod tests {
             reveal: true,
             target_player: None,
             up_to: false,
+            selection_constraint: crate::types::ability::SearchSelectionConstraint::None,
         };
         let json = serde_json::to_string(&search).unwrap();
         let restored: Effect = serde_json::from_str(&json).unwrap();

@@ -13,7 +13,8 @@ use super::types::{SearchLibraryDetails, SeekDetails};
 use super::{capitalize, scan_contains_phrase};
 use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
-    ControllerRef, FilterProp, QuantityExpr, TargetFilter, TypeFilter, TypedFilter,
+    ControllerRef, FilterProp, QuantityExpr, SearchSelectionConstraint, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::CoreType;
 use crate::types::zones::Zone;
@@ -123,16 +124,46 @@ pub(super) fn parse_search_library_details(lower: &str) -> SearchLibraryDetails 
         )
     };
 
+    // CR 608.2c + CR 701.23: "with different names" is a printed-text restriction
+    // on the chosen set, not a filter on individual library cards. Detected via a
+    // word-boundary nom scan so it composes with arbitrary preceding filter text
+    // ("for four cards with different names", "for any number of cards with
+    // different names", etc.) without enumerating per-prefix permutations.
+    let selection_constraint = if scan_distinct_names_clause(lower) {
+        SearchSelectionConstraint::DistinctNames
+    } else {
+        SearchSelectionConstraint::None
+    };
+
     SearchLibraryDetails {
         filter,
         count,
         reveal,
         target_player,
         up_to,
+        selection_constraint,
         extra_filters,
         multi_destination,
         multi_enter_tapped,
     }
+}
+
+/// CR 608.2c + CR 701.23: Detect the "with different names" printed-text
+/// restriction at any word boundary in the clause. Composable nom scan that
+/// matches both the canonical phrasing and the trivial pluralization variants
+/// without committing to a fixed prefix.
+fn scan_distinct_names_clause(lower: &str) -> bool {
+    use nom::branch::alt;
+    use nom::combinator::value;
+
+    scan_preceded(lower, "with ", |i| {
+        alt((
+            value((), tag::<_, _, VerboseError<&str>>("different names")),
+            value((), tag::<_, _, VerboseError<&str>>("different name")),
+        ))
+        .parse(i)
+    })
+    .is_some()
 }
 
 /// CR 701.23a + CR 107.1: Split a search filter tail on conjunction boundaries
@@ -994,5 +1025,35 @@ mod tests {
             "search your library for a creature card, put it onto the battlefield",
         );
         assert!(details.extra_filters.is_empty());
+    }
+
+    /// CR 608.2c + CR 701.23: Gifts Ungiven — "search your library for up to
+    /// four cards with different names". The "with different names" clause
+    /// must surface as `SearchSelectionConstraint::DistinctNames` rather than
+    /// silently degrading the per-card filter.
+    #[test]
+    fn search_with_different_names_emits_distinct_names_constraint() {
+        let details = parse_search_library_details(
+            "search your library for up to four cards with different names, reveal those cards, and put them into your graveyard",
+        );
+        assert_eq!(
+            details.selection_constraint,
+            SearchSelectionConstraint::DistinctNames
+        );
+        assert!(details.up_to);
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 4 });
+    }
+
+    /// Regression: searches without the "different names" clause stay on the
+    /// `None` constraint and don't pick up a spurious restriction.
+    #[test]
+    fn search_without_different_names_keeps_none_constraint() {
+        let details = parse_search_library_details(
+            "search your library for a creature card, put it onto the battlefield",
+        );
+        assert_eq!(
+            details.selection_constraint,
+            SearchSelectionConstraint::None
+        );
     }
 }
