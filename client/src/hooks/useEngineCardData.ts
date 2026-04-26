@@ -53,10 +53,15 @@ export function useEngineCardData(cardName: string | null): EngineCardFace | nul
 
     let cancelled = false;
 
-    getCardFaceData(cardName).then((result) => {
-      if (cancelled) return;
-      setData(result ?? null);
-    });
+    getCardFaceData(cardName)
+      .then((result) => {
+        if (cancelled) return;
+        setData(result ?? null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setData(null);
+      });
 
     return () => { cancelled = true; };
   }, [cardName]);
@@ -82,10 +87,15 @@ export function useCardParseDetails(cardName: string | null): ParsedItem[] | nul
 
     let cancelled = false;
 
-    getCardParseDetails(cardName).then((result) => {
-      if (cancelled) return;
-      setItems(result ?? null);
-    });
+    getCardParseDetails(cardName)
+      .then((result) => {
+        if (cancelled) return;
+        setItems(result ?? null);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setItems(null);
+      });
 
     return () => { cancelled = true; };
   }, [cardName]);
@@ -109,10 +119,15 @@ export function useCardRulings(cardName: string | null): CardRuling[] {
 
     let cancelled = false;
 
-    getCardRulings(cardName).then((result) => {
-      if (cancelled) return;
-      setRulings(result);
-    });
+    getCardRulings(cardName)
+      .then((result) => {
+        if (cancelled) return;
+        setRulings(result);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setRulings([]);
+      });
 
     return () => { cancelled = true; };
   }, [cardName]);

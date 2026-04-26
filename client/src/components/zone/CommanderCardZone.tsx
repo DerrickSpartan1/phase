@@ -7,8 +7,10 @@ import { dispatchAction } from "../../game/dispatch.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useDragToCast } from "../../hooks/useDragToCast.ts";
+import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { composeCardAlt } from "../../utils/cardAlt.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 
 interface CommanderCardZoneProps {
@@ -55,6 +57,7 @@ function CommanderCard({ commander }: { commander: GameObject }) {
   );
   const inspectObject = useUiStore((s) => s.inspectObject);
   const { src } = useCardImage(commander.name, { size: "normal" });
+  const altText = composeCardAlt(commander.name, useEngineCardData(commander.name)?.oracle_text);
   const { handlers: hoverHandlers, firedRef } = useCardHover(commander.id);
   const tax = commander.commander_tax ?? 0;
 
@@ -115,7 +118,8 @@ function CommanderCard({ commander }: { commander: GameObject }) {
         {src ? (
           <img
             src={src}
-            alt={commander.name}
+            alt={altText}
+            title={altText}
             className="h-full w-full object-cover"
             draggable={false}
           />

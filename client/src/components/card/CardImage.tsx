@@ -1,5 +1,7 @@
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import type { TokenSearchFilters } from "../../services/scryfall.ts";
+import { composeCardAlt } from "../../utils/cardAlt.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
 
 interface CardImageProps {
@@ -12,6 +14,12 @@ interface CardImageProps {
   colors?: string[];
   isToken?: boolean;
   tokenFilters?: TokenSearchFilters;
+  /**
+   * Defensive alt-text for screen readers and broken-image fallbacks.
+   * If omitted, the component looks the oracle text up via the engine card
+   * database so a broken image still conveys the card's content.
+   */
+  oracleText?: string;
 }
 
 export function CardImage({
@@ -24,8 +32,12 @@ export function CardImage({
   colors,
   isToken = false,
   tokenFilters,
+  oracleText,
 }: CardImageProps) {
   const { src, isLoading } = useCardImage(cardName, { size, faceIndex, isToken, tokenFilters });
+  const fallbackData = useEngineCardData(oracleText === undefined ? cardName : null);
+  const resolvedOracleText = oracleText ?? fallbackData?.oracle_text ?? undefined;
+  const altText = composeCardAlt(cardName, resolvedOracleText);
 
   const tappedStyle = tapped ? "rotate-[90deg] origin-center" : "";
   const baseClasses = `w-[var(--card-w)] h-[var(--card-h)] rounded-lg transition-transform duration-200 ${tappedStyle} ${className}`;
@@ -40,6 +52,7 @@ export function CardImage({
         className={`${baseClasses} bg-gray-700 shadow-md animate-pulse`}
         style={borderStyle ?? { border: "1px solid #4b5563" }}
         aria-label={`Loading ${cardName}`}
+        title={altText}
       />
     );
   }
@@ -48,7 +61,8 @@ export function CardImage({
     <div className="relative inline-block w-fit select-none">
       <img
         src={src}
-        alt={cardName}
+        alt={altText}
+        title={altText}
         draggable={false}
         className={`${baseClasses} shadow-lg object-cover`}
         style={borderStyle ?? { border: "1px solid #4b5563" }}

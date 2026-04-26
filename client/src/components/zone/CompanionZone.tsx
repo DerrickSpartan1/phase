@@ -1,7 +1,9 @@
 import type { PlayerId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
+import { composeCardAlt } from "../../utils/cardAlt.ts";
 
 interface CompanionZoneProps {
   playerId: PlayerId;
@@ -17,6 +19,7 @@ export function CompanionZone({ playerId }: CompanionZoneProps) {
 
   const cardName = companion?.card.card.name ?? "";
   const { src } = useCardImage(cardName, { size: "normal" });
+  const altText = composeCardAlt(cardName, useEngineCardData(cardName)?.oracle_text);
 
   if (!companion) return null;
 
@@ -32,7 +35,8 @@ export function CompanionZone({ playerId }: CompanionZoneProps) {
         {src ? (
           <img
             src={src}
-            alt={cardName}
+            alt={altText}
+            title={altText}
             className="h-full w-full object-cover"
             draggable={false}
           />
