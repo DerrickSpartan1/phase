@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use engine::ai_support::{AiDecisionContext, CandidateAction};
 use engine::game::combat::AttackTarget;
 use engine::types::ability::{AbilityCondition, Effect, PtValue, TargetRef};
@@ -388,7 +390,11 @@ fn pump_changes_combat_outcome(
         return false;
     };
 
-    let mut total_unblocked_damage = 0;
+    // CR 509.1: Aggregate AI's unblocked damage per defending player. A 4-player
+    // pod where AI attacks player A for 5 and player B for 5 must NOT report
+    // 10 unblocked damage when checking if pumping makes A's lethal threshold —
+    // only attackers heading to A count toward A's life threat.
+    let mut unblocked_per_defender: HashMap<PlayerId, i32> = HashMap::new();
     for attacker in &combat.attackers {
         let Some(attacker_obj) = state.objects.get(&attacker.object_id) else {
             continue;
@@ -402,7 +408,10 @@ fn pump_changes_combat_outcome(
                 .get(&attacker.object_id)
                 .is_some_and(|blockers| !blockers.is_empty());
         if !blocked {
-            total_unblocked_damage += attacker_obj.power.unwrap_or(0);
+            if let AttackTarget::Player(defending) = attacker.attack_target {
+                *unblocked_per_defender.entry(defending).or_insert(0) +=
+                    attacker_obj.power.unwrap_or(0);
+            }
         }
     }
 
@@ -418,12 +427,14 @@ fn pump_changes_combat_outcome(
 
         if attacker_obj.controller == ai_player {
             if blockers.is_empty() {
-                if unblocked_attack_becomes_lethal(
-                    state,
-                    attacker,
-                    total_unblocked_damage,
-                    power_bonus,
-                ) {
+                let total_for_defender = match attacker.attack_target {
+                    AttackTarget::Player(pid) => {
+                        unblocked_per_defender.get(&pid).copied().unwrap_or(0)
+                    }
+                    _ => 0,
+                };
+                if unblocked_attack_becomes_lethal(state, attacker, total_for_defender, power_bonus)
+                {
                     return true;
                 }
                 continue;

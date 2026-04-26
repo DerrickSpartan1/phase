@@ -3,12 +3,14 @@ import type { CSSProperties } from "react";
 import { motion } from "framer-motion";
 
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
+import { composeCardAlt } from "../../utils/cardAlt.ts";
 import { renderDescription } from "../../utils/description.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import type { StackEntry as StackEntryType } from "../../adapter/types.ts";
@@ -52,6 +54,7 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
   const sourceName = sourceObj?.name ?? "Unknown";
 
   const { src, isLoading } = useCardImage(sourceName, { size: "normal" });
+  const altText = composeCardAlt(sourceName, useEngineCardData(sourceName)?.oracle_text);
 
   const isSpell = entry.kind.type === "Spell";
   const abilityLabel =
@@ -133,7 +136,8 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
         ) : (
           <img
             src={src}
-            alt={sourceName}
+            alt={altText}
+            title={altText}
             className="h-full w-full object-cover"
             draggable={false}
           />

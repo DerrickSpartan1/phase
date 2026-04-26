@@ -61,6 +61,20 @@ pub fn choose_action(
         }
     }
 
+    // CR 608.2c + CR 701.23: SearchChoice picks have their own dedicated
+    // beam-bounded scorer in `deterministic_choice`. Routing them through
+    // `score_candidates` first would force `validate_candidates` to clone
+    // state and re-apply every legal SelectCards combination — for a
+    // multi-card tutor against a large library that is hundreds of state
+    // clones (already capped engine-side, but still wasteful relative to
+    // the dedicated scorer). The deterministic path returns the chosen
+    // SelectCards directly; only fall through if it produces nothing.
+    if matches!(state.waiting_for, WaitingFor::SearchChoice { .. }) {
+        if let Some(action) = deterministic_choice(state, ai_player, config, &[]) {
+            return Some(action);
+        }
+    }
+
     let scored = score_candidates(state, ai_player, config);
     if scored.is_empty() {
         // No valid candidates from search — fall back to a safe escape action
@@ -619,7 +633,14 @@ pub(crate) fn deterministic_choice(
         }
     }
 
-    if let WaitingFor::SearchChoice { cards, count, .. } = &state.waiting_for {
+    if let WaitingFor::SearchChoice {
+        cards,
+        count,
+        up_to,
+        constraint,
+        ..
+    } = &state.waiting_for
+    {
         if *count == 1 {
             let mut scored = score_search_choice_cards(state, ai_player, cards);
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -627,14 +648,42 @@ pub(crate) fn deterministic_choice(
                 return Some(GameAction::SelectCards { cards: vec![*best] });
             }
         } else {
-            let mut scored: Vec<_> = actions
-                .iter()
-                .filter_map(|action| match action {
-                    GameAction::SelectCards { cards } => Some((
-                        cards.clone(),
-                        score_search_choice_selection(state, ai_player, cards),
-                    )),
-                    _ => None,
+            // CR 608.2c: Multi-card library searches are *combinatorial* — an
+            // opponent may pick the worst card from the chosen set (Gifts
+            // Ungiven). Per-card greedy scoring is wrong; we must score whole
+            // selections via `score_search_choice_selection`. To bound cost
+            // when the pool is large, beam-restrict to the top BEAM_K cards
+            // by per-card score and enumerate `C(BEAM_K, count)` combinations
+            // locally — three orders of magnitude smaller than `C(|cards|,
+            // count)` for typical Commander libraries (C(12, 4) = 495 ≪
+            // C(88, 4) ≈ 2.4M). The engine's candidate list has already been
+            // filtered against the selection constraint at this point; we
+            // re-apply it after enumerating beam combinations because the
+            // beam itself is computed in AI-local space.
+            const BEAM_K: usize = 12;
+            let beam_ids: Vec<_> = if cards.len() <= BEAM_K {
+                cards.clone()
+            } else {
+                let mut per_card = score_search_choice_cards(state, ai_player, cards);
+                per_card.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                per_card.iter().take(BEAM_K).map(|(id, _)| *id).collect()
+            };
+            let sizes: Vec<usize> = if *up_to {
+                (0..=*count).collect()
+            } else {
+                vec![*count]
+            };
+            let mut scored: Vec<(Vec<_>, f64)> = sizes
+                .into_iter()
+                .flat_map(|size| local_combinations(&beam_ids, size))
+                .filter(|combo| {
+                    engine::game::effects::search_library::selection_satisfies_constraint(
+                        state, combo, constraint,
+                    )
+                })
+                .map(|combo| {
+                    let score = score_search_choice_selection(state, ai_player, &combo);
+                    (combo, score)
                 })
                 .collect();
             scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -794,7 +843,17 @@ pub(crate) fn deterministic_choice(
     } = &state.waiting_for
     {
         if let Some(combat) = &state.combat {
-            let attacker_ids: Vec<_> = combat.attackers.iter().map(|a| a.object_id).collect();
+            // CR 509.1: Blockers may only be declared against attackers attacking
+            // the defending player or a planeswalker/battle they control. In a
+            // multi-defender pod, `combat.attackers` carries attackers heading to
+            // every defender — filter to those targeting the AI before evaluating
+            // block objective and assignments.
+            let attacker_ids: Vec<_> = combat
+                .attackers
+                .iter()
+                .filter(|a| a.defending_player == ai_player)
+                .map(|a| a.object_id)
+                .collect();
             let assignments = choose_blockers_with_profile(
                 state,
                 ai_player,
@@ -840,7 +899,13 @@ fn deterministic_combat_choice(
     } = &state.waiting_for
     {
         if let Some(combat) = &state.combat {
-            let attacker_ids: Vec<_> = combat.attackers.iter().map(|a| a.object_id).collect();
+            // CR 509.1: Filter to attackers targeting the AI; see deterministic_choice.
+            let attacker_ids: Vec<_> = combat
+                .attackers
+                .iter()
+                .filter(|a| a.defending_player == ai_player)
+                .map(|a| a.object_id)
+                .collect();
             let assignments = choose_blockers_with_profile(
                 state,
                 ai_player,
@@ -915,6 +980,33 @@ fn evaluate_card_value(state: &GameState, obj_id: engine::types::identifiers::Ob
     }
 
     value
+}
+
+/// AI-local combination enumerator. Mirrors `engine::ai_support::candidates::combinations`
+/// but lives in `phase-ai` so the beam in `deterministic_choice` can build
+/// `C(BEAM_K, count)` tuples without paying the cost of the engine's full
+/// candidate enumeration. Empty `k` yields a single empty combination so
+/// `up_to` searches naturally include the "select zero" option.
+fn local_combinations(
+    items: &[engine::types::identifiers::ObjectId],
+    k: usize,
+) -> Vec<Vec<engine::types::identifiers::ObjectId>> {
+    if k == 0 {
+        return vec![Vec::new()];
+    }
+    if items.len() < k {
+        return Vec::new();
+    }
+    if items.len() == k {
+        return vec![items.to_vec()];
+    }
+    let mut result = Vec::new();
+    for mut combo in local_combinations(&items[1..], k - 1) {
+        combo.insert(0, items[0]);
+        result.push(combo);
+    }
+    result.extend(local_combinations(&items[1..], k));
+    result
 }
 
 /// Select an action from scored `(GameAction, f64)` pairs using softmax.
@@ -1366,6 +1458,7 @@ mod tests {
             count: 1,
             reveal: false,
             up_to: false,
+            constraint: engine::types::ability::SearchSelectionConstraint::None,
         };
 
         let config = create_config(AiDifficulty::VeryHard, Platform::Native);
@@ -1576,5 +1669,82 @@ mod tests {
             "Should return DeclareAttackers, got {:?}",
             action
         );
+    }
+
+    /// CR 608.2c + CR 701.23: Gifts Ungiven scaling regression — with a
+    /// large library (80 cards), a count-4 search must complete in well
+    /// under 100 ms via the BEAM_K-bounded path. The pre-fix Cartesian
+    /// enumerator (~C(80, 4) ≈ 1.5M combos × per-combo scoring) stalled
+    /// the AI; the beam reduces to C(BEAM_K, 4) candidates. The DistinctNames
+    /// constraint is honored by the engine candidate filter and re-checked
+    /// inside the AI beam, so the returned selection must contain only
+    /// uniquely-named cards.
+    #[test]
+    fn gifts_ungiven_search_choice_returns_quickly_with_distinct_names() {
+        use engine::types::ability::SearchSelectionConstraint;
+        use std::time::Instant;
+
+        let mut state = make_state();
+
+        // Seed an 80-card pool with mostly unique names plus a few duplicates,
+        // mirroring the kind of long-game library Gifts is cast into.
+        let mut cards: Vec<ObjectId> = Vec::with_capacity(80);
+        for i in 0..80 {
+            // Repeat 8 base names to ensure DistinctNames pruning has work to do.
+            let name = format!("Card-{}", i % 8);
+            let id = create_object(
+                &mut state,
+                CardId(1000 + i as u64),
+                PlayerId(0),
+                name,
+                Zone::Library,
+            );
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+            cards.push(id);
+        }
+
+        state.waiting_for = WaitingFor::SearchChoice {
+            player: PlayerId(0),
+            cards,
+            count: 4,
+            reveal: true,
+            up_to: true,
+            constraint: SearchSelectionConstraint::DistinctNames,
+        };
+
+        let config = create_config(AiDifficulty::VeryHard, Platform::Native);
+        let mut rng = SmallRng::seed_from_u64(42);
+        let started = Instant::now();
+        let action = choose_action(&state, PlayerId(0), &config, &mut rng);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed.as_millis() < 100,
+            "AI search-choice took {elapsed:?}; beam path must keep it under 100ms"
+        );
+
+        match action {
+            Some(GameAction::SelectCards { cards }) => {
+                assert!(
+                    cards.len() <= 4,
+                    "up_to=true SearchChoice must respect the count ceiling"
+                );
+                let mut names = std::collections::HashSet::new();
+                for id in &cards {
+                    let obj = state.objects.get(id).expect("selected card present");
+                    assert!(
+                        names.insert(obj.name.clone()),
+                        "DistinctNames must prevent duplicate name in selection: {:?}",
+                        obj.name
+                    );
+                }
+            }
+            other => panic!("expected SelectCards, got {other:?}"),
+        }
     }
 }

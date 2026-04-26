@@ -123,6 +123,9 @@ export const AttachmentChip = memo(function AttachmentChip({ id, glyphOnly = fal
   const obj = useGameStore((s) => s.gameState?.objects[id]);
   const selectObject = useUiStore((s) => s.selectObject);
   const { handlers, firedRef } = useCardHover(id);
+  const controllerIdentity = useGameStore(
+    (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
+  );
 
   // Defensive: attachments[] may briefly reference an ID not yet in objects
   // mid-WASM-tick. Mirror PermanentCard.tsx:112's early return.
@@ -134,7 +137,8 @@ export const AttachmentChip = memo(function AttachmentChip({ id, glyphOnly = fal
     obj.color,
     isLand,
     obj.card_types.subtypes,
-    obj.available_mana_colors,
+    obj.available_mana_pips,
+    controllerIdentity || undefined,
   );
   const borderClass = colorBorderClass(displayColors);
   const costSuffix = shortManaCost(obj.mana_cost);

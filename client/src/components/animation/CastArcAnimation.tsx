@@ -1,6 +1,8 @@
 import { motion } from "framer-motion";
 
 import { useCardImage } from "../../hooks/useCardImage";
+import { useEngineCardData } from "../../hooks/useEngineCardData";
+import { composeCardAlt } from "../../utils/cardAlt";
 
 interface CastArcAnimationProps {
   from: { x: number; y: number };
@@ -22,6 +24,7 @@ export function CastArcAnimation({
   onComplete,
 }: CastArcAnimationProps) {
   const { src } = useCardImage(cardName, { size: "small" });
+  const altText = composeCardAlt(cardName, useEngineCardData(cardName)?.oracle_text);
 
   if (mode === "resolve-spell") {
     // Instant/sorcery: fade out with scale reduction at current position
@@ -47,7 +50,8 @@ export function CastArcAnimation({
         {src && (
           <img
             src={src}
-            alt={cardName}
+            alt={altText}
+            title={altText}
             style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />
         )}
@@ -113,7 +117,8 @@ export function CastArcAnimation({
       {src && (
         <img
           src={src}
-          alt={cardName}
+          alt={altText}
+          title={altText}
           style={{ width: "100%", height: "100%", objectFit: "cover" }}
         />
       )}

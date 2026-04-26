@@ -22,6 +22,36 @@ pub fn record_commander_cast(state: &mut GameState, commander_id: ObjectId) {
     *state.commander_cast_count.entry(commander_id).or_insert(0) += 1;
 }
 
+/// CR 903.10a: A player who has been dealt 21 or more combat damage by the same commander
+/// over the course of the game loses the game.
+///
+/// Returns the remaining headroom in commander damage from `commander_id` to `defender`
+/// before that loss condition fires — i.e., the smallest amount of additional combat damage
+/// from this commander that would be lethal under the rule.
+///
+/// Returns `None` when the active format has no commander-damage threshold configured
+/// (e.g., FFA / Standard) or when `commander_id` does not refer to a commander object.
+/// Saturates to `0` when the threshold has already been reached (i.e., the player has
+/// already lost to this commander but state-based actions have not yet fired).
+pub fn commander_lethal_headroom(
+    state: &GameState,
+    defender: PlayerId,
+    commander_id: ObjectId,
+) -> Option<u32> {
+    let threshold = state.format_config.commander_damage_threshold?;
+    let obj = state.objects.get(&commander_id)?;
+    if !obj.is_commander {
+        return None;
+    }
+    let existing: u32 = state
+        .commander_damage
+        .iter()
+        .filter(|e| e.player == defender && e.commander == commander_id)
+        .map(|e| e.damage)
+        .sum();
+    Some(u32::from(threshold).saturating_sub(existing))
+}
+
 /// CR 903.9a + CR 408.1: Commander owner may put it into the command zone instead of graveyard or exile.
 /// CR 408.1: The command zone is reserved for specialized objects that have an overarching effect on the game.
 ///
@@ -241,7 +271,7 @@ mod tests {
     use crate::types::card::CardFace;
     use crate::types::card_type::CoreType;
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::PlayerDeckPool;
+    use crate::types::game_state::{CommanderDamageEntry, PlayerDeckPool};
     use crate::types::identifiers::CardId;
     use crate::types::mana::{ManaCost, ManaCostShard};
 
@@ -899,6 +929,120 @@ mod tests {
         assert_eq!(
             obj.color,
             vec![ManaColor::Red, ManaColor::White, ManaColor::Black]
+        );
+    }
+
+    // --- Commander Lethal Headroom Tests (CR 903.10a) ---
+
+    fn move_commander_to_battlefield(state: &mut GameState, cmd_id: ObjectId) {
+        let obj = state.objects.get_mut(&cmd_id).unwrap();
+        obj.zone = Zone::Battlefield;
+    }
+
+    #[test]
+    fn lethal_headroom_none_for_non_commander_format() {
+        let mut state = GameState::new(FormatConfig::free_for_all(), 2, 42);
+        let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Cmd", vec![]);
+        move_commander_to_battlefield(&mut state, cmd_id);
+        assert_eq!(
+            commander_lethal_headroom(&state, PlayerId(1), cmd_id),
+            None,
+            "Formats without commander_damage_threshold must return None"
+        );
+    }
+
+    #[test]
+    fn lethal_headroom_none_for_non_commander_object() {
+        let mut state = setup_commander_game();
+        let card_id = CardId(state.next_object_id);
+        let obj_id = create_object(
+            &mut state,
+            card_id,
+            PlayerId(0),
+            "NotACommander".to_string(),
+            Zone::Battlefield,
+        );
+        assert_eq!(
+            commander_lethal_headroom(&state, PlayerId(1), obj_id),
+            None,
+            "Non-commander objects must return None even in commander format"
+        );
+    }
+
+    #[test]
+    fn lethal_headroom_full_when_no_damage_dealt() {
+        let mut state = setup_commander_game();
+        let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Cmd", vec![]);
+        move_commander_to_battlefield(&mut state, cmd_id);
+        assert_eq!(
+            commander_lethal_headroom(&state, PlayerId(1), cmd_id),
+            Some(21),
+            "Pristine defender has full 21-damage headroom"
+        );
+    }
+
+    #[test]
+    fn lethal_headroom_partial_after_damage() {
+        let mut state = setup_commander_game();
+        let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Cmd", vec![]);
+        move_commander_to_battlefield(&mut state, cmd_id);
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: cmd_id,
+            damage: 18,
+        });
+        assert_eq!(
+            commander_lethal_headroom(&state, PlayerId(1), cmd_id),
+            Some(3),
+            "18 prior damage leaves 3 headroom (21 - 18)"
+        );
+    }
+
+    #[test]
+    fn lethal_headroom_saturates_at_zero_when_over_threshold() {
+        let mut state = setup_commander_game();
+        let cmd_id = create_commander_in_command_zone(&mut state, PlayerId(0), "Cmd", vec![]);
+        move_commander_to_battlefield(&mut state, cmd_id);
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: cmd_id,
+            damage: 30,
+        });
+        assert_eq!(
+            commander_lethal_headroom(&state, PlayerId(1), cmd_id),
+            Some(0),
+            "Over-threshold damage saturates to 0, not negative wrap"
+        );
+    }
+
+    #[test]
+    fn lethal_headroom_filters_by_defender_and_commander() {
+        let mut state = setup_commander_game();
+        let cmd_a = create_commander_in_command_zone(&mut state, PlayerId(0), "A", vec![]);
+        let cmd_b = create_commander_in_command_zone(&mut state, PlayerId(2), "B", vec![]);
+        move_commander_to_battlefield(&mut state, cmd_a);
+        move_commander_to_battlefield(&mut state, cmd_b);
+        // Both commanders have dealt damage to player 1, but only cmd_a's counts toward cmd_a's headroom.
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: cmd_a,
+            damage: 5,
+        });
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: cmd_b,
+            damage: 15,
+        });
+        // Damage to player 3 must not count toward player 1's headroom either.
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(3),
+            commander: cmd_a,
+            damage: 19,
+        });
+        assert_eq!(
+            commander_lethal_headroom(&state, PlayerId(1), cmd_a),
+            Some(16),
+            "Only damage from cmd_a to player 1 counts toward cmd_a's headroom vs player 1"
         );
     }
 }

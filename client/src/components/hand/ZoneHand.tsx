@@ -3,8 +3,10 @@ import { motion, AnimatePresence } from "framer-motion";
 
 import type { GameAction, ObjectId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
+import { composeCardAlt } from "../../utils/cardAlt.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
@@ -222,12 +224,13 @@ export function ZoneHand({ zone }: ZoneHandProps) {
 /** Top card image for the collapsed stack */
 function TopCardImage({ cardName }: { cardName: string }) {
   const { src } = useCardImage(cardName, { size: "normal" });
+  const altText = composeCardAlt(cardName, useEngineCardData(cardName)?.oracle_text);
   return (
     <div className="h-full w-full overflow-hidden rounded-lg border border-purple-400/60 shadow-md">
       {src ? (
-        <img src={src} alt={cardName} className="h-full w-full object-cover" draggable={false} />
+        <img src={src} alt={altText} title={altText} className="h-full w-full object-cover" draggable={false} />
       ) : (
-        <div className="h-full w-full bg-gray-700" />
+        <div className="h-full w-full bg-gray-700" title={altText} />
       )}
     </div>
   );
@@ -247,6 +250,7 @@ interface ZoneHandCardProps {
 function ZoneHandCard({ objectId, cardName, zone, index, onClick }: ZoneHandCardProps) {
   const { src } = useCardImage(cardName, { size: "normal" });
   const hoverProps = useInspectHoverProps();
+  const altText = composeCardAlt(cardName, useEngineCardData(cardName)?.oracle_text);
 
   return (
     <button
@@ -267,7 +271,7 @@ function ZoneHandCard({ objectId, cardName, zone, index, onClick }: ZoneHandCard
         {src ? (
           <img
             src={src}
-            alt={cardName}
+            alt={altText}
             className="h-full w-full object-cover"
             draggable={false}
           />

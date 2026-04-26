@@ -90,7 +90,7 @@ export function IncomingAttackersPopover({
                 <CardImage
                   cardName={obj.name}
                   size="small"
-                  isToken={obj.card_id === 0}
+                  isToken={obj.display_source === "Token"}
                 />
               </div>
               {pt && (

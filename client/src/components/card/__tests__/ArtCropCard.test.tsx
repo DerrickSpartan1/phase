@@ -40,7 +40,7 @@ function transformedPermanent(): GameObject {
     replacement_definitions: [],
     static_definitions: [],
     color: ["Green"],
-    available_mana_colors: [],
+    available_mana_pips: [],
     base_power: 7,
     base_toughness: 7,
     base_keywords: [],

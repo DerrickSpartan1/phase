@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::events::BendingType;
 use super::identifiers::ObjectId;
-use super::mana::ManaPool;
+use super::mana::{ManaColor, ManaPool};
 
 use crate::game::deck_loading::DeckEntry;
 
@@ -163,6 +163,15 @@ pub struct Player {
     // Derived fields (computed in WASM bridge, not persisted)
     #[serde(skip_deserializing, default)]
     pub can_look_at_top_of_library: bool,
+
+    /// CR 903.4: Combined color identity of this player's commander(s).
+    /// Derived per-tick by `derive_display_state` from `state.deck_pools` /
+    /// command-zone objects so the frontend can render
+    /// `ManaPip::AnyInCommandersIdentity` (Command Tower, Path of Ancestry)
+    /// without recomputing identity client-side. Empty when the player has
+    /// no commander or has only a colorless commander (CR 903.4f).
+    #[serde(skip_deserializing, default)]
+    pub commander_color_identity: Vec<ManaColor>,
 }
 
 impl Default for Player {
@@ -193,6 +202,7 @@ impl Default for Player {
             player_counters: HashMap::new(),
             companion: None,
             can_look_at_top_of_library: false,
+            commander_color_identity: Vec::new(),
             status: PlayerStatus::Active,
         }
     }

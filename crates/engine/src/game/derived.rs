@@ -2,7 +2,7 @@ use crate::game::combat::has_summoning_sickness;
 use crate::game::coverage::unimplemented_mechanics;
 use crate::game::devotion::count_devotion;
 use crate::game::mana_abilities;
-use crate::game::mana_sources::display_land_mana_colors;
+use crate::game::mana_sources::display_land_mana_pips;
 use crate::game::static_abilities::{check_static_ability, StaticCheckContext};
 use crate::types::ability::StaticCondition;
 use crate::types::card_type::CoreType;
@@ -59,7 +59,7 @@ pub fn derive_display_state(state: &mut GameState) {
         obj.has_summoning_sickness = summoning_sickness;
         obj.has_mana_ability = mana_idx.is_some();
         obj.mana_ability_index = mana_idx;
-        obj.available_mana_colors.clear();
+        obj.available_mana_pips.clear();
     }
 
     // Compute per-card devotion for cards with DevotionGE conditions
@@ -125,9 +125,9 @@ pub fn derive_display_state(state: &mut GameState) {
         }
     }
 
-    // Compute dynamic land frame colors from currently available mana options.
+    // Compute dynamic land frame pips from currently available mana options.
     if dirty.all_objects_dirty || dirty.mana_display_dirty || dirty.battlefield_display_dirty {
-        let mana_color_cards: Vec<_> = state
+        let mana_pip_cards: Vec<_> = state
             .battlefield
             .iter()
             .filter_map(|&id| {
@@ -135,14 +135,31 @@ pub fn derive_display_state(state: &mut GameState) {
                 if !obj.card_types.core_types.contains(&CoreType::Land) {
                     return None;
                 }
-                let colors = display_land_mana_colors(state, id, obj.controller);
-                Some((id, colors))
+                let pips = display_land_mana_pips(state, id, obj.controller);
+                Some((id, pips))
             })
             .collect();
-        for (id, colors) in mana_color_cards {
+        for (id, pips) in mana_pip_cards {
             if let Some(obj) = state.objects.get_mut(&id) {
-                obj.available_mana_colors = colors;
+                obj.available_mana_pips = pips;
             }
+        }
+    }
+
+    // CR 903.4: Per-player commander color identity. Derived from
+    // `commander_color_identity` (which inspects deck pools and command-zone
+    // objects) so the frontend can render `ManaPip::AnyInCommandersIdentity`
+    // without recomputing identity client-side. Commander identity changes
+    // only when commander objects move zones or deck pools update — gated by
+    // the same flags that already cover those transitions.
+    if dirty.all_players_dirty || dirty.all_objects_dirty || dirty.battlefield_display_dirty {
+        let identities: Vec<Vec<crate::types::mana::ManaColor>> = state
+            .players
+            .iter()
+            .map(|p| super::commander::commander_color_identity(state, p.id))
+            .collect();
+        for (i, identity) in identities.into_iter().enumerate() {
+            state.players[i].commander_color_identity = identity;
         }
     }
 

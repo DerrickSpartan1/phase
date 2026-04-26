@@ -109,6 +109,10 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
     }, [inspectObject, setPreviewSticky, objectId]),
   );
 
+  const controllerIdentity = useGameStore(
+    (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
+  );
+
   if (!obj) return null;
 
   const isLand = obj.card_types.core_types.includes("Land");
@@ -116,7 +120,8 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
     obj.color,
     isLand,
     obj.card_types.subtypes,
-    obj.available_mana_colors,
+    obj.available_mana_pips,
+    controllerIdentity || undefined,
   );
   const { name: imgName, faceIndex: imgFace } = cardImageLookup(obj);
   const hasSummoningSickness = obj.has_summoning_sickness ?? false;
@@ -323,7 +328,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
       ) : (
         <>
           <div className={`relative z-10 rounded-lg overflow-hidden ${glowClass}`}>
-            <CardImage cardName={imgName} faceIndex={imgFace} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.card_id === 0} tokenFilters={obj.card_id === 0 ? { power: obj.power, toughness: obj.toughness, colors: obj.color } : undefined} />
+            <CardImage cardName={imgName} faceIndex={imgFace} size="small" unimplementedMechanics={obj.unimplemented_mechanics} colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? { power: obj.power, toughness: obj.toughness, colors: obj.color } : undefined} />
             {/* Keyword strip overlay — inside the card image wrapper so absolute positioning works */}
             {showKeywordStrip && obj.keywords.length > 0 && !obj.face_down && (
               <KeywordStrip keywords={obj.keywords} baseKeywords={obj.base_keywords} />
@@ -408,6 +413,9 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
   const obj = useGameStore((s) => s.gameState?.objects[objectId]);
   const { handlers: hoverHandlers } = useCardHover(objectId);
   const battlefieldCardDisplay = usePreferencesStore((s) => s.battlefieldCardDisplay);
+  const controllerIdentity = useGameStore(
+    (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
+  );
 
   if (!obj) return null;
 
@@ -416,7 +424,8 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
     obj.color,
     isLand,
     obj.card_types.subtypes,
-    obj.available_mana_colors,
+    obj.available_mana_pips,
+    controllerIdentity || undefined,
   );
   const { name: imgName, faceIndex: imgFace } = cardImageLookup(obj);
   const useArtCrop = battlefieldCardDisplay === "art_crop";
@@ -432,7 +441,7 @@ const ExileGhostCard = memo(function ExileGhostCard({ objectId, offset }: ExileG
       {useArtCrop ? (
         <ArtCropCard objectId={objectId} />
       ) : (
-        <CardImage cardName={imgName} faceIndex={imgFace} size="small" colors={displayColors} isToken={obj.card_id === 0} tokenFilters={obj.card_id === 0 ? { power: obj.power, toughness: obj.toughness, colors: obj.color } : undefined} />
+        <CardImage cardName={imgName} faceIndex={imgFace} size="small" colors={displayColors} isToken={obj.display_source === "Token"} tokenFilters={obj.display_source === "Token" ? { power: obj.power, toughness: obj.toughness, colors: obj.color } : undefined} />
       )}
     </div>
   );
