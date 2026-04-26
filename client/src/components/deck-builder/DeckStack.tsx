@@ -1,10 +1,8 @@
 import { useMemo } from "react";
 
 import { useCardImage } from "../../hooks/useCardImage";
-import { useEngineCardData } from "../../hooks/useEngineCardData";
 import type { DeckEntry, ParsedDeck } from "../../services/deckParser";
 import type { ScryfallCard } from "../../services/scryfall";
-import { composeCardAlt } from "../../utils/cardAlt";
 
 interface DeckStackProps {
   deck: ParsedDeck;
@@ -158,7 +156,6 @@ function DeckStackCard({
   onCardHover?: (cardName: string | null) => void;
 }) {
   const { src, isLoading } = useCardImage(item.name, { size: "normal" });
-  const altText = composeCardAlt(item.name, useEngineCardData(item.name)?.oracle_text);
   const isCommander = item.section === "commander";
   const showAddButton = item.section === "main";
 
@@ -228,7 +225,7 @@ function DeckStackCard({
         ) : (
           <img
             src={src}
-            alt={altText}
+            alt={item.name}
             draggable={false}
             className="object-cover"
             style={{ height: CARD_HEIGHT, width: CARD_WIDTH }}

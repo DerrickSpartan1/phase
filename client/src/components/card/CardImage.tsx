@@ -1,7 +1,7 @@
+import { useState } from "react";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import type { TokenSearchFilters } from "../../services/scryfall.ts";
-import { composeCardAlt } from "../../utils/cardAlt.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
 
 interface CardImageProps {
@@ -15,9 +15,8 @@ interface CardImageProps {
   isToken?: boolean;
   tokenFilters?: TokenSearchFilters;
   /**
-   * Defensive alt-text for screen readers and broken-image fallbacks.
-   * If omitted, the component looks the oracle text up via the engine card
-   * database so a broken image still conveys the card's content.
+   * Oracle text rendered inside the broken-image fallback when the image fails
+   * to load. If omitted, the component looks it up via the engine card database.
    */
   oracleText?: string;
 }
@@ -35,9 +34,9 @@ export function CardImage({
   oracleText,
 }: CardImageProps) {
   const { src, isLoading } = useCardImage(cardName, { size, faceIndex, isToken, tokenFilters });
+  const [imageError, setImageError] = useState(false);
   const fallbackData = useEngineCardData(oracleText === undefined ? cardName : null);
   const resolvedOracleText = oracleText ?? fallbackData?.oracle_text ?? undefined;
-  const altText = composeCardAlt(cardName, resolvedOracleText);
 
   const tappedStyle = tapped ? "rotate-[90deg] origin-center" : "";
   const baseClasses = `w-[var(--card-w)] h-[var(--card-h)] rounded-lg transition-transform duration-200 ${tappedStyle} ${className}`;
@@ -56,12 +55,31 @@ export function CardImage({
     );
   }
 
+  if (imageError) {
+    return (
+      <div
+        className={`${baseClasses} bg-gray-800 shadow-md overflow-hidden flex flex-col p-2`}
+        style={borderStyle ?? { border: "1px solid #4b5563" }}
+        role="img"
+        aria-label={cardName}
+      >
+        <div className="text-xs font-semibold text-gray-100 mb-1 truncate">{cardName}</div>
+        {resolvedOracleText && (
+          <div className="text-[10px] text-gray-300 whitespace-pre-wrap leading-tight overflow-hidden">
+            {resolvedOracleText}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="relative inline-block w-fit select-none">
       <img
         src={src}
-        alt={altText}
+        alt={cardName}
         draggable={false}
+        onError={() => setImageError(true)}
         className={`${baseClasses} shadow-lg object-cover`}
         style={borderStyle ?? { border: "1px solid #4b5563" }}
       />

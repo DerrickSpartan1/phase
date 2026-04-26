@@ -5,9 +5,7 @@ import { ManaCostPips } from "../mana/ManaCostPips.tsx";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
-import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import { useLongPress } from "../../hooks/useLongPress.ts";
-import { composeCardAlt } from "../../utils/cardAlt.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import type { GameAction, ManaCost, ObjectId } from "../../adapter/types.ts";
@@ -179,7 +177,6 @@ const DrawerCard = memo(function DrawerCard({
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
   const effectiveCost = useGameStore((s) => s.spellCosts[String(objectId)]);
   const { src } = useCardImage(cardName, { size: "normal" });
-  const altText = composeCardAlt(cardName, useEngineCardData(cardName)?.oracle_text);
   const displayCost = effectiveCost ?? manaCost;
   const isReduced = effectiveCost?.type === "Cost" && manaCost.type === "Cost"
     && (effectiveCost.generic < manaCost.generic || effectiveCost.shards.length < manaCost.shards.length);
@@ -215,7 +212,7 @@ const DrawerCard = memo(function DrawerCard({
       {src ? (
         <img
           src={src}
-          alt={altText}
+          alt={cardName}
           className="h-full w-full object-cover"
           draggable={false}
         />

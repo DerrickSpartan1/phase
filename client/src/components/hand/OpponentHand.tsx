@@ -3,9 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useCardHover } from "../../hooks/useCardHover.ts";
-import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
-import { composeCardAlt } from "../../utils/cardAlt.ts";
 import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
@@ -96,14 +94,12 @@ const cardStyle = {
 function OpponentCardThumbnail({ cardId, cardName }: { cardId: ObjectId; cardName: string | null }) {
   const { src } = useCardImage(cardName ?? "", { size: "small" });
   const { handlers: hoverHandlers } = useCardHover(cardName ? cardId : null);
-  const oracleText = useEngineCardData(cardName)?.oracle_text;
 
   if (cardName && src) {
-    const altText = composeCardAlt(cardName, oracleText);
     return (
       <img
         src={src}
-        alt={altText}
+        alt={cardName}
         className="rounded-lg border border-gray-600 shadow-md object-cover"
         style={cardStyle}
         draggable={false}

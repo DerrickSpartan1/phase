@@ -8,7 +8,6 @@ import type { CardRuling } from "../../services/engineRuntime.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { ManaCostPips } from "../mana/ManaCostPips.tsx";
-import { composeCardAlt } from "../../utils/cardAlt.ts";
 import { computePTDisplay, formatCounterType, formatTypeLine, toRoman } from "../../viewmodel/cardProps.ts";
 import {
   getKeywordDisplayText,
@@ -283,7 +282,6 @@ function MobilePreviewOverlay({
   onDismiss: () => void;
 }) {
   const { src } = useCardImage(cardName, { size: "normal", faceIndex });
-  const altText = composeCardAlt(cardName, useEngineCardData(cardName)?.oracle_text);
 
   // pointerdown (not click): the touch-release that opened this overlay fires
   // pointerup, not pointerdown, so a fresh tap is required to dismiss.
@@ -296,7 +294,7 @@ function MobilePreviewOverlay({
       {src && (
         <img
           src={src}
-          alt={altText}
+          alt={cardName}
           draggable={false}
           onPointerDown={(e) => e.stopPropagation()}
           className="max-h-[calc(100dvh-2rem)] max-w-full rounded-lg object-contain shadow-2xl landscape:max-w-[45vw]"
@@ -336,7 +334,6 @@ function CardImagePreview({
   // otherwise fall back to printed mana cost.
   const effectiveCost = useGameStore((s) => obj ? s.spellCosts[String(obj.id)] : undefined);
   const displayCost = effectiveCost ?? obj?.mana_cost;
-  const altText = composeCardAlt(cardName, useEngineCardData(cardName)?.oracle_text);
 
   if (isLoading || !src) {
     return (
@@ -351,7 +348,7 @@ function CardImagePreview({
       <div className="relative rounded-[4%] overflow-hidden">
         <img
           src={src}
-          alt={altText}
+          alt={cardName}
           className={`${sizeClass} object-cover`}
           draggable={false}
         />
