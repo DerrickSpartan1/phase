@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 use super::ability::{
     AbilityCost, AbilityDefinition, AdditionalCost, ChoiceType, ChoiceValue,
     ChooseFromZoneConstraint, ContinuousModification, DelayedTriggerCondition, Duration,
-    EffectKind, GameRestriction, KeywordAction, ModalChoice, ResolvedAbility, StaticCondition,
-    TargetFilter, TargetRef, TriggerCondition, UnlessCost,
+    EffectKind, GameRestriction, KeywordAction, ModalChoice, ResolvedAbility,
+    SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef, TriggerCondition,
+    UnlessCost,
 };
 use super::card::CardFace;
 use super::card_type::{CoreType, Supertype};
@@ -895,6 +896,12 @@ pub enum WaitingFor {
         /// cards. When false, they must select exactly count cards.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         up_to: bool,
+        /// CR 608.2c: Selection-time constraint propagated from
+        /// `Effect::SearchLibrary.selection_constraint` (e.g., "with different
+        /// names"). Enforced by the Select-handler call site and used by the
+        /// AI candidate enumerator to prune illegal combinations.
+        #[serde(default)]
+        constraint: SearchSelectionConstraint,
     },
     /// CR 700.2: Player selects card(s) from a tracked set (e.g., exiled cards).
     /// Chosen/unchosen cards flow into sub-abilities via pending_continuation,

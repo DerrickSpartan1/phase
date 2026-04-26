@@ -593,6 +593,7 @@ pub(super) fn handle_resolution_choice(
                 count,
                 reveal,
                 up_to,
+                constraint,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -616,6 +617,15 @@ pub(super) fn handle_resolution_choice(
                         "Selected card not in search results".to_string(),
                     ));
                 }
+            }
+            // CR 608.2c: Enforce the printed-text selection restriction at the
+            // submission boundary so the AI candidate filter and the engine
+            // resolver agree on legality.
+            if !effects::search_library::selection_satisfies_constraint(state, &chosen, &constraint)
+            {
+                return Err(EngineError::InvalidAction(
+                    "Selected cards do not satisfy the search-selection constraint".to_string(),
+                ));
             }
 
             if reveal {

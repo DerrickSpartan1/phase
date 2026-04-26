@@ -544,6 +544,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             format!("{counter_type} counters on target")
         }
         QuantityRef::AnyCountersOnTarget => "counters on target (any type)".into(),
+        QuantityRef::AnyCountersOnSelf => "counters on self (any type)".into(),
         QuantityRef::CountersOnObjects {
             counter_type,
             filter,
@@ -757,6 +758,13 @@ fn fmt_mana_production(mp: &ManaProduction) -> String {
         ManaProduction::OpponentLandColors { count } => {
             format!("{} of opponent land colors", fmt_quantity(count))
         }
+        ManaProduction::AnyTypeProduceableBy { count, land_filter } => {
+            format!(
+                "{} of any type {} could produce",
+                fmt_quantity(count),
+                fmt_target(land_filter)
+            )
+        }
         ManaProduction::ChoiceAmongExiledColors { .. } => "1 of exiled cards' colors".into(),
         ManaProduction::ChoiceAmongCombinations { options } => {
             let rendered: Vec<String> = options
@@ -967,6 +975,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::TapAll { target }
         | Effect::UntapAll { target }
         | Effect::BounceAll { target, .. }
+        | Effect::CounterAll { target, .. }
         | Effect::DamageAll {
             amount: _,
             target,
@@ -4006,6 +4015,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CountersOnSelf { .. } => ("CountersOnSelf", Handled),
         QuantityRef::CountersOnTarget { .. } => ("CountersOnTarget", Handled),
         QuantityRef::AnyCountersOnTarget => ("AnyCountersOnTarget", Handled),
+        QuantityRef::AnyCountersOnSelf => ("AnyCountersOnSelf", Handled),
         QuantityRef::CountersOnObjects { .. } => ("CountersOnObjects", Handled),
         QuantityRef::Variable { .. } => ("Variable", Handled),
         QuantityRef::SelfPower => ("SelfPower", Handled),

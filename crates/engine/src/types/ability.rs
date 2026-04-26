@@ -54,6 +54,22 @@ pub enum ChooseFromZoneConstraint {
     DistinctCardTypes { categories: Vec<CoreType> },
 }
 
+/// Selection constraint applied to multi-card library searches at the
+/// `WaitingFor::SearchChoice` step. Lives one abstraction up from `count` /
+/// `up_to` so the engine can reject illegal combinations and the AI can
+/// prune its candidate space without bespoke per-card knowledge.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SearchSelectionConstraint {
+    /// CR 107.1c: No restriction beyond `count` (and `up_to`).
+    #[default]
+    None,
+    /// CR 608.2c: The spell's printed text dictates "with different names" —
+    /// no two chosen cards may share a name. Used by Gifts Ungiven and the
+    /// "for X cards with different names" tutor class.
+    DistinctNames,
+}
+
 /// CR 608.2d: Who may choose to perform an optional effect during resolution.
 /// Used with `AbilityDefinition::optional_for` to route the "you may" prompt to opponents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -583,6 +599,21 @@ pub enum ManaProduction {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
     },
+    /// CR 106.7 + CR 106.1b: Produce N mana of any **type** (W/U/B/R/G/C) that a
+    /// land matching `land_filter` could produce. Differs from
+    /// `OpponentLandColors` in that the choice axis is the full type set
+    /// including colorless (Reflecting Pool, Naga Vitalist, Incubation Druid,
+    /// Cactus Preserve, Horizon of Progress). The `land_filter` controls which
+    /// lands contribute (typically `ControllerRef::You`, but parameterized so
+    /// future opponent-/player-scoped printings slot in without a new variant).
+    /// Per CR 106.7 the union ignores cost-payability of the surveyed lands'
+    /// mana abilities — only the resulting *type set* matters. CR 106.5 applies
+    /// when the union is empty (e.g. no matching lands → no mana).
+    AnyTypeProduceableBy {
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+        land_filter: TargetFilter,
+    },
     /// CR 605.1a + CR 406.1: Produce one mana of any of the colors among the cards
     /// linked to `source` via `state.exile_links` (e.g. Pit of Offerings —
     /// "Add one mana of any of the exiled cards' colors"). Colors are computed
@@ -701,6 +732,11 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                         #[serde(default = "default_quantity_one")]
                         count: QuantityExpr,
                     },
+                    AnyTypeProduceableBy {
+                        #[serde(default = "default_quantity_one")]
+                        count: QuantityExpr,
+                        land_filter: TargetFilter,
+                    },
                     ChoiceAmongExiledColors {
                         #[serde(default)]
                         source: LinkedExileScope,
@@ -762,6 +798,9 @@ impl<'de> serde::Deserialize<'de> for ManaProduction {
                     },
                     ManaProductionHelper::OpponentLandColors { count } => {
                         ManaProduction::OpponentLandColors { count }
+                    }
+                    ManaProductionHelper::AnyTypeProduceableBy { count, land_filter } => {
+                        ManaProduction::AnyTypeProduceableBy { count, land_filter }
                     }
                     ManaProductionHelper::ChoiceAmongExiledColors { source } => {
                         ManaProduction::ChoiceAmongExiledColors { source }
@@ -1670,6 +1709,13 @@ pub enum QuantityRef {
     /// unspecified (e.g., Nils, Discipline Enforcer — per the Scryfall rulings, ALL
     /// counters on the creature are considered, not just +1/+1 counters).
     AnyCountersOnTarget,
+    /// CR 122.1: Total counters of any type on the source object.
+    /// Used for bare "counter on it" / "counters on ~" phrasings where no
+    /// specific counter type is named (Gemstone Mine: "When there are no
+    /// counters on ~, sacrifice it"; depletion-land cycle and similar).
+    /// Mirrors `CountersOnSelf` (which restricts to one type) and
+    /// `AnyCountersOnTarget` (which sums all types on a targeted object).
+    AnyCountersOnSelf,
     /// CR 122.1: Total counters across all objects matching a filter.
     /// Used for phrases like "the number of +1/+1 counters on lands you control"
     /// (`counter_type: Some("P1P1")`) and "counters among artifacts and creatures
@@ -2927,6 +2973,19 @@ pub enum Effect {
         #[serde(default)]
         unless_payment: Option<UnlessCost>,
     },
+    /// CR 701.6 + CR 405.1: Mass counter — counter every spell or ability on
+    /// the stack matching `target`. Mirrors `Effect::DestroyAll` /
+    /// `Effect::BounceAll` for the "counter all/each [filter] spells" /
+    /// "counter all [filter] abilities" Oracle text class (Glen Elendra's
+    /// Answer, Swift Silence, Kadena's Silencer, etc.). The class filter must
+    /// pin the stack property (`InZone { Stack }` or `StackAbility`) — the
+    /// resolver iterates the stack zone and counters each match. Since the
+    /// effect is non-targeting (CR 115.1: "all" does not target), it never
+    /// asks for player input and Ward / hexproof / shroud do not apply.
+    CounterAll {
+        #[serde(default = "default_target_filter_none")]
+        target: TargetFilter,
+    },
     Token {
         name: String,
         #[serde(default = "default_pt_value_zero")]
@@ -3501,6 +3560,15 @@ pub enum Effect {
         /// by "any number of ..." and "up to N ..." Oracle phrasings.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         up_to: bool,
+        /// CR 608.2c: Printed-text restriction on the chosen set (e.g., "with
+        /// different names"). Defaults to `None` so the existing card-data.json
+        /// deserializes without churn; the parser populates it for tutors that
+        /// carry the restriction.
+        #[serde(
+            default,
+            skip_serializing_if = "is_default_search_selection_constraint"
+        )]
+        selection_constraint: SearchSelectionConstraint,
     },
     RevealHand {
         #[serde(default = "default_target_filter_any")]
@@ -4139,6 +4207,10 @@ fn default_quantity_one() -> QuantityExpr {
     QuantityExpr::Fixed { value: 1 }
 }
 
+fn is_default_search_selection_constraint(c: &SearchSelectionConstraint) -> bool {
+    matches!(c, SearchSelectionConstraint::None)
+}
+
 fn default_zone_hand() -> Zone {
     Zone::Hand
 }
@@ -4398,6 +4470,7 @@ impl Effect {
             | Effect::TapAll { .. }
             | Effect::UntapAll { .. }
             | Effect::BounceAll { .. }
+            | Effect::CounterAll { .. }
             | Effect::ChangeZoneAll { .. }
             | Effect::Dig { .. }
             | Effect::PutCounterAll { .. }
@@ -4487,6 +4560,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::Destroy { .. } => "Destroy",
         Effect::Regenerate { .. } => "Regenerate",
         Effect::Counter { .. } => "Counter",
+        Effect::CounterAll { .. } => "CounterAll",
         Effect::Token { .. } => "Token",
         Effect::GainLife { .. } => "GainLife",
         Effect::LoseLife { .. } => "LoseLife",
@@ -4646,6 +4720,7 @@ pub enum EffectKind {
     Pump,
     Destroy,
     Counter,
+    CounterAll,
     Token,
     GainLife,
     LoseLife,
@@ -4809,6 +4884,7 @@ impl From<&Effect> for EffectKind {
             Effect::Destroy { .. } => EffectKind::Destroy,
             Effect::Regenerate { .. } => EffectKind::Regenerate,
             Effect::Counter { .. } => EffectKind::Counter,
+            Effect::CounterAll { .. } => EffectKind::CounterAll,
             Effect::Token { .. } => EffectKind::Token,
             Effect::GainLife { .. } => EffectKind::GainLife,
             Effect::LoseLife { .. } => EffectKind::LoseLife,

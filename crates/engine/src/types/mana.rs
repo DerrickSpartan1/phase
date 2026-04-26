@@ -49,6 +49,37 @@ pub enum ManaType {
     Colorless,
 }
 
+/// Display-layer projection of `ManaProduction` — typed pip descriptors the
+/// frontend renders verbatim. One variant per `ManaProduction` axis so no
+/// information is lost on the wire (e.g., colorless producers must surface as
+/// a `Colorless` pip rather than an empty `Vec<ManaColor>`).
+///
+/// The frontend treats this as opaque display data; all derivation lives in
+/// the engine. Per the "build for the class" rule, every `ManaProduction`
+/// variant maps to a `ManaPip` here so future variants force an exhaustive
+/// `match` update.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ManaPip {
+    /// CR 106.1a: A specific color of mana ({W}, {U}, {B}, {R}, {G}).
+    Color(ManaColor),
+    /// CR 106.1b: Colorless mana ({C}).
+    Colorless,
+    /// CR 106.4: Producer chooses one color from the listed set, then yields N
+    /// of that color. When the set is all five colors this represents
+    /// "any color" (City of Brass); the frontend may special-case the 5-of-5
+    /// case visually.
+    OneOfColors(Vec<ManaColor>),
+    /// CR 106.4: Producer assigns each unit independently across the listed
+    /// color set (e.g., Cascading Cataracts). Same axis as `OneOfColors` but
+    /// per-unit choice.
+    CombinationOfColors(Vec<ManaColor>),
+    /// CR 903.4: Producer adds one mana of any color in the controller's
+    /// commander color identity (Command Tower, Path of Ancestry). The frontend
+    /// resolves the pip set against the controller's `commander_color_identity`.
+    AnyInCommandersIdentity,
+}
+
 /// Lightweight descriptor of the spell being paid for.
 /// Used by `ManaRestriction::allows_spell` to decide whether restricted mana
 /// may be spent on a given spell.

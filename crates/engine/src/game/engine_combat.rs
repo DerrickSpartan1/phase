@@ -658,4 +658,180 @@ mod tests {
         assert_eq!(state.players[1].life, 20);
         assert_eq!(state.objects[&blocker].damage_marked, 0);
     }
+
+    /// Install a Norn's-Annex-style attack-tax static on a fresh battlefield
+    /// object controlled by `controller`. Mirrors the constructor used in
+    /// `combat::tests::compute_attack_tax_norns_annex_phyrexian_cost` but lives
+    /// here so this test module can exercise the full
+    /// declare-attackers → CombatTaxPayment → handle_pay_combat_tax cycle.
+    fn install_attack_tax_static(
+        state: &mut GameState,
+        controller: PlayerId,
+        name: &str,
+        cost: crate::types::mana::ManaCost,
+    ) -> ObjectId {
+        use crate::types::ability::{
+            ControllerRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+            TypedFilter, UnlessPayScaling,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::statics::StaticMode;
+
+        let id = create_object(
+            state,
+            CardId(state.next_object_id),
+            controller,
+            name.to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        let mut def = StaticDefinition::new(StaticMode::CantAttack)
+            .affected(TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: Some(ControllerRef::Opponent),
+                properties: vec![],
+            }))
+            .description(name.to_string());
+        def.condition = Some(StaticCondition::UnlessPay {
+            cost,
+            scaling: UnlessPayScaling::PerAffectedCreature,
+        });
+        obj.static_definitions.push(def);
+        id
+    }
+
+    /// L9-52 regression: with Norn's Annex on the battlefield, declaring
+    /// attackers must yield `WaitingFor::CombatTaxPayment` (not deadlock or
+    /// panic), and accepting the tax must resolve cleanly to
+    /// `WaitingFor::Priority` with the attackers in combat.
+    ///
+    /// CR 508.1d + CR 508.1h: combat tax pause/resume.
+    /// CR 202.3g + CR 107.4f: each `{W/P}` shard auto-resolves to mana when
+    /// available, otherwise 2 life.
+    #[test]
+    fn norns_annex_attack_tax_resolves_without_deadlock_paying_mana() {
+        use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+
+        let mut state = setup();
+        // Defender (PlayerId(1)) controls Norn's Annex.
+        install_attack_tax_static(
+            &mut state,
+            PlayerId(1),
+            "Norn's Annex",
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::PhyrexianWhite],
+                generic: 0,
+            },
+        );
+        // Attacker has two creatures and one White mana floating.
+        let a1 = create_creature(&mut state, PlayerId(0), "A1", 2, 2);
+        let a2 = create_creature(&mut state, PlayerId(0), "A2", 2, 2);
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap()
+            .mana_pool
+            .add(ManaUnit {
+                color: ManaType::White,
+                source_id: ObjectId(0),
+                snow: false,
+                restrictions: Vec::new(),
+                grants: vec![],
+                expiry: None,
+            });
+        let life_before = state.players[0].life;
+
+        let attacks = vec![
+            (a1, AttackTarget::Player(PlayerId(1))),
+            (a2, AttackTarget::Player(PlayerId(1))),
+        ];
+
+        // Step 1: declare-attackers must pause for the tax (no deadlock).
+        let mut events = Vec::new();
+        let waiting = handle_declare_attackers(&mut state, PlayerId(0), &attacks, &mut events)
+            .expect("declare-attackers must yield WaitingFor::CombatTaxPayment, not error");
+        let WaitingFor::CombatTaxPayment {
+            player,
+            total_cost,
+            per_creature,
+            ..
+        } = waiting.clone()
+        else {
+            panic!("expected CombatTaxPayment, got {waiting:?}");
+        };
+        assert_eq!(player, PlayerId(0));
+        assert_eq!(total_cost.mana_value(), 2);
+        assert_eq!(per_creature.len(), 2);
+
+        // Step 2: accepting the tax must complete the declaration.
+        // Auto-decide consumes the one White mana for shard 0 and 2 life for shard 1.
+        let mut events = Vec::new();
+        let resumed = handle_pay_combat_tax(&mut state, waiting, true, &mut events)
+            .expect("pay-combat-tax must resolve, not deadlock or error");
+        assert!(
+            matches!(resumed, WaitingFor::Priority { .. }),
+            "post-payment WaitingFor must be Priority, got {resumed:?}"
+        );
+        // CR 107.4f: one shard paid with mana, one with 2 life.
+        assert_eq!(
+            state.players[0].life,
+            life_before - 2,
+            "second {{W/P}} shard auto-pays 2 life when mana exhausted"
+        );
+        // CR 508.1f: combat state must contain both attackers post-resume.
+        let combat = state.combat.as_ref().expect("combat state present");
+        assert_eq!(combat.attackers.len(), 2);
+    }
+
+    /// Class regression: same flow with a Ghostly-Prison-style `{2}` cost
+    /// must remain unaffected by the Phyrexian-handling change.
+    /// CR 508.1d + CR 508.1h: generic-mana attack tax.
+    #[test]
+    fn ghostly_prison_attack_tax_resolves_without_deadlock() {
+        use crate::types::mana::{ManaCost, ManaType, ManaUnit};
+
+        let mut state = setup();
+        install_attack_tax_static(
+            &mut state,
+            PlayerId(1),
+            "Ghostly Prison",
+            ManaCost::generic(2),
+        );
+        let a1 = create_creature(&mut state, PlayerId(0), "A1", 2, 2);
+        // Give attacker enough generic mana to pay {2}.
+        for _ in 0..2 {
+            state
+                .players
+                .iter_mut()
+                .find(|p| p.id == PlayerId(0))
+                .unwrap()
+                .mana_pool
+                .add(ManaUnit {
+                    color: ManaType::Colorless,
+                    source_id: ObjectId(0),
+                    snow: false,
+                    restrictions: Vec::new(),
+                    grants: vec![],
+                    expiry: None,
+                });
+        }
+        let life_before = state.players[0].life;
+
+        let attacks = vec![(a1, AttackTarget::Player(PlayerId(1)))];
+        let mut events = Vec::new();
+        let waiting = handle_declare_attackers(&mut state, PlayerId(0), &attacks, &mut events)
+            .expect("declare-attackers must yield CombatTaxPayment");
+        assert!(matches!(waiting, WaitingFor::CombatTaxPayment { .. }));
+
+        let mut events = Vec::new();
+        let resumed = handle_pay_combat_tax(&mut state, waiting, true, &mut events)
+            .expect("pay-combat-tax must resolve cleanly for generic-mana tax");
+        assert!(matches!(resumed, WaitingFor::Priority { .. }));
+        assert_eq!(
+            state.players[0].life, life_before,
+            "generic-mana tax must not change life total"
+        );
+    }
 }

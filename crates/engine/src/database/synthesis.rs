@@ -7,8 +7,8 @@ use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
     CastVariantPaid, ChoiceType, ContinuousModification, ControllerRef, CounterTriggerFilter,
     Duration, Effect, FilterProp, ManaContribution, ManaProduction, NinjutsuVariant, PtValue,
-    QuantityExpr, ReplacementDefinition, RuntimeHandler, StaticDefinition, TargetFilter,
-    TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
+    QuantityExpr, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
+    StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -699,6 +699,7 @@ pub fn synthesize_cycling(face: &mut CardFace) {
                         reveal: true,
                         target_player: None,
                         up_to: false,
+                        selection_constraint: SearchSelectionConstraint::None,
                     },
                 )
                 .cost(composite_cost);

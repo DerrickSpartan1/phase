@@ -2,7 +2,9 @@ import { memo, useMemo } from "react";
 
 import type { PTColor } from "../../viewmodel/cardProps";
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
+import { composeCardAlt } from "../../utils/cardAlt.ts";
 import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../stores/preferencesStore.ts";
@@ -26,27 +28,31 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   const inspectObject = useUiStore((s) => s.inspectObject);
   const showKeywordStrip = usePreferencesStore((s) => s.showKeywordStrip) ?? true;
   const isCompactHeight = useIsCompactHeight();
+  const controllerIdentity = useGameStore(
+    (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
+  );
 
   const cardName = obj?.name ?? "";
   const imageLookup = obj ? cardImageLookup(obj) : { name: "", faceIndex: 0 };
-  const isToken = obj?.card_id === 0;
+  const isToken = obj?.display_source === "Token";
   const { src, isLoading } = useCardImage(imageLookup.name, {
     size: "art_crop",
     faceIndex: imageLookup.faceIndex,
     isToken,
     tokenFilters: isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color } : undefined,
   });
+  const altText = composeCardAlt(cardName, useEngineCardData(cardName)?.oracle_text);
 
   const { frameGradient, lightText, ptDisplay } = useMemo(() => {
     if (!obj) return { frameGradient: "", lightText: false, ptDisplay: null };
     const isLand = obj.card_types.core_types.includes("Land");
-    const dc = getCardDisplayColors(obj.color, isLand, obj.card_types.subtypes, obj.available_mana_colors);
+    const dc = getCardDisplayColors(obj.color, isLand, obj.card_types.subtypes, obj.available_mana_pips, controllerIdentity || undefined);
     return {
       frameGradient: getFrameGradient(dc),
       lightText: frameNeedsLightText(dc),
       ptDisplay: computePTDisplay(obj),
     };
-  }, [obj]);
+  }, [obj, controllerIdentity]);
 
   if (!obj) return null;
 
@@ -116,7 +122,8 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
             <div className="w-full h-full relative rounded-[1.5px] overflow-hidden border border-black/80 shadow-[inset_0_1px_3px_rgba(0,0,0,0.6)] bg-black">
               <img
                 src={src}
-                alt={cardName}
+                alt={altText}
+                title={altText}
                 draggable={false}
                 className="absolute inset-0 w-full h-full object-cover"
               />

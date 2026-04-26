@@ -14,9 +14,38 @@ use crate::types::counter::CounterType;
 use crate::types::definitions::Definitions;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{Keyword, KeywordKind};
-use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost};
+use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
+
+/// Image-lookup routing hint for the display layer.
+///
+/// The frontend uses this to decide whether a `GameObject`'s art should be
+/// fetched from the real-card database (Scryfall/MTGJSON entry keyed by name)
+/// or from Scryfall's generic-token database. The two are disjoint: a
+/// real-card name like "Lightning Bolt" never appears in the token database,
+/// and a generic-token name like "Treasure" never appears in the card
+/// database. Without this hint the frontend would have to infer routing from
+/// `card_id == 0`, conflating "object has no card-database entry" with "art
+/// should be looked up as a token" — which is wrong for token-copies of real
+/// cards (Twinflame, Helm of the Host, Mirage Mirror, Vaultborn Tyrant LTB,
+/// etc.) where `is_token = true` but the art belongs to a real card.
+///
+/// Independent of `is_token` (which is the CR 111.1 game-rules concept). A
+/// token-copy of Bahamut has `is_token = true` AND
+/// `display_source = DisplaySource::Card`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DisplaySource {
+    /// Image lives in the real-card database (looked up by name).
+    /// Default for fresh `GameObject`s including token-copies of real cards.
+    #[default]
+    Card,
+    /// Image lives in Scryfall's generic-token database (Treasure, Spirit
+    /// 1/1, Soldier 1/1, Saproling, Incubator, Army, etc.). Set explicitly
+    /// at the few token-construction sites that fabricate a token from a
+    /// `TokenSpec` rather than copying an existing object.
+    Token,
+}
 
 /// CR 702.xxx: Prepared-permanent marker payload (Strixhaven).
 ///
@@ -297,10 +326,14 @@ pub struct GameObject {
     #[serde(skip_deserializing, default, skip_serializing_if = "Option::is_none")]
     pub mana_ability_index: Option<usize>,
 
-    // Derived field: currently available colored mana options for this object.
-    // Computed before serialization from mana abilities + activation constraints.
-    #[serde(skip_deserializing, default, skip_serializing_if = "Vec::is_empty")]
-    pub available_mana_colors: Vec<ManaColor>,
+    // Derived field: currently available mana pips for this object — typed
+    // projection of every applicable `ManaProduction` variant. Always
+    // serialized (even when empty) so the frontend can distinguish
+    // "no producers" from "field absent" on the wire. Derived per-tick by
+    // `display_land_mana_pips` from the source's mana abilities + activation
+    // constraints.
+    #[serde(skip_deserializing, default)]
+    pub available_mana_pips: Vec<ManaPip>,
 
     // Planeswalker: whether a loyalty ability has been activated this turn
     #[serde(skip_deserializing, default)]
@@ -327,6 +360,12 @@ pub struct GameObject {
     /// CR 111.1: Whether this object is a token (not a card).
     #[serde(default)]
     pub is_token: bool,
+
+    /// Image-lookup routing hint for the display layer. See `DisplaySource`
+    /// for the rationale. Independent of `is_token` — a token-copy of a
+    /// real card carries `is_token = true` AND `DisplaySource::Card`.
+    #[serde(default)]
+    pub display_source: DisplaySource,
 
     /// Modal spell metadata ("Choose one —", etc.). Copied from CardFace at load time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -601,13 +640,14 @@ impl GameObject {
             has_mana_ability: false,
             mana_ability_index: None,
             devotion: None,
-            available_mana_colors: Vec::new(),
+            available_mana_pips: Vec::new(),
             loyalty_activated_this_turn: false,
             is_commander: false,
             commander_tax: None,
             is_renowned: false,
             is_emblem: false,
             is_token: false,
+            display_source: DisplaySource::Card,
             modal: None,
             additional_cost: None,
             strive_cost: None,

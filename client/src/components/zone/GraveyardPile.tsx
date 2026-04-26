@@ -1,7 +1,9 @@
 import { useCardImage } from "../../hooks/useCardImage.ts";
+import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import type { TargetRef } from "../../adapter/types.ts";
+import { composeCardAlt } from "../../utils/cardAlt.ts";
 
 const EMPTY: readonly number[] = [];
 
@@ -12,17 +14,22 @@ interface GraveyardPileProps {
 
 function TopCard({ cardName }: { cardName: string }) {
   const { src } = useCardImage(cardName, { size: "normal" });
+  const altText = composeCardAlt(cardName, useEngineCardData(cardName)?.oracle_text);
 
   if (!src) {
     return (
-      <div className="h-full w-full rounded-lg bg-gray-700 border border-gray-600" />
+      <div
+        className="h-full w-full rounded-lg bg-gray-700 border border-gray-600"
+        title={altText}
+      />
     );
   }
 
   return (
     <img
       src={src}
-      alt={cardName}
+      alt={altText}
+      title={altText}
       className="h-full w-full rounded-lg object-cover"
       draggable={false}
     />

@@ -97,6 +97,14 @@ pub fn resolve(
         let values = compute_current_copiable_values(state, copy_source_id)
             .ok_or(EffectError::ObjectNotFound(copy_source_id))?;
         let name = values.name.clone();
+        // Image-lookup hint propagates from the copy source: a CopyTokenOf
+        // of a real-card permanent (Twinflame, Helm of the Host) keeps the
+        // default `Card`, while a populate-copy of a true creature token
+        // (Saproling, Spirit) carries `Token` forward so the synthesized
+        // copy resolves to the same generic-token art. The source is
+        // guaranteed present here — `compute_current_copiable_values` above
+        // already returned `Ok` for this id.
+        let copy_source_display = state.objects[&copy_source_id].display_source;
         for _ in 0..count {
             // Step 3: Create a new token object on the battlefield.
             let token_id = zones::create_object(
@@ -110,6 +118,7 @@ pub fn resolve(
             // Step 4: Apply snapshotted characteristics to the token (CR 707.2).
             let token = state.objects.get_mut(&token_id).unwrap();
             token.is_token = true;
+            token.display_source = copy_source_display;
             token.name = values.name.clone();
             token.base_name = values.name.clone();
             token.mana_cost = values.mana_cost.clone();
