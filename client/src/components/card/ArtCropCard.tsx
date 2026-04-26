@@ -26,6 +26,9 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   const inspectObject = useUiStore((s) => s.inspectObject);
   const showKeywordStrip = usePreferencesStore((s) => s.showKeywordStrip) ?? true;
   const isCompactHeight = useIsCompactHeight();
+  const controllerIdentity = useGameStore(
+    (s) => obj && s.gameState?.players?.find((p) => p.id === obj.controller)?.commander_color_identity,
+  );
 
   const cardName = obj?.name ?? "";
   const imageLookup = obj ? cardImageLookup(obj) : { name: "", faceIndex: 0 };
@@ -40,13 +43,13 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
   const { frameGradient, lightText, ptDisplay } = useMemo(() => {
     if (!obj) return { frameGradient: "", lightText: false, ptDisplay: null };
     const isLand = obj.card_types.core_types.includes("Land");
-    const dc = getCardDisplayColors(obj.color, isLand, obj.card_types.subtypes, obj.available_mana_colors);
+    const dc = getCardDisplayColors(obj.color, isLand, obj.card_types.subtypes, obj.available_mana_pips, controllerIdentity || undefined);
     return {
       frameGradient: getFrameGradient(dc),
       lightText: frameNeedsLightText(dc),
       ptDisplay: computePTDisplay(obj),
     };
-  }, [obj]);
+  }, [obj, controllerIdentity]);
 
   if (!obj) return null;
 

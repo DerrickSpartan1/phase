@@ -202,6 +202,28 @@ export type ManaColor = "White" | "Blue" | "Black" | "Red" | "Green";
 
 export type ManaType = "White" | "Blue" | "Black" | "Red" | "Green" | "Colorless";
 
+/**
+ * Display-layer projection of the engine's `ManaProduction` enum. One variant
+ * per producer shape so colorless and commander-identity producers reach the
+ * frontend with full fidelity (the previous `ManaColor[]` shape silently
+ * dropped both classes). Engine-derived; the frontend renders pips verbatim.
+ *
+ * - `Color` — a specific WUBRG color (CR 106.1a).
+ * - `Colorless` — colorless `{C}` (CR 106.1b). War Room, Wastes.
+ * - `OneOfColors` — controller picks one color from the listed set per
+ *   activation (CR 106.4). City of Brass, Mana Confluence.
+ * - `CombinationOfColors` — controller assigns each unit independently across
+ *   the listed set (CR 106.4). Cascading Cataracts.
+ * - `AnyInCommandersIdentity` — Command Tower / Path of Ancestry. Resolve the
+ *   pip set against the controller's `commander_color_identity` (CR 903.4).
+ */
+export type ManaPip =
+  | { type: "Color"; data: ManaColor }
+  | { type: "Colorless" }
+  | { type: "OneOfColors"; data: ManaColor[] }
+  | { type: "CombinationOfColors"; data: ManaColor[] }
+  | { type: "AnyInCommandersIdentity" };
+
 // ── Mana ─────────────────────────────────────────────────────────────────
 
 export interface ManaRestriction {
@@ -357,7 +379,7 @@ export interface GameObject {
   case_state?: { is_solved: boolean; solve_condition: unknown } | null;
   class_level?: number;
   devotion?: number;
-  available_mana_colors?: ManaColor[];
+  available_mana_pips?: ManaPip[];
   casting_permissions?: CastingPermission[];
   is_emblem?: boolean;
   is_commander?: boolean;
@@ -419,6 +441,13 @@ export interface Player {
    * targeting, attacking, damage, and SBA-loss checks.
    */
   status?: PlayerStatus;
+  /**
+   * CR 903.4: Combined color identity of this player's commander(s).
+   * Engine-derived; the frontend reads to render
+   * `ManaPip.AnyInCommandersIdentity` pips. Empty when the player has no
+   * commander or has only a colorless commander (CR 903.4f).
+   */
+  commander_color_identity?: ManaColor[];
 }
 
 // ── Target Filter ───────────────────────────────────────────────────────

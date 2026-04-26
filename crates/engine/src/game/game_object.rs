@@ -14,7 +14,7 @@ use crate::types::counter::CounterType;
 use crate::types::definitions::Definitions;
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{Keyword, KeywordKind};
-use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost};
+use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
@@ -297,10 +297,14 @@ pub struct GameObject {
     #[serde(skip_deserializing, default, skip_serializing_if = "Option::is_none")]
     pub mana_ability_index: Option<usize>,
 
-    // Derived field: currently available colored mana options for this object.
-    // Computed before serialization from mana abilities + activation constraints.
-    #[serde(skip_deserializing, default, skip_serializing_if = "Vec::is_empty")]
-    pub available_mana_colors: Vec<ManaColor>,
+    // Derived field: currently available mana pips for this object — typed
+    // projection of every applicable `ManaProduction` variant. Always
+    // serialized (even when empty) so the frontend can distinguish
+    // "no producers" from "field absent" on the wire. Derived per-tick by
+    // `display_land_mana_pips` from the source's mana abilities + activation
+    // constraints.
+    #[serde(skip_deserializing, default)]
+    pub available_mana_pips: Vec<ManaPip>,
 
     // Planeswalker: whether a loyalty ability has been activated this turn
     #[serde(skip_deserializing, default)]
@@ -601,7 +605,7 @@ impl GameObject {
             has_mana_ability: false,
             mana_ability_index: None,
             devotion: None,
-            available_mana_colors: Vec::new(),
+            available_mana_pips: Vec::new(),
             loyalty_activated_this_turn: false,
             is_commander: false,
             commander_tax: None,

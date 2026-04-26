@@ -1,9 +1,12 @@
+import type { ManaColor, ManaPip } from "../../adapter/types.ts";
+
 const FRAME_COLORS: Record<string, string> = {
   White: "#F5E6C8",
   Blue: "#0E68AB",
   Black: "#2B2B2B",
   Red: "#D32029",
   Green: "#00733E",
+  Colorless: "#A8A29E",
 };
 
 const LAND_SUBTYPE_COLORS: Record<string, string> = {
@@ -14,14 +17,43 @@ const LAND_SUBTYPE_COLORS: Record<string, string> = {
   Forest: "Green",
 };
 
+/**
+ * Project a single engine `ManaPip` into one or more display-color tokens.
+ * Tokens are entries of `FRAME_COLORS` ("White" | "Blue" | ... | "Colorless")
+ * — frame helpers in this module map them to hex values.
+ *
+ * `commanderIdentity` resolves `AnyInCommandersIdentity` per CR 903.4. When
+ * the player has no commander (CR 903.4f), the pip contributes no colors.
+ */
+function pipToColors(pip: ManaPip, commanderIdentity: ManaColor[] | undefined): string[] {
+  switch (pip.type) {
+    case "Color":
+      return [pip.data];
+    case "Colorless":
+      return ["Colorless"];
+    case "OneOfColors":
+    case "CombinationOfColors":
+      return pip.data;
+    case "AnyInCommandersIdentity":
+      return commanderIdentity ?? [];
+  }
+}
+
 export function getCardDisplayColors(
   color: string[],
   isLand: boolean,
   subtypes: string[],
-  availableManaColors?: string[],
+  availableManaPips?: ManaPip[],
+  commanderIdentity?: ManaColor[],
 ): string[] {
-  if (isLand && availableManaColors && availableManaColors.length > 0) {
-    return availableManaColors;
+  if (isLand && availableManaPips && availableManaPips.length > 0) {
+    const out: string[] = [];
+    for (const pip of availableManaPips) {
+      for (const color of pipToColors(pip, commanderIdentity)) {
+        if (!out.includes(color)) out.push(color);
+      }
+    }
+    if (out.length > 0) return out;
   }
   if (isLand && color.length === 0) {
     return subtypes.flatMap((s) => (LAND_SUBTYPE_COLORS[s] ? [LAND_SUBTYPE_COLORS[s]] : []));
