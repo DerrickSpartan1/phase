@@ -5754,6 +5754,16 @@ pub enum TriggerCondition {
     /// controller directly (`AttackTarget::Player(trigger_controller)`).
     NoneOfAttackersTargetedYou,
 
+    /// CR 121.1 + CR 504.1 + CR 603.4: "except the first one [you|they] draw in
+    /// each of [your|their] draw steps" — the trigger fires for every card-draw
+    /// EXCEPT the draw step's mandatory first draw. Used by Orcish Bowmasters
+    /// ("Whenever an opponent draws a card except the first one they draw in
+    /// each of their draw steps, ~ deals 1 damage to any target."). Reads the
+    /// `nth_in_step` ordinal embedded in the `GameEvent::CardDrawn` event:
+    /// returns `false` when the drawing player is the active player, the
+    /// current phase is the draw step, AND `nth_in_step == 1`; otherwise `true`.
+    ExceptFirstDrawInDrawStep,
+
     // -- Combinators --
     /// All conditions must be true ("if you gained and lost life this turn")
     And { conditions: Vec<TriggerCondition> },
@@ -5857,6 +5867,17 @@ pub enum ReplacementCondition {
     /// `subtypes` is `Vec<String>` to mirror the existing `TokenSpec.subtypes`
     /// shape; introducing a typed `Subtype` enum is a separate, broader refactor.
     TokenSubtypeMatches { subtypes: Vec<String> },
+    /// CR 121.1 + CR 504.1 + CR 614.6: "except the first one you draw in each
+    /// of your draw steps" — the replacement applies to every card-draw EXCEPT
+    /// the draw step's mandatory first draw (the active player's CR 504.1
+    /// turn-based action). Used by Alhammarret's Archive
+    /// ("If you would draw a card except the first one you draw in each of
+    /// your draw steps, draw two cards instead.").
+    /// Evaluated against `ProposedEvent::Draw`: returns `false` (suppress) when
+    /// the drawing player is the active player, the current phase is the draw
+    /// step, AND the player has not yet drawn a card during this step
+    /// (`cards_drawn_this_step == 0`); otherwise `true` (apply replacement).
+    ExceptFirstDrawInDrawStep,
     /// "unless you revealed a [type] card" / "unless you paid {mana}"
     /// CR 614.1d — Generic condition text that the engine does not yet decompose further.
     /// Using this variant lets the replacement be recognized for coverage while deferring
