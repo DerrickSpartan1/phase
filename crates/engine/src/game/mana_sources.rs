@@ -905,7 +905,11 @@ pub(crate) fn opponent_land_color_options(
         if !obj.card_types.core_types.contains(&CoreType::Land) {
             continue;
         }
-        // Scan each mana ability, skipping OpponentLandColors to prevent recursion.
+        // Scan each mana ability, skipping recursive producers to prevent
+        // mutual recursion (Exotic Orchard ↔ Exotic Orchard, Exotic Orchard ↔
+        // Reflecting Pool). The skip set is symmetric with the one in
+        // `produceable_mana_types_by_filter` — both directions exclude each
+        // other so a cross-controller cycle yields the empty set (CR 106.5).
         for ability in obj.abilities.iter() {
             if ability.kind != AbilityKind::Activated
                 || !super::mana_abilities::is_mana_ability(ability)
@@ -918,9 +922,17 @@ pub(crate) fn opponent_land_color_options(
             let Effect::Mana { produced, .. } = &*ability.effect else {
                 continue;
             };
-            // CR 106.7: Skip OpponentLandColors — an Exotic Orchard facing another
-            // Exotic Orchard with no other lands produces no mana.
-            if matches!(produced, ManaProduction::OpponentLandColors { .. }) {
+            // CR 106.7: Skip both recursive producers. `OpponentLandColors`
+            // facing itself yields no mana; `AnyTypeProduceableBy` (Reflecting
+            // Pool class) is excluded because (a) recursing into it would
+            // re-anchor `ControllerRef::You` to the wrong player and (b) the
+            // mutual cycle terminates cleanly only when both sides skip each
+            // other.
+            if matches!(
+                produced,
+                ManaProduction::OpponentLandColors { .. }
+                    | ManaProduction::AnyTypeProduceableBy { .. }
+            ) {
                 continue;
             }
             for mana_type in mana_options_from_production(state, controller, *object_id, produced) {
@@ -944,7 +956,8 @@ pub(crate) fn opponent_land_color_options(
             !matches!(
                 &*ability.effect,
                 Effect::Mana {
-                    produced: ManaProduction::OpponentLandColors { .. },
+                    produced: ManaProduction::OpponentLandColors { .. }
+                        | ManaProduction::AnyTypeProduceableBy { .. },
                     ..
                 }
             )

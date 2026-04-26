@@ -1188,4 +1188,111 @@ mod tests {
             "type union must include Colorless when a Wastes is controlled (CR 106.1b)"
         );
     }
+
+    /// CR 106.7 + CR 106.5: P0 controls Exotic Orchard (`OpponentLandColors`),
+    /// P1 controls Reflecting Pool (`AnyTypeProduceableBy`), and neither
+    /// player controls any other land. The mutual recursion guard must be
+    /// symmetric — `opponent_land_color_options` skips both recursive
+    /// producers, so the survey terminates with the empty set rather than
+    /// re-anchoring `ControllerRef::You` to the wrong player or looping.
+    /// Activating either side produces no mana per CR 106.5.
+    #[test]
+    fn exotic_orchard_with_opponent_reflecting_pool_no_panic() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{
+            AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, TargetFilter, TypedFilter,
+        };
+        use crate::types::card_type::CoreType;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+
+        // P0 controls Exotic Orchard.
+        let orchard = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Exotic Orchard".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&orchard).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::OpponentLandColors {
+                        count: QuantityExpr::Fixed { value: 1 },
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+
+        // P1 controls Reflecting Pool.
+        let pool = create_object(
+            &mut state,
+            CardId(702),
+            PlayerId(1),
+            "Reflecting Pool".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&pool).unwrap();
+        obj.card_types.core_types.push(CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyTypeProduceableBy {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        land_filter: TargetFilter::Typed(
+                            TypedFilter::land().controller(ControllerRef::You),
+                        ),
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+
+        // P0's Exotic Orchard surveys P1's lands → only finds Reflecting Pool
+        // (recursive — skipped) → empty set.
+        let orchard_opts =
+            crate::game::mana_sources::opponent_land_color_options(&state, PlayerId(0));
+        assert!(
+            orchard_opts.is_empty(),
+            "Exotic Orchard facing only an opponent's Reflecting Pool must yield empty (CR 106.5); got {orchard_opts:?}"
+        );
+
+        // P1's Reflecting Pool surveys P1's lands → only itself (recursive,
+        // skipped) → empty set. (Cross-controller cycle terminates cleanly.)
+        let pool_opts = crate::game::mana_sources::produceable_mana_types_by_filter(
+            &state,
+            &TargetFilter::Typed(TypedFilter::land().controller(ControllerRef::You)),
+            PlayerId(1),
+            pool,
+        );
+        assert!(
+            pool_opts.is_empty(),
+            "Reflecting Pool with no other own lands must yield empty (CR 106.5); got {pool_opts:?}"
+        );
+
+        // Both should activate without panic and produce zero mana.
+        let mut events = Vec::new();
+        resolve(
+            &mut state,
+            &make_mana_ability(ManaProduction::OpponentLandColors {
+                count: QuantityExpr::Fixed { value: 1 },
+            }),
+            &mut events,
+        )
+        .unwrap();
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+    }
 }
