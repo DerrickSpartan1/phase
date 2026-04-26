@@ -327,6 +327,11 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_life_lost_ref,
         parse_life_gained_ref,
         parse_starting_life_ref,
+        // CR 117.1 + CR 202.3: cost-paid object's mana value — must precede
+        // `parse_event_context_refs` so the cost-paid resolver wins over the
+        // generic event-source resolver for sacrificed/exiled possessives
+        // (Food Chain, Burnt Offering, Metamorphosis).
+        parse_cost_paid_object_mana_value_ref,
         parse_event_context_refs,
     ))
     .or(alt((
@@ -783,6 +788,35 @@ fn parse_starting_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         tag("your starting life total"),
     )
     .parse(input)
+}
+
+/// CR 117.1 + CR 202.3: Cost-paid object's mana value.
+///
+/// Composes the prefix grammar
+/// `[the] (sacrificed|exiled) (creature|card|permanent|artifact)'s (mana value|converted mana cost)`
+/// into a single typed combinator. Each axis is a single `alt()` over
+/// independent variants — adding a new participle (e.g. "discarded"), a new
+/// noun, or the British spelling of "mana value" extends one alt branch
+/// rather than adding a new top-level arm.
+///
+/// Used by Food Chain ("1 plus the exiled creature's mana value"),
+/// Burnt Offering / Metamorphosis ("the sacrificed creature's mana value"),
+/// and the broader cost-paid-by-property class.
+fn parse_cost_paid_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = opt(tag("the ")).parse(input)?;
+    let (rest, _) = alt((tag("sacrificed "), tag("exiled "), tag("discarded "))).parse(rest)?;
+    let (rest, _) = alt((
+        tag("creature"),
+        tag("card"),
+        tag("permanent"),
+        tag("artifact"),
+        tag("enchantment"),
+        tag("planeswalker"),
+        tag("land"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = alt((tag("'s mana value"), tag("'s converted mana cost"))).parse(rest)?;
+    Ok((rest, QuantityRef::CostPaidObjectManaValue))
 }
 
 /// Parse event-context quantity references.
@@ -1295,6 +1329,34 @@ mod tests {
     fn test_parse_that_spells_mana_value() {
         let (rest, q) = parse_quantity_ref("that spell's mana value").unwrap();
         assert_eq!(q, QuantityRef::EventContextSourceManaValue);
+        assert_eq!(rest, "");
+    }
+
+    /// CR 117.1 + CR 202.3: Food Chain — "the exiled creature's mana value"
+    /// resolves to the cost-paid object snapshot (NOT the trigger-event
+    /// source), so the parser must emit `CostPaidObjectManaValue`.
+    #[test]
+    fn test_parse_exiled_creatures_mana_value() {
+        let (rest, q) = parse_quantity_ref("the exiled creature's mana value").unwrap();
+        assert_eq!(q, QuantityRef::CostPaidObjectManaValue);
+        assert_eq!(rest, "");
+    }
+
+    /// CR 117.1 + CR 202.3: Burnt Offering / Metamorphosis — additional
+    /// sacrifice cost referenced as "the sacrificed creature's mana value".
+    #[test]
+    fn test_parse_sacrificed_creatures_mana_value() {
+        let (rest, q) = parse_quantity_ref("the sacrificed creature's mana value").unwrap();
+        assert_eq!(q, QuantityRef::CostPaidObjectManaValue);
+        assert_eq!(rest, "");
+    }
+
+    /// Parser must accept the legacy "converted mana cost" phrasing.
+    #[test]
+    fn test_parse_sacrificed_creatures_converted_mana_cost() {
+        let (rest, q) =
+            parse_quantity_ref("the sacrificed creature's converted mana cost").unwrap();
+        assert_eq!(q, QuantityRef::CostPaidObjectManaValue);
         assert_eq!(rest, "");
     }
 

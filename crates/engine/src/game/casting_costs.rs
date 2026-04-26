@@ -90,7 +90,7 @@ pub(crate) fn handle_decide_additional_cost(
 pub(crate) fn handle_discard_for_cost(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
+    mut pending: PendingCast,
     expected: usize,
     legal_cards: &[ObjectId],
     chosen: &[ObjectId],
@@ -108,6 +108,22 @@ pub(crate) fn handle_discard_for_cost(
             return Err(EngineError::InvalidAction(
                 "Selected card not in hand".to_string(),
             ));
+        }
+    }
+
+    // CR 117.1 + CR 202.3: Capture the discarded card's mana value BEFORE
+    // it leaves the hand, so `QuantityRef::CostPaidObjectManaValue` can
+    // resolve at ability resolution. Volrath the Fallen ("Volrath gets
+    // +X/+X until end of turn, where X is the discarded card's mana value").
+    if let Some(&first) = chosen.first() {
+        if let Some(mv) = state
+            .objects
+            .get(&first)
+            .map(|obj| obj.mana_cost.mana_value())
+        {
+            pending
+                .ability
+                .set_cost_paid_object_mana_value_recursive(mv);
         }
     }
 
@@ -155,7 +171,7 @@ pub(crate) fn handle_discard_for_cost(
 pub(crate) fn handle_sacrifice_for_cost(
     state: &mut GameState,
     player: PlayerId,
-    pending: PendingCast,
+    mut pending: PendingCast,
     count: usize,
     legal_permanents: &[ObjectId],
     chosen: &[ObjectId],
@@ -173,6 +189,23 @@ pub(crate) fn handle_sacrifice_for_cost(
             return Err(EngineError::InvalidAction(
                 "Selected permanent not eligible for sacrifice".to_string(),
             ));
+        }
+    }
+
+    // CR 117.1 + CR 202.3: Capture the sacrificed object's mana value BEFORE
+    // it leaves the battlefield, stamping it onto the resolving ability for
+    // later read by `QuantityRef::CostPaidObjectManaValue` (Food Chain,
+    // Burnt Offering, Metamorphosis). Uses the first chosen permanent — the
+    // class only ever sacrifices one cost-tracked object.
+    if let Some(&first) = chosen.first() {
+        if let Some(mv) = state
+            .objects
+            .get(&first)
+            .map(|obj| obj.mana_cost.mana_value())
+        {
+            pending
+                .ability
+                .set_cost_paid_object_mana_value_recursive(mv);
         }
     }
 

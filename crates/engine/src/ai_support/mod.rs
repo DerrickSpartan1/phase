@@ -272,6 +272,15 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
                 ..
             },
             GameAction::SelectCards { cards: chosen },
+        )
+        | (
+            WaitingFor::ExileFromBattlefieldForManaAbility {
+                player: _,
+                permanents: cards,
+                count,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
         ) => selection_mismatch(chosen, cards, Some(*count)),
         (
             WaitingFor::EffectZoneChoice {

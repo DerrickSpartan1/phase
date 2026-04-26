@@ -1817,6 +1817,22 @@ pub enum QuantityRef {
     EventContextSourceToughness,
     /// CR 603.7c: Mana value of the source object from the triggering event.
     EventContextSourceManaValue,
+    /// CR 202.3 + CR 118.8 + CR 701.21: Mana value of the object that was
+    /// sacrificed, exiled, or otherwise paid as part of the cost of the
+    /// resolving spell or ability. The mana value is captured at cost-payment
+    /// time (CR 117.1) — before the object leaves the battlefield — and stored
+    /// on `ResolvedAbility.cost_paid_object_mana_value`.
+    ///
+    /// Covers the "sac-for-mana-by-property" / "exile-for-mana-by-property"
+    /// class: Food Chain ("1 plus the exiled creature's mana value"),
+    /// Burnt Offering, Metamorphosis ("the sacrificed creature's mana value"),
+    /// and any future cards that read the cost-paid object's mana value.
+    ///
+    /// Distinct from `EventContextSourceManaValue` (which reads the triggering
+    /// event's source). A cost-paid object is not a triggering-event source —
+    /// activation/spell-cast announcements (CR 117.1, CR 601.2) are not events
+    /// in the triggered-ability sense.
+    CostPaidObjectManaValue,
     /// CR 603.10a + CR 603.6e: Count of attachments of a given kind that were attached
     /// to the leaving-battlefield object at the moment it left, optionally filtered by
     /// attachment controller. Resolved via the triggering `ZoneChangeRecord`'s
@@ -6826,6 +6842,14 @@ pub struct ResolvedAbility {
     /// Read during resolution by `QuantityRef::Variable { name: "X" }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_x: Option<u32>,
+    /// CR 117.1 + CR 202.3: Mana value of the object paid as part of this
+    /// resolving ability's cost (sacrificed creature, exiled creature, etc.),
+    /// captured at cost-payment time before the object leaves the battlefield.
+    /// Read by `QuantityRef::CostPaidObjectManaValue` during resolution.
+    /// `None` for abilities whose cost did not include a non-self
+    /// sacrifice/exile of a permanent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_paid_object_mana_value: Option<u32>,
     /// CR 603.4: Index of the printed ability this resolution came from on the
     /// source object's ability list. Identifies "this ability" for per-turn
     /// resolution tracking (`AbilityCondition::NthResolutionThisTurn`). `None` for
@@ -6865,6 +6889,7 @@ impl ResolvedAbility {
             distribution: None,
             player_scope: None,
             chosen_x: None,
+            cost_paid_object_mana_value: None,
             ability_index: None,
         }
     }
@@ -6878,6 +6903,20 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_chosen_x_recursive(value);
+        }
+    }
+
+    /// CR 117.1 + CR 202.3: Stamp the cost-paid object's mana value across this
+    /// ability and every sub/else branch. Captured at cost-payment time (before
+    /// the object leaves the battlefield) and read by
+    /// `QuantityRef::CostPaidObjectManaValue` during resolution.
+    pub fn set_cost_paid_object_mana_value_recursive(&mut self, value: u32) {
+        self.cost_paid_object_mana_value = Some(value);
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_cost_paid_object_mana_value_recursive(value);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_cost_paid_object_mana_value_recursive(value);
         }
     }
 

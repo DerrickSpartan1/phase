@@ -844,6 +844,14 @@ fn resolve_ref(
                     })
             })
             .unwrap_or(0),
+        // CR 117.1 + CR 202.3: Mana value of the cost-paid object (sacrificed
+        // creature, exiled creature, etc.), captured at cost-payment time on
+        // the resolving ability. Food Chain / Burnt Offering / Metamorphosis.
+        // Returns 0 when no cost-paid object snapshot is in scope.
+        QuantityRef::CostPaidObjectManaValue => ability
+            .and_then(|a| a.cost_paid_object_mana_value)
+            .map(u32_to_i32_saturating)
+            .unwrap_or(0),
         // CR 107.3a + CR 601.2b + CR 603.7c: The announced value of X for the
         // triggering spell. Reads `GameObject::cost_x_paid` — populated during
         // cost determination and persisted through the stack → battlefield

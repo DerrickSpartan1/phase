@@ -1057,6 +1057,24 @@ fn apply_action(
             &chosen,
             &mut events,
         )?,
+        // CR 117.1 + CR 118.3 + CR 605.3b + CR 202.3: Player selected battlefield
+        // permanent(s) to exile as a mana ability cost (Food Chain class).
+        (
+            WaitingFor::ExileFromBattlefieldForManaAbility {
+                count,
+                permanents,
+                pending_mana_ability,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => super::mana_abilities::handle_exile_from_battlefield_for_mana_ability(
+            state,
+            *count,
+            permanents,
+            pending_mana_ability,
+            &chosen,
+            &mut events,
+        )?,
         (
             WaitingFor::ChooseManaColor {
                 choice,

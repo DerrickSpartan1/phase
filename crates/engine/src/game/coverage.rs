@@ -622,6 +622,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::EventContextSourcePower => "source's power".into(),
         QuantityRef::EventContextSourceToughness => "source's toughness".into(),
         QuantityRef::EventContextSourceManaValue => "source's mana value".into(),
+        QuantityRef::CostPaidObjectManaValue => "cost-paid object's mana value".into(),
         QuantityRef::SpellsCastThisTurn { filter } => match filter {
             Some(filter) => format!("{} spells cast this turn", fmt_target(filter)),
             None => "spells cast this turn".into(),
@@ -4042,6 +4043,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::EventContextSourcePower => ("EventContextSourcePower", Handled),
         QuantityRef::EventContextSourceToughness => ("EventContextSourceToughness", Handled),
         QuantityRef::EventContextSourceManaValue => ("EventContextSourceManaValue", Handled),
+        QuantityRef::CostPaidObjectManaValue => ("CostPaidObjectManaValue", Handled),
         QuantityRef::SpellsCastThisTurn { .. } => ("SpellsCastThisTurn", Handled),
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
