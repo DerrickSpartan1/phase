@@ -4402,6 +4402,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -4417,6 +4418,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap);
@@ -4631,6 +4633,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(crate::types::ability::AbilityCost::Tap),
@@ -4646,6 +4649,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(crate::types::ability::AbilityCost::Tap)
@@ -4680,6 +4684,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -4696,6 +4701,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Composite {
@@ -8180,6 +8186,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(crate::types::ability::AbilityCost::Tap),
@@ -8348,6 +8355,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(crate::types::ability::AbilityCost::Tap),
@@ -8469,6 +8477,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(crate::types::ability::AbilityCost::Tap),
@@ -9876,6 +9885,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(crate::types::ability::AbilityCost::Tap)

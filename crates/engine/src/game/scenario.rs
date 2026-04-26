@@ -370,6 +370,7 @@ impl GameScenario {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(crate::types::ability::AbilityCost::Tap);

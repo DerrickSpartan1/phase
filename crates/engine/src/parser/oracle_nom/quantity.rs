@@ -494,6 +494,17 @@ fn parse_number_of_cards_in_target_zone(input: &str) -> OracleResult<'_, Quantit
     .parse(rest)
 }
 
+/// CR 115.1 + CR 115.7: Parse "target opponent's <zone>" / "target player's <zone>"
+/// possessive into a `TargetZoneCardCount`. Used as a target-bound branch of
+/// `parse_zone_card_count` for "card in target opponent's hand" expressions
+/// (Jeska's Will mode 1). Does not consume the leading "card in " — the caller
+/// has already stripped that prefix and is positioned at the possessive.
+fn parse_target_player_possessive_zone(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("target opponent's "), tag("target player's "))).parse(input)?;
+    let (rest, zone) = parse_zone_ref_singular(rest)?;
+    Ok((rest, QuantityRef::TargetZoneCardCount { zone }))
+}
+
 fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, card_types) = if let Ok((typed_rest, typed_filters)) = parse_type_filter_list(input)
     {
@@ -508,6 +519,18 @@ fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
         (rest, Vec::new())
     };
     let (rest, _) = tag(" in ").parse(rest)?;
+    // CR 115.1 + CR 115.7: "card in target opponent's <zone>" / "card in target
+    // player's <zone>" — possessive references the spell's player target. Only
+    // applies when no card-type filters were captured (target-bound counts are
+    // type-agnostic over the targeted zone). Resolves dynamically via
+    // `ability.targets`. Tried before `parse_scoped_zone_ref`, which has no
+    // `target opponent's` arm and would otherwise fall through to the bare
+    // singular zone (`CountScope::All`) and silently misroute the count.
+    if card_types.is_empty() {
+        if let Ok((after_zone, q)) = parse_target_player_possessive_zone(rest) {
+            return Ok((after_zone, q));
+        }
+    }
     let (rest, (zone, scope)) = parse_scoped_zone_ref(rest)?;
     Ok((
         rest,

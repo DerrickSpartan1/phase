@@ -28,12 +28,16 @@ use super::sacrifice;
 /// implies targeting, so this check is defensive — if future variants introduce
 /// targeting on mana-producing abilities, this guard ensures correctness.
 pub fn is_mana_ability(ability_def: &AbilityDefinition) -> bool {
-    if !matches!(*ability_def.effect, Effect::Mana { .. }) {
-        return false;
-    }
+    let target_attached = match &*ability_def.effect {
+        Effect::Mana { target, .. } => target.as_ref(),
+        _ => return false,
+    };
     // CR 605.1a: A targeted mana-producing ability is not a mana ability.
-    // multi_target is the explicit targeting mechanism on AbilityDefinition.
-    ability_def.multi_target.is_none()
+    // Reject both the explicit `multi_target` mechanism and the embedded
+    // `Effect::Mana::target` field (Jeska's Will mode 1: "Add {R} for each
+    // card in target opponent's hand" — the spell targets, so it must use the
+    // stack and is not a mana ability under CR 605).
+    ability_def.multi_target.is_none() && target_attached.is_none()
 }
 
 /// CR 605.1b: A triggered ability is a mana ability iff all three hold:
@@ -229,6 +233,7 @@ fn produce_mana_from_ability(
             restrictions,
             grants,
             expiry,
+            target: None,
         } => {
             let mana = match color_override {
                 // `Combination` is pre-chosen — skip `resolve_mana_types` entirely
@@ -803,6 +808,7 @@ fn resolve_mana_ability_with_selected_choices(
             restrictions,
             grants,
             expiry,
+            target: None,
         } => {
             let mana = match color_override {
                 Some(ProductionOverride::Combination(types)) => types,
@@ -1642,6 +1648,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap)
@@ -1777,6 +1784,7 @@ mod tests {
                 )],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap);
@@ -1899,6 +1907,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap);
@@ -1956,6 +1965,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Composite {
@@ -2007,6 +2017,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Composite {
@@ -2089,6 +2100,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Composite {
@@ -2222,6 +2234,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(AbilityCost::Tap),
@@ -2271,6 +2284,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(AbilityCost::Tap),
@@ -2352,6 +2366,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -2430,6 +2445,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -2511,6 +2527,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -2650,6 +2667,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
             vec![],
             ObjectId(1),
@@ -3040,6 +3058,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Composite {
@@ -3602,6 +3621,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: Vec::new(),
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Composite {
@@ -3794,6 +3814,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap)
@@ -3869,6 +3890,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: Vec::new(),
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap);
@@ -3982,6 +4004,7 @@ mod tests {
                 restrictions: vec![ManaSpendRestriction::SpellType("Creature".to_string())],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Exile {
@@ -4146,6 +4169,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
             Vec::new(),
             ObjectId(1),
@@ -4185,6 +4209,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
             Vec::new(),
             ObjectId(1),

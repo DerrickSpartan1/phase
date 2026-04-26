@@ -2985,6 +2985,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(AbilityCost::Tap),
@@ -3000,6 +3001,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(AbilityCost::Tap)

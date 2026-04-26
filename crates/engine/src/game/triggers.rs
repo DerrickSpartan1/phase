@@ -466,6 +466,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             restrictions: vec![],
                             grants: vec![],
                             expiry: Some(crate::types::mana::ManaExpiry::EndOfCombat),
+                            target: None,
                         };
                         let fb_ability =
                             ResolvedAbility::new(fb_effect, Vec::new(), obj_id, controller);
@@ -5462,6 +5463,7 @@ pub mod tests {
                             restrictions: vec![],
                             grants: vec![],
                             expiry: None,
+                            target: None,
                         },
                     ))
                     .valid_card(TargetFilter::AttachedTo),
@@ -5559,6 +5561,7 @@ pub mod tests {
                             restrictions: vec![],
                             grants: vec![],
                             expiry: None,
+                            target: None,
                         },
                     ))
                     .valid_card(TargetFilter::AttachedTo),

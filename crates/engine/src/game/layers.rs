@@ -1472,6 +1472,7 @@ fn inject_basic_mana_ability_for_subtype(
                 restrictions: Vec::new(),
                 grants: Vec::new(),
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap),
@@ -4193,6 +4194,7 @@ mod tests {
                 restrictions: Vec::new(),
                 grants: Vec::new(),
                 expiry: None,
+                target: None,
             },
         )
         .cost(AbilityCost::Tap);

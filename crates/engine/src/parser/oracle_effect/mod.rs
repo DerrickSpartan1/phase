@@ -11798,6 +11798,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             }
         );
     }
@@ -11815,6 +11816,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             }
         );
     }
@@ -11836,6 +11838,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             }
         );
         // Plural possessive variant (partner commanders).
@@ -11850,6 +11853,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             }
         );
     }

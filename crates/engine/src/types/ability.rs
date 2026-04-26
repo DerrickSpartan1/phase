@@ -3551,6 +3551,15 @@ pub enum Effect {
         /// until the specified expiry condition is met (e.g., EndOfCombat for firebending).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         expiry: Option<crate::types::mana::ManaExpiry>,
+        /// CR 115.1 + CR 115.7: Spell-level player target for mana abilities whose
+        /// produced amount references a player target (e.g., Jeska's Will mode 1
+        /// "Add {R} for each card in target opponent's hand"). When set, the
+        /// player target is surfaced as a target slot at cast time and
+        /// `TargetZoneCardCount`/`TargetLifeTotal` quantities resolve against it.
+        /// `None` for the common case of mana abilities with no player target
+        /// (Cabal Coffers, Reflecting Pool, fixed mana, etc.).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<TargetFilter>,
     },
     Discard {
         #[serde(default = "default_quantity_one")]
@@ -4515,6 +4524,14 @@ impl Effect {
                 target.as_ref()
             }
 
+            // CR 115.1 + CR 115.7: Mana abilities normally don't target, but a
+            // few spell-only mana effects (Jeska's Will mode 1: "Add {R} for
+            // each card in target opponent's hand") declare a player target so
+            // the `TargetZoneCardCount` quantity in `produced` can resolve
+            // against `ability.targets`. The optional `target` is `None` for
+            // every classic mana ability (Cabal Coffers, Reflecting Pool, etc.).
+            Effect::Mana { target, .. } => target.as_ref(),
+
             // --- Effects with no player-selectable target field ---
             // These use filters, zone-level operations, or have no targeting at all.
             Effect::StartYourEngines { .. }
@@ -4541,7 +4558,6 @@ impl Effect {
             | Effect::Clash
             | Effect::Vote { .. }
             | Effect::Cleanup { .. }
-            | Effect::Mana { .. }
             | Effect::RevealTop { .. }
             | Effect::Choose { .. }
             | Effect::SolveCase
@@ -7395,6 +7411,7 @@ mod tests {
             restrictions: vec![],
             grants: vec![],
             expiry: None,
+            target: None,
         };
         let json = serde_json::to_string(&effect).unwrap();
         let deserialized: Effect = serde_json::from_str(&json).unwrap();
@@ -7416,6 +7433,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             }
         );
     }

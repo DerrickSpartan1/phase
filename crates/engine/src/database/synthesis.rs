@@ -137,6 +137,7 @@ pub fn synthesize_basic_land_mana(face: &mut CardFace) {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(AbilityCost::Tap),

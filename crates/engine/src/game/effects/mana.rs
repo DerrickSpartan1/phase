@@ -22,6 +22,12 @@ pub fn resolve(
             restrictions,
             grants,
             expiry,
+            // CR 115.1 + CR 115.7: `target` is the spell-level player target
+            // (e.g. Jeska's Will mode 1). The actual count quantity inside
+            // `produced` references it via `TargetZoneCardCount`; we don't
+            // need it again here since `resolve_quantity_with_targets` reads
+            // `ability.targets` directly.
+            target: _,
         } => (produced, restrictions, grants, *expiry),
         _ => return Err(EffectError::MissingParam("Produced".to_string())),
     };
@@ -451,6 +457,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
             vec![],
             ObjectId(100),
@@ -763,6 +770,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -833,6 +841,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -868,6 +877,7 @@ mod tests {
                 restrictions: vec![ManaSpendRestriction::SpellType("Creature".to_string())],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
             vec![],
             ObjectId(100),
@@ -914,6 +924,7 @@ mod tests {
                 restrictions: vec![ManaSpendRestriction::ChosenCreatureType],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
             vec![],
             obj_id,
@@ -944,6 +955,7 @@ mod tests {
                 restrictions: vec![ManaSpendRestriction::ChosenCreatureType],
                 grants: vec![],
                 expiry: None,
+                target: None,
             },
             vec![],
             ObjectId(999),
@@ -974,6 +986,7 @@ mod tests {
                 restrictions: vec![],
                 grants: vec![ManaSpellGrant::CantBeCountered],
                 expiry: None,
+                target: None,
             },
             vec![],
             ObjectId(100),
@@ -1028,6 +1041,7 @@ mod tests {
                         restrictions: vec![],
                         grants: vec![],
                         expiry: None,
+                        target: None,
                     },
                 )
                 .cost(AbilityCost::Tap),
@@ -1131,6 +1145,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -1185,6 +1200,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -1242,6 +1258,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
@@ -1270,6 +1287,7 @@ mod tests {
                     restrictions: vec![],
                     grants: vec![],
                     expiry: None,
+                    target: None,
                 },
             )
             .cost(AbilityCost::Tap),
