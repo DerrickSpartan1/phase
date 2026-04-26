@@ -361,7 +361,7 @@ fn escape_full_casting_flow() {
         matches!(
             result.waiting_for,
             WaitingFor::ExileForCost {
-                zone: Zone::Graveyard,
+                zone: ExileCostSourceZone::Graveyard,
                 count: 2,
                 ..
             }
@@ -372,7 +372,7 @@ fn escape_full_casting_flow() {
 
     // Verify the escape card itself is NOT in the eligible list
     if let WaitingFor::ExileForCost {
-        zone: Zone::Graveyard,
+        zone: ExileCostSourceZone::Graveyard,
         ref cards,
         ..
     } = result.waiting_for
@@ -485,14 +485,14 @@ fn escape_variant_preserved_through_mana_payment() {
     assert!(matches!(
         result.waiting_for,
         WaitingFor::ExileForCost {
-            zone: Zone::Graveyard,
+            zone: ExileCostSourceZone::Graveyard,
             ..
         }
     ));
 
     // Select exile targets
     if let WaitingFor::ExileForCost {
-        zone: Zone::Graveyard,
+        zone: ExileCostSourceZone::Graveyard,
         ref cards,
         ..
     } = result.waiting_for
@@ -679,7 +679,7 @@ fn pitch_full_casting_flow() {
 
     let eligible = match &result.waiting_for {
         WaitingFor::ExileForCost {
-            zone: Zone::Hand,
+            zone: ExileCostSourceZone::Hand,
             cards,
             count,
             player,
@@ -762,7 +762,7 @@ fn pitch_cancel_returns_to_priority() {
         matches!(
             runner.state().waiting_for,
             WaitingFor::ExileForCost {
-                zone: Zone::Hand,
+                zone: ExileCostSourceZone::Hand,
                 ..
             }
         ),

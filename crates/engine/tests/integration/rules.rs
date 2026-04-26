@@ -12,7 +12,7 @@ pub use engine::types::identifiers::ObjectId;
 pub use engine::types::keywords::Keyword;
 pub use engine::types::phase::Phase;
 pub use engine::types::player::PlayerId;
-pub use engine::types::zones::Zone;
+pub use engine::types::zones::{ExileCostSourceZone, Zone};
 
 /// Shared combat helper: drives the engine from DeclareAttackers through damage resolution.
 ///

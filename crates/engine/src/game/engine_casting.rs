@@ -6,7 +6,7 @@ use crate::types::game_state::{
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
-use crate::types::zones::Zone;
+use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::engine::EngineError;
 use super::{casting, casting_costs, mana_abilities};
@@ -236,7 +236,7 @@ pub(super) fn handle_pay_mana_ability_mana(
 pub(super) fn handle_exile_for_cost(
     state: &mut GameState,
     player: PlayerId,
-    zone: Zone,
+    zone: ExileCostSourceZone,
     pending_cast: PendingCast,
     count: usize,
     legal_cards: &[ObjectId],

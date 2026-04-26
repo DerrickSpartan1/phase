@@ -16,6 +16,35 @@ pub enum Zone {
     Command,
 }
 
+/// CR 118.9a + CR 601.2b + CR 601.2h: Source zone for an `AbilityCost::Exile`
+/// payment. Only `Hand` (pitch spells, CR 118.9a) and `Graveyard` (escape,
+/// CR 702.138a) are valid; any other zone is rejected at cost-resolution time
+/// and falls through to the non-interactive path. Making the invariant a type
+/// removes the load-bearing `unreachable!` panics that previously guarded
+/// downstream matches on the broader `Zone` enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ExileCostSourceZone {
+    Hand,
+    Graveyard,
+}
+
+impl ExileCostSourceZone {
+    pub fn as_zone(self) -> Zone {
+        match self {
+            Self::Hand => Zone::Hand,
+            Self::Graveyard => Zone::Graveyard,
+        }
+    }
+
+    pub fn try_from_zone(zone: Zone) -> Option<Self> {
+        match zone {
+            Zone::Hand => Some(Self::Hand),
+            Zone::Graveyard => Some(Self::Graveyard),
+            _ => None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -10,7 +10,7 @@ use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaCost, ManaCostShard, ManaType, PaymentContext};
 use crate::types::player::PlayerId;
-use crate::types::zones::Zone;
+use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::casting::emit_targeting_events;
 use super::engine::EngineError;
@@ -431,7 +431,7 @@ pub(crate) fn handle_tap_creatures_for_spell_cost(
 pub(crate) fn handle_exile_for_cost(
     state: &mut GameState,
     player: PlayerId,
-    zone: Zone,
+    zone: ExileCostSourceZone,
     pending: PendingCast,
     expected: usize,
     legal_cards: &[ObjectId],
@@ -459,13 +459,13 @@ pub(crate) fn handle_exile_for_cost(
             .players
             .get(player.0 as usize)
             .is_some_and(|p| match zone {
-                Zone::Hand => p.hand.contains(&id),
-                Zone::Graveyard => p.graveyard.contains(&id),
-                _ => unreachable!("ExileForCost only supports Hand or Graveyard"),
+                ExileCostSourceZone::Hand => p.hand.contains(&id),
+                ExileCostSourceZone::Graveyard => p.graveyard.contains(&id),
             });
         if !still_in_zone {
             return Err(EngineError::InvalidAction(format!(
-                "Selected card is no longer in {zone:?}"
+                "Selected card is no longer in {:?}",
+                zone.as_zone()
             )));
         }
     }
@@ -1189,20 +1189,24 @@ fn pay_additional_cost(
         }
         AbilityCost::Exile {
             count,
-            zone: Some(zone @ (Zone::Hand | Zone::Graveyard)),
+            zone: Some(zone),
             ref filter,
-        } => {
+        } if matches!(zone, Zone::Hand | Zone::Graveyard) => {
             // CR 118.9a + CR 601.2b + CR 601.2h: Exile N cards from `zone` as
             // part of an alternative or additional casting cost. Covers escape
             // (CR 702.138a, graveyard) and pitch spells (Force of Will, Force
             // of Negation, Misdirection, Unmask, etc., hand). Eligibility is
             // filtered by the cost's `TargetFilter`; the cast source itself is
-            // always excluded.
+            // always excluded. The narrow `ExileCostSourceZone` makes invalid
+            // zones unrepresentable downstream — `try_from_zone` is the single
+            // construction site.
+            let narrow_zone = ExileCostSourceZone::try_from_zone(zone)
+                .expect("match guard restricts zone to Hand or Graveyard");
             let eligible = super::casting::find_eligible_exile_for_cost_targets(
                 state,
                 player,
                 pending.object_id,
-                zone,
+                narrow_zone,
                 filter.as_ref(),
             );
             if eligible.len() < count as usize {
@@ -1212,7 +1216,7 @@ fn pay_additional_cost(
             }
             return Ok(WaitingFor::ExileForCost {
                 player,
-                zone,
+                zone: narrow_zone,
                 count: count as usize,
                 cards: eligible,
                 pending_cast: Box::new(pending),
@@ -4618,7 +4622,7 @@ mod tests {
                 ..
             } => {
                 assert_eq!(player, caster);
-                assert_eq!(zone, Zone::Hand);
+                assert_eq!(zone, ExileCostSourceZone::Hand);
                 assert_eq!(count, 1);
                 assert!(
                     cards.contains(&blue_card),
@@ -4782,7 +4786,7 @@ mod tests {
         let result = handle_exile_for_cost(
             &mut state,
             caster,
-            Zone::Hand,
+            ExileCostSourceZone::Hand,
             pending.clone(),
             1,
             &[blue_a, blue_b],
@@ -4850,7 +4854,7 @@ mod tests {
         let result = handle_exile_for_cost(
             &mut state,
             caster,
-            Zone::Hand,
+            ExileCostSourceZone::Hand,
             pending,
             1,
             &[blue],
@@ -4861,5 +4865,133 @@ mod tests {
             matches!(result, Err(EngineError::InvalidAction(_))),
             "card not in legal list must be rejected: {result:?}"
         );
+    }
+
+    /// CR 601.2b + CR 601.2h + CR 702.138a: The eligibility helper for an
+    /// `AbilityCost::Exile` payment must apply the cost's `TargetFilter` in
+    /// the graveyard branch — not just the hand branch. Escape today carries
+    /// no filter, but any future graveyard-source exile cost with a filter
+    /// would otherwise silently no-op. Building-block-level test exercising
+    /// the filter against a heterogeneous graveyard.
+    #[test]
+    fn exile_for_cost_graveyard_applies_filter() {
+        use crate::game::zones::create_object;
+        use crate::types::ability::{FilterProp, TargetFilter, TypeFilter, TypedFilter};
+        use crate::types::card_type::CoreType;
+        use crate::types::mana::ManaColor;
+
+        let mut state = GameState::new_two_player(42);
+        let caster = PlayerId(0);
+
+        // Cast source — not in graveyard, but its ID must still be excluded.
+        let source_id = create_object(
+            &mut state,
+            CardId(900),
+            caster,
+            "Escape Source".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.color.push(ManaColor::Blue);
+        }
+
+        // Eligible: blue card in graveyard.
+        let blue_card = create_object(
+            &mut state,
+            CardId(901),
+            caster,
+            "Blue Filler".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&blue_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.color.push(ManaColor::Blue);
+        }
+
+        // Ineligible: non-blue card in graveyard.
+        let red_card = create_object(
+            &mut state,
+            CardId(902),
+            caster,
+            "Red Filler".to_string(),
+            Zone::Graveyard,
+        );
+        {
+            let obj = state.objects.get_mut(&red_card).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.color.push(ManaColor::Red);
+        }
+
+        let mut events = Vec::new();
+        let pending = PendingCast {
+            object_id: source_id,
+            card_id: CardId(900),
+            ability: ResolvedAbility::new(
+                Effect::Counter {
+                    target: TargetFilter::Any,
+                    source_static: None,
+                    unless_payment: None,
+                },
+                Vec::new(),
+                source_id,
+                caster,
+            ),
+            cost: crate::types::mana::ManaCost::NoCost,
+            activation_cost: None,
+            activation_ability_index: None,
+            target_constraints: Vec::new(),
+            casting_variant: CastingVariant::Normal,
+            distribute: None,
+            origin_zone: Zone::Graveyard,
+        };
+
+        let result = pay_additional_cost(
+            &mut state,
+            caster,
+            AbilityCost::Exile {
+                count: 1,
+                zone: Some(Zone::Graveyard),
+                filter: Some(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Card],
+                    controller: Some(crate::types::ability::ControllerRef::You),
+                    properties: vec![FilterProp::HasColor {
+                        color: ManaColor::Blue,
+                    }],
+                })),
+            },
+            pending,
+            &mut events,
+        )
+        .expect("graveyard exile cost should produce ExileForCost");
+
+        match result {
+            WaitingFor::ExileForCost {
+                player,
+                zone,
+                count,
+                cards,
+                ..
+            } => {
+                assert_eq!(player, caster);
+                assert_eq!(zone, ExileCostSourceZone::Graveyard);
+                assert_eq!(count, 1);
+                assert!(
+                    cards.contains(&blue_card),
+                    "blue graveyard card must be eligible: {cards:?}"
+                );
+                assert!(
+                    !cards.contains(&red_card),
+                    "non-blue graveyard card must be filtered out: {cards:?}"
+                );
+                assert!(
+                    !cards.contains(&source_id),
+                    "cast source itself must never be eligible: {cards:?}"
+                );
+            }
+            other => panic!("expected ExileForCost, got {other:?}"),
+        }
     }
 }

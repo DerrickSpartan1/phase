@@ -4,7 +4,7 @@ use std::sync::Arc;
 use crate::types::game_state::{GameState, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
-use crate::types::zones::Zone;
+use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use super::players;
 use super::turn_control;
@@ -210,7 +210,7 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         ref pending_cast,
     } = state.waiting_for
     {
-        if zone == Zone::Hand && !can_view_private_for_player(player) {
+        if zone == ExileCostSourceZone::Hand && !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::ExileForCost {
                 player,
                 zone,
@@ -315,7 +315,7 @@ mod tests {
     use crate::types::game_state::{CastingVariant, PendingCast};
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
-    use crate::types::zones::Zone;
+    use crate::types::zones::{ExileCostSourceZone, Zone};
 
     fn dummy_pending_cast(
         object_id: ObjectId,
@@ -541,7 +541,7 @@ mod tests {
         let pending = dummy_pending_cast(ObjectId(50), CardId(99), PlayerId(1));
         state.waiting_for = WaitingFor::ExileForCost {
             player: PlayerId(1),
-            zone: Zone::Hand,
+            zone: ExileCostSourceZone::Hand,
             count: 1,
             cards: vec![card_id],
             pending_cast: pending,
@@ -557,7 +557,7 @@ mod tests {
                 player,
                 ..
             } => {
-                assert_eq!(zone, Zone::Hand);
+                assert_eq!(zone, ExileCostSourceZone::Hand);
                 assert_eq!(cards, vec![card_id]);
                 assert_eq!(count, 1);
                 assert_eq!(player, PlayerId(1));
@@ -575,7 +575,7 @@ mod tests {
                 player,
                 pending_cast,
             } => {
-                assert_eq!(zone, Zone::Hand);
+                assert_eq!(zone, ExileCostSourceZone::Hand);
                 assert_eq!(cards, vec![ObjectId(0)]);
                 assert_eq!(count, 1);
                 assert_eq!(player, PlayerId(1));
@@ -601,7 +601,7 @@ mod tests {
         let pending = dummy_pending_cast(ObjectId(50), CardId(99), PlayerId(1));
         state.waiting_for = WaitingFor::ExileForCost {
             player: PlayerId(1),
-            zone: Zone::Graveyard,
+            zone: ExileCostSourceZone::Graveyard,
             count: 1,
             cards: vec![card_id],
             pending_cast: pending,
@@ -610,7 +610,7 @@ mod tests {
         let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));
         match filtered_opp.waiting_for {
             WaitingFor::ExileForCost { zone, cards, .. } => {
-                assert_eq!(zone, Zone::Graveyard);
+                assert_eq!(zone, ExileCostSourceZone::Graveyard);
                 assert_eq!(
                     cards,
                     vec![card_id],

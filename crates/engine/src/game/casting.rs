@@ -15,7 +15,7 @@ use crate::types::player::PlayerId;
 use crate::types::statics::{
     ActivationExemption, CastFrequency, CastingProhibitionCondition, ProhibitionScope, StaticMode,
 };
-use crate::types::zones::Zone;
+use crate::types::zones::{ExileCostSourceZone, Zone};
 
 use std::collections::HashSet;
 
@@ -3419,21 +3419,20 @@ pub(crate) fn find_eligible_discard_targets(
 
 /// CR 601.2b + CR 601.2h: Eligible cards for an `AbilityCost::Exile` payment
 /// whose `zone` is `Hand` (pitch spells) or `Graveyard` (escape, CR 702.138a).
-/// The cast source itself is never eligible.
+/// The cast source itself is never eligible. The cost's `TargetFilter` is
+/// applied uniformly in both branches — escape today carries no filter, but
+/// any future graveyard-source exile cost with a filter relies on this.
 pub(crate) fn find_eligible_exile_for_cost_targets(
     state: &GameState,
     player: PlayerId,
     source: ObjectId,
-    zone: Zone,
+    zone: ExileCostSourceZone,
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
     match zone {
-        Zone::Hand => find_eligible_hand_cost_targets(state, player, source, filter),
-        Zone::Graveyard => {
-            // CR 702.138a: Escape eligibility is "other cards in your graveyard"
-            // — the cost's filter is unused at this layer (preserved from the
-            // pre-refactor inline iteration).
-            let _ = filter;
+        ExileCostSourceZone::Hand => find_eligible_hand_cost_targets(state, player, source, filter),
+        ExileCostSourceZone::Graveyard => {
+            let ctx = super::filter::FilterContext::from_source(state, source);
             state
                 .players
                 .get(player.0 as usize)
@@ -3441,12 +3440,16 @@ pub(crate) fn find_eligible_exile_for_cost_targets(
                     p.graveyard
                         .iter()
                         .copied()
-                        .filter(|&id| id != source)
+                        .filter(|&id| {
+                            id != source
+                                && filter.is_none_or(|f| {
+                                    super::filter::matches_target_filter(state, id, f, &ctx)
+                                })
+                        })
                         .collect()
                 })
                 .unwrap_or_default()
         }
-        _ => unreachable!("ExileForCost only supports Hand or Graveyard"),
     }
 }
 
@@ -9244,7 +9247,7 @@ mod tests {
         assert!(matches!(
             waiting,
             WaitingFor::ExileForCost {
-                zone: Zone::Graveyard,
+                zone: ExileCostSourceZone::Graveyard,
                 count: 3,
                 ..
             }

@@ -24,7 +24,7 @@ use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
 use super::player::{Player, PlayerId};
 use super::proposed_event::{ProposedEvent, ReplacementId};
-use super::zones::Zone;
+use super::zones::{ExileCostSourceZone, Zone};
 
 use crate::game::combat::{AttackTarget, CombatState};
 use crate::game::deck_loading::DeckEntry;
@@ -1361,8 +1361,9 @@ pub enum WaitingFor {
     ExileForCost {
         player: PlayerId,
         /// Source zone for the exile cost — `Hand` (pitch spells) or
-        /// `Graveyard` (escape).
-        zone: Zone,
+        /// `Graveyard` (escape). Narrow type makes invalid zones
+        /// unrepresentable; see `ExileCostSourceZone`.
+        zone: ExileCostSourceZone,
         /// How many cards to exile.
         count: usize,
         /// Eligible cards in `zone` — excludes the spell being cast.
@@ -3239,14 +3240,14 @@ mod tests {
         }));
         variants.push(Box::new(WaitingFor::ExileForCost {
             player: PlayerId(0),
-            zone: Zone::Hand,
+            zone: ExileCostSourceZone::Hand,
             count: 1,
             cards: vec![ObjectId(1)],
             pending_cast: dummy_pending(),
         }));
         variants.push(Box::new(WaitingFor::ExileForCost {
             player: PlayerId(0),
-            zone: Zone::Graveyard,
+            zone: ExileCostSourceZone::Graveyard,
             count: 1,
             cards: vec![ObjectId(1)],
             pending_cast: dummy_pending(),

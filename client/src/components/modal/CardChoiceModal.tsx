@@ -1430,9 +1430,18 @@ function ExileForCostModal({
 }
 
 function ExileForCostDispatch({ data }: { data: ExileForCost["data"] }) {
-  const isHand = data.zone === "Hand";
-  const title = isHand ? "Alternative cost" : "Escape";
-  const sourceLabel = isHand ? "your hand" : "your graveyard";
+  let title: string;
+  let sourceLabel: string;
+  switch (data.zone) {
+    case "Hand":
+      title = "Alternative cost";
+      sourceLabel = "your hand";
+      break;
+    case "Graveyard":
+      title = "Escape";
+      sourceLabel = "your graveyard";
+      break;
+  }
   return (
     <ExileForCostModal
       cards={data.cards}
