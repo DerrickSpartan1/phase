@@ -242,11 +242,13 @@ pub fn resolve_all(
             continue;
         }
 
-        // CR 405.2: Find the (possibly most-recent) stack entry for this id.
-        let stack_idx = state
-            .stack
-            .iter()
-            .rposition(|e| e.id == obj_id || e.source_id == obj_id);
+        // CR 405.2: Look up the stack entry by its own id only. The
+        // `matching` set was populated from `entry.id`, so a `source_id`
+        // fallback (used in the single-target resolver to bridge a target's
+        // ObjectId to its parent permanent) would match the wrong entry
+        // when several stack entries share a `source_id` (e.g., two
+        // activated abilities of the same permanent).
+        let stack_idx = state.stack.iter().position(|e| e.id == obj_id);
         let Some(idx) = stack_idx else { continue };
 
         let is_spell = matches!(state.stack[idx].kind, StackEntryKind::Spell { .. });
