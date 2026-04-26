@@ -8,7 +8,7 @@ import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
 import { ArtCropCard } from "../card/ArtCropCard.tsx";
 import { CardImage } from "../card/CardImage.tsx";
-import { AttachmentChipRow } from "./AttachmentChipRow.tsx";
+import { AttachmentStack } from "./AttachmentStack.tsx";
 import { PTBox } from "./PTBox.tsx";
 import { useCardHover } from "../../hooks/useCardHover.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
@@ -395,12 +395,12 @@ export const PermanentCard = memo(function PermanentCard({ objectId }: Permanent
         </>
       )}
 
-      {/* Attached Equipment / Auras / etc. summarized as chips along the
-          bottom edge of the host. Rendered outside the art-crop/full-card
-          ternary so the indicator is visible in both display modes —
-          otherwise art-crop users see no attachment indicator at all
-          (the support-row card was removed by the dedup work in df51a144e). */}
-      {obj.attachments.length > 0 && <AttachmentChipRow objectIds={obj.attachments} />}
+      {/* Attached Equipment / Auras / etc. peek above the host as staggered
+          mini-cards so the player sees what's attached, not just an abstract
+          glyph. Rendered outside the art-crop/full-card ternary so the
+          indicator is visible in both display modes (the support-row card
+          was removed by the dedup work in df51a144e). */}
+      {obj.attachments.length > 0 && <AttachmentStack objectIds={obj.attachments} />}
 
     </motion.div>
   );
