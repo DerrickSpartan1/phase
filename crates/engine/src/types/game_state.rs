@@ -1350,27 +1350,22 @@ pub enum WaitingFor {
         choice: ManaChoicePrompt,
         pending_mana_ability: Box<PendingManaAbility>,
     },
-    /// CR 702.138a: Player must choose cards to exile from graveyard as escape cost.
-    ExileFromGraveyardForCost {
-        player: PlayerId,
-        /// How many cards to exile.
-        count: usize,
-        /// Eligible graveyard cards — excludes the escape card itself.
-        cards: Vec<ObjectId>,
-        /// The pending cast to resume after the exile is complete.
-        pending_cast: Box<PendingCast>,
-    },
     /// CR 118.9a + CR 601.2b + CR 601.2h: Player must choose cards to exile from
-    /// hand as part of an alternative or additional casting cost (Force of Will,
-    /// Force of Negation, Force of Vigor, Misdirection, Unmask, Mindbreak Trap,
-    /// etc.). CR 118.9a authorizes alternative costs; CR 601.2b covers cost
-    /// announcement; CR 601.2h covers payment. Eligibility is pre-filtered against
-    /// the cost's `TargetFilter`; the spell being cast is excluded.
-    ExileFromHandForCost {
+    /// `zone` as part of an alternative or additional casting cost. Used by both
+    /// escape (CR 702.138a, `zone = Graveyard`) and pitch spells such as Force
+    /// of Will, Force of Negation, Force of Vigor, Misdirection, Unmask, and
+    /// Mindbreak Trap (CR 118.9a, `zone = Hand`). CR 118.9a authorizes
+    /// alternative costs; CR 601.2b covers cost announcement; CR 601.2h covers
+    /// payment. Eligibility is pre-filtered against the cost's `TargetFilter`;
+    /// the spell being cast is excluded.
+    ExileForCost {
         player: PlayerId,
+        /// Source zone for the exile cost — `Hand` (pitch spells) or
+        /// `Graveyard` (escape).
+        zone: Zone,
         /// How many cards to exile.
         count: usize,
-        /// Eligible cards in hand — excludes the spell being cast.
+        /// Eligible cards in `zone` — excludes the spell being cast.
         cards: Vec<ObjectId>,
         /// The pending cast to resume after the exile is complete.
         pending_cast: Box<PendingCast>,
@@ -1751,8 +1746,7 @@ impl WaitingFor {
             | WaitingFor::ExileFromBattlefieldForManaAbility { player, .. }
             | WaitingFor::PayManaAbilityMana { player, .. }
             | WaitingFor::ChooseManaColor { player, .. }
-            | WaitingFor::ExileFromGraveyardForCost { player, .. }
-            | WaitingFor::ExileFromHandForCost { player, .. }
+            | WaitingFor::ExileForCost { player, .. }
             | WaitingFor::CollectEvidenceChoice { player, .. }
             | WaitingFor::HarmonizeTapChoice { player, .. }
             | WaitingFor::OptionalEffectChoice { player, .. }
@@ -1817,8 +1811,7 @@ impl WaitingFor {
             | WaitingFor::ReturnToHandForCost { pending_cast, .. }
             | WaitingFor::BlightChoice { pending_cast, .. }
             | WaitingFor::TapCreaturesForSpellCost { pending_cast, .. }
-            | WaitingFor::ExileFromGraveyardForCost { pending_cast, .. }
-            | WaitingFor::ExileFromHandForCost { pending_cast, .. }
+            | WaitingFor::ExileForCost { pending_cast, .. }
             | WaitingFor::HarmonizeTapChoice { pending_cast, .. } => Some(pending_cast),
             WaitingFor::CollectEvidenceChoice { resume, .. } => match resume.as_ref() {
                 CollectEvidenceResume::Casting { pending_cast } => Some(pending_cast),
@@ -3244,8 +3237,16 @@ mod tests {
             cards: vec![ObjectId(1)],
             pending_cast: dummy_pending(),
         }));
-        variants.push(Box::new(WaitingFor::ExileFromHandForCost {
+        variants.push(Box::new(WaitingFor::ExileForCost {
             player: PlayerId(0),
+            zone: Zone::Hand,
+            count: 1,
+            cards: vec![ObjectId(1)],
+            pending_cast: dummy_pending(),
+        }));
+        variants.push(Box::new(WaitingFor::ExileForCost {
+            player: PlayerId(0),
+            zone: Zone::Graveyard,
             count: 1,
             cards: vec![ObjectId(1)],
             pending_cast: dummy_pending(),
@@ -3310,7 +3311,7 @@ mod tests {
             mana_reduction: ManaCost::zero(),
             pending_cast: dummy_pending(),
         }));
-        assert_eq!(variants.len(), 29);
+        assert_eq!(variants.len(), 30);
     }
 
     #[test]

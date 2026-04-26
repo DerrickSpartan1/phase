@@ -421,11 +421,17 @@ pub(crate) fn handle_tap_creatures_for_spell_cost(
     }
 }
 
-/// CR 702.138a: Escape cost requires exiling other cards from your graveyard.
-/// Complete the exile-from-graveyard cost after player selection.
-pub(crate) fn handle_exile_from_graveyard_for_cost(
+/// CR 118.9a + CR 601.2b + CR 601.2h: Complete the exile-for-cost cost after
+/// player selection. Covers escape (CR 702.138a, `zone = Graveyard`) and
+/// pitch spells (Force of Will and the rest of the pitch-spell family,
+/// `zone = Hand`). CR 118.9a authorizes alternative costs; CR 601.2b covers
+/// cost announcement; CR 601.2h covers payment. The only zone-specific branch
+/// is the "still in zone" re-validation against the chosen cards.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn handle_exile_for_cost(
     state: &mut GameState,
     player: PlayerId,
+    zone: Zone,
     pending: PendingCast,
     expected: usize,
     legal_cards: &[ObjectId],
@@ -447,78 +453,20 @@ pub(crate) fn handle_exile_from_graveyard_for_cost(
         }
     }
 
-    // Re-validate: chosen cards must still be in graveyard
+    // Re-validate: chosen cards must still be in the cost's source zone.
     for &id in chosen {
-        let still_in_graveyard = state
+        let still_in_zone = state
             .players
             .get(player.0 as usize)
-            .is_some_and(|p| p.graveyard.contains(&id));
-        if !still_in_graveyard {
-            return Err(EngineError::InvalidAction(
-                "Selected card is no longer in graveyard".to_string(),
-            ));
-        }
-    }
-
-    // Exile each chosen card
-    for &id in chosen {
-        super::zones::move_to_zone(state, id, Zone::Exile, events);
-    }
-
-    pay_and_push(
-        state,
-        player,
-        pending.object_id,
-        pending.card_id,
-        pending.ability,
-        &pending.cost,
-        pending.casting_variant,
-        pending.distribute,
-        pending.origin_zone,
-        events,
-    )
-}
-
-/// CR 118.9a + CR 601.2b + CR 601.2h: Complete the exile-from-hand cost after
-/// player selection (Force of Will and the rest of the pitch-spell family).
-/// CR 118.9a authorizes alternative costs; CR 601.2b covers cost announcement;
-/// CR 601.2h covers payment. Mirrors `handle_exile_from_graveyard_for_cost` —
-/// the only difference is the source zone (hand vs. graveyard), which is
-/// enforced by the eligibility re-check.
-pub(crate) fn handle_exile_from_hand_for_cost(
-    state: &mut GameState,
-    player: PlayerId,
-    pending: PendingCast,
-    expected: usize,
-    legal_cards: &[ObjectId],
-    chosen: &[ObjectId],
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    if chosen.len() != expected {
-        return Err(EngineError::InvalidAction(format!(
-            "Must exile exactly {} card(s), got {}",
-            expected,
-            chosen.len()
-        )));
-    }
-    for id in chosen {
-        if !legal_cards.contains(id) {
-            return Err(EngineError::InvalidAction(
-                "Selected card not eligible for exile".to_string(),
-            ));
-        }
-    }
-
-    // Re-validate: chosen cards must still be in hand
-    for &id in chosen {
-        let still_in_hand = state
-            .players
-            .get(player.0 as usize)
-            .is_some_and(|p| p.hand.contains(&id));
-        if !still_in_hand {
-            return Err(EngineError::InvalidAction(
-                "Selected card is no longer in hand".to_string(),
-            ));
+            .is_some_and(|p| match zone {
+                Zone::Hand => p.hand.contains(&id),
+                Zone::Graveyard => p.graveyard.contains(&id),
+                _ => unreachable!("ExileForCost only supports Hand or Graveyard"),
+            });
+        if !still_in_zone {
+            return Err(EngineError::InvalidAction(format!(
+                "Selected card is no longer in {zone:?}"
+            )));
         }
     }
 
@@ -1241,55 +1189,30 @@ fn pay_additional_cost(
         }
         AbilityCost::Exile {
             count,
-            zone: Some(Zone::Hand),
+            zone: Some(zone @ (Zone::Hand | Zone::Graveyard)),
             ref filter,
         } => {
-            // CR 118.9a + CR 601.2b + CR 601.2h: Exile N cards from hand as
-            // part of an alternative or additional casting cost (Force of Will,
-            // Force of Negation, Misdirection, Unmask, etc.).
-            // Eligibility is filtered by the cost's `TargetFilter`.
-            let eligible = super::casting::find_eligible_exile_from_hand_targets(
+            // CR 118.9a + CR 601.2b + CR 601.2h: Exile N cards from `zone` as
+            // part of an alternative or additional casting cost. Covers escape
+            // (CR 702.138a, graveyard) and pitch spells (Force of Will, Force
+            // of Negation, Misdirection, Unmask, etc., hand). Eligibility is
+            // filtered by the cost's `TargetFilter`; the cast source itself is
+            // always excluded.
+            let eligible = super::casting::find_eligible_exile_for_cost_targets(
                 state,
                 player,
                 pending.object_id,
+                zone,
                 filter.as_ref(),
             );
             if eligible.len() < count as usize {
-                return Err(EngineError::ActionNotAllowed(
-                    "Not enough eligible cards in hand to exile".to_string(),
-                ));
+                return Err(EngineError::ActionNotAllowed(format!(
+                    "Not enough eligible cards in {zone:?} to exile"
+                )));
             }
-            return Ok(WaitingFor::ExileFromHandForCost {
+            return Ok(WaitingFor::ExileForCost {
                 player,
-                count: count as usize,
-                cards: eligible,
-                pending_cast: Box::new(pending),
-            });
-        }
-        AbilityCost::Exile {
-            count,
-            zone: Some(Zone::Graveyard),
-            ..
-        } => {
-            // CR 702.138a: Escape — exile N other cards from graveyard.
-            let eligible: Vec<ObjectId> = state
-                .players
-                .get(player.0 as usize)
-                .map(|p| {
-                    p.graveyard
-                        .iter()
-                        .copied()
-                        .filter(|id| *id != pending.object_id)
-                        .collect()
-                })
-                .unwrap_or_default();
-            if eligible.len() < count as usize {
-                return Err(EngineError::ActionNotAllowed(
-                    "Not enough cards in graveyard for Escape cost".into(),
-                ));
-            }
-            return Ok(WaitingFor::ExileFromGraveyardForCost {
-                player,
+                zone,
                 count: count as usize,
                 cards: eligible,
                 pending_cast: Box::new(pending),
@@ -4587,8 +4510,8 @@ mod tests {
     }
 
     /// CR 601.2b + CR 601.2h: `AbilityCost::Exile { zone: Some(Hand), filter }`
-    /// must surface as a `WaitingFor::ExileFromHandForCost` carrying only
-    /// filter-matching cards from the caster's hand, with the cast source
+    /// must surface as a `WaitingFor::ExileForCost { zone: Hand, .. }` carrying
+    /// only filter-matching cards from the caster's hand, with the cast source
     /// itself excluded. Building-block-level test — covers every pitch spell
     /// (Force of Will, Force of Negation, Force of Vigor, Misdirection,
     /// Unmask, Mindbreak Trap, …), not just one card.
@@ -4684,16 +4607,18 @@ mod tests {
             pending,
             &mut events,
         )
-        .expect("pitch cost should produce ExileFromHandForCost");
+        .expect("pitch cost should produce ExileForCost");
 
         match result {
-            WaitingFor::ExileFromHandForCost {
+            WaitingFor::ExileForCost {
                 player,
+                zone,
                 count,
                 cards,
                 ..
             } => {
                 assert_eq!(player, caster);
+                assert_eq!(zone, Zone::Hand);
                 assert_eq!(count, 1);
                 assert!(
                     cards.contains(&blue_card),
@@ -4708,7 +4633,7 @@ mod tests {
                     "cast source itself must never be eligible: {cards:?}"
                 );
             }
-            other => panic!("expected ExileFromHandForCost, got {other:?}"),
+            other => panic!("expected ExileForCost, got {other:?}"),
         }
     }
 
@@ -4799,12 +4724,12 @@ mod tests {
         );
     }
 
-    /// CR 601.2b + CR 601.2h: `handle_exile_from_hand_for_cost` must reject a
-    /// selection whose length differs from the required count and an attempt
-    /// to exile a card that is not in the legal-cards list. These guards keep
-    /// the pitch flow from accepting illegal payments.
+    /// CR 601.2b + CR 601.2h: `handle_exile_for_cost` must reject a selection
+    /// whose length differs from the required count and an attempt to exile a
+    /// card that is not in the legal-cards list. These guards keep the pitch
+    /// flow from accepting illegal payments.
     #[test]
-    fn handle_exile_from_hand_for_cost_rejects_wrong_count() {
+    fn handle_exile_for_cost_rejects_wrong_count() {
         use crate::game::zones::create_object;
 
         let mut state = GameState::new_two_player(42);
@@ -4854,9 +4779,10 @@ mod tests {
 
         // Exactly one card is required. Selecting two must fail.
         let mut events = Vec::new();
-        let result = handle_exile_from_hand_for_cost(
+        let result = handle_exile_for_cost(
             &mut state,
             caster,
+            Zone::Hand,
             pending.clone(),
             1,
             &[blue_a, blue_b],
@@ -4870,7 +4796,7 @@ mod tests {
     }
 
     #[test]
-    fn handle_exile_from_hand_for_cost_rejects_illegal_selection() {
+    fn handle_exile_for_cost_rejects_illegal_selection() {
         use crate::game::zones::create_object;
 
         let mut state = GameState::new_two_player(42);
@@ -4921,9 +4847,10 @@ mod tests {
         // `red` is not in the legal-cards list, so the cost handler must reject
         // it even though it is in hand and the count matches.
         let mut events = Vec::new();
-        let result = handle_exile_from_hand_for_cost(
+        let result = handle_exile_for_cost(
             &mut state,
             caster,
+            Zone::Hand,
             pending,
             1,
             &[blue],

@@ -232,38 +232,21 @@ pub(super) fn handle_pay_mana_ability_mana(
     )
 }
 
-pub(super) fn handle_exile_from_graveyard_for_cost(
+#[allow(clippy::too_many_arguments)]
+pub(super) fn handle_exile_for_cost(
     state: &mut GameState,
     player: PlayerId,
+    zone: Zone,
     pending_cast: PendingCast,
     count: usize,
     legal_cards: &[ObjectId],
     chosen: &[ObjectId],
     events: &mut Vec<GameEvent>,
 ) -> Result<WaitingFor, EngineError> {
-    casting_costs::handle_exile_from_graveyard_for_cost(
+    casting_costs::handle_exile_for_cost(
         state,
         player,
-        pending_cast,
-        count,
-        legal_cards,
-        chosen,
-        events,
-    )
-}
-
-pub(super) fn handle_exile_from_hand_for_cost(
-    state: &mut GameState,
-    player: PlayerId,
-    pending_cast: PendingCast,
-    count: usize,
-    legal_cards: &[ObjectId],
-    chosen: &[ObjectId],
-    events: &mut Vec<GameEvent>,
-) -> Result<WaitingFor, EngineError> {
-    casting_costs::handle_exile_from_hand_for_cost(
-        state,
-        player,
+        zone,
         pending_cast,
         count,
         legal_cards,

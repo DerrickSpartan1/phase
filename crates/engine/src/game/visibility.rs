@@ -200,18 +200,20 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     // one). Redact `cards` to opaque placeholders for viewers who cannot see
     // the caster's hand. `count` and `pending_cast` are public (CR 601.2 +
     // CR 408 — the spell on the stack is public information).
-    // Note: `ExileFromGraveyardForCost` is intentionally NOT redacted because
-    // the graveyard is a public zone (CR 400.2).
-    if let WaitingFor::ExileFromHandForCost {
+    // The graveyard variant of `ExileForCost` is intentionally NOT redacted
+    // because the graveyard is a public zone (CR 400.2).
+    if let WaitingFor::ExileForCost {
         player,
+        zone,
         count,
         ref cards,
         ref pending_cast,
     } = state.waiting_for
     {
-        if !can_view_private_for_player(player) {
-            filtered.waiting_for = WaitingFor::ExileFromHandForCost {
+        if zone == Zone::Hand && !can_view_private_for_player(player) {
+            filtered.waiting_for = WaitingFor::ExileForCost {
                 player,
+                zone,
                 count,
                 cards: cards.iter().map(|_| ObjectId(0)).collect(),
                 pending_cast: pending_cast.clone(),
@@ -537,8 +539,9 @@ mod tests {
             Zone::Hand,
         );
         let pending = dummy_pending_cast(ObjectId(50), CardId(99), PlayerId(1));
-        state.waiting_for = WaitingFor::ExileFromHandForCost {
+        state.waiting_for = WaitingFor::ExileForCost {
             player: PlayerId(1),
+            zone: Zone::Hand,
             count: 1,
             cards: vec![card_id],
             pending_cast: pending,
@@ -547,34 +550,74 @@ mod tests {
         // Caster sees the real ID.
         let filtered_self = filter_state_for_viewer(&state, PlayerId(1));
         match filtered_self.waiting_for {
-            WaitingFor::ExileFromHandForCost {
+            WaitingFor::ExileForCost {
                 cards,
+                zone,
                 count,
                 player,
                 ..
             } => {
+                assert_eq!(zone, Zone::Hand);
                 assert_eq!(cards, vec![card_id]);
                 assert_eq!(count, 1);
                 assert_eq!(player, PlayerId(1));
             }
-            other => panic!("expected ExileFromHandForCost, got {other:?}"),
+            other => panic!("expected ExileForCost, got {other:?}"),
         }
 
         // Opponent sees a placeholder, but `count` and `pending_cast` survive.
         let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));
         match filtered_opp.waiting_for {
-            WaitingFor::ExileFromHandForCost {
+            WaitingFor::ExileForCost {
                 cards,
+                zone,
                 count,
                 player,
                 pending_cast,
             } => {
+                assert_eq!(zone, Zone::Hand);
                 assert_eq!(cards, vec![ObjectId(0)]);
                 assert_eq!(count, 1);
                 assert_eq!(player, PlayerId(1));
                 assert_eq!(pending_cast.object_id, ObjectId(50));
             }
-            other => panic!("expected ExileFromHandForCost, got {other:?}"),
+            other => panic!("expected ExileForCost, got {other:?}"),
+        }
+    }
+
+    /// CR 400.2: Graveyard is a public zone. The escape eligibility list
+    /// (`ExileForCost { zone: Graveyard, .. }`) must NOT be redacted for
+    /// non-controller viewers.
+    #[test]
+    fn exile_for_cost_graveyard_is_not_redacted() {
+        let mut state = GameState::new(FormatConfig::standard(), 3, 42);
+        let card_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Escape Filler".to_string(),
+            Zone::Graveyard,
+        );
+        let pending = dummy_pending_cast(ObjectId(50), CardId(99), PlayerId(1));
+        state.waiting_for = WaitingFor::ExileForCost {
+            player: PlayerId(1),
+            zone: Zone::Graveyard,
+            count: 1,
+            cards: vec![card_id],
+            pending_cast: pending,
+        };
+
+        let filtered_opp = filter_state_for_viewer(&state, PlayerId(2));
+        match filtered_opp.waiting_for {
+            WaitingFor::ExileForCost { zone, cards, .. } => {
+                assert_eq!(zone, Zone::Graveyard);
+                assert_eq!(
+                    cards,
+                    vec![card_id],
+                    "graveyard variant must NOT be redacted"
+                );
+            }
+            other => panic!("expected ExileForCost, got {other:?}"),
         }
     }
 

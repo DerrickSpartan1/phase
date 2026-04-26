@@ -342,7 +342,7 @@ fn escape_card_not_castable_without_enough_graveyard() {
     );
 }
 
-/// CR 702.138: Full escape casting flow — CastSpell → ExileFromGraveyardForCost → SelectCards → ManaPayment.
+/// CR 702.138: Full escape casting flow — CastSpell → ExileForCost (Graveyard) → SelectCards → ManaPayment.
 #[test]
 fn escape_full_casting_flow() {
     let (mut runner, escape_card_id, escape_id, filler) = setup_escape_scenario(3);
@@ -360,14 +360,23 @@ fn escape_full_casting_flow() {
     assert!(
         matches!(
             result.waiting_for,
-            WaitingFor::ExileFromGraveyardForCost { count: 2, .. }
+            WaitingFor::ExileForCost {
+                zone: Zone::Graveyard,
+                count: 2,
+                ..
+            }
         ),
-        "Expected ExileFromGraveyardForCost, got {:?}",
+        "Expected ExileForCost (Graveyard), got {:?}",
         result.waiting_for
     );
 
     // Verify the escape card itself is NOT in the eligible list
-    if let WaitingFor::ExileFromGraveyardForCost { ref cards, .. } = result.waiting_for {
+    if let WaitingFor::ExileForCost {
+        zone: Zone::Graveyard,
+        ref cards,
+        ..
+    } = result.waiting_for
+    {
         assert!(
             !cards.contains(&escape_id),
             "Escape card itself should not be eligible for exile"
@@ -475,11 +484,19 @@ fn escape_variant_preserved_through_mana_payment() {
     // Should prompt for exile selection
     assert!(matches!(
         result.waiting_for,
-        WaitingFor::ExileFromGraveyardForCost { .. }
+        WaitingFor::ExileForCost {
+            zone: Zone::Graveyard,
+            ..
+        }
     ));
 
     // Select exile targets
-    if let WaitingFor::ExileFromGraveyardForCost { ref cards, .. } = result.waiting_for {
+    if let WaitingFor::ExileForCost {
+        zone: Zone::Graveyard,
+        ref cards,
+        ..
+    } = result.waiting_for
+    {
         runner
             .act(GameAction::SelectCards {
                 cards: cards[..2].to_vec(),
@@ -616,7 +633,7 @@ fn setup_pitch_scenario() -> (
     let card_id = runner.state().objects[&spell_id].card_id;
 
     // Tag colors on the runtime objects: pitch spell itself is blue (so the
-    // self-exclusion guard inside `find_eligible_exile_from_hand_targets` is
+    // self-exclusion guard inside `find_eligible_exile_for_cost_targets` is
     // exercised end-to-end), `blue_id` is blue (eligible), `red_id` is red.
     {
         let s = runner.state_mut();
@@ -634,7 +651,7 @@ fn setup_pitch_scenario() -> (
 }
 
 /// CR 118.9a + CR 601.2b + CR 601.2h: Full pitch flow — `CastSpell` →
-/// `ExileFromHandForCost` → `SelectCards` → spell on stack with the chosen card
+/// `ExileForCost` (Hand) → `SelectCards` → spell on stack with the chosen card
 /// exiled. Mirrors the escape-cost integration test (`escape_full_casting_flow`)
 /// for the hand-source variant.
 #[test]
@@ -661,7 +678,8 @@ fn pitch_full_casting_flow() {
     };
 
     let eligible = match &result.waiting_for {
-        WaitingFor::ExileFromHandForCost {
+        WaitingFor::ExileForCost {
+            zone: Zone::Hand,
             cards,
             count,
             player,
@@ -671,7 +689,7 @@ fn pitch_full_casting_flow() {
             assert_eq!(*count, 1);
             cards.clone()
         }
-        other => panic!("expected ExileFromHandForCost, got {other:?}"),
+        other => panic!("expected ExileForCost (Hand), got {other:?}"),
     };
     assert!(
         !eligible.contains(&spell_id),
@@ -717,7 +735,7 @@ fn pitch_full_casting_flow() {
     );
 }
 
-/// CR 601.2i: `CancelCast` from `ExileFromHandForCost` rolls the cast back —
+/// CR 601.2i: `CancelCast` from `ExileForCost` (Hand) rolls the cast back —
 /// no cards exiled, spell back in hand, priority restored.
 #[test]
 fn pitch_cancel_returns_to_priority() {
@@ -731,7 +749,7 @@ fn pitch_cancel_returns_to_priority() {
         })
         .expect("CastSpell should succeed");
 
-    // Advance past TargetSelection so we cancel from ExileFromHandForCost.
+    // Advance past TargetSelection so we cancel from ExileForCost (Hand).
     if matches!(cast_result.waiting_for, WaitingFor::TargetSelection { .. }) {
         runner
             .act(GameAction::SelectTargets {
@@ -743,9 +761,12 @@ fn pitch_cancel_returns_to_priority() {
     assert!(
         matches!(
             runner.state().waiting_for,
-            WaitingFor::ExileFromHandForCost { .. }
+            WaitingFor::ExileForCost {
+                zone: Zone::Hand,
+                ..
+            }
         ),
-        "expected ExileFromHandForCost before cancel, got {:?}",
+        "expected ExileForCost (Hand) before cancel, got {:?}",
         runner.state().waiting_for
     );
 

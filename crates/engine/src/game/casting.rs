@@ -3417,17 +3417,37 @@ pub(crate) fn find_eligible_discard_targets(
     find_eligible_hand_cost_targets(state, player, source, filter)
 }
 
-/// CR 601.2b + CR 601.2h: Eligible cards in hand for an `AbilityCost::Exile`
-/// payment whose `zone` is `Hand`. The cast source itself is never eligible
-/// (it is moved to the stack before costs are paid, but defense-in-depth
-/// keeps it out regardless).
-pub(crate) fn find_eligible_exile_from_hand_targets(
+/// CR 601.2b + CR 601.2h: Eligible cards for an `AbilityCost::Exile` payment
+/// whose `zone` is `Hand` (pitch spells) or `Graveyard` (escape, CR 702.138a).
+/// The cast source itself is never eligible.
+pub(crate) fn find_eligible_exile_for_cost_targets(
     state: &GameState,
     player: PlayerId,
     source: ObjectId,
+    zone: Zone,
     filter: Option<&TargetFilter>,
 ) -> Vec<ObjectId> {
-    find_eligible_hand_cost_targets(state, player, source, filter)
+    match zone {
+        Zone::Hand => find_eligible_hand_cost_targets(state, player, source, filter),
+        Zone::Graveyard => {
+            // CR 702.138a: Escape eligibility is "other cards in your graveyard"
+            // — the cost's filter is unused at this layer (preserved from the
+            // pre-refactor inline iteration).
+            let _ = filter;
+            state
+                .players
+                .get(player.0 as usize)
+                .map(|p| {
+                    p.graveyard
+                        .iter()
+                        .copied()
+                        .filter(|&id| id != source)
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        _ => unreachable!("ExileForCost only supports Hand or Graveyard"),
+    }
 }
 
 fn find_return_to_hand_cost(cost: &AbilityCost) -> Option<(u32, Option<&TargetFilter>)> {
@@ -9223,7 +9243,11 @@ mod tests {
             .expect("granted escape should start cost payment");
         assert!(matches!(
             waiting,
-            WaitingFor::ExileFromGraveyardForCost { count: 3, .. }
+            WaitingFor::ExileForCost {
+                zone: Zone::Graveyard,
+                count: 3,
+                ..
+            }
         ));
     }
 

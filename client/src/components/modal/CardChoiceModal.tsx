@@ -28,8 +28,7 @@ type DiscardToHandSize = Extract<WaitingFor, { type: "DiscardToHandSize" }>;
 type SacrificeForCost = Extract<WaitingFor, { type: "SacrificeForCost" }>;
 type ReturnToHandForCost = Extract<WaitingFor, { type: "ReturnToHandForCost" }>;
 type BlightChoice = Extract<WaitingFor, { type: "BlightChoice" }>;
-type ExileFromGraveyardForCost = Extract<WaitingFor, { type: "ExileFromGraveyardForCost" }>;
-type ExileFromHandForCost = Extract<WaitingFor, { type: "ExileFromHandForCost" }>;
+type ExileForCost = Extract<WaitingFor, { type: "ExileForCost" }>;
 type CollectEvidenceChoice = Extract<WaitingFor, { type: "CollectEvidenceChoice" }>;
 type HarmonizeTapChoice = Extract<WaitingFor, { type: "HarmonizeTapChoice" }>;
 type ChooseLegend = Extract<WaitingFor, { type: "ChooseLegend" }>;
@@ -144,12 +143,9 @@ export function CardChoiceModal() {
     case "SaddleMount":
       if (!canActForWaitingState) return null;
       return <SaddleModal data={waitingFor.data} />;
-    case "ExileFromGraveyardForCost":
+    case "ExileForCost":
       if (!canActForWaitingState) return null;
-      return <ExileFromGraveyardModal data={waitingFor.data} />;
-    case "ExileFromHandForCost":
-      if (!canActForWaitingState) return null;
-      return <ExileFromHandModal data={waitingFor.data} />;
+      return <ExileForCostDispatch data={waitingFor.data} />;
     case "CollectEvidenceChoice":
       if (!canActForWaitingState) return null;
       return <CollectEvidenceModal data={waitingFor.data} />;
@@ -1433,26 +1429,16 @@ function ExileForCostModal({
   );
 }
 
-function ExileFromGraveyardModal({ data }: { data: ExileFromGraveyardForCost["data"] }) {
+function ExileForCostDispatch({ data }: { data: ExileForCost["data"] }) {
+  const isHand = data.zone === "Hand";
+  const title = isHand ? "Alternative cost" : "Escape";
+  const sourceLabel = isHand ? "your hand" : "your graveyard";
   return (
     <ExileForCostModal
       cards={data.cards}
       count={data.count}
-      title="Escape"
-      subtitle={`Exile ${data.count} card${data.count > 1 ? "s" : ""} from your graveyard`}
-    />
-  );
-}
-
-// ── Exile from Hand Modal (pitch-spell alternative cost) ───────────────────
-
-function ExileFromHandModal({ data }: { data: ExileFromHandForCost["data"] }) {
-  return (
-    <ExileForCostModal
-      cards={data.cards}
-      count={data.count}
-      title="Alternative cost"
-      subtitle={`Exile ${data.count} card${data.count > 1 ? "s" : ""} from your hand`}
+      title={title}
+      subtitle={`Exile ${data.count} card${data.count > 1 ? "s" : ""} from ${sourceLabel}`}
     />
   );
 }

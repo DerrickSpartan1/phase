@@ -1105,18 +1105,23 @@ fn apply_action(
             &payment,
             &mut events,
         )?,
-        // CR 702.138a: Player selected cards to exile from graveyard as escape cost.
+        // CR 118.9a + CR 601.2b + CR 601.2h: Player selected cards to exile as
+        // part of an alternative or additional casting cost. Covers escape
+        // (CR 702.138a, graveyard) and pitch spells (Force of Will, Force of
+        // Negation, Misdirection, Unmask, etc., hand).
         (
-            WaitingFor::ExileFromGraveyardForCost {
+            WaitingFor::ExileForCost {
                 player,
+                zone,
                 count,
                 cards: legal_cards,
                 pending_cast,
             },
             GameAction::SelectCards { cards: chosen },
-        ) => engine_casting::handle_exile_from_graveyard_for_cost(
+        ) => engine_casting::handle_exile_for_cost(
             state,
             *player,
+            *zone,
             *pending_cast.clone(),
             *count,
             legal_cards,
@@ -1124,35 +1129,7 @@ fn apply_action(
             &mut events,
         )?,
         (
-            WaitingFor::ExileFromGraveyardForCost {
-                player,
-                pending_cast,
-                ..
-            },
-            GameAction::CancelCast,
-        ) => engine_casting::cancel_pending_cast(state, *player, pending_cast, &mut events),
-        // CR 601.2b + CR 601.2h: Player selected cards to exile from hand as
-        // part of an alternative or additional casting cost (Force of Will,
-        // Force of Negation, Misdirection, Unmask, etc.).
-        (
-            WaitingFor::ExileFromHandForCost {
-                player,
-                count,
-                cards: legal_cards,
-                pending_cast,
-            },
-            GameAction::SelectCards { cards: chosen },
-        ) => engine_casting::handle_exile_from_hand_for_cost(
-            state,
-            *player,
-            *pending_cast.clone(),
-            *count,
-            legal_cards,
-            &chosen,
-            &mut events,
-        )?,
-        (
-            WaitingFor::ExileFromHandForCost {
+            WaitingFor::ExileForCost {
                 player,
                 pending_cast,
                 ..

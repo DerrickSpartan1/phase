@@ -1087,8 +1087,7 @@ impl GameRunner {
             }
             WaitingFor::ChooseManaColor { .. } => "ChooseManaColor",
             WaitingFor::PayManaAbilityMana { .. } => "PayManaAbilityMana",
-            WaitingFor::ExileFromGraveyardForCost { .. } => "ExileFromGraveyardForCost",
-            WaitingFor::ExileFromHandForCost { .. } => "ExileFromHandForCost",
+            WaitingFor::ExileForCost { .. } => "ExileForCost",
             WaitingFor::CollectEvidenceChoice { .. } => "CollectEvidenceChoice",
             WaitingFor::HarmonizeTapChoice { .. } => "HarmonizeTapChoice",
             WaitingFor::DiscoverChoice { .. } => "DiscoverChoice",

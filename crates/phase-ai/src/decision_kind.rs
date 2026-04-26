@@ -96,8 +96,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::TapCreaturesForSpellCost { .. }
         | WaitingFor::TapCreaturesForManaAbility { .. }
         | WaitingFor::ChooseManaColor { .. }
-        | WaitingFor::ExileFromGraveyardForCost { .. }
-        | WaitingFor::ExileFromHandForCost { .. }
+        | WaitingFor::ExileForCost { .. }
         | WaitingFor::CollectEvidenceChoice { .. }
         | WaitingFor::HarmonizeTapChoice { .. }
         | WaitingFor::OptionalEffectChoice { .. }

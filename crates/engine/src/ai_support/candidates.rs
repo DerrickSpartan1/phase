@@ -1010,25 +1010,10 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
-        // CR 702.138a: AI selects cards to exile from graveyard as part of paying Escape cost.
-        WaitingFor::ExileFromGraveyardForCost {
-            player,
-            count,
-            cards,
-            ..
-        } => combinations(cards, *count)
-            .into_iter()
-            .map(|combo| {
-                candidate(
-                    GameAction::SelectCards { cards: combo },
-                    TacticalClass::Selection,
-                    Some(*player),
-                )
-            })
-            .collect(),
-        // CR 601.2b + CR 601.2h: AI selects cards to exile from hand as part of
-        // paying an alternative or additional casting cost (pitch spells).
-        WaitingFor::ExileFromHandForCost {
+        // CR 118.9a + CR 601.2b + CR 601.2h: AI selects cards to exile as part
+        // of paying an alternative or additional casting cost — escape
+        // (CR 702.138a, graveyard) or pitch spells (hand).
+        WaitingFor::ExileForCost {
             player,
             count,
             cards,
