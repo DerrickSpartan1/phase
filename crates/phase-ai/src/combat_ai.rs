@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use engine::game::combat::{can_block_pair, AttackTarget};
+use engine::game::commander::commander_lethal_headroom;
 use engine::game::players;
 use engine::types::ability::{Effect, QuantityExpr, QuantityRef, TargetFilter};
 use engine::types::card_type::CoreType;
@@ -528,14 +529,25 @@ pub fn choose_blockers_with_profile(
                 }
             }
 
+            // CR 903.10a: For commander attackers, the effective lethal threshold can be
+            // tighter than raw life. Use min(life, headroom) so we chump-stabilize when
+            // a 5-power commander would cross the 21-cmd-damage threshold.
+            let effective_life = commander_lethal_headroom(state, player, attacker_id)
+                .map(|h| p_life.min(h as i32))
+                .unwrap_or(p_life);
+
             let should_chump_stabilize = priority == 0
                 && damage_prevented >= 2
                 && matches!(objective, CombatObjective::Stabilize)
-                && p_life <= attacker_power * 3;
+                && effective_life <= attacker_power * 3;
             // Race chump: losing the damage race, block anything with power >= 2
             let should_chump_race =
                 priority == 0 && attacker_power >= 2 && matches!(objective, CombatObjective::Race);
-            if priority > 0 || should_chump_stabilize || should_chump_race {
+            // CR 903.10a: Skip chumps that don't actually save under commander damage
+            // (e.g. 1/1 in front of a 12/12 trample commander with 3 cmd-damage headroom).
+            let chump_unsafe = priority == 0
+                && commander_chump_unsafe(state, player, attacker_id, blocker_toughness);
+            if !chump_unsafe && (priority > 0 || should_chump_stabilize || should_chump_race) {
                 assignments.push((blocker_id, attacker_id));
                 used_blockers.push(blocker_id);
             }
@@ -734,9 +746,96 @@ pub fn choose_blockers_with_profile(
                 }
             }
         }
+
+        // CR 903.10a: Per-commander chump pass. Chumping commander A doesn't reduce
+        // lethality from commander B, so iterate each unblocked commander attacker
+        // independently and chump if a safe (non-trample-defeated) blocker exists.
+        for &(attacker_id, _) in &sorted_attackers {
+            if assignments.iter().any(|&(_, a)| a == attacker_id) {
+                continue; // Already blocked
+            }
+            let attacker = match state.objects.get(&attacker_id) {
+                Some(a) => a,
+                None => continue,
+            };
+            // CR 702.111b: Menace requires 2+ blockers — handled by gang-block, not chump.
+            if attacker.has_keyword(&Keyword::Menace) {
+                continue;
+            }
+            let Some(headroom) = commander_lethal_headroom(state, player, attacker_id) else {
+                continue; // Not a commander or no commander-damage threshold
+            };
+            let attacker_power = attacker.power.unwrap_or(0).max(0) as u32;
+            if attacker_power < headroom {
+                continue; // This commander can't push lethal commander damage this combat
+            }
+
+            // Find any legal blocker that's "safe" — i.e., not defeated by trample-over.
+            let safe_blocker = available_blockers.iter().find(|&&bid| {
+                if used_blockers.contains(&bid) {
+                    return false;
+                }
+                if !can_block_with_engine_map(state, bid, attacker_id, valid_block_targets) {
+                    return false;
+                }
+                let blocker_toughness = state
+                    .objects
+                    .get(&bid)
+                    .and_then(|b| b.toughness)
+                    .unwrap_or(1);
+                !commander_chump_unsafe(state, player, attacker_id, blocker_toughness)
+            });
+            if let Some(&blocker_id) = safe_blocker {
+                assignments.push((blocker_id, attacker_id));
+                used_blockers.push(blocker_id);
+            }
+            // No safe chump exists — accept the loss on this commander rather than
+            // wasting a creature that won't actually save the player. Continue to
+            // the next commander attacker so other independent threats can still chump.
+        }
     }
 
     assignments
+}
+
+/// CR 510.1c + CR 903.10a: Returns true when blocking `attacker` with a single creature of
+/// `chump_toughness` would NOT prevent commander-damage lethality. For non-commander attackers
+/// or non-commander formats, returns false (the chump is "safe" with respect to commander rules).
+///
+/// For trample attackers, the defending player still receives `(power - lethal_to_blocker)`
+/// worth of commander damage that counts toward the 21-damage threshold. A 1/1 chump in front
+/// of a 12/12 trample commander with only 3 headroom is unsafe — the player still loses to
+/// commander damage even though the block was legal.
+///
+/// CR 702.2c + CR 702.19b: A deathtouch+trample attacker only needs to assign 1 damage to a
+/// blocker before tramping the rest, so a 4/4 deathtouch+trample with 3 headroom defeats any
+/// chump (trample-through = 3, lethal = 1 due to deathtouch).
+fn commander_chump_unsafe(
+    state: &GameState,
+    defender: PlayerId,
+    attacker_id: ObjectId,
+    chump_toughness: i32,
+) -> bool {
+    let Some(headroom) = commander_lethal_headroom(state, defender, attacker_id) else {
+        return false;
+    };
+    let Some(attacker) = state.objects.get(&attacker_id) else {
+        return false;
+    };
+    let power = attacker.power.unwrap_or(0).max(0);
+    let trample_through = if attacker.has_keyword(&Keyword::Trample) {
+        // CR 702.2c: Deathtouch makes any nonzero damage lethal, so the trampler need only
+        // assign 1 to the blocker before sending excess to the player.
+        let lethal_to_blocker = if attacker.has_keyword(&Keyword::Deathtouch) {
+            1
+        } else {
+            chump_toughness
+        };
+        (power - lethal_to_blocker).max(0)
+    } else {
+        0
+    };
+    trample_through as u32 >= headroom
 }
 
 fn determine_attack_objective(
@@ -802,12 +901,42 @@ fn determine_block_objective(
 ) -> CombatObjective {
     let life = state.players[player.0 as usize].life;
     let incoming_power = sum_power(state, attacker_ids);
-    let threshold = incoming_power as f64 * profile.stabilize_bias;
 
-    // Immediate lethal: must block to survive this turn
-    if life as f64 <= threshold {
+    // CR 704.5a: A player with 0 or less life loses the game.
+    // Path A — life-loss path: if raw aggregate damage equals or exceeds raw life,
+    // we are facing immediate lethal this turn and must Stabilize unconditionally.
+    // The bias multiplier is meaningless here — bias was previously applied to this
+    // check and made low-bias profiles (Easy/VeryEasy at 0.8/0.9) miss exact lethal.
+    if incoming_power >= life {
         return CombatObjective::Stabilize;
     }
+
+    // CR 903.10a: A player loses if dealt 21+ combat damage from a single commander.
+    // Path B — per-commander path: if ANY single commander attacker can cross its
+    // remaining damage threshold this combat (accounting for prior commander damage),
+    // the position is commander-lethal regardless of life total. Independent of Path A
+    // because chumping commander A doesn't reduce lethality from commander B.
+    let cmd_path_lethal = attacker_ids.iter().any(|&aid| {
+        let Some(headroom) = commander_lethal_headroom(state, player, aid) else {
+            return false;
+        };
+        let attacker_power = state
+            .objects
+            .get(&aid)
+            .and_then(|o| o.power)
+            .unwrap_or(0)
+            .max(0) as u32;
+        attacker_power >= headroom
+    });
+    if cmd_path_lethal {
+        return CombatObjective::Stabilize;
+    }
+
+    // Bias-weighted near-lethal anticipation. With Path A handling exact lethal,
+    // these bands govern multi-turn pressure where a more defensive bias (>1.0)
+    // tells the AI to Stabilize earlier. Profiles below 1.0 still rely on Path A
+    // for the unconditional save; the bands here only widen the Stabilize window.
+    let threshold = incoming_power as f64 * profile.stabilize_bias;
 
     // Multi-turn lethality: dead in ~2-3 turns at this rate
     if life as f64 <= threshold * 2.5 {
@@ -1531,6 +1660,225 @@ mod tests {
         assert!(
             blockers.is_empty(),
             "Healthy defender should not chump block against non-lethal aggregate damage"
+        );
+    }
+
+    // --- Bug-fix regression tests for AI block decision pipeline ---
+
+    /// Bug 1 regression: Easy difficulty uses `stabilize_bias = 0.9`, which previously
+    /// scaled the lethal-detection threshold to `incoming_power * 0.9`. At exact-lethal
+    /// (life == incoming_power), the comparison `life <= 0.9 * incoming` failed and the
+    /// AI fell through to `PreserveAdvantage`, skipping the third-pass chump loop.
+    /// Path A in `determine_block_objective` now uses raw `incoming_power >= life`
+    /// unconditionally, regardless of profile bias.
+    #[test]
+    fn easy_difficulty_blocks_exact_lethal() {
+        let mut state = setup();
+        // 4× 5/5 = 20 power; defender at 20 life — exact lethal, must chump.
+        let a1 = add_creature(&mut state, PlayerId(0), "Bear1", 5, 5, vec![]);
+        let a2 = add_creature(&mut state, PlayerId(0), "Bear2", 5, 5, vec![]);
+        let a3 = add_creature(&mut state, PlayerId(0), "Bear3", 5, 5, vec![]);
+        let a4 = add_creature(&mut state, PlayerId(0), "Bear4", 5, 5, vec![]);
+        let chump = add_creature(&mut state, PlayerId(1), "Token", 1, 1, vec![]);
+        state.players[1].life = 20;
+
+        let easy_profile = AiProfile {
+            risk_tolerance: 0.8,
+            interaction_patience: 0.4,
+            stabilize_bias: 0.9,
+        };
+        let assignments = choose_blockers_with_profile(
+            &state,
+            PlayerId(1),
+            &[a1, a2, a3, a4],
+            &easy_profile,
+            None,
+        );
+
+        assert!(
+            !assignments.is_empty(),
+            "Easy AI must chump at exact lethal (Bug 1 regression)"
+        );
+        assert!(
+            assignments.iter().any(|&(b, _)| b == chump),
+            "1/1 token should chump-block under exact lethal on Easy difficulty"
+        );
+    }
+
+    /// Bug 2 regression: 5-power commander with 18 prior commander damage is
+    /// commander-lethal (5 ≥ 21−18) even when raw life (30) far exceeds incoming
+    /// damage. Path B in `determine_block_objective` recognizes this; the per-commander
+    /// chump pass assigns a blocker.
+    #[test]
+    fn commander_damage_triggers_chump_block() {
+        use engine::types::format::FormatConfig;
+        use engine::types::game_state::CommanderDamageEntry;
+
+        let mut state = setup();
+        state.format_config = FormatConfig::commander();
+        state.players[1].life = 30;
+
+        let commander = add_creature(&mut state, PlayerId(0), "Cmd", 5, 5, vec![]);
+        state.objects.get_mut(&commander).unwrap().is_commander = true;
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander,
+            damage: 18,
+        });
+        let chump = add_creature(&mut state, PlayerId(1), "Token", 1, 1, vec![]);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[commander]);
+
+        assert!(
+            assignments.contains(&(chump, commander)),
+            "AI must chump 5-power commander with 18 prior cmd damage (Bug 2 regression), \
+             got {:?}",
+            assignments
+        );
+    }
+
+    /// Bug 2 regression — disjunctive aggregation: two opposing commanders each at
+    /// 18 prior cmd damage attacking for 5 are independently commander-lethal.
+    /// Sum-of-min-eff-life would be 6, which is `< life=30` and would NOT trigger
+    /// Stabilize. The disjunctive Path B catches this via `attackers.iter().any(...)`.
+    #[test]
+    fn two_commanders_independent_lethality() {
+        use engine::types::format::FormatConfig;
+        use engine::types::game_state::CommanderDamageEntry;
+
+        let mut state = setup();
+        state.format_config = FormatConfig::commander();
+        state.players[1].life = 30;
+
+        let cmd_a = add_creature(&mut state, PlayerId(0), "CmdA", 5, 5, vec![]);
+        let cmd_b = add_creature(&mut state, PlayerId(0), "CmdB", 5, 5, vec![]);
+        state.objects.get_mut(&cmd_a).unwrap().is_commander = true;
+        state.objects.get_mut(&cmd_b).unwrap().is_commander = true;
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: cmd_a,
+            damage: 18,
+        });
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander: cmd_b,
+            damage: 18,
+        });
+        let chump_a = add_creature(&mut state, PlayerId(1), "TokenA", 1, 1, vec![]);
+        let chump_b = add_creature(&mut state, PlayerId(1), "TokenB", 1, 1, vec![]);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[cmd_a, cmd_b]);
+
+        let blocked_attackers: Vec<ObjectId> = assignments.iter().map(|&(_, a)| a).collect();
+        assert!(
+            blocked_attackers.contains(&cmd_a) && blocked_attackers.contains(&cmd_b),
+            "Both commanders must be chump-blocked independently — chumping one doesn't \
+             save from the other (got assignments: {:?}, chumps: [{:?}, {:?}])",
+            assignments,
+            chump_a,
+            chump_b
+        );
+    }
+
+    /// Bug 3 regression: in a 3-player pod, attackers heading to a player other
+    /// than the AI must not factor into the AI's block objective. The filter at
+    /// `search.rs:846/892` uses `defending_player == ai_player`. Verify here at
+    /// the `determine_block_objective` layer by passing a pre-filtered (empty)
+    /// attacker list — objective should not be Stabilize.
+    #[test]
+    fn multiplayer_attackers_targeting_others_dont_panic_ai() {
+        let mut state = setup_multiplayer(3);
+        // PlayerId(0) attacks PlayerId(2) with lethal; AI is PlayerId(1).
+        add_creature(&mut state, PlayerId(0), "Threat", 30, 30, vec![]);
+        add_creature(&mut state, PlayerId(1), "Sentinel", 1, 1, vec![]);
+        state.players[1].life = 5;
+
+        // Simulating the search.rs filter: AI sees an empty attacker list because
+        // no attacker targets PlayerId(1).
+        let assignments = choose_blockers(&state, PlayerId(1), &[]);
+
+        assert!(
+            assignments.is_empty(),
+            "With no attackers targeting the AI, no blockers should be assigned"
+        );
+    }
+
+    /// Bug 2 / B-R1 regression: a 12/12 trample commander with only 3 cmd-damage
+    /// headroom defeats a 1/1 chump (12 - 1 = 11 trample-through ≥ 3 headroom).
+    /// `commander_chump_unsafe` returns true; the per-commander chump pass skips
+    /// the assignment rather than wasting the creature for zero defensive value.
+    #[test]
+    fn trample_commander_skips_unsafe_chump() {
+        use engine::types::format::FormatConfig;
+        use engine::types::game_state::CommanderDamageEntry;
+
+        let mut state = setup();
+        state.format_config = FormatConfig::commander();
+        state.players[1].life = 30;
+
+        let commander = add_creature(
+            &mut state,
+            PlayerId(0),
+            "TrampleCmd",
+            12,
+            12,
+            vec![Keyword::Trample],
+        );
+        state.objects.get_mut(&commander).unwrap().is_commander = true;
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander,
+            damage: 18,
+        });
+        let chump = add_creature(&mut state, PlayerId(1), "Token", 1, 1, vec![]);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[commander]);
+
+        assert!(
+            !assignments.contains(&(chump, commander)),
+            "AI must NOT chump 1/1 in front of 12/12 trample commander with 3 headroom \
+             — trample-through (11) still crosses lethal cmd damage. Got: {:?}",
+            assignments
+        );
+    }
+
+    /// CR 702.2c + CR 702.19b: Deathtouch+trample needs only 1 damage assigned to a blocker
+    /// before tramping. A 4/4 deathtouch+trample commander with 3 headroom defeats a 3/3 chump
+    /// (trample-through = 4 - 1 = 3 ≥ headroom 3), even though without deathtouch the chump
+    /// would absorb everything (4 - 3 = 1, safe).
+    #[test]
+    fn deathtouch_trample_commander_skips_chump_that_would_be_safe_without_deathtouch() {
+        use engine::types::format::FormatConfig;
+        use engine::types::game_state::CommanderDamageEntry;
+
+        let mut state = setup();
+        state.format_config = FormatConfig::commander();
+        state.players[1].life = 30;
+
+        let commander = add_creature(
+            &mut state,
+            PlayerId(0),
+            "DTTrampleCmd",
+            4,
+            4,
+            vec![Keyword::Trample, Keyword::Deathtouch],
+        );
+        state.objects.get_mut(&commander).unwrap().is_commander = true;
+        state.commander_damage.push(CommanderDamageEntry {
+            player: PlayerId(1),
+            commander,
+            damage: 18,
+        });
+        let chump = add_creature(&mut state, PlayerId(1), "Bear", 3, 3, vec![]);
+
+        let assignments = choose_blockers(&state, PlayerId(1), &[commander]);
+
+        assert!(
+            !assignments.contains(&(chump, commander)),
+            "AI must NOT chump 3/3 in front of 4/4 deathtouch+trample commander with 3 headroom \
+             — trample-through (3) crosses lethal cmd damage because deathtouch makes 1 damage \
+             lethal to the blocker. Got: {:?}",
+            assignments
         );
     }
 

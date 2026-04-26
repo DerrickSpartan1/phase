@@ -843,7 +843,17 @@ pub(crate) fn deterministic_choice(
     } = &state.waiting_for
     {
         if let Some(combat) = &state.combat {
-            let attacker_ids: Vec<_> = combat.attackers.iter().map(|a| a.object_id).collect();
+            // CR 509.1: Blockers may only be declared against attackers attacking
+            // the defending player or a planeswalker/battle they control. In a
+            // multi-defender pod, `combat.attackers` carries attackers heading to
+            // every defender — filter to those targeting the AI before evaluating
+            // block objective and assignments.
+            let attacker_ids: Vec<_> = combat
+                .attackers
+                .iter()
+                .filter(|a| a.defending_player == ai_player)
+                .map(|a| a.object_id)
+                .collect();
             let assignments = choose_blockers_with_profile(
                 state,
                 ai_player,
@@ -889,7 +899,13 @@ fn deterministic_combat_choice(
     } = &state.waiting_for
     {
         if let Some(combat) = &state.combat {
-            let attacker_ids: Vec<_> = combat.attackers.iter().map(|a| a.object_id).collect();
+            // CR 509.1: Filter to attackers targeting the AI; see deterministic_choice.
+            let attacker_ids: Vec<_> = combat
+                .attackers
+                .iter()
+                .filter(|a| a.defending_player == ai_player)
+                .map(|a| a.object_id)
+                .collect();
             let assignments = choose_blockers_with_profile(
                 state,
                 ai_player,

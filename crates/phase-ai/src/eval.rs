@@ -232,25 +232,29 @@ pub fn threat_level_projected(
     // Hand size: more cards = more options
     let hand_score = (target_player.hand.len() as f64).min(7.0) / 7.0;
 
-    // Commander damage dealt to evaluator
-    let cmd_damage: u32 = state
-        .commander_damage
-        .iter()
-        .filter(|e| e.player == evaluator)
-        .filter(|e| {
+    // CR 903.10a: Loss only fires when a SINGLE commander reaches the threshold —
+    // accumulated damage across multiple commanders does not. Use the max progress
+    // ratio of any one of `target`'s commanders against `evaluator` so the threat
+    // signal tracks "closest single commander to the loss condition." Delegates to
+    // `commander_lethal_headroom` for the headroom math (single source of truth).
+    let cmd_threat = state
+        .format_config
+        .commander_damage_threshold
+        .map_or(0.0, |threshold| {
+            let threshold_f = f64::from(threshold);
             state
                 .objects
-                .get(&e.commander)
-                .map(|o| o.owner == target)
-                .unwrap_or(false)
-        })
-        .map(|e| e.damage)
-        .sum();
-    let cmd_threat = if let Some(threshold) = state.format_config.commander_damage_threshold {
-        (cmd_damage as f64 / threshold as f64).min(1.0)
-    } else {
-        0.0
-    };
+                .values()
+                .filter(|o| o.is_commander && o.owner == target)
+                .filter_map(|cmd_obj| {
+                    let headroom = engine::game::commander::commander_lethal_headroom(
+                        state, evaluator, cmd_obj.id,
+                    )?;
+                    let dealt = f64::from(u32::from(threshold).saturating_sub(headroom));
+                    Some((dealt / threshold_f).min(1.0))
+                })
+                .fold(0.0f64, f64::max)
+        });
 
     // Weighted combination
     board_score * 0.4 + life_ratio * 0.2 + hand_score * 0.15 + cmd_threat * 0.25
