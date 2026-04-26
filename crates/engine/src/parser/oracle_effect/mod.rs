@@ -3768,6 +3768,134 @@ fn try_parse_compound_player_object_damage(lower: &str) -> Option<ParsedEffectCl
     })
 }
 
+/// CR 120.3 + CR 119.3a: Compound object+player damage — type-first variant.
+/// Detects "deals N damage to each [type-phrase] and each player" and emits a
+/// single `Effect::DamageAll` carrying both the object filter and a
+/// `player_filter: Some(PlayerFilter::All)` so the resolver damages every
+/// matching creature AND every player from one batch (preserving simultaneous
+/// damage event semantics for replacement/prevention shields).
+///
+/// Mirrors `try_parse_compound_player_object_damage` but with the conjunction
+/// reversed: the first half names the object filter (with optional property
+/// suffix like "with flying" / "without flying" / "with horsemanship"), the
+/// second half is the player scope ("each player"). Without this gate the
+/// general compound splitter parses "each [type]" and silently drops the
+/// "and each player" continuation.
+///
+/// Cards: Pyrohemia, Pestilence, Earthquake, Hurricane, Inferno, Famine,
+/// Fire Tempest, Cave-In, Crypt Rats, Cloudthresher, Flamebreak, Devastate,
+/// Dakmor Plague, Dry Spell, Festering Evil, etc. (~30 cards).
+fn try_parse_compound_object_player_damage(lower: &str) -> Option<ParsedEffectClause> {
+    // Reuse the same verb+amount entry logic as the player-first variant.
+    let pos = lower.find("deals ").or_else(|| lower.find("deal "))?; // allow-noncombinator: positional verb search inside a variable-length subject prefix; tag("deals ") below is the actual dispatch.
+    let verb_len = if tag::<_, _, VerboseError<&str>>("deals ")
+        .parse(&lower[pos..])
+        .is_ok()
+    {
+        6
+    } else {
+        5
+    };
+    let after_lower = &lower[pos + verb_len..];
+
+    // Parse amount: "N damage to "
+    let (qty, after_amount) =
+        super::oracle_util::parse_count_expr(after_lower).and_then(|(qty, rest)| {
+            let (rest, _) = tag::<_, _, VerboseError<&str>>("damage").parse(rest).ok()?;
+            let rest = rest.trim_start();
+            let (rest, _) = tag::<_, _, VerboseError<&str>>("to ").parse(rest).ok()?;
+            Some((qty, rest))
+        })?;
+
+    // Must start with "each " (the object half of the conjunction).
+    let (after_each, _) = tag::<_, _, VerboseError<&str>>("each ")
+        .parse(after_amount)
+        .ok()?;
+
+    // Locate the " and each player" connector. take_until isolates the type-phrase
+    // prefix; the player suffix gates the compound shape and may carry a trailing
+    // period, comma, or independent continuation clause (e.g., Flamebreak:
+    // "and each player. Creatures dealt damage this way..."). After consuming the
+    // tag, the next char must be a clause boundary — anything else (e.g.,
+    // " who controls a white creature" on Disorder, " equal to ..." on Pompeii)
+    // means "each player" is a QUALIFIED player set, not the universal scope.
+    let (after_player, type_phrase) = take_until::<_, _, VerboseError<&str>>(" and each player")
+        .parse(after_each)
+        .ok()?;
+    let (after_player_tag, _) = tag::<_, _, VerboseError<&str>>(" and each player")
+        .parse(after_player)
+        .ok()?;
+
+    // CR 109.5: Reject qualified player phrases. Only accept clause-boundary
+    // characters (whitespace + punctuation) or end-of-string after "each player".
+    // " who", " equal", " that", " whose", and similar word continuations indicate
+    // a relative clause that restricts the player set — those cards are not part
+    // of this class.
+    if let Some(c) = after_player_tag.chars().next() {
+        if !(c.is_ascii_punctuation() || c == ' ') {
+            return None;
+        }
+        // Whitespace alone isn't enough — peek at the next word.
+        if c == ' ' {
+            let next = after_player_tag.trim_start();
+            // A bare trailing space + period/comma is fine (already covered by punctuation
+            // peek above), but " who/equal/that/whose/with..." is a qualifier.
+            // The only acceptable post-space content is another sentence (capitalized,
+            // started by punctuation), or the empty tail. We approximate with a tag
+            // probe over the known qualifier words.
+            let mut qualifier = alt((
+                tag::<_, _, VerboseError<&str>>("who "),
+                tag("whose "),
+                tag("that "),
+                tag("equal "),
+                tag("with "),
+                tag("without "),
+            ));
+            if qualifier.parse(next).is_ok() {
+                return None;
+            }
+        }
+    }
+
+    if type_phrase.is_empty() {
+        return None;
+    }
+
+    // Reject if the type-phrase itself contains a stray "and each " — that
+    // suggests a more complex N-way conjunction we don't yet handle.
+    if scan_contains_phrase(type_phrase, "and each") {
+        return None;
+    }
+
+    // Hand the "each [type-phrase]" slice to parse_target so property suffixes
+    // ("with flying", "without flying", "with horsemanship") are consumed
+    // natively. The full lower-case slice is fine because parse_target is
+    // case-insensitive and we only use the resulting filter, not the remainder.
+    let target_text = format!("each {type_phrase}");
+    let (object_filter, _rem) = parse_target(&target_text);
+
+    // Sanity: the parsed filter must reference at least one object type.
+    // If parse_target returned an empty filter, bail out so the general
+    // compound splitter gets a chance.
+    if matches!(&object_filter, TargetFilter::None) {
+        return None;
+    }
+
+    Some(ParsedEffectClause {
+        effect: Effect::DamageAll {
+            amount: qty,
+            target: object_filter,
+            player_filter: Some(PlayerFilter::All),
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+    })
+}
+
 fn try_split_damage_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
     if !scan_contains_phrase(&lower, "and") {
@@ -3778,6 +3906,13 @@ fn try_split_damage_compound(text: &str, ctx: &ParseContext) -> Option<ParsedEff
     // must be detected before the general compound splitter, because the "and" here connects
     // two damage targets (not two independent effects).
     if let Some(clause) = try_parse_compound_player_object_damage(&lower) {
+        return Some(clause);
+    }
+
+    // CR 120.3 + CR 119.3a: Same shape, type-first ordering — "each creature
+    // [with X | without X] and each player" (Pyrohemia / Earthquake / Hurricane
+    // class). Must run before the general split so the player half isn't dropped.
+    if let Some(clause) = try_parse_compound_object_player_damage(&lower) {
         return Some(clause);
     }
 
@@ -9382,6 +9517,100 @@ mod tests {
             other => {
                 panic!("expected DamageAll Or{{...}} with player_filter Opponent, got {other:?}")
             }
+        }
+    }
+
+    /// CR 120.3 + CR 119.3a: Pyrohemia / Pestilence class — "each creature and
+    /// each player" must emit a unified `DamageAll` carrying both the creature
+    /// filter and `player_filter: Some(PlayerFilter::All)`. Previously the
+    /// "and each player" half was silently dropped.
+    #[test]
+    fn effect_damage_compound_each_creature_and_each_player() {
+        let e = parse_effect("~ deals 1 damage to each creature and each player");
+        match e {
+            Effect::DamageAll {
+                amount: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Typed(tf),
+                player_filter: Some(PlayerFilter::All),
+            } => {
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)));
+                assert!(tf.properties.is_empty());
+            }
+            other => panic!("expected DamageAll{{Creature, player_filter=All}}, got {other:?}"),
+        }
+    }
+
+    /// Hurricane class — "each creature with flying and each player". The
+    /// property suffix on the type half must be preserved, and the player
+    /// filter must still be populated.
+    #[test]
+    fn effect_damage_compound_each_creature_with_flying_and_each_player() {
+        let e = parse_effect("~ deals X damage to each creature with flying and each player");
+        match e {
+            Effect::DamageAll {
+                amount: _,
+                target: TargetFilter::Typed(tf),
+                player_filter: Some(PlayerFilter::All),
+            } => {
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)));
+                assert!(!tf.properties.is_empty(), "expected flying property");
+            }
+            other => {
+                panic!("expected DamageAll{{Creature w/ flying, player_filter=All}}, got {other:?}")
+            }
+        }
+    }
+
+    /// Earthquake / Flamebreak class — "each creature without flying and each player".
+    #[test]
+    fn effect_damage_compound_each_creature_without_flying_and_each_player() {
+        let e = parse_effect("~ deals X damage to each creature without flying and each player");
+        match e {
+            Effect::DamageAll {
+                amount: _,
+                target: TargetFilter::Typed(tf),
+                player_filter: Some(PlayerFilter::All),
+            } => {
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)));
+                assert!(
+                    !tf.properties.is_empty(),
+                    "expected without-flying property"
+                );
+            }
+            other => panic!(
+                "expected DamageAll{{Creature w/o flying, player_filter=All}}, got {other:?}"
+            ),
+        }
+    }
+
+    /// Negative case: Disorder ("each white creature and each player who controls
+    /// a white creature") must NOT route through the compound parser, because
+    /// the player half is qualified by a relative clause. Falling through to the
+    /// general path is acceptable here — the queue's L9-13 fix targets the
+    /// universal "each player" form only.
+    #[test]
+    fn effect_damage_compound_qualified_player_rejected() {
+        let e = parse_effect(
+            "~ deals 2 damage to each white creature and each player who controls a white creature",
+        );
+        // The compound helper must bail; the result must NOT have player_filter
+        // set to PlayerFilter::All (which would damage every player including
+        // those without a white creature — wrong rules).
+        if let Effect::DamageAll {
+            player_filter: Some(PlayerFilter::All),
+            ..
+        } = &e
+        {
+            panic!("compound helper must bail on qualified 'each player who...': {e:?}");
         }
     }
 
