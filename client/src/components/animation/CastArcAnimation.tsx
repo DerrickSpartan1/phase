@@ -51,7 +51,6 @@ export function CastArcAnimation({
           <img
             src={src}
             alt={altText}
-            title={altText}
             style={{ width: "100%", height: "100%", objectFit: "cover" }}
           />
         )}
@@ -118,7 +117,6 @@ export function CastArcAnimation({
         <img
           src={src}
           alt={altText}
-          title={altText}
           style={{ width: "100%", height: "100%", objectFit: "cover" }}
         />
       )}

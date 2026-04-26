@@ -123,7 +123,6 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
               <img
                 src={src}
                 alt={altText}
-                title={altText}
                 draggable={false}
                 className="absolute inset-0 w-full h-full object-cover"
               />

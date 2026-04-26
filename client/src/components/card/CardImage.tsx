@@ -52,7 +52,6 @@ export function CardImage({
         className={`${baseClasses} bg-gray-700 shadow-md animate-pulse`}
         style={borderStyle ?? { border: "1px solid #4b5563" }}
         aria-label={`Loading ${cardName}`}
-        title={altText}
       />
     );
   }
@@ -62,7 +61,6 @@ export function CardImage({
       <img
         src={src}
         alt={altText}
-        title={altText}
         draggable={false}
         className={`${baseClasses} shadow-lg object-cover`}
         style={borderStyle ?? { border: "1px solid #4b5563" }}

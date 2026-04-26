@@ -104,7 +104,6 @@ function OpponentCardThumbnail({ cardId, cardName }: { cardId: ObjectId; cardNam
       <img
         src={src}
         alt={altText}
-        title={altText}
         className="rounded-lg border border-gray-600 shadow-md object-cover"
         style={cardStyle}
         draggable={false}

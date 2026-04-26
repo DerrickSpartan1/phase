@@ -216,7 +216,6 @@ const DrawerCard = memo(function DrawerCard({
         <img
           src={src}
           alt={altText}
-          title={altText}
           className="h-full w-full object-cover"
           draggable={false}
         />

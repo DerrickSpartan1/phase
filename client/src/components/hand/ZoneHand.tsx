@@ -228,9 +228,9 @@ function TopCardImage({ cardName }: { cardName: string }) {
   return (
     <div className="h-full w-full overflow-hidden rounded-lg border border-purple-400/60 shadow-md">
       {src ? (
-        <img src={src} alt={altText} title={altText} className="h-full w-full object-cover" draggable={false} />
+        <img src={src} alt={altText} className="h-full w-full object-cover" draggable={false} />
       ) : (
-        <div className="h-full w-full bg-gray-700" title={altText} />
+        <div className="h-full w-full bg-gray-700" />
       )}
     </div>
   );

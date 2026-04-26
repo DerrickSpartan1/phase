@@ -297,7 +297,6 @@ function MobilePreviewOverlay({
         <img
           src={src}
           alt={altText}
-          title={altText}
           draggable={false}
           onPointerDown={(e) => e.stopPropagation()}
           className="max-h-[calc(100dvh-2rem)] max-w-full rounded-lg object-contain shadow-2xl landscape:max-w-[45vw]"
@@ -343,7 +342,6 @@ function CardImagePreview({
     return (
       <div
         className={`${sizeClass} aspect-[5/7] rounded-[4%] border border-gray-600 bg-gray-700 shadow-2xl animate-pulse`}
-        title={altText}
       />
     );
   }
@@ -354,7 +352,6 @@ function CardImagePreview({
         <img
           src={src}
           alt={altText}
-          title={altText}
           className={`${sizeClass} object-cover`}
           draggable={false}
         />

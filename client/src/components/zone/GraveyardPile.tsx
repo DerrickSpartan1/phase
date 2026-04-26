@@ -20,7 +20,6 @@ function TopCard({ cardName }: { cardName: string }) {
     return (
       <div
         className="h-full w-full rounded-lg bg-gray-700 border border-gray-600"
-        title={altText}
       />
     );
   }
@@ -29,7 +28,6 @@ function TopCard({ cardName }: { cardName: string }) {
     <img
       src={src}
       alt={altText}
-      title={altText}
       className="h-full w-full rounded-lg object-cover"
       draggable={false}
     />

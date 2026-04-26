@@ -119,7 +119,6 @@ function CommanderCard({ commander }: { commander: GameObject }) {
           <img
             src={src}
             alt={altText}
-            title={altText}
             className="h-full w-full object-cover"
             draggable={false}
           />

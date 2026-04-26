@@ -229,7 +229,6 @@ function DeckStackCard({
           <img
             src={src}
             alt={altText}
-            title={altText}
             draggable={false}
             className="object-cover"
             style={{ height: CARD_HEIGHT, width: CARD_WIDTH }}

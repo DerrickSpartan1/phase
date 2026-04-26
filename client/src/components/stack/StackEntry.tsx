@@ -137,7 +137,6 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
           <img
             src={src}
             alt={altText}
-            title={altText}
             className="h-full w-full object-cover"
             draggable={false}
           />
