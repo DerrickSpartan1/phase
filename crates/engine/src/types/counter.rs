@@ -13,7 +13,7 @@ pub enum CounterType {
     /// battlefield indicates its defense. A battle with 0 defense is put into
     /// its owner's graveyard as a state-based action (CR 704.5v).
     Defense,
-    /// CR 122.1g: When a permanent with a stun counter would become untapped during its
+    /// CR 122.1d: When a permanent with a stun counter would become untapped during its
     /// controller's untap step, one stun counter is removed instead of untapping.
     Stun,
     /// CR 714.1: Lore counters track Saga chapter progression.
@@ -120,7 +120,10 @@ pub fn parse_counter_type(text: &str) -> CounterType {
             if let Some((_, kind)) = KEYWORD_COUNTERS.iter().find(|(name, _)| *name == lower) {
                 CounterType::Keyword(*kind)
             } else {
-                CounterType::Generic(other.to_string())
+                // Normalize generic counter names to lowercase so that sources that
+                // emit different cases (e.g. replacement parser emits "MINING", cost
+                // parser emits "mining") resolve to the same HashMap key at runtime.
+                CounterType::Generic(lower)
             }
         }
     }
