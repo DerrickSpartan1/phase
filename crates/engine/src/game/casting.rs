@@ -2702,13 +2702,27 @@ pub fn can_pay_cost_after_auto_tap(
     }
     let spell_meta = build_spell_meta(&simulated, player, source_id);
 
+    let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
     super::casting_costs::auto_tap_mana_sources(
         &mut simulated,
         player,
         cost,
-        &mut Vec::new(),
+        &mut tap_events,
         Some(source_id),
     );
+
+    // CR 605.1b: A `TapsForMana` triggered mana ability (Fertile Ground / Wild
+    // Growth / Utopia Sprawl class) resolves inline and adds bonus mana to the
+    // pool when the enchanted land is tapped for mana. The auto-tap helper
+    // emits the `ManaAdded` events but does not run the trigger pipeline; in
+    // the production action flow `run_post_action_pipeline` later processes
+    // them, but this affordability simulation is a one-shot clone — without an
+    // explicit pipeline run the aura's bonus mana would never reach the
+    // simulated pool, causing AI legal-actions to skip a cast that the player
+    // would actually be able to pay (e.g. Plains + Wild Growth → cost {1}{G}).
+    if !tap_events.is_empty() {
+        super::triggers::process_triggers(&mut simulated, &tap_events);
+    }
 
     let any_color = super::static_abilities::player_can_spend_as_any_color(&simulated, player);
     // CR 107.4f + CR 118.3 + CR 119.8: Include the caster's Phyrexian life
