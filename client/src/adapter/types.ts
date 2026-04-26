@@ -382,6 +382,14 @@ export interface GameObject {
   available_mana_pips?: ManaPip[];
   casting_permissions?: CastingPermission[];
   is_emblem?: boolean;
+  /**
+   * Image-lookup routing hint from the engine. "Card" → look up the image
+   * in the real-card database (default; also covers token-copies of real
+   * cards like Twinflame/Helm of the Host). "Token" → look up the image
+   * in Scryfall's generic-token database (Treasure, Spirit 1/1, etc.).
+   * Independent of `is_token` (which is the CR 111.1 game-rules concept).
+   */
+  display_source?: "Card" | "Token";
   is_commander?: boolean;
   commander_tax?: number;
   back_face?: {

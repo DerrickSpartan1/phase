@@ -1,4 +1,5 @@
 use crate::game::effects::counters::add_counter_with_replacement;
+use crate::game::game_object::DisplaySource;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
@@ -92,6 +93,7 @@ fn create_army_token(
 
     if let Some(obj) = state.objects.get_mut(&obj_id) {
         obj.is_token = true;
+        obj.display_source = DisplaySource::Token;
         obj.power = Some(0);
         obj.toughness = Some(0);
         obj.base_power = Some(0);

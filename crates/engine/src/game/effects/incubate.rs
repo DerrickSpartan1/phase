@@ -1,4 +1,5 @@
 use crate::game::effects::counters::add_counter_with_replacement;
+use crate::game::game_object::DisplaySource;
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::zones;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility};
@@ -44,6 +45,7 @@ pub fn resolve(
 
     if let Some(obj) = state.objects.get_mut(&obj_id) {
         obj.is_token = true;
+        obj.display_source = DisplaySource::Token;
         // CR 111.10i: Front face is a colorless Incubator artifact.
         obj.card_types = CardType {
             supertypes: vec![],

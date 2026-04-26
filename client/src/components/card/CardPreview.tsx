@@ -89,7 +89,7 @@ function CardPreviewInner({
   const frontParseDetails = useCardParseDetails(lookupName);
   const backParseDetails = useCardParseDetails(backFaceName);
 
-  const isToken = obj?.card_id === 0;
+  const isToken = obj?.display_source === "Token";
   // For transformed DFCs, the active face is the back (Scryfall faceIndex 1).
   // The engine swaps obj.name to the active face, but Scryfall always indexes
   // 0=front, 1=back regardless of search name — so we must flip the index.

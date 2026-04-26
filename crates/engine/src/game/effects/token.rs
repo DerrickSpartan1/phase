@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use crate::game::game_object::DisplaySource;
 use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
 use crate::game::replacement::{self, ReplacementResult};
 use crate::game::zones;
@@ -580,6 +581,9 @@ pub fn apply_create_token_after_replacement(
         if let Some(obj) = state.objects.get_mut(&obj_id) {
             // CR 111.1: Mark as token for SBA cleanup (CR 704.5d)
             obj.is_token = true;
+            // True token from a TokenSpec — image lives in the generic-token
+            // database (Treasure, Spirit, Saproling, Soldier, etc.).
+            obj.display_source = DisplaySource::Token;
             let has_attrs = spec.power.is_some()
                 || spec.toughness.is_some()
                 || !spec.core_types.is_empty()

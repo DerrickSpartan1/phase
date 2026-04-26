@@ -18,6 +18,35 @@ use crate::types::mana::{ColoredManaCount, ManaColor, ManaCost, ManaPip};
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 
+/// Image-lookup routing hint for the display layer.
+///
+/// The frontend uses this to decide whether a `GameObject`'s art should be
+/// fetched from the real-card database (Scryfall/MTGJSON entry keyed by name)
+/// or from Scryfall's generic-token database. The two are disjoint: a
+/// real-card name like "Lightning Bolt" never appears in the token database,
+/// and a generic-token name like "Treasure" never appears in the card
+/// database. Without this hint the frontend would have to infer routing from
+/// `card_id == 0`, conflating "object has no card-database entry" with "art
+/// should be looked up as a token" — which is wrong for token-copies of real
+/// cards (Twinflame, Helm of the Host, Mirage Mirror, Vaultborn Tyrant LTB,
+/// etc.) where `is_token = true` but the art belongs to a real card.
+///
+/// Independent of `is_token` (which is the CR 111.1 game-rules concept). A
+/// token-copy of Bahamut has `is_token = true` AND
+/// `display_source = DisplaySource::Card`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DisplaySource {
+    /// Image lives in the real-card database (looked up by name).
+    /// Default for fresh `GameObject`s including token-copies of real cards.
+    #[default]
+    Card,
+    /// Image lives in Scryfall's generic-token database (Treasure, Spirit
+    /// 1/1, Soldier 1/1, Saproling, Incubator, Army, etc.). Set explicitly
+    /// at the few token-construction sites that fabricate a token from a
+    /// `TokenSpec` rather than copying an existing object.
+    Token,
+}
+
 /// CR 702.xxx: Prepared-permanent marker payload (Strixhaven).
 ///
 /// Carried as `GameObject::prepared: Option<PreparedState>`. `Some(_)` means
@@ -332,6 +361,12 @@ pub struct GameObject {
     #[serde(default)]
     pub is_token: bool,
 
+    /// Image-lookup routing hint for the display layer. See `DisplaySource`
+    /// for the rationale. Independent of `is_token` — a token-copy of a
+    /// real card carries `is_token = true` AND `DisplaySource::Card`.
+    #[serde(default)]
+    pub display_source: DisplaySource,
+
     /// Modal spell metadata ("Choose one —", etc.). Copied from CardFace at load time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub modal: Option<ModalChoice>,
@@ -612,6 +647,7 @@ impl GameObject {
             is_renowned: false,
             is_emblem: false,
             is_token: false,
+            display_source: DisplaySource::Card,
             modal: None,
             additional_cost: None,
             strive_cost: None,

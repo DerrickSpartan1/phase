@@ -32,7 +32,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
 
   const cardName = obj?.name ?? "";
   const imageLookup = obj ? cardImageLookup(obj) : { name: "", faceIndex: 0 };
-  const isToken = obj?.card_id === 0;
+  const isToken = obj?.display_source === "Token";
   const { src, isLoading } = useCardImage(imageLookup.name, {
     size: "art_crop",
     faceIndex: imageLookup.faceIndex,
