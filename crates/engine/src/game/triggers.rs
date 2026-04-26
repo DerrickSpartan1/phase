@@ -1912,6 +1912,27 @@ pub(crate) fn check_trigger_condition(
                 // Any counter: check if any counter was present.
                 None => lki.counters.values().any(|&v| v > 0),
             }),
+        // CR 121.1 + CR 504.1 + CR 603.4: "except the first one [you|they]
+        // draw in each of [your|their] draw steps" — suppress trigger when
+        // the drawing player is the active player, the current phase is the
+        // draw step, and the event is the first draw of the step
+        // (`nth_in_step == 1`). The ordinal is set by the emitter AFTER
+        // incrementing `cards_drawn_this_step`, so 1 == first draw of step.
+        TriggerCondition::ExceptFirstDrawInDrawStep => match trigger_event {
+            Some(GameEvent::CardDrawn {
+                player_id,
+                nth_in_step,
+                ..
+            }) => {
+                let in_draw_step = state.phase == crate::types::phase::Phase::Draw;
+                let drawer_is_active = *player_id == state.active_player;
+                !(in_draw_step && drawer_is_active && *nth_in_step == 1)
+            }
+            // Defensive: a non-CardDrawn event reaching this condition is a
+            // parser/wiring error. Fail-closed (don't fire) so the misattach
+            // surfaces rather than silently spamming triggers.
+            _ => false,
+        },
         TriggerCondition::And { conditions } => conditions
             .iter()
             .all(|c| check_trigger_condition(state, c, controller, source_id, trigger_event)),
@@ -4315,6 +4336,7 @@ pub mod tests {
         let event = GameEvent::CardDrawn {
             player_id: PlayerId(1),
             object_id: ObjectId(99),
+            nth_in_step: 1,
         };
 
         // Should fire: opponent (player 1) drew their 2nd card
@@ -4331,6 +4353,7 @@ pub mod tests {
         let controller_draw = GameEvent::CardDrawn {
             player_id: PlayerId(0),
             object_id: ObjectId(100),
+            nth_in_step: 1,
         };
         assert!(!check_trigger_constraint(
             &state,
@@ -6496,6 +6519,69 @@ pub mod tests {
             Some(cast_spell),
             None,
         ));
+    }
+
+    /// CR 121.1 + CR 504.1 + CR 603.4 — `ExceptFirstDrawInDrawStep` gates
+    /// Orcish Bowmasters' trigger so the active player's mandatory first draw
+    /// of their draw step does NOT fire it. Subsequent draws (extra draws,
+    /// any draws outside the draw step, opponent draws during their own draw
+    /// step's mandatory first draw, etc.) all fire normally.
+    #[test]
+    fn except_first_draw_in_draw_step_suppresses_only_active_first_draw() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.phase = Phase::Draw;
+        let controller = PlayerId(1); // Bowmasters' controller (the opponent)
+        let condition = TriggerCondition::ExceptFirstDrawInDrawStep;
+
+        // Active player (P0) drawing their FIRST card of the draw step → suppress.
+        let first_draw = GameEvent::CardDrawn {
+            player_id: PlayerId(0),
+            object_id: ObjectId(50),
+            nth_in_step: 1,
+        };
+        assert!(
+            !check_trigger_condition(&state, &condition, controller, None, Some(&first_draw)),
+            "the mandatory first draw of the active player's draw step must NOT fire"
+        );
+
+        // Same active player drawing a SECOND card during their draw step → fire.
+        let extra_draw = GameEvent::CardDrawn {
+            player_id: PlayerId(0),
+            object_id: ObjectId(51),
+            nth_in_step: 2,
+        };
+        assert!(
+            check_trigger_condition(&state, &condition, controller, None, Some(&extra_draw)),
+            "any subsequent draw during the active player's draw step must fire"
+        );
+
+        // Outside the draw step — first draw of a different step still fires.
+        state.phase = Phase::Upkeep;
+        let upkeep_first = GameEvent::CardDrawn {
+            player_id: PlayerId(0),
+            object_id: ObjectId(52),
+            nth_in_step: 1,
+        };
+        assert!(
+            check_trigger_condition(&state, &condition, controller, None, Some(&upkeep_first)),
+            "first draw outside the draw step must fire"
+        );
+
+        // Back in draw step but the NON-active player draws first (e.g., a
+        // forced draw on the opponent during the active player's draw step).
+        // The exception only excuses the active player's mandatory draw, so a
+        // draw by anyone else still fires the trigger.
+        state.phase = Phase::Draw;
+        let opponent_draw = GameEvent::CardDrawn {
+            player_id: PlayerId(1),
+            object_id: ObjectId(53),
+            nth_in_step: 1,
+        };
+        assert!(
+            check_trigger_condition(&state, &condition, controller, None, Some(&opponent_draw)),
+            "draw step draws by the non-active player must fire"
+        );
     }
 }
 
