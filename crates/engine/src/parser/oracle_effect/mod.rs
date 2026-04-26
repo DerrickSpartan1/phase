@@ -4855,16 +4855,18 @@ fn try_parse_cast_effect(lower: &str) -> Option<Effect> {
     .parse(lower)
     .ok()?;
 
-    // CR 401.5 + CR 118.9 + CR 601.2a: "from the top of your library" is the
-    // top-of-library cast permission class (Realmwalker, Future Sight,
-    // Bolas's Citadel). It belongs in `parse_static_line` →
-    // `StaticMode::TopOfLibraryCastPermission`, NOT in this imperative parser
-    // — resolving via this branch would (incorrectly) exile the card before
-    // granting an `ExileWithAltCost` permission (impulse-draw flow). Returning
-    // `None` here lets the static path own the line.
-    if scan_contains_phrase(rest, "from the top of your library") {
-        return None;
-    }
+    // CR 401.5 + CR 118.9 + CR 601.2a: Static-shaped "you may [play|cast] X
+    // from the top of your library" lines (Realmwalker, Future Sight, Bolas's
+    // Citadel) are routed to `parse_static_line` →
+    // `StaticMode::TopOfLibraryCastPermission` by `is_static_compound_pattern`
+    // before the imperative dispatcher runs, so this path does not see them.
+    // Trigger sub-effects (Ziatora's Envoy combat-damage trigger, The
+    // Belligerent attack trigger granting "until end of turn, you may play
+    // lands and cast spells from the top of your library") are NOT classified
+    // — they parse through the imperative path here and lower to
+    // `Effect::CastFromZone`, the same shape the engine has long supported for
+    // these cards. A blanket guard against the "from the top of your library"
+    // anchor would silently regress those triggers to `Unimplemented`.
 
     let without_paying = scan_contains_phrase(rest, "without paying its mana cost")
         || scan_contains_phrase(rest, "without paying their mana cost");
