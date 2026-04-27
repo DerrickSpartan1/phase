@@ -68,7 +68,16 @@ pub fn resolve(
         // chosen during spell announcement and is in `ability.targets` —
         // `target_player()` reads it back, falling back to controller for
         // context-ref filters that don't surface a target slot.
-        Effect::Draw { count, target } => (
+        // CR 608.2d: `up_to` is honored at runtime via the player choice
+        // mechanism in `engine_resolution_choices` — by the time we reach
+        // here the engine has already resolved the chosen count into the
+        // ProposedEvent::Draw count. So the resolver here just reads the
+        // configured count expression as the upper bound.
+        Effect::Draw {
+            count,
+            target,
+            up_to: _,
+        } => (
             resolve_quantity_with_targets(state, count, ability) as u32,
             // CR 121.1 + CR 615.5 + CR 609.7: context-ref target filters
             // (PostReplacementSourceController, ParentTargetController, etc.)
@@ -245,6 +254,7 @@ mod tests {
                     value: num_cards as i32,
                 },
                 target: crate::types::ability::TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(100),

@@ -239,18 +239,27 @@ pub(super) fn parse_numeric_imperative_ast(
 ) -> Option<NumericImperativeAst> {
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| value((), tag("draw ")).parse(input))
     {
+        // CR 608.2d + CR 121.1: "draw up to N cards" — opt-choice draw,
+        // mirrors the up_to pattern on Discard / Sacrifice. Strip the prefix
+        // before count parsing so "up to two cards" → count=Fixed{2}, up_to=true.
+        let (rest, up_to) = match nom_on_lower(rest, &rest.to_ascii_lowercase(), |i| {
+            value((), tag("up to ")).parse(i)
+        }) {
+            Some((_, after)) => (after, true),
+            None => (rest, false),
+        };
         // CR 121.1 / CR 609.3: dynamic-count tails — "cards equal to <ref>",
         // "a card equal to <ref>", "that many cards", "that many".
         let rest_lower = rest.to_ascii_lowercase();
         if let Some(count) = parse_dynamic_count_phrase(rest_lower.as_str()) {
-            return Some(NumericImperativeAst::Draw { count });
+            return Some(NumericImperativeAst::Draw { count, up_to });
         }
         // CR 119.1 / CR 121.1: When the verb committed but the quantity phrase
         // can't be classified, return None so the line surfaces as
         // `Effect::Unimplemented` upstream. Silently substituting Fixed{1} hides
         // dynamic-quantity gaps from the coverage report.
         let count = parse_count_expr(rest).map(|(q, _)| q)?;
-        return Some(NumericImperativeAst::Draw { count });
+        return Some(NumericImperativeAst::Draw { count, up_to });
     }
 
     if nom_primitives::scan_contains(lower, "gain") && nom_primitives::scan_contains(lower, "life")
@@ -447,9 +456,10 @@ pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect 
         // path doesn't see the subject, which is later threaded via
         // `inject_subject_target` for "target player draws ..." patterns
         // (CR 601.2c per-mode targeting).
-        NumericImperativeAst::Draw { count } => Effect::Draw {
+        NumericImperativeAst::Draw { count, up_to } => Effect::Draw {
             count,
             target: TargetFilter::Controller,
+            up_to,
         },
         NumericImperativeAst::GainLife { amount } => Effect::GainLife {
             amount,
@@ -3187,6 +3197,7 @@ pub(super) fn parse_imperative_family_ast(
                     qty: QuantityRef::EventContextAmount,
                 },
                 target: TargetFilter::Controller,
+                up_to: false,
             }))
         }
         "draw" => parse_numeric_imperative_ast(text, lower)

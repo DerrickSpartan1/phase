@@ -357,7 +357,8 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         });
     }
 
-    match lower { // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
+    match lower {
+        // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
         "that much" | "that many" => {
             return Some(QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
@@ -367,10 +368,11 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         // is exposed via the same EventContextAmount channel that "that much" /
         // "that many" use (Adorable Kitten "You gain life equal to the result"
         // after roll-a-die). Both compile to the same runtime resolver.
-        "the result" => { // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
+        // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
+        "the result" => {
             return Some(QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
-            })
+            });
         }
         "its power" => {
             return Some(QuantityExpr::Ref {

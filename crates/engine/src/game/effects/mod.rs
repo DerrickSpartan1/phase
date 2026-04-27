@@ -2046,6 +2046,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -2075,6 +2076,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -2144,6 +2146,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(1),
@@ -2840,6 +2843,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -2851,6 +2855,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -2919,6 +2924,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -2996,6 +3002,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -3043,6 +3050,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -3101,6 +3109,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -3166,6 +3175,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -3446,6 +3456,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(1),
@@ -3469,6 +3480,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(1),
@@ -3485,6 +3497,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(2),
@@ -3504,6 +3517,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             ObjectId(1),
@@ -3693,6 +3707,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             source_id,
@@ -3866,6 +3881,7 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
+                up_to: false,
             },
             vec![],
             source_id,
