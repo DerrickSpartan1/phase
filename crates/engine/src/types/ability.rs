@@ -5820,8 +5820,6 @@ pub enum TriggerCondition {
     TwoOrMoreSpellsCastLastTurn,
     /// CR 603.4: "if it's your turn" — intervening-if requiring the controller's turn.
     DuringYourTurn,
-    /// CR 603.4: "if it's not your turn" / "if it isn't your turn"
-    NotYourTurn,
     /// CR 508.1a: "Whenever ~ and at least N other creatures attack."
     /// True when combat is active and at least `minimum` other creatures
     /// controlled by the same player are also attacking.
@@ -5835,27 +5833,18 @@ pub enum TriggerCondition {
 
     /// "if you cast it" — zoneless cast check (unlike CastFromZone which requires a specific zone).
     /// CR 701.57a: Used by Discover ETB triggers.
+    /// Negation ("if it wasn't cast") is expressed via `Not { Box::new(WasCast) }`.
     WasCast,
-
-    /// "if none of them were cast" / "if it wasn't cast" — true when the entering
-    /// creature was NOT cast (entered via ninjutsu, reanimation, flicker, etc.).
-    /// CR 601.2: Negation of WasCast — checks that `cast_from_zone` is `None`.
-    WasNotCast,
 
     /// "if it's attacking" — true when the trigger source object is currently an attacker.
     /// CR 508.1: Used by ninjutsu ETB triggers (e.g., Thousand-Faced Shadow).
     SourceIsAttacking,
 
     /// CR 702.49 + CR 702.190a + CR 603.4 + CR 702.138b: "if its sneak/ninjutsu
-    /// cost was paid this turn" / "unless it escaped". True when the source
-    /// permanent entered via the specified cast/activation variant this turn.
-    /// When `negated` is true, the condition inverts — e.g. "sacrifice it unless
-    /// it escaped" gates the sacrifice on `cast_variant_paid != Some(Escape)`.
-    CastVariantPaid {
-        variant: CastVariantPaid,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        negated: bool,
-    },
+    /// cost was paid this turn". True when the source permanent entered via the
+    /// specified cast/activation variant this turn. Negation ("unless it escaped")
+    /// is expressed via `Not { Box::new(CastVariantPaid { variant }) }`.
+    CastVariantPaid { variant: CastVariantPaid },
 
     /// CR 601.2: "during each opponent's turn" — the trigger only fires when it is
     /// currently an opponent's turn. Used in conjunction with NthSpellThisTurn constraint.
@@ -5902,16 +5891,17 @@ pub enum TriggerCondition {
     IsMonarch,
     /// CR 702.131a: "if you have the city's blessing" — true when the controller has Ascend.
     HasCityBlessing,
-    /// CR 309.7: True when the controller has completed at least one dungeon.
-    CompletedADungeon,
-    /// CR 309.7: True when the controller has NOT completed a specific dungeon.
-    /// Used by Acererak: "if you haven't completed Tomb of Annihilation"
-    NotCompletedDungeon {
-        dungeon: crate::game::dungeon::DungeonId,
+    /// CR 309.7: True when the controller has completed a dungeon.
+    /// `specific: None` matches "have you completed any dungeon"; `specific: Some(d)`
+    /// matches "have you completed `d`". Negation ("haven't completed Tomb of
+    /// Annihilation") is expressed via `Not { Box::new(CompletedDungeon { specific }) }`.
+    CompletedDungeon {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        specific: Option<crate::game::dungeon::DungeonId>,
     },
-    /// CR 611.2b: "if this [permanent] is tapped/untapped" — checks the source's tapped status.
-    /// When `negated` is true, condition is met when the source is *untapped*.
-    SourceIsTapped { negated: bool },
+    /// CR 611.2b: "if this [permanent] is tapped" — checks the source's tapped status.
+    /// Negation ("untapped") is expressed via `Not { Box::new(SourceIsTapped) }`.
+    SourceIsTapped,
     /// CR 113.6b: "if this card is in [zone]" — true when the trigger source is in the given zone.
     SourceInZone { zone: crate::types::zones::Zone },
     /// CR 122.1: "if you put a counter on a permanent this turn" — true when the controller
@@ -5985,6 +5975,13 @@ pub enum TriggerCondition {
     And { conditions: Vec<TriggerCondition> },
     /// Any condition must be true
     Or { conditions: Vec<TriggerCondition> },
+    /// CR 603.4: True when the inner predicate is false. Used for "unless [phrase]"
+    /// intervening-if patterns ("you lose 4 life unless you attacked this turn"
+    /// → `Not { Box::new(AttackedThisTurn) }`). Mirrors `TargetFilter::Not` and
+    /// `StaticCondition::Not` so trigger-side negation composes uniformly with
+    /// `And`/`Or`. Replaces the prior per-leaf `negated: bool` fields and the
+    /// `NotYourTurn` / `WasNotCast` / `NotCompletedDungeon` sibling-pair variants.
+    Not { condition: Box<TriggerCondition> },
 }
 
 /// Condition that gates whether a replacement effect applies.
