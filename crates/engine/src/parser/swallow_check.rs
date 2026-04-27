@@ -341,6 +341,14 @@ fn any_ability_has_unimplemented(parsed: &ParsedAbilities) -> bool {
             .replacements
             .iter()
             .any(|r| r.execute.as_deref().is_some_and(def_tree_has_unimplemented))
+        // CR 603: A `TriggerMode::Unknown(_)` is the trigger-side equivalent
+        // of `Effect::Unimplemented` — the parser preserved the original
+        // trigger text but couldn't classify the timing/event. Suppress
+        // swallow detectors so we don't double-report the same gap. The
+        // unparsed trigger mode text is a coverage signal in its own right.
+        || parsed.triggers.iter().any(|t| {
+            matches!(t.mode, crate::types::triggers::TriggerMode::Unknown(_))
+        })
 }
 
 fn any_ability_has_target_replacement(parsed: &ParsedAbilities) -> bool {
