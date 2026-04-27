@@ -437,16 +437,39 @@ pub(crate) fn parse_trigger_line_with_index(
     let condition_text: &str = &condition_text_stripped;
 
     let effect_lower = effect_text.to_lowercase();
+    // Extract intervening-if condition from effect text first — a leading
+    // "if X, " can hide the "you may " optional marker behind the if-clause
+    // ("At the beginning of your upkeep, if you have more cards in hand
+    // than each opponent, you may return this card from your graveyard to
+    // your hand"). Without stripping the if first, the optional check
+    // below would see "if …" at position 0 and miss the "you may " that
+    // sits between the comma and the verb.
+    let (effect_without_if, if_condition) = extract_if_condition(&effect_lower);
+
     // CR 609.3: "You may" at the start of the effect text makes the triggered
     // effect optional at resolution — the player chooses whether to perform it.
     // Mid-chain "you may" is per-sentence optional, handled by
     // parse_effect_chain → strip_optional_effect_prefix().
-    let optional = tag::<_, _, VerboseError<&str>>("you may ")
-        .parse(effect_lower.as_str())
-        .is_ok();
-
-    // Extract intervening-if condition from effect text
-    let (effect_without_if, if_condition) = extract_if_condition(&effect_lower);
+    //
+    // Three cases route here:
+    //   1. Bare "you may verb …"                     → optional=true at pos 0
+    //   2. "if X, you may verb …" with X recognized  → extract_if_condition
+    //      strips "if X, " and post-strip starts with "you may"
+    //   3. "if X, you may verb …" with X unrecognized → extract_if_condition
+    //      returns the text unchanged. We still want optional detection, so
+    //      fall back to a structural "if [phrase], " skip — find the FIRST
+    //      ", " that closes the if-clause and re-check after the comma.
+    //      The condition itself remains uncaptured (Condition_If swallow
+    //      will fire), but the optional flag is preserved.
+    let starts_with_you_may =
+        |s: &str| tag::<_, _, VerboseError<&str>>("you may ").parse(s).is_ok();
+    let after_structural_if = effect_lower
+        .strip_prefix("if ") // allow-noncombinator: structural if-clause skip when condition is unrecognized
+        .and_then(|rest| rest.split_once(", "))
+        .map(|(_cond, body)| body);
+    let optional = starts_with_you_may(effect_lower.as_str())
+        || starts_with_you_may(effect_without_if.trim_start())
+        || after_structural_if.is_some_and(starts_with_you_may);
 
     // Strip constraint sentences so they don't leak into effect parsing as sub-abilities
     let effect_final = strip_constraint_sentences(&effect_without_if);
