@@ -2137,6 +2137,63 @@ pub enum QuantityExpr {
     /// `TargetFilter::Or` (e.g., Alrund's "+1/+1 for each card in your
     /// hand and each foretold card you own in exile").
     Sum { exprs: Vec<QuantityExpr> },
+    /// CR 107.1c + CR 608.2d: "Up to N" — the affected player chooses any
+    /// integer in `0..=resolve(max)` at resolution time. Used by
+    /// `Effect::Draw`, `Effect::Sacrifice`, `Effect::Discard`, and
+    /// `Effect::SearchLibrary` for the "draw / sacrifice / discard / search
+    /// for up to N" Oracle text class. The 4 specific resolvers peel this
+    /// wrapper via `QuantityExpr::peel_up_to` and propagate the bool to
+    /// their `WaitingFor::*Choice` runtime state.
+    ///
+    /// Layered above `QuantityExpr::Ref`/`Fixed`/`HalfRounded`/etc. so the
+    /// upper bound itself can be a dynamic game-state quantity (e.g. "draw
+    /// up to your hand size cards" → `UpTo { max: Ref { qty: HandSize } }`,
+    /// "sacrifice up to half your creatures" → `UpTo { max: HalfRounded {
+    /// inner: Ref { qty: ObjectCount {..} }, rounding: Down } }`).
+    ///
+    /// Generic quantity resolvers (`resolve_quantity`,
+    /// `resolve_quantity_with_targets`, etc.) treat `UpTo` transparently —
+    /// they resolve to the upper bound as if the `UpTo` wrapper were not
+    /// present. This is safe because the only places where the
+    /// "may pick fewer" semantics matter are the 4 specific effect
+    /// resolvers, which extract the flag explicitly via `peel_up_to`.
+    ///
+    /// Invariant: `max` MUST NOT itself be `UpTo` — nesting is meaningless
+    /// ("up to up to N" is just "up to N"). Always construct via the
+    /// `QuantityExpr::up_to` helper which debug-asserts this invariant.
+    UpTo { max: Box<QuantityExpr> },
+}
+
+impl QuantityExpr {
+    /// Construct an `UpTo { max }` expression, debug-asserting the
+    /// non-nesting invariant. Always use this rather than the raw struct
+    /// literal.
+    pub fn up_to(max: QuantityExpr) -> Self {
+        debug_assert!(
+            !matches!(max, QuantityExpr::UpTo { .. }),
+            "QuantityExpr::UpTo cannot wrap another UpTo — \"up to up to N\" is meaningless",
+        );
+        QuantityExpr::UpTo {
+            max: Box::new(max),
+        }
+    }
+
+    /// Peel an outer `UpTo` wrapper, returning `(inner_max, true)` if this
+    /// expression was an `UpTo`, otherwise `(self, false)`. The 4 effect
+    /// resolvers (Draw, Sacrifice, Discard, SearchLibrary) all call this to
+    /// derive the upper-bound expression and the "may pick fewer" flag they
+    /// propagate to their `WaitingFor` state.
+    pub fn peel_up_to(&self) -> (&QuantityExpr, bool) {
+        match self {
+            QuantityExpr::UpTo { max } => (max.as_ref(), true),
+            other => (other, false),
+        }
+    }
+
+    /// Returns true if this expression is an `UpTo` wrapper.
+    pub fn is_up_to(&self) -> bool {
+        matches!(self, QuantityExpr::UpTo { .. })
+    }
 }
 
 /// Comparison operator used in static conditions.

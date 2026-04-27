@@ -1235,6 +1235,7 @@ pub(crate) fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
                 rewrite_variable_x_to_cost_x_paid(inner);
             }
         }
+        QuantityExpr::UpTo { max } => rewrite_variable_x_to_cost_x_paid(max),
     }
 }
 

@@ -5896,6 +5896,7 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                     rewrite_quantity_expr(inner);
                 }
             }
+            QuantityExpr::UpTo { max } => rewrite_quantity_expr(max),
             QuantityExpr::Fixed { .. } => {}
         }
     }
@@ -5932,6 +5933,7 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
                     rewrite_quantity_expr(inner, mode);
                 }
             }
+            QuantityExpr::UpTo { max } => rewrite_quantity_expr(max, mode),
             QuantityExpr::Ref { .. } | QuantityExpr::Fixed { .. } => {}
         }
     }

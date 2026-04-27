@@ -501,6 +501,7 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
             let parts: Vec<String> = exprs.iter().map(fmt_quantity).collect();
             format!("({})", parts.join(" + "))
         }
+        QuantityExpr::UpTo { max } => format!("up to {}", fmt_quantity(max)),
     }
 }
 
@@ -4002,6 +4003,7 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
                 extract_quantity_features(inner, features);
             }
         }
+        QuantityExpr::UpTo { max } => extract_quantity_features(max, features),
     }
 }
 
