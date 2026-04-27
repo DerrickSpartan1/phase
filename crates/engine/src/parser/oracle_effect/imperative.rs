@@ -757,6 +757,25 @@ pub(super) fn parse_targeted_action_ast(
                 filter: None,
             });
         }
+        // CR 701.8a: "discard any number of [filter] cards" — opt-choice
+        // discard where the player picks any 0..hand-size. Encoded as
+        // count = HandSize with up_to = true so the controller chooses how
+        // many to actually discard. Mind Maggots ("discard any number of
+        // creature cards"), Fervent Mastery, Sirocco-class chains.
+        if let Ok((rest, _)) =
+            tag::<_, _, VerboseError<&str>>("any number of ").parse(after_discard)
+        {
+            let filter = parse_discard_card_filter(rest);
+            return Some(TargetedImperativeAst::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize,
+                },
+                random,
+                up_to: true,
+                unless_filter: None,
+                filter,
+            });
+        }
         // CR 608.2c: Strip "unless you discard a [type] card" suffix before count parsing.
         // Compute original-case offset before the unless strip narrows the slice.
         let original_after = &text[text.len() - after_discard.len()..];
