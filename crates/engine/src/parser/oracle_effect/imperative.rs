@@ -456,10 +456,17 @@ pub(super) fn lower_numeric_imperative_ast(ast: NumericImperativeAst) -> Effect 
         // path doesn't see the subject, which is later threaded via
         // `inject_subject_target` for "target player draws ..." patterns
         // (CR 601.2c per-mode targeting).
+        // CR 121.1 + CR 608.2d: Lower the AST `up_to: bool` into the typed
+        // `count: QuantityExpr::UpTo { max }` wrapper. Plain `up_to: false`
+        // leaves the count expression unchanged; `up_to: true` wraps it so
+        // the resolver peels it back at runtime.
         NumericImperativeAst::Draw { count, up_to } => Effect::Draw {
-            count,
+            count: if up_to {
+                QuantityExpr::up_to(count)
+            } else {
+                count
+            },
             target: TargetFilter::Controller,
-            up_to,
         },
         NumericImperativeAst::GainLife { amount } => Effect::GainLife {
             amount,
@@ -980,11 +987,9 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
         TargetedImperativeAst::Untap { target } => Effect::Untap { target },
         TargetedImperativeAst::TapAll { target } => Effect::TapAll { target },
         TargetedImperativeAst::UntapAll { target } => Effect::UntapAll { target },
-        TargetedImperativeAst::Sacrifice { target, count } => Effect::Sacrifice {
-            target,
-            count,
-            up_to: false,
-        },
+        TargetedImperativeAst::Sacrifice { target, count } => Effect::Sacrifice { target, count },
+        // CR 701.9b + CR 608.2d: Lower the AST `up_to: bool` into the typed
+        // `count: QuantityExpr::UpTo { max }` wrapper.
         TargetedImperativeAst::Discard {
             count,
             random,
@@ -992,12 +997,15 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             unless_filter,
             filter,
         } => Effect::Discard {
-            count,
+            count: if up_to {
+                QuantityExpr::up_to(count)
+            } else {
+                count
+            },
             // CR 701.9a: "Discard" with no subject defaults to the controller.
             // Subject injection overrides this for "target player discards" patterns.
             target: TargetFilter::Controller,
             random,
-            up_to,
             unless_filter,
             filter,
         },
@@ -1309,10 +1317,15 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
             multi_enter_tapped: _,
         } => Effect::SearchLibrary {
             filter,
-            count,
+            // CR 107.1c + CR 701.23d: Lower the AST `up_to: bool` into the
+            // typed `count: QuantityExpr::UpTo { max }` wrapper.
+            count: if up_to {
+                QuantityExpr::up_to(count)
+            } else {
+                count
+            },
             reveal,
             target_player,
-            up_to,
             selection_constraint,
         },
         SearchCreationImperativeAst::Dig { count, reveal } => Effect::Dig {
@@ -2643,6 +2656,15 @@ pub(super) fn lower_multi_filter_search_library(
         enter_with_counters: vec![],
     };
 
+    // CR 107.1c + CR 701.23d: Wrap the count in `UpTo` once at the helper's
+    // entrance — every search in the chain shares the same `up_to` semantic,
+    // so the per-arm constructions below all read the wrapped form.
+    let chain_count = if up_to {
+        QuantityExpr::up_to(count)
+    } else {
+        count
+    };
+
     let mut tail: Option<Box<AbilityDefinition>> = None;
     for extra_filter in extra_filters.into_iter().rev() {
         // Append `Search(extra)` first (it is the successor of the ChangeZone
@@ -2651,10 +2673,9 @@ pub(super) fn lower_multi_filter_search_library(
             AbilityKind::Spell,
             Effect::SearchLibrary {
                 filter: extra_filter,
-                count: count.clone(),
+                count: chain_count.clone(),
                 reveal,
                 target_player: target_player.clone(),
-                up_to,
                 selection_constraint: selection_constraint.clone(),
             },
         );
@@ -2669,10 +2690,9 @@ pub(super) fn lower_multi_filter_search_library(
 
     let mut clause = parsed_clause(Effect::SearchLibrary {
         filter: primary_filter,
-        count,
+        count: chain_count,
         reveal,
         target_player,
-        up_to,
         selection_constraint,
     });
     clause.sub_ability = tail;
@@ -3206,7 +3226,6 @@ pub(super) fn parse_imperative_family_ast(
                     qty: QuantityRef::EventContextAmount,
                 },
                 target: TargetFilter::Controller,
-                up_to: false,
             }))
         }
         "draw" => parse_numeric_imperative_ast(text, lower)

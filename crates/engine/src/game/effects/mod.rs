@@ -2047,7 +2047,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -2077,7 +2076,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -2147,7 +2145,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(1),
@@ -2844,7 +2841,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -2856,7 +2852,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -2925,7 +2920,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -2960,7 +2954,6 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
                 random: false,
-                up_to: false,
                 unless_filter: None,
                 filter: None,
             },
@@ -3003,7 +2996,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -3051,7 +3043,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -3110,7 +3101,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -3176,7 +3166,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(100),
@@ -3457,7 +3446,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(1),
@@ -3481,7 +3469,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(1),
@@ -3498,7 +3485,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(2),
@@ -3518,7 +3504,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(1),
@@ -3708,7 +3693,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             source_id,
@@ -3882,7 +3866,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             source_id,

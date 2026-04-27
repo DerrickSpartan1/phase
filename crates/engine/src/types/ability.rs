@@ -2173,9 +2173,7 @@ impl QuantityExpr {
             !matches!(max, QuantityExpr::UpTo { .. }),
             "QuantityExpr::UpTo cannot wrap another UpTo — \"up to up to N\" is meaningless",
         );
-        QuantityExpr::UpTo {
-            max: Box::new(max),
-        }
+        QuantityExpr::UpTo { max: Box::new(max) }
     }
 
     /// Peel an outer `UpTo` wrapper, returning `(inner_max, true)` if this
@@ -3080,17 +3078,15 @@ pub enum Effect {
     /// historical "controller draws" semantics for `"draw a card"` /
     /// `"you draw a card"` patterns where no `target` field appears in the
     /// serialized AST.
+    /// CR 121.1 + CR 608.2d: "Draw up to N cards" is encoded as
+    /// `count: QuantityExpr::UpTo { max: <former count> }`. The drawing
+    /// player chooses any 0..=resolve(max) at resolution time via the
+    /// `engine_resolution_choices` flow.
     Draw {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
         #[serde(default = "default_target_filter_controller")]
         target: TargetFilter,
-        /// CR 121.1 + CR 608.2d: When true, the drawing player may choose any
-        /// number of cards from 0..count to actually draw. Mirrors
-        /// `Effect::Sacrifice.up_to`. "Draw up to N cards" — Arcane Denial,
-        /// Diminishing Returns, Indentured Djinn, Truce, etc.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        up_to: bool,
     },
     Pump {
         #[serde(default = "default_pt_value_zero")]
@@ -3232,12 +3228,11 @@ pub enum Effect {
         /// ("sacrifice half the permanents they control") resolve per-iteration
         /// via `resolve_quantity_with_targets`, which honors `player_scope`
         /// controller rebinding.
+        /// CR 701.21a + CR 608.2d: "Sacrifice up to N permanents" is encoded
+        /// as `count: QuantityExpr::UpTo { max: <former count> }`. Distinct
+        /// from `optional: true` on the ability ("you may sacrifice").
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
-        /// CR 608.2d: When true, the player may select fewer than the required count
-        /// ("sacrifice up to N"). Distinct from `optional: true` on the ability ("you may sacrifice").
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        up_to: bool,
     },
     DiscardCard {
         #[serde(default = "default_one")]
@@ -3676,9 +3671,8 @@ pub enum Effect {
         /// CR 701.9a: When true, the discard is random (e.g., "discard a card at random").
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         random: bool,
-        /// CR 701.9b: When true, the player may discard 0..=count cards ("discard up to N").
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        up_to: bool,
+        /// CR 701.9b + CR 608.2d: "Discard up to N cards" is encoded as
+        /// `count: QuantityExpr::UpTo { max: <former count> }`.
         /// CR 608.2c: "discard N cards unless you discard a [type] card" — when set,
         /// the player may discard 1 card matching this filter instead of `count` cards.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3715,12 +3709,11 @@ pub enum Effect {
         /// Used by Bribery, Acquire, Praetor's Grasp, etc.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target_player: Option<TargetFilter>,
-        /// CR 107.1c + CR 701.23d: When true, the searcher may find up to `count`
-        /// matching cards (including zero). When false, they must find exactly
-        /// `count` matching cards (or as many as possible if fewer exist). Set
-        /// by "any number of ..." and "up to N ..." Oracle phrasings.
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        up_to: bool,
+        // CR 107.1c + CR 701.23d: "search for up to N" / "search for any
+        // number of" is encoded as `count: QuantityExpr::UpTo { max:
+        // <former count> }`. Plain "search for N" leaves count as a
+        // non-UpTo expression and the searcher must find exactly N (or as
+        // many as possible if fewer exist).
         /// CR 608.2c: Printed-text restriction on the chosen set (e.g., "with
         /// different names"). Defaults to `None` so the existing card-data.json
         /// deserializes without churn; the parser populates it for tutors that
@@ -7235,7 +7228,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![],
             ObjectId(1),
@@ -7312,7 +7304,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             ))),
             valid_card: Some(TargetFilter::SelfRef),
@@ -7425,7 +7416,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         ))
         .duration(Duration::UntilEndOfTurn)
@@ -7745,7 +7735,6 @@ mod tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 2 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
             vec![TargetRef::Player(PlayerId(0))],
             ObjectId(1),
@@ -8034,7 +8023,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             );
             assert!(def.cost_categories().is_empty());
@@ -8047,7 +8035,6 @@ mod tests {
                 Effect::Draw {
                     count: QuantityExpr::Fixed { value: 1 },
                     target: TargetFilter::Controller,
-                    up_to: false,
                 },
             )
             .cost(AbilityCost::Sacrifice {
@@ -8073,7 +8060,6 @@ mod modal_ability_tests {
             Effect::Draw {
                 count: QuantityExpr::Fixed { value: 1 },
                 target: TargetFilter::Controller,
-                up_to: false,
             },
         );
         let mode2 = AbilityDefinition::new(
