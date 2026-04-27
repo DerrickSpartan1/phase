@@ -755,6 +755,31 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         value(QuantityRef::LifeLostThisTurn, tag("the life you lost")),
         value(QuantityRef::LifeLostThisTurn, tag("life you've lost")),
         value(QuantityRef::LifeLostThisTurn, tag("life you lost")),
+        // CR 119.3 + CR 608.2k: Third-person variants resolve against the
+        // per-target player during effect iteration. The runtime's
+        // `LifeLostThisTurn` reads `player.life_lost_this_turn` where
+        // `player` is the resolution context's bound player — for
+        // `LoseLife { target: EachOpponent }` this rebinds per-opponent,
+        // so "they lost" / "that player lost" resolve correctly without
+        // a new typed variant. Archfiend of Despair, Wound Reflection,
+        // Astarion (Feed mode), Blitzwing, Warlock Class.
+        value(
+            QuantityRef::LifeLostThisTurn,
+            tag("the life that player lost this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn,
+            tag("the life they lost this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn,
+            tag("the amount of life they lost this turn"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn,
+            tag("the life that player lost"),
+        ),
+        value(QuantityRef::LifeLostThisTurn, tag("the life they lost")),
     ))
     .parse(input)
 }
