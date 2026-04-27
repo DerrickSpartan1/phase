@@ -566,17 +566,23 @@ fn parse_discard_unless_filter<'a>(
 /// Mirrors `AbilityCost::Discard.filter` so the trigger-effect discard on
 /// Dokuchi Silencer ("you may discard a creature card") preserves the same
 /// filter data as cost-form discards like "Discard a creature card:".
-fn parse_discard_card_filter(lower: &str) -> Option<TargetFilter> {
-    // Consume the article / quantifier prefix ("a ", "an ", "N ", "X "). The
-    // count itself was already parsed upstream; we only need to reach the
-    // type-word portion.
-    let after_article = strip_article(lower);
-    // Find the " card" / " cards" suffix — the type phrase lies between the
-    // article and that suffix. Without a suffix, there is no type qualifier
-    // (e.g. plain "a card" → `None`).
-    let type_phrase = after_article
+/// Extract the type qualifier from the post-count tail of a discard noun phrase.
+///
+/// Caller contract: `tail` is the text **after** the count token has already
+/// been consumed by `parse_count_expr`. So for "discard two creature cards"
+/// the count parser eats "two " and hands "creature cards" here. For "a card"
+/// (count = 1, no type qualifier) the count parser eats "a " and hands
+/// "card" here, which has no leading type word and returns `None`.
+///
+/// Mirrors `AbilityCost::Discard.filter` so the trigger-effect discard on
+/// Dokuchi Silencer ("you may discard a creature card") preserves the same
+/// filter data as cost-form discards like "Discard a creature card:".
+fn parse_discard_card_filter(tail: &str) -> Option<TargetFilter> {
+    // Find the " card" / " cards" suffix — the type phrase lies before it.
+    // No suffix or empty before-suffix → no type qualifier.
+    let type_phrase = tail
         .strip_suffix(" cards") // allow-noncombinator: structural suffix cleanup on pre-chunked sub-phrase (PATTERNS.md §9)
-        .or_else(|| after_article.strip_suffix(" card"))? // allow-noncombinator: see line above
+        .or_else(|| tail.strip_suffix(" card"))? // allow-noncombinator: see line above
         .trim();
     if type_phrase.is_empty() {
         return None;
@@ -800,13 +806,16 @@ pub(super) fn parse_targeted_action_ast(
         // CR 701.8a: Discard count must be explicit (or the implicit 1 from
         // "a/an" inside `parse_count_expr`). If the count phrase doesn't parse,
         // return None so the line surfaces as Unimplemented.
-        let count = parse_count_expr(original_after).map(|(q, _)| q)?;
+        // Forward the post-count remainder to the filter probe so it never
+        // re-sees the count token — the type qualifier (if any) is whatever
+        // is left after the count was eaten.
+        let (count, after_count) = parse_count_expr(original_after)?;
         // CR 701.9a + CR 608.2c: Extract card-type filter from phrases like
         // "a creature card" / "an artifact card". Mirrors the filter slot on
         // `AbilityCost::Discard` so trigger-effect discards carry the same
         // restriction data as cost discards (Dokuchi Silencer's "you may
         // discard a creature card").
-        let filter = parse_discard_card_filter(after_discard);
+        let filter = parse_discard_card_filter(after_count.trim_start());
         return Some(TargetedImperativeAst::Discard {
             count,
             random,
