@@ -7191,6 +7191,85 @@ mod tests {
         assert_ne!(t, TargetRef::Object(ObjectId(6)));
     }
 
+    /// CR 107.1c + CR 608.2d: `QuantityExpr::up_to(max)` constructs the
+    /// wrapper variant; `peel_up_to` recovers (max, true).
+    #[test]
+    fn quantity_expr_up_to_constructor_and_peel_round_trip() {
+        let inner = QuantityExpr::Fixed { value: 3 };
+        let wrapped = QuantityExpr::up_to(inner.clone());
+        assert!(wrapped.is_up_to());
+        let (peeled, was_up_to) = wrapped.peel_up_to();
+        assert!(was_up_to);
+        assert_eq!(peeled, &inner);
+    }
+
+    /// CR 107.1c: `peel_up_to` on a non-UpTo expression returns the
+    /// expression unchanged with `false`. Resolvers depend on this so they
+    /// can call `peel_up_to` unconditionally.
+    #[test]
+    fn quantity_expr_peel_up_to_passes_through_non_up_to() {
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::HandSize,
+        };
+        assert!(!expr.is_up_to());
+        let (peeled, was_up_to) = expr.peel_up_to();
+        assert!(!was_up_to);
+        assert_eq!(peeled, &expr);
+    }
+
+    /// Demonstrates the new compositional power: "up to your hand size cards"
+    /// composes `UpTo` over a dynamic `Ref` quantity, which was structurally
+    /// inexpressible under the old `up_to: bool` field layout.
+    #[test]
+    fn quantity_expr_up_to_composes_with_ref_for_hand_size() {
+        let expr = QuantityExpr::up_to(QuantityExpr::Ref {
+            qty: QuantityRef::HandSize,
+        });
+        let (max, up_to) = expr.peel_up_to();
+        assert!(up_to);
+        match max {
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize,
+            } => {}
+            other => panic!("expected Ref {{ HandSize }}, got {other:?}"),
+        }
+    }
+
+    /// Demonstrates the second new compositional axis: "up to half the
+    /// creatures they control" stacks `UpTo` over `HalfRounded` over
+    /// `ObjectCount`. Each layer is an existing primitive — the refactor
+    /// only added the outer wrapper.
+    #[test]
+    fn quantity_expr_up_to_composes_with_half_rounded_object_count() {
+        let creatures_filter = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            ..Default::default()
+        });
+        let expr = QuantityExpr::up_to(QuantityExpr::HalfRounded {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: creatures_filter,
+                },
+            }),
+            rounding: RoundingMode::Down,
+        });
+        let (max, up_to) = expr.peel_up_to();
+        assert!(up_to);
+        assert!(matches!(max, QuantityExpr::HalfRounded { .. }));
+    }
+
+    /// CR 107.1c: Nesting `UpTo` inside `UpTo` is meaningless ("up to up to N"
+    /// is just "up to N"). The constructor `up_to()` debug-asserts against
+    /// this. Wrapped only in `cfg(debug_assertions)` because `debug_assert!`
+    /// is a no-op in release builds.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "QuantityExpr::UpTo cannot wrap another UpTo")]
+    fn quantity_expr_up_to_rejects_nested_up_to() {
+        let inner = QuantityExpr::up_to(QuantityExpr::Fixed { value: 3 });
+        let _ = QuantityExpr::up_to(inner);
+    }
+
     #[test]
     fn target_ref_player_variant() {
         let t = TargetRef::Player(PlayerId(1));
