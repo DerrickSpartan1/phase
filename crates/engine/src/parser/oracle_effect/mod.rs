@@ -1222,6 +1222,31 @@ fn try_parse_choose_one_of_inline(
     // enough that misreading intra-phrase "or" is unlikely. Each needle
     // literal appears exactly once — the separator's length is implied by
     // what's missing between the two returned halves.
+    //
+    // CR 202.3 + CR 107.1c: Comparator grammar ("less than or equal to",
+    // "greater than or equal to", "or fewer", "or more", "or less",
+    // "or greater") wraps a bare " or " that is structurally part of the
+    // comparator phrase, NOT a disjunction of imperative clauses. Splitting
+    // here truncates the dynamic-quantity comparator (e.g., Beseech the
+    // Queen's "with mana value less than or equal to the number of lands
+    // you control") into a malformed left half, and the trial parse against
+    // that half pollutes the parse_warnings buffer with spurious
+    // search-filter-suffix gaps. Skip this helper entirely for any clause
+    // that contains a comparator phrase — none of the false-positive cards
+    // are real binary-choice clauses anyway.
+    if [
+        "less than or",
+        "greater than or",
+        " or fewer",
+        " or more",
+        " or less",
+        " or greater",
+    ]
+    .iter()
+    .any(|needle| tp.lower.contains(needle))
+    {
+        return None;
+    }
     let (before_lower, after_lower) =
         split_around(tp.lower, ", or ").or_else(|| split_around(tp.lower, " or "))?;
 
