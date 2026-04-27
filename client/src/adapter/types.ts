@@ -436,6 +436,7 @@ export type PlayerStatus =
 export interface Player {
   id: PlayerId;
   life: number;
+  poison_counters: number;
   speed?: number | null;
   mana_pool: ManaPool;
   library: ObjectId[];
