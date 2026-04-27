@@ -328,37 +328,36 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         }
     }
     // CR 107.1b: "equal to <quantity ref>" — composes the existing
-    // QuantityRef parser into the count-position. The "equal to " prefix
-    // dispatch uses a nom tag combinator; the remainder is then handed to
-    // the shared `parse_quantity_ref` building block.
-    if let Ok((rest_lower, _)) =
-        nom::bytes::complete::tag::<_, _, nom_language::error::VerboseError<&str>>("equal to ")
-            .parse(lower.as_str())
-    {
-        let rest_text = &text["equal to ".len()..];
-        let trimmed_for_ref = rest_lower.trim_end_matches('.').trim_end();
-        if let Some(qty) = super::oracle_quantity::parse_quantity_ref(trimmed_for_ref) {
-            return Some((QuantityExpr::Ref { qty }, &rest_text[rest_text.len()..]));
+    // QuantityRef parser into the count-position. Strips the prefix, hands
+    // the trimmed tail to the shared `parse_quantity_ref` building block.
+    if let Some(((), rest_lower)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
+        nom::combinator::value(
+            (),
+            nom::bytes::complete::tag::<_, _, nom_language::error::VerboseError<&str>>("equal to "),
+        )
+        .parse(i)
+    }) {
+        let trimmed = rest_lower.trim_end_matches('.').trim_end();
+        if let Some(qty) = super::oracle_quantity::parse_quantity_ref(trimmed) {
+            return Some((QuantityExpr::Ref { qty }, ""));
         }
     }
 
     // CR 121.1: "another" — implicit count of 1 in chained-effect contexts
     // ("draw another card", "create another token"). Distinct from "a/an"
-    // which the article-number combinator handles, because parse_number
-    // explicitly excludes "another" to avoid the "a"-prefix false match.
-    if let Ok((rest_lower, _)) = nom::bytes::complete::tag::<
-        _,
-        _,
-        nom_language::error::VerboseError<&str>,
-    >("another ")
-    .parse(lower.as_str())
-    {
-        let rest_text = &text["another ".len()..];
-        let _ = rest_lower; // unused; the offset comes from the original text
-        return Some((QuantityExpr::Fixed { value: 1 }, rest_text.trim_start()));
+    // which `parse_number` explicitly excludes to avoid the "a"-prefix
+    // false match on "another".
+    if let Some(((), rest)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
+        nom::combinator::value(
+            (),
+            nom::bytes::complete::tag::<_, _, nom_language::error::VerboseError<&str>>("another "),
+        )
+        .parse(i)
+    }) {
+        return Some((QuantityExpr::Fixed { value: 1 }, rest.trim_start()));
     }
 
-// CR 107.3a: "X" in Oracle text represents a variable determined at cast time.
+    // CR 107.3a: "X" in Oracle text represents a variable determined at cast time.
     // Accept X followed by whitespace, comma, period, or end-of-string — all valid
     // Oracle text boundaries (e.g., "X cards", "X, rounded up", "X.").
     if let Some(rest_lower) = lower.strip_prefix('x') {

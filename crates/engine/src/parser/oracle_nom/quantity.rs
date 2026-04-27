@@ -870,11 +870,26 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
-/// Parse "target creature's power" / "that player's life total".
+/// Parse "target creature's power" / "the power of target creature".
 fn parse_target_power_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         value(QuantityRef::TargetPower, tag("target creature's power")),
         value(QuantityRef::TargetPower, tag("the target creature's power")),
+        // CR 107.1: of-form variants with controller suffixes — same
+        // TargetPower resolution. Soul's Majesty ('Draw cards equal to
+        // the power of target creature you control'), Predator's Rapport.
+        value(
+            QuantityRef::TargetPower,
+            tag("the power of target creature you control"),
+        ),
+        value(
+            QuantityRef::TargetPower,
+            tag("the power of target creature an opponent controls"),
+        ),
+        value(
+            QuantityRef::TargetPower,
+            tag("the power of target creature"),
+        ),
     ))
     .parse(input)
 }
