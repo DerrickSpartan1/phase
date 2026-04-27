@@ -507,15 +507,18 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
 
 fn fmt_duration(d: &Duration) -> String {
     match d {
-        Duration::UntilEndOfTurn => "until end of turn",
-        Duration::UntilEndOfCombat => "until end of combat",
-        Duration::UntilYourNextTurn => "until your next turn",
-        Duration::UntilHostLeavesPlay => "while on battlefield",
-        Duration::UntilControllerNextUntapStep => "until controller's next untap step",
-        Duration::ForAsLongAs { .. } => "for as long as condition",
-        Duration::Permanent => "permanent",
+        Duration::UntilEndOfTurn => "until end of turn".to_string(),
+        Duration::UntilEndOfCombat => "until end of combat".to_string(),
+        Duration::UntilNextTurnOf { player } => {
+            format!("until next turn ({})", fmt_player_scope(*player))
+        }
+        Duration::UntilHostLeavesPlay => "while on battlefield".to_string(),
+        Duration::UntilNextUntapStepOf { player } => {
+            format!("until next untap step ({})", fmt_player_scope(*player))
+        }
+        Duration::ForAsLongAs { .. } => "for as long as condition".to_string(),
+        Duration::Permanent => "permanent".to_string(),
     }
-    .into()
 }
 
 fn fmt_qty(q: &QuantityExpr) -> String {

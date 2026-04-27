@@ -881,7 +881,9 @@ fn try_parse_cast_only_from_zones_restriction(tp: TextPair<'_>) -> Option<Parsed
                 value(
                     (
                         RestrictionExpiry::EndOfTurn,
-                        Some(Duration::UntilYourNextTurn),
+                        Some(Duration::UntilNextTurnOf {
+                            player: PlayerScope::Controller,
+                        }),
                     ),
                     tag("until your next turn, "),
                 ),
@@ -7587,10 +7589,17 @@ fn strip_leading_duration(text: &str) -> Option<(Duration, &str)> {
         alt((
             value(Duration::UntilEndOfTurn, tag("until end of turn, ")),
             value(
-                Duration::UntilYourNextTurn,
+                Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
                 tag("until the end of your next turn, "),
             ),
-            value(Duration::UntilYourNextTurn, tag("until your next turn, ")),
+            value(
+                Duration::UntilNextTurnOf {
+                    player: PlayerScope::Controller,
+                },
+                tag("until your next turn, "),
+            ),
         ))
         .parse(i)
     }) {
@@ -7620,20 +7629,34 @@ pub(crate) fn strip_trailing_duration(text: &str) -> (&str, Option<Duration>) {
         (" until end of turn", Duration::UntilEndOfTurn),
         (
             " until the end of your next turn",
-            Duration::UntilYourNextTurn,
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
         ),
         // CR 611.2a + CR 108.3: Third-person "their next turn" appears in grants
         // whose grantee is not the ability's controller (Suspend Aggression:
         // "its owner may play it"; Expedited Inheritance: "its controller may
         // ... They may play those cards"). Theme D's `granted_to` binds to the
-        // grantee, so `UntilYourNextTurn` is semantically "until the end of the
-        // grantee's next turn" at prune time.
+        // grantee, so `UntilNextTurnOf { Controller }` is semantically "until
+        // the end of the grantee's next turn" at prune time.
         (
             " until the end of their next turn",
-            Duration::UntilYourNextTurn,
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
         ),
-        (" until their next turn", Duration::UntilYourNextTurn),
-        (" until your next turn", Duration::UntilYourNextTurn),
+        (
+            " until their next turn",
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+        ),
+        (
+            " until your next turn",
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+        ),
         (
             " until ~ leaves the battlefield",
             Duration::UntilHostLeavesPlay,
@@ -13874,7 +13897,9 @@ mod tests {
                 *def.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilYourNextTurn,
+                        duration: Duration::UntilNextTurnOf {
+                            player: PlayerScope::Controller,
+                        },
                         ..
                     },
                     ..
@@ -13897,7 +13922,9 @@ mod tests {
                 *def.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilYourNextTurn,
+                        duration: Duration::UntilNextTurnOf {
+                            player: PlayerScope::Controller,
+                        },
                         ..
                     },
                     ..
@@ -13919,7 +13946,9 @@ mod tests {
                 *def.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilYourNextTurn,
+                        duration: Duration::UntilNextTurnOf {
+                            player: PlayerScope::Controller,
+                        },
                         ..
                     },
                     ..
@@ -13954,7 +13983,9 @@ mod tests {
                 *sub.effect,
                 Effect::GrantCastingPermission {
                     permission: CastingPermission::PlayFromExile {
-                        duration: Duration::UntilYourNextTurn,
+                        duration: Duration::UntilNextTurnOf {
+                            player: PlayerScope::Controller,
+                        },
                         ..
                     },
                     ..
@@ -15587,7 +15618,12 @@ mod tests {
 
         // First ability: the chained compound under UntilYourNextTurn.
         let first = &result.abilities[0];
-        assert_eq!(first.duration, Some(Duration::UntilYourNextTurn));
+        assert_eq!(
+            first.duration,
+            Some(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            })
+        );
 
         let Effect::GenericEffect {
             static_abilities, ..
@@ -16530,7 +16566,12 @@ mod tests {
                 }
             } if allowed_zones == vec![Zone::Hand]
         ));
-        assert_eq!(def.duration, Some(Duration::UntilYourNextTurn));
+        assert_eq!(
+            def.duration,
+            Some(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            })
+        );
     }
 
     #[test]

@@ -866,17 +866,35 @@ pub enum ManaSpendRestriction {
 }
 
 /// Duration for temporary effects.
+///
+/// Player-axis variants (`UntilNextTurnOf`, `UntilNextUntapStepOf`) are
+/// parameterized by `PlayerScope` per the workspace "Parameterize, don't
+/// proliferate" principle. `PlayerScope::Controller` recovers the legacy
+/// "until your next turn" / "controller's next untap step" semantics; future
+/// `Target` / `Opponent` / `AllPlayers` readings unblock cards whose duration
+/// is bound to a non-controller player.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Duration {
+    /// CR 514.2: Effect expires at end of turn (cleanup step).
     UntilEndOfTurn,
     /// CR 514.2: Effect expires at end of combat phase.
     UntilEndOfCombat,
-    UntilYourNextTurn,
+    /// CR 514.2 + CR 611.2a: Effect expires at the beginning of `player`'s
+    /// next turn. `PlayerScope::Controller` corresponds to the legacy
+    /// "until your next turn" reading.
+    UntilNextTurnOf {
+        player: PlayerScope,
+    },
+    /// CR 611.2a: Effect expires when the source object leaves the
+    /// battlefield.
     UntilHostLeavesPlay,
-    /// CR 502.3: Effect expires at the beginning of the affected permanent's
-    /// controller's next untap step. Used for "doesn't untap during its
-    /// controller's next untap step" effects.
-    UntilControllerNextUntapStep,
+    /// CR 502.3 + CR 611.2a: Effect expires at the beginning of `player`'s
+    /// next untap step. `PlayerScope::Controller` corresponds to the legacy
+    /// "controller's next untap step" reading used by exert / "doesn't
+    /// untap" effects.
+    UntilNextUntapStepOf {
+        player: PlayerScope,
+    },
     /// CR 611.2b: "for as long as [condition]" — effect persists while condition holds.
     ForAsLongAs {
         condition: StaticCondition,
@@ -976,7 +994,7 @@ pub enum CastingPermission {
     ///
     /// `granted_to` records the player the permission was granted to — i.e. the
     /// controller of the effect that created it (CR 611.2a/b). This is required
-    /// to correctly expire `Duration::UntilYourNextTurn` permissions at the
+    /// to correctly expire `Duration::UntilNextTurnOf` permissions at the
     /// grantee's next untap step and `Duration::UntilEndOfTurn` permissions at
     /// cleanup (CR 514.2). Cast-permission checks (`has_exile_cast_permission`)
     /// do not consult this field — it governs duration pruning only.
@@ -1026,7 +1044,7 @@ pub enum CastingPermission {
 /// to at resolution time. Resolved to a concrete `PlayerId` by
 /// `grant_permission::resolve` before the permission is written to the target
 /// `GameObject`. Drives both `granted_to` binding and, for durations scoped to
-/// that player (e.g., `UntilYourNextTurn`), the prune step in `layers.rs`.
+/// that player (e.g., `UntilNextTurnOf`), the prune step in `layers.rs`.
 ///
 /// Default is `AbilityController` for all pre-existing parser call sites.
 /// Additional variants support compound-exile patterns where multiple objects
@@ -4172,7 +4190,7 @@ pub enum Effect {
     },
     /// CR 701.15a: Goad target creature — it must attack each combat if able and must
     /// attack a player other than the goading player if able. Duration is until the
-    /// goading player's next turn (UntilYourNextTurn).
+    /// goading player's next turn (UntilNextTurnOf).
     Goad {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -7742,7 +7760,12 @@ mod tests {
         let durations = vec![
             Duration::UntilEndOfTurn,
             Duration::UntilEndOfCombat,
-            Duration::UntilYourNextTurn,
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            },
+            Duration::UntilNextUntapStepOf {
+                player: PlayerScope::Controller,
+            },
             Duration::UntilHostLeavesPlay,
             Duration::Permanent,
         ];

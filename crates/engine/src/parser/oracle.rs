@@ -6235,7 +6235,9 @@ mod tests {
         ));
         assert_eq!(
             r.abilities[1].duration,
-            Some(crate::types::ability::Duration::UntilYourNextTurn)
+            Some(crate::types::ability::Duration::UntilNextTurnOf {
+                player: crate::types::ability::PlayerScope::Controller,
+            })
         );
 
         assert!(matches!(
