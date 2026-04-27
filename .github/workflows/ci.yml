@@ -83,7 +83,22 @@ jobs:
           mkdir -p data/mtgjson
           curl -fSL -o data/mtgjson/AtomicCards.json "https://mtgjson.com/api/v5/AtomicCards.json"
 
+      - name: Cache generated card data
+        # Output of `oracle-gen` is deterministic given (MTGJSON input + engine
+        # source). Hash both into the key; on hit, skip the ~30k-card pass.
+        # Exact-match only (no restore-keys) — a stale hit would feed wrong
+        # card-data into the validate/coverage gates downstream. Cargo.lock is
+        # included so dep bumps that affect parsing (e.g. nom) invalidate.
+        id: cardgen-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            data/card-data.json
+            data/card-names.json
+          key: cardgen-${{ hashFiles('data/mtgjson/AtomicCards.json', 'crates/engine/src/**/*.rs', 'crates/engine/Cargo.toml', 'Cargo.lock') }}
+
       - name: Generate card data
+        if: steps.cardgen-cache.outputs.cache-hit != 'true'
         run: |
           cargo run --bin oracle-gen --features cli -- data/ --stats --names-out data/card-names.json > data/card-data.json
 
