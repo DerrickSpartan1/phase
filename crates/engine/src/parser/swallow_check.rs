@@ -956,6 +956,17 @@ fn detect_duration_this_turn(cleaned: &str, original: &str, ast_json: &str) {
         // not a separate `duration` slot.
         "\"event\":\"DamageDone\"",
         "AddTargetReplacement",
+        // CR 603.7c: A `CreateDelayedTrigger` with `WhenNextEvent` condition
+        // IS the "next [event] this turn" delayed-trigger scope (Chandra,
+        // the Firebrand's [-2], Doublecast-class copy-on-next-cast). The
+        // "this turn" scope is implicit in the delayed-trigger semantics —
+        // delayed triggers created by spells expire at end of turn per CR.
+        "CreateDelayedTrigger",
+        "WhenNextEvent",
+        // CR 514.2 + CR 601.2f: `ReduceNextSpellCost` is a one-shot cost
+        // reduction consumed by the next-cast spell — its "this turn"
+        // scope is structural, not a `duration` slot.
+        "ReduceNextSpellCost",
     ];
     if json_has_any(ast_json, markers) {
         return;
