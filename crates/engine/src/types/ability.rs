@@ -5666,9 +5666,6 @@ pub enum AbilityCondition {
     /// CR 608.2e: "Instead" clause — replaces the parent effect when the additional cost was paid.
     /// The resolver swaps the override sub's effect in place of the parent before resolution.
     AdditionalCostPaidInstead,
-    /// Negated additional cost: sub_ability executes only when the cost was NOT paid.
-    /// Used by Gift "if the gift wasn't promised" pattern.
-    AdditionalCostNotPaid,
     /// CR 608.2c: "If you do" — sub_ability executes only if the parent optional effect was performed.
     IfYouDo,
     /// CR 603.12: "When you do" — reflexive trigger that always fires when the parent
@@ -5680,18 +5677,18 @@ pub enum AbilityCondition {
     CastFromZone { zone: Zone },
     /// CR 608.2c: "If it's a [type] card" — gates sub_ability on the last revealed card's type.
     /// Evaluated at resolution time by inspecting `state.last_revealed_ids[0]`.
-    /// `negated` handles "if it's a nonland card" patterns.
     /// `additional_filter` holds optional extra filter properties (e.g., `IsChosenCreatureType`
-    /// for "creature card of the chosen type").
+    /// for "creature card of the chosen type"). For "if it's a nonland card" patterns,
+    /// wrap with `AbilityCondition::Not`.
     RevealedHasCardType {
         card_type: CoreType,
-        negated: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         additional_filter: Option<FilterProp>,
     },
-    /// CR 400.7 + CR 608.2c: True when the source permanent did NOT enter the battlefield
-    /// this turn. Used for "unless ~ entered this turn" exemptions (e.g., Moon-Circuit Hacker).
-    SourceDidNotEnterThisTurn,
+    /// CR 400.7 + CR 608.2c: True when the source permanent entered the battlefield
+    /// this turn. For the "did not enter this turn" sense (e.g., Moon-Circuit Hacker
+    /// "unless ~ entered this turn"), wrap with `AbilityCondition::Not`.
+    SourceEnteredThisTurn,
     /// CR 702.49 + CR 603.4: True when the source permanent entered via a ninjutsu-family
     /// activation of the specified variant this turn.
     CastVariantPaid { variant: CastVariantPaid },
@@ -5722,48 +5719,36 @@ pub enum AbilityCondition {
     /// CR 400.7 + CR 608.2c: "If that creature was a [type]" — gates the sub_ability on
     /// whether the target (or its last-known information if `use_lki` is true) matches the filter.
     /// Present-tense ("is a") checks current state; past-tense ("was a") checks LKI per CR 400.7.
+    /// For the "does NOT match" sense, wrap with `AbilityCondition::Not`.
     TargetMatchesFilter {
         filter: TargetFilter,
         #[serde(default)]
         use_lki: bool,
-        /// When true, the condition is satisfied when the target does NOT match.
-        #[serde(default)]
-        negated: bool,
     },
     /// CR 608.2c: "If this creature/permanent is a [type]" — gates sub_ability on whether
     /// the ability's source object matches the filter. Used by leveler-style cards
     /// (e.g. Figure of Fable) where each activated ability gates on the source's current type.
     SourceMatchesFilter { filter: TargetFilter },
-    /// CR 608.2c + CR 614.1d: "if you control a/no [filter]" — gates sub_ability on whether
+    /// CR 608.2c + CR 614.1d: "if you control a [filter]" — gates sub_ability on whether
     /// the ability controller controls at least one battlefield permanent matching the
-    /// filter (excluding the source itself). When `negated` is true, the condition is
-    /// satisfied iff the controller controls NO matching permanent. Used by reveal-tribal
-    /// land cycles (Fortified Beachhead, Temple of the Dragon Queen) where the on_decline
-    /// Tap fires only when the controller doesn't already control a [filter] permanent.
+    /// filter (excluding the source itself). For the "controls NO matching permanent"
+    /// sense (reveal-tribal land cycles like Fortified Beachhead / Temple of the Dragon
+    /// Queen on_decline), wrap with `AbilityCondition::Not`.
     /// `filter` MUST have its `ControllerRef::You` pre-bound by the parser.
-    ControllerControlsMatching {
-        filter: TargetFilter,
-        #[serde(default)]
-        negated: bool,
-    },
-    /// CR 608.2c: "If it's your turn" / "If it's not your turn" — gates sub_ability on
-    /// whether the active player is the ability's controller.
-    IsYourTurn {
-        #[serde(default)]
-        negated: bool,
-    },
+    ControllerControlsMatching { filter: TargetFilter },
+    /// CR 608.2c: "If it's your turn" — gates sub_ability on whether the active player
+    /// is the ability's controller. For "if it's not your turn", wrap with
+    /// `AbilityCondition::Not`.
+    IsYourTurn,
     /// CR 608.2c: "If a [noun] was [verb]ed this way" — sub_ability executes only if
     /// the parent effect produced a zone change involving an object matching the filter.
     /// Evaluated by checking `state.last_zone_changed_ids` against the filter.
     /// Handles both optional-targeting parents (empty targets → empty IDs → false)
     /// and mandatory parents (type filter check on moved objects).
     ZoneChangedThisWay { filter: TargetFilter },
-    /// CR 611.2b: "if this [permanent] is tapped/untapped" — checks the source's tapped status.
-    /// When `negated` is true, condition is met when the source is *untapped*.
-    SourceIsTapped {
-        #[serde(default)]
-        negated: bool,
-    },
+    /// CR 611.2b: "if this [permanent] is tapped" — checks the source's tapped status.
+    /// For the untapped sense, wrap with `AbilityCondition::Not`.
+    SourceIsTapped,
     /// CR 608.2c: General "instead" replacement — wraps any `AbilityCondition` with
     /// replacement semantics. When the inner condition is met at resolution, the sub's
     /// effect chain replaces the parent's entire effect chain. When not met, the base
@@ -5777,6 +5762,14 @@ pub enum AbilityCondition {
     /// Used when multiple independent checks gate the same resolution
     /// (e.g., Revolt + mana value threshold on Fatal Push).
     And { conditions: Vec<AbilityCondition> },
+    /// CR 608.2c: Logical negation — sub_ability executes when `condition` is false.
+    /// Mirrors `TriggerCondition::Not` for ability-level conditions. Replaces the
+    /// per-leaf `negated: bool` fields that existed on `RevealedHasCardType`,
+    /// `TargetMatchesFilter`, `ControllerControlsMatching`, `IsYourTurn`, and
+    /// `SourceIsTapped`, plus the dedicated negation variants
+    /// `AdditionalCostNotPaid` and `SourceDidNotEnterThisTurn`. Used by
+    /// "if you don't" / "unless you" / "if it isn't" sub-clause gates.
+    Not { condition: Box<AbilityCondition> },
     /// CR 730.2a: True when it's neither day nor night (day_night is None).
     /// Used by Daybound/Nightbound ETB initialization: "If it's neither day nor night,
     /// it becomes day as this creature enters."

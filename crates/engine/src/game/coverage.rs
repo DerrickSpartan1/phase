@@ -4069,12 +4069,12 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // (crates/engine/src/game/effects/mod.rs).
         AbilityCondition::AdditionalCostPaid => ("AdditionalCostPaid", Handled),
         AbilityCondition::AdditionalCostPaidInstead => ("AdditionalCostPaidInstead", Handled),
-        AbilityCondition::AdditionalCostNotPaid => ("AdditionalCostNotPaid", Handled),
         AbilityCondition::IfYouDo => ("IfYouDo", Handled),
         AbilityCondition::WhenYouDo => ("WhenYouDo", Handled),
         AbilityCondition::CastFromZone { .. } => ("CastFromZone", Handled),
         AbilityCondition::RevealedHasCardType { .. } => ("RevealedHasCardType", Handled),
-        AbilityCondition::SourceDidNotEnterThisTurn => ("SourceDidNotEnterThisTurn", Handled),
+        AbilityCondition::SourceEnteredThisTurn => ("SourceEnteredThisTurn", Handled),
+        AbilityCondition::Not { .. } => ("Not", Handled),
         AbilityCondition::CastVariantPaid { .. } => ("CastVariantPaid", Handled),
         AbilityCondition::CastVariantPaidInstead { .. } => ("CastVariantPaidInstead", Handled),
         AbilityCondition::IfAPlayerDoes => ("IfAPlayerDoes", Handled),
@@ -4083,7 +4083,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::IsMonarch => ("IsMonarch", Handled),
         AbilityCondition::TargetHasKeywordInstead { .. } => ("TargetHasKeywordInstead", Handled),
         // CR 608.2c: active-player check; handled by `evaluate_condition` (effects/mod.rs).
-        AbilityCondition::IsYourTurn { .. } => ("IsYourTurn", Handled),
+        AbilityCondition::IsYourTurn => ("IsYourTurn", Handled),
         // CR 614.1a: `ConditionInstead` wraps a general condition with swap-on-true semantics.
         AbilityCondition::ConditionInstead { .. } => ("ConditionInstead", Handled),
         // CR 608.2c + CR 614.1d: "you control a/no [filter]" — handled by
@@ -4096,7 +4096,7 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Unhandled),
         AbilityCondition::SourceMatchesFilter { .. } => ("SourceMatchesFilter", Unhandled),
         AbilityCondition::ZoneChangedThisWay { .. } => ("ZoneChangedThisWay", Unhandled),
-        AbilityCondition::SourceIsTapped { .. } => ("SourceIsTapped", Unhandled),
+        AbilityCondition::SourceIsTapped => ("SourceIsTapped", Unhandled),
         // CR 608.2c: Compound condition — resolved recursively by `evaluate_condition`
         // (effects/mod.rs), which short-circuits on the first false child.
         AbilityCondition::And { .. } => ("And", Handled),
@@ -7715,7 +7715,7 @@ mod tests {
     /// unhandled resolver feature.
     #[test]
     fn is_your_turn_condition_is_marked_handled() {
-        let (name, support) = condition_feature(&AbilityCondition::IsYourTurn { negated: false });
+        let (name, support) = condition_feature(&AbilityCondition::IsYourTurn);
         assert_eq!(name, "IsYourTurn");
         assert_eq!(
             support,

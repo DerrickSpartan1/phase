@@ -14265,8 +14265,10 @@ mod tests {
         let sub = def.sub_ability.as_ref().expect("Expected sub_ability");
         assert_eq!(
             sub.condition,
-            Some(AbilityCondition::AdditionalCostNotPaid),
-            "Expected AdditionalCostNotPaid condition"
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::AdditionalCostPaid),
+            }),
+            "Expected Not(AdditionalCostPaid) condition"
         );
     }
 
@@ -14282,7 +14284,6 @@ mod tests {
             sub.condition,
             Some(AbilityCondition::RevealedHasCardType {
                 card_type: CoreType::Land,
-                negated: false,
                 additional_filter: None,
             })
         );
@@ -14424,7 +14425,6 @@ mod tests {
                 let sub = def.sub_ability.as_deref().unwrap();
                 assert!(sub.condition == Some(AbilityCondition::RevealedHasCardType {
                     card_type: CoreType::Land,
-                    negated: false,
                     additional_filter: None,
                 }));
                 assert!(matches!(
@@ -14452,10 +14452,11 @@ mod tests {
         let sub = def.sub_ability.as_ref().expect("should have sub_ability");
         assert_eq!(
             sub.condition,
-            Some(AbilityCondition::RevealedHasCardType {
-                card_type: CoreType::Land,
-                negated: true,
-                additional_filter: None,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::RevealedHasCardType {
+                    card_type: CoreType::Land,
+                    additional_filter: None,
+                }),
             })
         );
     }
@@ -14492,8 +14493,10 @@ mod tests {
         let (cond, text) = strip_unless_entered_suffix("discard a card unless ~ entered this turn");
         assert_eq!(
             cond,
-            Some(AbilityCondition::SourceDidNotEnterThisTurn),
-            "Should produce SourceDidNotEnterThisTurn condition"
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::SourceEnteredThisTurn),
+            }),
+            "Should produce Not(SourceEnteredThisTurn) condition"
         );
         assert_eq!(text, "discard a card");
     }
@@ -14509,7 +14512,12 @@ mod tests {
     fn strip_unless_general_your_turn() {
         // "unless it's your turn" → Not(DuringYourTurn) → IsYourTurn { negated: true }
         let (cond, text) = strip_unless_entered_suffix("draw a card unless it's your turn");
-        assert_eq!(cond, Some(AbilityCondition::IsYourTurn { negated: true }),);
+        assert_eq!(
+            cond,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::IsYourTurn)
+            }),
+        );
         assert_eq!(text, "draw a card");
     }
 
@@ -16125,16 +16133,18 @@ mod tests {
     #[test]
     fn bridge_during_your_turn() {
         let result = try_nom_condition_as_ability_condition("it's your turn");
-        assert_eq!(
-            result,
-            Some(AbilityCondition::IsYourTurn { negated: false })
-        );
+        assert_eq!(result, Some(AbilityCondition::IsYourTurn));
     }
 
     #[test]
     fn bridge_not_your_turn() {
         let result = try_nom_condition_as_ability_condition("it's not your turn");
-        assert_eq!(result, Some(AbilityCondition::IsYourTurn { negated: true }));
+        assert_eq!(
+            result,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::IsYourTurn)
+            })
+        );
     }
 
     #[test]
@@ -16192,19 +16202,18 @@ mod tests {
     fn bridge_source_tapped_maps_to_ability_condition() {
         // CR 611.2b: SourceIsTapped bridges to AbilityCondition::SourceIsTapped.
         let result = try_nom_condition_as_ability_condition("~ is tapped");
-        assert_eq!(
-            result,
-            Some(AbilityCondition::SourceIsTapped { negated: false })
-        );
+        assert_eq!(result, Some(AbilityCondition::SourceIsTapped));
     }
 
     #[test]
     fn bridge_source_untapped_maps_to_negated_condition() {
-        // CR 611.2b: Not(SourceIsTapped) bridges to SourceIsTapped { negated: true }.
+        // CR 611.2b: Not(SourceIsTapped) bridges to Not(SourceIsTapped).
         let result = try_nom_condition_as_ability_condition("~ is untapped");
         assert_eq!(
             result,
-            Some(AbilityCondition::SourceIsTapped { negated: true })
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::SourceIsTapped),
+            })
         );
     }
 
@@ -16864,7 +16873,6 @@ mod tests {
             sub.condition,
             Some(AbilityCondition::RevealedHasCardType {
                 card_type: CoreType::Creature,
-                negated: false,
                 additional_filter: Some(FilterProp::IsChosenCreatureType),
             }),
             "condition should check creature type + chosen type"
@@ -17326,10 +17334,7 @@ mod tests {
         );
         let clause = lower_clause_ast(ast, &ParseContext::default());
         assert!(
-            matches!(
-                clause.condition,
-                Some(AbilityCondition::IsYourTurn { negated: false })
-            ),
+            matches!(clause.condition, Some(AbilityCondition::IsYourTurn)),
             "expected IsYourTurn condition, got: {:?}",
             clause.condition
         );
@@ -17370,10 +17375,7 @@ mod tests {
         // End-to-end: parse_effect_chain sets condition on AbilityDefinition.
         let def = parse_effect_chain("if it's your turn, draw a card", AbilityKind::Spell);
         assert!(
-            matches!(
-                def.condition,
-                Some(AbilityCondition::IsYourTurn { negated: false })
-            ),
+            matches!(def.condition, Some(AbilityCondition::IsYourTurn)),
             "expected IsYourTurn on AbilityDefinition, got: {:?}",
             def.condition
         );
@@ -17638,13 +17640,8 @@ mod tests {
         assert!(cond.is_some(), "should extract MV ≤ 2 condition");
         assert_eq!(text, "Destroy target creature");
         match cond.unwrap() {
-            AbilityCondition::TargetMatchesFilter {
-                filter,
-                use_lki,
-                negated,
-            } => {
+            AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
                 assert!(!use_lki);
-                assert!(!negated);
                 if let TargetFilter::Typed(tf) = filter {
                     assert!(tf.properties.iter().any(|p| matches!(
                         p,

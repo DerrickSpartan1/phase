@@ -7389,7 +7389,7 @@ mod tests {
     }
 
     fn cond_your_turn() -> AbilityCondition {
-        AbilityCondition::IsYourTurn { negated: false }
+        AbilityCondition::IsYourTurn
     }
 
     fn cond_max_speed() -> AbilityCondition {
