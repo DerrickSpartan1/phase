@@ -491,6 +491,13 @@ pub(super) enum TargetedImperativeAst {
         /// any card in the discarding player's hand is legal.
         filter: Option<TargetFilter>,
     },
+    /// CR 701.9a: Back-reference discard — "discard that card" / "discard those
+    /// cards" — discards a specific card identified by the parent effect's
+    /// affected IDs (Seek, Conjure, Reveal-Choose). Distinct from `Discard`
+    /// which is player-choice-from-hand. Lowers to `Effect::DiscardCard`.
+    DiscardCard {
+        target: TargetFilter,
+    },
     /// CR 701.3: Return to hand (bounce).
     Return {
         target: TargetFilter,

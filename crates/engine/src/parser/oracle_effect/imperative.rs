@@ -734,6 +734,22 @@ pub(super) fn parse_targeted_action_ast(
         nom_on_lower(text, lower, |input| value((), tag("discard ")).parse(input))
     {
         let after_discard = &lower[lower.len() - after_discard_orig.len()..];
+        // CR 701.9a: Back-reference discard — "discard that card" / "discard
+        // those cards" target a specific card identified by the parent effect
+        // (Seek/Conjure/Reveal-Choose populate ParentTarget at runtime). Must
+        // be checked before the player-choice count-based discard path, since
+        // "that card" is not a count phrase.
+        if alt((
+            tag::<_, _, VerboseError<&str>>("that card"),
+            tag("those cards"),
+        ))
+        .parse(after_discard)
+        .is_ok()
+        {
+            return Some(TargetedImperativeAst::DiscardCard {
+                target: TargetFilter::ParentTarget,
+            });
+        }
         // CR 701.9a: Detect "at random" suffix for random discard effects.
         let random = nom_primitives::scan_contains(after_discard, "at random");
         // CR 701.9b: Detect "up to" prefix for optional partial discard.
@@ -1014,6 +1030,11 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             unless_filter,
             filter,
         },
+        // CR 701.9a: Back-reference discard — "discard that card" / "discard those
+        // cards" — discards specific cards via ParentTarget binding. Count is
+        // implicit (1 per parent-affected ID; the runtime expands ParentTarget
+        // into the full set at rebind time).
+        TargetedImperativeAst::DiscardCard { target } => Effect::DiscardCard { count: 1, target },
         TargetedImperativeAst::Return { target } => Effect::Bounce {
             target,
             destination: None,
