@@ -47,7 +47,6 @@ const EXILE_GHOST_OFFSET_PX = 20;
 const ATTACHMENT_PEEK_PX = 22;
 const ATTACHMENT_STACK_STEP_PX = 22;
 const HOVERED_ATTACHMENT_HOST_Z_INDEX = 80;
-const HOVERED_ATTACHMENT_Z_INDEX = 70;
 
 // Subtype glyphs sit in the top-right of the peek (where the mana pips
 // would normally be) so the player can identify the attachment's role
@@ -83,6 +82,14 @@ function attachmentTreeContains(
   }
 
   return false;
+}
+
+function objectIdFromRelatedTarget(target: EventTarget | null): number | null {
+  if (!(target instanceof Element)) return null;
+  const objectEl = target.closest<HTMLElement>("[data-object-id]");
+  if (!objectEl) return null;
+  const objectId = Number(objectEl.dataset.objectId);
+  return Number.isFinite(objectId) ? objectId : null;
 }
 
 export const PermanentCard = memo(function PermanentCard({ objectId, attachmentsLiftedByAncestor = false }: PermanentCardProps) {
@@ -157,8 +164,10 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
     hoverObject(objectId); inspectObject(objectId);
   }, [hoverObject, inspectObject, objectId]);
 
-  const handleMouseLeave = useCallback(() => {
-    hoverObject(null); inspectObject(null);
+  const handleMouseLeave = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const nextObjectId = objectIdFromRelatedTarget(event.relatedTarget);
+    hoverObject(nextObjectId);
+    inspectObject(nextObjectId);
   }, [hoverObject, inspectObject]);
 
   const setPreviewSticky = useUiStore((s) => s.setPreviewSticky);
@@ -379,10 +388,10 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
           Card 0 (innermost) is closest to the host with the smallest peek;
           subsequent cards shift further right so each one's right edge is
           visible past the previous one. z-index counts DOWN from a value
-          below the host's z-10 by default so attachments stay tucked behind
-          the host face. While the host or one of its attachment descendants
-          is hovered, lift the attachment tree so each attachment's own
-          click/target handler can win the hit test. */}
+          below the host's z-10 so attachments stay tucked behind the host
+          face. While the host or one of its attachment descendants is
+          hovered, lift only the outer permanent tree above sibling
+          permanents; internal host/attachment ordering stays unchanged. */}
       {obj.attachments.map((attachId, i) => {
         const peekPx = ATTACHMENT_PEEK_PX + i * ATTACHMENT_STACK_STEP_PX;
         return (
@@ -392,9 +401,7 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
             style={{
               left: "100%",
               transform: `translateX(calc(-100% + ${peekPx}px))`,
-              zIndex: attachmentsLifted
-                ? HOVERED_ATTACHMENT_Z_INDEX - i
-                : 5 - i,
+              zIndex: 5 - i,
             }}
           >
             <PermanentCard objectId={attachId} attachmentsLiftedByAncestor={attachmentsLifted} />

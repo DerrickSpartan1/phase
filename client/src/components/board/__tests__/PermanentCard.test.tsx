@@ -154,7 +154,7 @@ describe("PermanentCard attachments", () => {
     cleanup();
   });
 
-  it("lifts attached permanents above the host while the host is hovered", () => {
+  it("lifts the permanent tree above siblings while keeping attachments behind the host", () => {
     const { container } = renderPermanent();
     const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
     const attachment = container.querySelector('[data-object-id="2"]') as HTMLElement;
@@ -169,8 +169,8 @@ describe("PermanentCard attachments", () => {
     fireEvent.mouseEnter(host);
 
     expect(host.style.zIndex).toBe("80");
-    expect(attachmentLayer.style.zIndex).toBe("70");
-    expect(nestedAttachmentLayer.style.zIndex).toBe("70");
+    expect(attachmentLayer.style.zIndex).toBe("5");
+    expect(nestedAttachmentLayer.style.zIndex).toBe("5");
   });
 
   it("keeps the attachment tree lifted while a nested attachment is hovered", () => {
@@ -181,6 +181,22 @@ describe("PermanentCard attachments", () => {
     fireEvent.mouseEnter(nestedAttachment);
 
     expect(host.style.zIndex).toBe("80");
+  });
+
+  it("restores host preview when moving from an attachment back to its host", () => {
+    const { container } = renderPermanent();
+    const host = container.querySelector('[data-object-id="1"]') as HTMLElement;
+    const attachment = container.querySelector('[data-object-id="2"]') as HTMLElement;
+
+    fireEvent.mouseEnter(host);
+    expect(useUiStore.getState().inspectedObjectId).toBe(1);
+
+    fireEvent.mouseEnter(attachment);
+    expect(useUiStore.getState().inspectedObjectId).toBe(2);
+
+    fireEvent.mouseLeave(attachment, { relatedTarget: host });
+    expect(useUiStore.getState().inspectedObjectId).toBe(1);
+    expect(useUiStore.getState().hoveredObjectId).toBe(1);
   });
 
   it("targets the attached permanent itself when the attachment is clicked", () => {
