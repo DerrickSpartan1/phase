@@ -2197,7 +2197,7 @@ fn parse_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
 
         // Try keyword list separators in longest-match-first order.
         let mut found_sep = false;
-        for sep in &[", and ", " and ", ", "] {
+        for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) =
                 tag::<_, _, nom_language::error::VerboseError<&str>>(*sep).parse(remaining)
             {
@@ -2246,7 +2246,7 @@ fn parse_without_keyword_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> 
 
         // Try keyword list separators in longest-match-first order.
         let mut found_sep = false;
-        for sep in &[", and ", " and ", ", "] {
+        for sep in &[", and ", ", or ", " and ", " or ", ", "] {
             if let Ok((rest, _)) =
                 tag::<_, _, nom_language::error::VerboseError<&str>>(*sep).parse(remaining)
             {
@@ -2348,6 +2348,17 @@ fn parse_leading_keyword_match(text: &str) -> Option<(KeywordMatch, usize)> {
 }
 
 fn parse_keyword_match(text: &str) -> Option<KeywordMatch> {
+    if let Ok((rest, kind)) = value(
+        KeywordKind::Disturb,
+        tag::<_, _, nom_language::error::VerboseError<&str>>("disturb"),
+    )
+    .parse(text)
+    {
+        if rest.is_empty() {
+            return Some(KeywordMatch::Kind(kind));
+        }
+    }
+
     if matches!(
         text,
         "flashback" | "cycling" | "escape" | "embalm" | "eternalize" | "harmonize" | "unearth"
@@ -3877,6 +3888,23 @@ mod tests {
     }
 
     #[test]
+    fn card_with_flashback_or_disturb_uses_keyword_kind_filters() {
+        let (f, rest) =
+            parse_type_phrase("card with flashback or disturb, put it into your graveyard");
+        assert_eq!(rest, "put it into your graveyard");
+        let TargetFilter::Typed(typed) = f else {
+            panic!("expected typed filter, got {f:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Card));
+        assert!(typed.properties.contains(&FilterProp::HasKeywordKind {
+            value: KeywordKind::Flashback,
+        }));
+        assert!(typed.properties.contains(&FilterProp::HasKeywordKind {
+            value: KeywordKind::Disturb,
+        }));
+    }
+
+    #[test]
     fn creature_of_the_chosen_type() {
         let (f, _) = parse_type_phrase("creature you control of the chosen type");
         assert_eq!(
@@ -3918,6 +3946,32 @@ mod tests {
                 },
             ]))
         );
+    }
+
+    #[test]
+    fn creature_with_keyword_list_or_separator() {
+        let (f, rest) = parse_type_phrase(
+            "creature with deathtouch, hexproof, reach, or trample and reveal it",
+        );
+        assert_eq!(rest, "reveal it");
+        let TargetFilter::Typed(typed) = f else {
+            panic!("expected typed filter, got {f:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        for keyword in [
+            Keyword::Deathtouch,
+            Keyword::Hexproof,
+            Keyword::Reach,
+            Keyword::Trample,
+        ] {
+            assert!(
+                typed.properties.contains(&FilterProp::WithKeyword {
+                    value: keyword.clone(),
+                }),
+                "missing {keyword:?} in {:?}",
+                typed.properties
+            );
+        }
     }
 
     #[test]
