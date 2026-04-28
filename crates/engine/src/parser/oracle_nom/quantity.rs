@@ -1340,8 +1340,36 @@ fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRe
 }
 
 fn parse_for_each_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, tf) = parse_type_filter_word(input)?;
+    // CR 109.1: Optional "other " / "another " prefix excludes the source from
+    // the count. Lowered to FilterProp::Another (CR 109.1), preserving the
+    // self-exclusion semantic at runtime via filter evaluation against the
+    // source object's identity.
+    let (rest, has_other) = nom::combinator::opt(alt((
+        nom::combinator::value(
+            (),
+            tag::<_, _, nom_language::error::VerboseError<&str>>("other "),
+        ),
+        nom::combinator::value((), tag("another ")),
+    )))
+    .parse(input)?;
+    let (rest, tf) = parse_type_filter_word(rest)?;
     let (rest, _) = tag(" you control").parse(rest)?;
+    let mut properties = Vec::new();
+    if has_other.is_some() {
+        properties.push(FilterProp::Another);
+    }
+    if !properties.is_empty() {
+        return Ok((
+            rest,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![tf],
+                    controller: Some(ControllerRef::You),
+                    properties,
+                }),
+            },
+        ));
+    }
     Ok((
         rest,
         QuantityRef::ObjectCount {
