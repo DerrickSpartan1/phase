@@ -5393,7 +5393,12 @@ fn parse_continuous_gets_has(
     // CR 613.4c: Handle "gets +N/+M for each [clause]" — dynamic P/T via ObjectCount.
     if let Some((before_for_each, after_for_each)) = tp.split_around("for each ") {
         let pt_text = before_for_each.original.trim();
-        let for_each_clause = after_for_each.lower.trim_end_matches('.');
+        let raw_for_each = after_for_each.lower.trim_end_matches('.');
+        // Strip a trailing keyword clause (" and has flying", " and gains haste",
+        // etc.) so the for-each filter parser sees only its own clause. The
+        // trailing keywords are picked up separately via `extract_keyword_clause`
+        // on `description` below.
+        let for_each_clause = strip_trailing_keyword_clause(raw_for_each);
 
         let pt_lower = pt_text.to_lowercase();
         let pt_source = nom_tag_lower(&pt_lower, &pt_lower, "gets ")
@@ -6015,6 +6020,21 @@ pub(crate) fn split_keyword_list(text: &str) -> Vec<Cow<'_, str>> {
     // Reuses the building block from oracle_keyword.rs which handles inline,
     // comma-continuation, and Oxford comma protection patterns.
     super::oracle_keyword::expand_protection_parts(&parts)
+}
+
+/// CR 613.4c: For "+N/+M for each X and has [keyword]" patterns, the for-each
+/// filter clause ends at " and has " / " and gains " / " and have ". Returns
+/// the input slice truncated at the first matching boundary, or unchanged if
+/// no boundary is present. Mirrors the keyword recognition in
+/// `extract_keyword_clause` but in the inverse direction (returns the
+/// pre-boundary span instead of the post-boundary one).
+fn strip_trailing_keyword_clause(clause: &str) -> &str {
+    for needle in [" and gains ", " and gain ", " and has ", " and have "] {
+        if let Some(pos) = clause.find(needle) {
+            return &clause[..pos];
+        }
+    }
+    clause
 }
 
 fn extract_keyword_clause(text: &str) -> Option<&str> {
