@@ -1010,6 +1010,19 @@ mod tests {
     }
 
     #[test]
+    fn parse_search_filter_handles_multicolored_card() {
+        let filter = parse_search_filter("multicolored card");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Card));
+        assert!(typed
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::Multicolored)));
+    }
+
+    #[test]
     fn search_any_number_of_dragon_creature_cards_sets_up_to_and_filter() {
         // CR 107.1c: Sarkhan, Dragonsoul [-9]: "Search your library for any number
         // of Dragon creature cards, put them onto the battlefield, then shuffle."

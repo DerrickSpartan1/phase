@@ -905,10 +905,10 @@ pub fn parse_type_phrase(text: &str) -> (TargetFilter, &str) {
         }
     }
 
-    // CR 105.1 + CR 105.2c: Handle color adjective prefixes:
-    // "white creature", "red spell", "colorless creature", etc.
+    // CR 105.1 + CR 105.2: Handle color adjective prefixes:
+    // "white creature", "red spell", "colorless creature", "multicolored card", etc.
     let color_prop =
-        parse_color_prefix(&lower[pos..]).or_else(|| parse_colorless_prefix(&lower[pos..]));
+        parse_color_prefix(&lower[pos..]).or_else(|| parse_color_quality_prefix(&lower[pos..]));
     if let Some((ref prop, color_len)) = color_prop {
         properties.push(prop.clone());
         pos += color_len;
@@ -1465,11 +1465,10 @@ pub(crate) fn starts_with_type_word(text: &str) -> bool {
             }
         }
     }
-    // CR 105.2c: Colorless adjective prefix: "colorless creature", etc.
-    if let Ok((after_colorless, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("colorless ").parse(text)
-    {
-        if starts_with_type_word(after_colorless) {
+    // CR 105.2b/c: Color-quality adjective prefix: "multicolored card",
+    // "colorless creature", etc.
+    if let Some((_prop, consumed)) = parse_color_quality_prefix(text) {
+        if starts_with_type_word(&text[consumed..]) {
             return true;
         }
     }
@@ -1594,6 +1593,7 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             // CR 105.1 + CR 205.2: color / supertype adjectives.
             | FilterProp::HasColor { .. }
             | FilterProp::Colorless
+            | FilterProp::Multicolored
             | FilterProp::NotColor { .. }
             | FilterProp::HasSupertype { .. }
             | FilterProp::NotSupertype { .. }
@@ -1780,13 +1780,19 @@ fn parse_color_prefix(text: &str) -> Option<(FilterProp, usize)> {
     Some((FilterProp::HasColor { color }, consumed))
 }
 
-/// Parse the colorless adjective prefix: "colorless creature", "colorless spell", etc.
-/// Returns (FilterProp::Colorless, bytes consumed including trailing space).
-fn parse_colorless_prefix(text: &str) -> Option<(FilterProp, usize)> {
-    let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("colorless ")
-        .parse(text)
-        .ok()?;
-    Some((FilterProp::Colorless, text.len() - rest.len()))
+/// Parse color-quality adjective prefixes: "colorless creature", "multicolored card", etc.
+/// Returns the filter property and bytes consumed including trailing space.
+fn parse_color_quality_prefix(text: &str) -> Option<(FilterProp, usize)> {
+    let (rest, prop) = alt((
+        value(
+            FilterProp::Colorless,
+            tag::<_, _, nom_language::error::VerboseError<&str>>("colorless "),
+        ),
+        value(FilterProp::Multicolored, tag("multicolored ")),
+    ))
+    .parse(text)
+    .ok()?;
+    Some((prop, text.len() - rest.len()))
 }
 
 /// CR 509.1h / CR 302.6: Parse status prefixes from type phrases.
@@ -3513,6 +3519,16 @@ mod tests {
             .properties
             .iter()
             .any(|property| matches!(property, FilterProp::Colorless)));
+    }
+
+    #[test]
+    fn multicolored_card() {
+        let (f, rest) = parse_type_phrase("multicolored card");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Multicolored]))
+        );
     }
 
     /// CR 208.1: "creature with power or toughness N or less" produces a
