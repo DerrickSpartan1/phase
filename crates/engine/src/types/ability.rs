@@ -1933,6 +1933,15 @@ pub enum QuantityRef {
     ///   life-lost-this-turn, but the slot exists for symmetry with `LifeTotal`
     ///   / `HandSize`.
     LifeLostThisTurn { player: PlayerScope },
+    /// CR 700.8: Number of creatures in `player`'s party. A party consists of
+    /// up to one Cleric, one Rogue, one Warrior, and one Wizard creature
+    /// `player` controls; the resolver maximizes the count when creatures have
+    /// multiple party-relevant types (CR 700.8b). The result is bounded
+    /// `0..=4`. `PlayerScope::Controller` is the default reading
+    /// ("your party"); `Target`/`Opponent { .. }`/`AllPlayers { .. }` cover
+    /// targeted-player and cross-player aggregate variants per the same axis
+    /// used by `LifeTotal`/`HandSize`.
+    PartySize { player: PlayerScope },
     /// CR 702.179f: The controller's current speed, treating no speed as 0.
     Speed,
     /// CR 603.7c: Numeric value from the triggering event.

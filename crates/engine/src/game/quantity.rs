@@ -417,6 +417,15 @@ fn resolve_ref(
                 u32_to_i32_saturating(p.life_lost_this_turn)
             })
         }
+        // CR 700.8: Number of creatures in `player`'s party. The maximum
+        // assignment of creatures to the four party slots (Cleric/Rogue/
+        // Warrior/Wizard) is computed per CR 700.8b for creatures with
+        // multiple party-relevant types. Bounded to `0..=4`.
+        QuantityRef::PartySize { player: scope } => {
+            resolve_per_player_scalar(state, *scope, controller, targets, |p| {
+                compute_party_size(state, p.id)
+            })
+        }
         QuantityRef::Speed => i32::from(effective_speed(state, controller)),
         QuantityRef::ObjectCount { filter } => {
             // CR 400.1: If the filter constrains to a specific zone via InZone,
@@ -1277,6 +1286,109 @@ where
     }
 }
 
+/// CR 700.8 + CR 700.8b: Compute the size of `player`'s party.
+///
+/// A player's party consists of up to one Cleric creature, one Rogue, one
+/// Warrior, and one Wizard the player controls (CR 700.8). When a creature
+/// has multiple party-relevant types, it counts toward only one slot, and
+/// the assignment maximizes the resulting party size (CR 700.8b). The
+/// result is bounded `0..=4`.
+///
+/// Reads each battlefield creature's post-layer `card_types.subtypes` so
+/// type-changing effects (Arcane Adaptation, Conspiracy, etc.) compose
+/// correctly. The four party slots are encoded as a 4-bit mask; the maximum
+/// matching is computed by exact bipartite enumeration over the 24 slot
+/// permutations — trivially small (4 slots, ≤24 permutations) and strictly
+/// correct.
+pub(crate) fn compute_party_size(state: &GameState, player: PlayerId) -> i32 {
+    /// Bitmask: bit 0=Cleric, 1=Rogue, 2=Warrior, 3=Wizard.
+    fn party_mask(subtypes: &[String]) -> u8 {
+        let mut mask = 0u8;
+        for s in subtypes {
+            match s.as_str() {
+                "Cleric" => mask |= 0b0001,
+                "Rogue" => mask |= 0b0010,
+                "Warrior" => mask |= 0b0100,
+                "Wizard" => mask |= 0b1000,
+                _ => {}
+            }
+        }
+        mask
+    }
+
+    // Collect non-zero party masks for each creature `player` controls on the
+    // battlefield. Creatures with no party-relevant types are skipped.
+    let masks: Vec<u8> = state
+        .battlefield
+        .iter()
+        .filter_map(|id| state.objects.get(id))
+        .filter(|obj| {
+            obj.controller == player && obj.card_types.core_types.contains(&CoreType::Creature)
+        })
+        .map(|obj| party_mask(&obj.card_types.subtypes))
+        .filter(|m| *m != 0)
+        .collect();
+
+    if masks.is_empty() {
+        return 0;
+    }
+
+    // CR 700.8b: try every permutation of the 4 slot indices and assign each
+    // creature to the first slot in the permutation it satisfies. Take the
+    // maximum across all permutations.
+    let permutations: [[u8; 4]; 24] = [
+        [0, 1, 2, 3],
+        [0, 1, 3, 2],
+        [0, 2, 1, 3],
+        [0, 2, 3, 1],
+        [0, 3, 1, 2],
+        [0, 3, 2, 1],
+        [1, 0, 2, 3],
+        [1, 0, 3, 2],
+        [1, 2, 0, 3],
+        [1, 2, 3, 0],
+        [1, 3, 0, 2],
+        [1, 3, 2, 0],
+        [2, 0, 1, 3],
+        [2, 0, 3, 1],
+        [2, 1, 0, 3],
+        [2, 1, 3, 0],
+        [2, 3, 0, 1],
+        [2, 3, 1, 0],
+        [3, 0, 1, 2],
+        [3, 0, 2, 1],
+        [3, 1, 0, 2],
+        [3, 1, 2, 0],
+        [3, 2, 0, 1],
+        [3, 2, 1, 0],
+    ];
+    let mut best: u32 = 0;
+    for perm in &permutations {
+        let mut filled: u8 = 0;
+        let mut count: u32 = 0;
+        for &m in &masks {
+            for &slot in perm {
+                let bit = 1u8 << slot;
+                if filled & bit == 0 && m & bit != 0 {
+                    filled |= bit;
+                    count += 1;
+                    break;
+                }
+            }
+            if filled == 0b1111 {
+                break;
+            }
+        }
+        if count > best {
+            best = count;
+            if best == 4 {
+                break;
+            }
+        }
+    }
+    best as i32
+}
+
 /// Count players matching a PlayerFilter relative to the controller.
 pub(crate) fn resolve_player_count(
     state: &GameState,
@@ -1360,6 +1472,91 @@ mod tests {
     use crate::types::mana::ManaColor;
     use crate::types::zones::Zone;
     use crate::types::SpellCastRecord;
+
+    /// CR 700.8 + CR 700.8b: party size — building-block test exercising
+    /// `compute_party_size` directly across the full assignment surface.
+    /// Verifies that the bipartite-matching maximizes the count for creatures
+    /// with multi-class subtype lines, that the cap is 4, and that opponent's
+    /// creatures don't contribute.
+    #[test]
+    fn compute_party_size_covers_700_8b_assignment() {
+        let mut state = GameState::new_two_player(42);
+
+        // Helper: spawn a creature on `controller`'s battlefield with given subtypes.
+        let spawn = |state: &mut GameState, controller: PlayerId, subtypes: &[&str]| {
+            let id = create_object(
+                state,
+                CardId(100),
+                controller,
+                "Test Creature".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types = vec![CoreType::Creature];
+            obj.card_types.subtypes = subtypes.iter().map(|s| (*s).to_string()).collect();
+        };
+
+        // No creatures → party size 0.
+        assert_eq!(compute_party_size(&state, PlayerId(0)), 0);
+
+        // One Cleric Wizard alone: assignment is forced (one slot), party = 1
+        // per CR 700.8b. The set-of-types shortcut would wrongly return 2.
+        spawn(&mut state, PlayerId(0), &["Cleric", "Wizard"]);
+        assert_eq!(compute_party_size(&state, PlayerId(0)), 1);
+
+        // Add a plain Wizard. Optimal: Cleric Wizard → Cleric, Wizard → Wizard.
+        // Party = 2.
+        spawn(&mut state, PlayerId(0), &["Wizard"]);
+        assert_eq!(compute_party_size(&state, PlayerId(0)), 2);
+
+        // Add a Rogue Warrior. Optimal: assign to Rogue OR Warrior (not both).
+        // Party = 3.
+        spawn(&mut state, PlayerId(0), &["Rogue", "Warrior"]);
+        assert_eq!(compute_party_size(&state, PlayerId(0)), 3);
+
+        // Add a plain Warrior. Optimal: Rogue Warrior → Rogue, Warrior →
+        // Warrior, plus the existing Cleric/Wizard pair. Party = 4 (cap).
+        spawn(&mut state, PlayerId(0), &["Warrior"]);
+        assert_eq!(compute_party_size(&state, PlayerId(0)), 4);
+
+        // Adding a fifth party-typed creature does not exceed the cap.
+        spawn(&mut state, PlayerId(0), &["Rogue"]);
+        assert_eq!(compute_party_size(&state, PlayerId(0)), 4);
+
+        // Non-party creature subtypes contribute nothing.
+        spawn(&mut state, PlayerId(1), &["Goblin", "Soldier"]);
+        assert_eq!(compute_party_size(&state, PlayerId(1)), 0);
+
+        // Opponent-controlled party-typed creature does not count for P0.
+        spawn(&mut state, PlayerId(1), &["Cleric"]);
+        assert_eq!(compute_party_size(&state, PlayerId(1)), 1);
+        assert_eq!(compute_party_size(&state, PlayerId(0)), 4);
+    }
+
+    /// CR 700.8: end-to-end resolution through `QuantityRef::PartySize` with
+    /// `PlayerScope::Controller` reads the controller's party size.
+    #[test]
+    fn resolve_party_size_controller_scope() {
+        let mut state = GameState::new_two_player(42);
+        let id = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Wizard".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&id).unwrap();
+        obj.card_types.core_types = vec![CoreType::Creature];
+        obj.card_types.subtypes = vec!["Wizard".to_string()];
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::PartySize {
+                player: PlayerScope::Controller,
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 1);
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(0)), 0);
+    }
 
     /// CR 122.1: PlayerCounter resolves controller scope from the named player.
     /// Opponents/All sums the kind across the matching scope (Toph's "you have"

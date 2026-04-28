@@ -728,6 +728,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             };
             format!("# of {kind} counters {scope_s}")
         }
+        QuantityRef::PartySize { player } => {
+            format!("party size ({})", fmt_player_scope(*player))
+        }
     }
 }
 
@@ -4177,6 +4180,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         }
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
         QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
+        QuantityRef::PartySize { .. } => ("PartySize", Handled),
     }
 }
 
