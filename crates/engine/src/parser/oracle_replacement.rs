@@ -4122,6 +4122,23 @@ mod tests {
     }
 
     #[test]
+    fn as_enters_choose_two_colors() {
+        let def = parse_replacement_line(
+            "As this artifact enters, choose two colors.",
+            "Tablet of the Guilds",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            *execute.effect,
+            Effect::Choose {
+                choice_type: ChoiceType::TwoColors,
+                persist: true,
+            }
+        ));
+    }
+
+    #[test]
     fn as_enters_choose_a_creature_type() {
         let def = parse_replacement_line(
             "As Door of Destinies enters, choose a creature type.",
