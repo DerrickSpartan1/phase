@@ -1176,15 +1176,20 @@ fn parse_target_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
-/// Parse the bare domain suffix: "basic land types among lands you control".
+/// Parse the bare domain suffix: "basic land type[s] among lands you control".
 ///
 /// Factored out so both the full "the number of ..." form (Domain quantity) and
 /// the "there are N ..." condition form (see `parse_there_are_conditions` in
-/// `oracle_nom/condition.rs`) share a single tag authority.
+/// `oracle_nom/condition.rs`) share a single tag authority. The singular form
+/// appears after "for each"; the plural form appears after "the number of".
 fn parse_basic_land_types_among_lands_you_control(input: &str) -> OracleResult<'_, QuantityRef> {
     value(
         QuantityRef::BasicLandTypeCount,
-        tag("basic land types among lands you control"),
+        (
+            tag("basic land type"),
+            opt(tag("s")),
+            tag(" among lands you control"),
+        ),
     )
     .parse(input)
 }
@@ -2028,6 +2033,13 @@ mod tests {
     fn test_parse_basic_land_type_count() {
         let (rest, q) =
             parse_quantity_ref("the number of basic land types among lands you control").unwrap();
+        assert_eq!(q, QuantityRef::BasicLandTypeCount);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_basic_land_type_count_singular_for_each_suffix() {
+        let (rest, q) = parse_quantity_ref("basic land type among lands you control").unwrap();
         assert_eq!(q, QuantityRef::BasicLandTypeCount);
         assert_eq!(rest, "");
     }

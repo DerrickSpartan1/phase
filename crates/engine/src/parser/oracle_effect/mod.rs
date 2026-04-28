@@ -9337,10 +9337,39 @@ fn parse_unless_payment(lower: &str) -> Option<UnlessCost> {
         return None;
     }
     let cost = parse_mtgjson_mana_cost(cost_text);
+    if let Some(unless_cost) = parse_unless_for_each_payment(&cost_str[cost_end..], &cost) {
+        return Some(unless_cost);
+    }
     if cost == ManaCost::NoCost || cost == ManaCost::zero() {
         return None;
     }
     Some(UnlessCost::Fixed { cost })
+}
+
+fn parse_unless_for_each_payment(after_cost: &str, cost: &ManaCost) -> Option<UnlessCost> {
+    let ManaCost::Cost { shards, generic } = cost else {
+        return None;
+    };
+    if !shards.is_empty() || *generic == 0 {
+        return None;
+    }
+
+    let (_, clause) = preceded(
+        tag::<_, _, VerboseError<&str>>(" for each "),
+        nom::combinator::rest,
+    )
+    .parse(after_cost)
+    .ok()?;
+    let qty = parse_for_each_clause(clause.trim())?;
+    let quantity = if *generic == 1 {
+        QuantityExpr::Ref { qty }
+    } else {
+        QuantityExpr::Multiply {
+            factor: i32::try_from(*generic).ok()?,
+            inner: Box::new(QuantityExpr::Ref { qty }),
+        }
+    };
+    Some(UnlessCost::DynamicGeneric { quantity })
 }
 
 /// Parse "where X is this creature's power" and similar dynamic quantity clauses.
@@ -9592,7 +9621,7 @@ mod tests {
     use crate::types::ability::{
         CastVariantPaid, Comparator, ContinuousModification, ControllerRef, DoublePTMode, Duration,
         FilterProp, GainLifePlayer, LinkedExileScope, ManaContribution, ManaProduction,
-        PaymentCost, TypeFilter,
+        PaymentCost, TypeFilter, ZoneRef,
     };
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
@@ -10580,6 +10609,59 @@ mod tests {
                 matches!(target, TargetFilter::Typed(TypedFilter { properties, .. })
                     if properties.iter().any(|p| matches!(p, FilterProp::InZone { zone: Zone::Stack }))),
                 "target should be on stack"
+            );
+        } else {
+            panic!("expected Counter effect, got {e:?}");
+        }
+    }
+
+    #[test]
+    fn effect_counter_unless_pays_for_each_uses_dynamic_cost() {
+        let e = parse_effect(
+            "Counter target spell unless its controller pays {1} for each card in your graveyard",
+        );
+        if let Effect::Counter { unless_payment, .. } = &e {
+            assert!(
+                matches!(
+                    unless_payment,
+                    Some(UnlessCost::DynamicGeneric {
+                        quantity: QuantityExpr::Ref {
+                            qty: QuantityRef::ZoneCardCount {
+                                zone: ZoneRef::Graveyard,
+                                ..
+                            }
+                        }
+                    })
+                ),
+                "unless payment should be dynamic graveyard count, got {unless_payment:?}"
+            );
+        } else {
+            panic!("expected Counter effect, got {e:?}");
+        }
+    }
+
+    #[test]
+    fn effect_counter_unless_pays_for_each_multiplies_generic_cost() {
+        let e = parse_effect(
+            "Counter target spell unless its controller pays {3} for each card discarded this way",
+        );
+        if let Effect::Counter { unless_payment, .. } = &e {
+            assert!(
+                matches!(
+                    unless_payment,
+                    Some(UnlessCost::DynamicGeneric {
+                        quantity: QuantityExpr::Multiply {
+                            factor: 3,
+                            inner,
+                        }
+                    }) if matches!(
+                        inner.as_ref(),
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::TrackedSetSize
+                        }
+                    )
+                ),
+                "unless payment should multiply tracked-set count, got {unless_payment:?}"
             );
         } else {
             panic!("expected Counter effect, got {e:?}");
