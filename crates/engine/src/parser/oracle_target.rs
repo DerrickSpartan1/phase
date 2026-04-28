@@ -2052,9 +2052,24 @@ pub(crate) fn parse_counter_suffix(text: &str) -> Option<(FilterProp, usize)> {
     use nom::combinator::{opt, value};
 
     let trimmed = text.trim_start();
+    let leading_ws = text.len() - trimmed.len();
     let (rest, _) = tag_e::<_, _, nom_language::error::VerboseError<&str>>("with ")
         .parse(trimmed)
         .ok()?;
+
+    // CR 122.1: Bare "with a counter on it" / "with a counter on them" — any
+    // counter of any type. Distinct from typed "with a +1/+1 counter on it"
+    // (CountersGE) — emits HasAnyCounter so `creature with a counter on it`
+    // matches any counter-bearing creature regardless of type. Must precede the
+    // typed-counter branch so the empty-counter-type guard there doesn't fire.
+    for prefix in ["a counter on it", "a counter on them", "any counter on it"] {
+        if let Ok((after, _)) =
+            tag_e::<_, _, nom_language::error::VerboseError<&str>>(prefix).parse(rest)
+        {
+            let consumed = leading_ws + "with ".len() + (rest.len() - after.len());
+            return Some((FilterProp::HasAnyCounter, consumed));
+        }
+    }
 
     // Parse count: optional article ("a"/"an" → implicit 1) or an explicit
     // quantity expression followed by a space. Neither branch matching means
