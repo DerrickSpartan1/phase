@@ -1083,12 +1083,10 @@ fn try_build_may_cost_pair(
     };
 
     let (execute, decline) = match next {
-        ReplacementActionWouldEnter::If(cond, body) if matches!(cond, Condition::CostWasPaid) => {
+        ReplacementActionWouldEnter::If(Condition::CostWasPaid, body) => {
             (Some(may_cost_body_ability(body, target)?), None)
         }
-        ReplacementActionWouldEnter::Unless(cond, body)
-            if matches!(cond, Condition::CostWasPaid) =>
-        {
+        ReplacementActionWouldEnter::Unless(Condition::CostWasPaid, body) => {
             (None, Some(Box::new(may_cost_body_ability(body, target)?)))
         }
         ReplacementActionWouldEnter::IfElse(cond, then_body, else_body)

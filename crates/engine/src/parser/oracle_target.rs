@@ -123,12 +123,16 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     // Strip leading article ("a "/"an ") before "target" to handle "a target creature".
     // Guard: only strip when followed by "target " to avoid over-stripping.
     if let Ok((after_article, _)) = alt((
-        tag::<_, _, nom_language::error::VerboseError<&str>>("a "),
+        tag::<_, _, nom_language::error::VerboseError<&str>>("a second "),
+        tag("a "),
         tag("an "),
     ))
     .parse(lower.as_str())
     {
-        if after_article.starts_with("target ") {
+        if tag::<_, _, nom_language::error::VerboseError<&str>>("target ")
+            .parse(after_article)
+            .is_ok()
+        {
             let original_rest = &text[lower.len() - after_article.len()..];
             return parse_target(original_rest);
         }
@@ -146,6 +150,7 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         "up to five ",
         "up to six ",
         "one, two, or three ",
+        "a second ",
         "one or two ",
         "one ",
         "two ",
@@ -1573,16 +1578,15 @@ fn target_phrase_uses_spell_suffix(phrase: &str) -> bool {
 fn add_stack_zone_to_spell_targets(filter: TargetFilter, scope_all_typed: bool) -> TargetFilter {
     match filter {
         TargetFilter::Typed(mut typed) => {
-            if scope_all_typed || typed.type_filters.contains(&TypeFilter::Card) {
-                if !typed
+            if (scope_all_typed || typed.type_filters.contains(&TypeFilter::Card))
+                && !typed
                     .properties
                     .iter()
                     .any(|prop| matches!(prop, FilterProp::InZone { zone } if *zone == Zone::Stack))
-                {
-                    typed
-                        .properties
-                        .push(FilterProp::InZone { zone: Zone::Stack });
-                }
+            {
+                typed
+                    .properties
+                    .push(FilterProp::InZone { zone: Zone::Stack });
             }
             TargetFilter::Typed(typed)
         }
@@ -1930,6 +1934,25 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
         tag::<_, _, nom_language::error::VerboseError<&str>>("with power or toughness ")
             .parse(trimmed)
     {
+        if let Some((comparator, value, after)) = parse_pt_quantity_comparison_tail(rest) {
+            let props = if comparator == Comparator::LE {
+                vec![
+                    FilterProp::PowerLE {
+                        value: value.clone(),
+                    },
+                    FilterProp::ToughnessLE { value },
+                ]
+            } else {
+                vec![
+                    FilterProp::PowerGE {
+                        value: value.clone(),
+                    },
+                    FilterProp::ToughnessGE { value },
+                ]
+            };
+            return Some((FilterProp::AnyOf { props }, text.len() - after.len()));
+        }
+
         let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
         let after_num = rest.trim_start();
         if let Ok((after, _)) =
@@ -1961,6 +1984,15 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     if let Ok((rest, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("with toughness ").parse(trimmed)
     {
+        if let Some((comparator, value, after)) = parse_pt_quantity_comparison_tail(rest) {
+            let prop = if comparator == Comparator::LE {
+                FilterProp::ToughnessLE { value }
+            } else {
+                FilterProp::ToughnessGE { value }
+            };
+            return Some((prop, text.len() - after.len()));
+        }
+
         let (rest, value) = nom_quantity::parse_quantity_expr_number(rest).ok()?;
         let after_num = rest.trim_start();
         let (prop, after) = if let Ok((a, _)) =
@@ -1980,6 +2012,15 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("with power ")
         .parse(trimmed)
         .ok()?;
+    if let Some((comparator, value, after)) = parse_pt_quantity_comparison_tail(rest) {
+        let prop = if comparator == Comparator::LE {
+            FilterProp::PowerLE { value }
+        } else {
+            FilterProp::PowerGE { value }
+        };
+        return Some((prop, text.len() - after.len()));
+    }
+
     // CR 208.1 + CR 107.3a: Accept literal N or the variable X — X emits
     // `QuantityRef::Variable { "X" }` resolved at effect time against the
     // resolving ability's `chosen_x` via `FilterContext::from_ability`.
@@ -1997,6 +2038,49 @@ fn parse_power_suffix(text: &str) -> Option<(FilterProp, usize)> {
         return None;
     };
     Some((prop, text.len() - after.len()))
+}
+
+fn parse_pt_quantity_comparison_tail(input: &str) -> Option<(Comparator, QuantityExpr, &str)> {
+    type Vbe<'a> = nom_language::error::VerboseError<&'a str>;
+    let input = input.trim_start();
+    let (after_cmp, comparator) = alt((
+        value(Comparator::LT, tag::<_, _, Vbe>("less than")),
+        value(Comparator::GT, tag("greater than")),
+    ))
+    .parse(input)
+    .ok()?;
+    let after_cmp = after_cmp.trim_start();
+    let (after_eq, includes_equal) =
+        if let Ok((rest, _)) = tag::<_, _, Vbe>("or equal to").parse(after_cmp) {
+            (rest.trim_start(), true)
+        } else {
+            (after_cmp, false)
+        };
+    let (after_qty, qty) = nom_quantity::parse_quantity_ref(after_eq).ok()?;
+    let value = QuantityExpr::Ref { qty };
+    let comparator = match (comparator, includes_equal) {
+        (Comparator::LT, true) => Comparator::LE,
+        (Comparator::GT, true) => Comparator::GE,
+        (comparator, false) => comparator,
+        _ => return None,
+    };
+    let value = match comparator {
+        Comparator::LT => QuantityExpr::Offset {
+            inner: Box::new(value),
+            offset: -1,
+        },
+        Comparator::GT => QuantityExpr::Offset {
+            inner: Box::new(value),
+            offset: 1,
+        },
+        _ => value,
+    };
+    let comparator = match comparator {
+        Comparator::LT => Comparator::LE,
+        Comparator::GT => Comparator::GE,
+        comparator => comparator,
+    };
+    Some((comparator, value, after_qty))
 }
 
 /// Parse "with mana value N or less" / "with mana value N or greater" suffix,
@@ -3734,6 +3818,51 @@ mod tests {
                     value: QuantityExpr::Fixed { value: 2 },
                 }
             ]))
+        );
+    }
+
+    #[test]
+    fn creature_with_toughness_less_than_domain_count() {
+        let (f, rest) = parse_type_phrase(
+            "creature with toughness less than the number of basic land types among lands you control",
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![
+                FilterProp::ToughnessLE {
+                    value: QuantityExpr::Offset {
+                        inner: Box::new(QuantityExpr::Ref {
+                            qty: QuantityRef::BasicLandTypeCount,
+                        }),
+                        offset: -1,
+                    },
+                }
+            ]))
+        );
+    }
+
+    #[test]
+    fn creature_with_power_less_than_or_equal_to_controlled_count() {
+        let (f, rest) = parse_type_phrase(
+            "creature with power less than or equal to the number of allies you control",
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::PowerLE {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Subtype("Ally".to_string())],
+                                controller: Some(ControllerRef::You),
+                                properties: Vec::new(),
+                            }),
+                        },
+                    },
+                }])
+            )
         );
     }
 
@@ -6238,6 +6367,18 @@ mod tests {
                 "Expected Another property in {:?}",
                 tf.properties
             );
+        } else {
+            panic!("Expected Typed filter, got {filter:?}");
+        }
+    }
+
+    #[test]
+    fn parse_target_a_second_target_creature_you_control() {
+        let (filter, rest) = parse_target("a second target creature you control");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        if let TargetFilter::Typed(tf) = &filter {
+            assert!(tf.type_filters.contains(&TypeFilter::Creature));
+            assert_eq!(tf.controller, Some(ControllerRef::You));
         } else {
             panic!("Expected Typed filter, got {filter:?}");
         }

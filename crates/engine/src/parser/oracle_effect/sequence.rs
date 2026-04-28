@@ -418,8 +418,7 @@ fn starts_multiword_keyword_continuation(s: &str) -> bool {
         tag::<_, _, VerboseError<&str>>("double strike"),
         tag("double team"),
     ))
-    .parse(s)
-    else {
+    .parse(s) else {
         return false;
     };
     rest.chars()
