@@ -411,9 +411,11 @@ fn resolve_ref(
         }
         // CR 103.4: The format's starting life total.
         QuantityRef::StartingLifeTotal => state.format_config.starting_life,
-        // CR 118.4: Total life lost this turn by the controller.
-        QuantityRef::LifeLostThisTurn => {
-            player.map_or(0, |p| u32_to_i32_saturating(p.life_lost_this_turn))
+        // CR 118.4 + CR 119.3: Life lost this turn, scoped via PlayerScope (Π-3).
+        QuantityRef::LifeLostThisTurn { player } => {
+            resolve_per_player_scalar(state, *player, controller, targets, |p| {
+                u32_to_i32_saturating(p.life_lost_this_turn)
+            })
         }
         QuantityRef::Speed => i32::from(effective_speed(state, controller)),
         QuantityRef::ObjectCount { filter } => {
@@ -1103,24 +1105,6 @@ fn resolve_ref(
         }
         // CR 117.1: Total spells cast last turn (by any player).
         QuantityRef::SpellsCastLastTurn => state.spells_cast_last_turn.map_or(0, i32::from),
-        // CR 119.3: Total life lost by opponents this turn.
-        QuantityRef::OpponentLifeLostThisTurn => state
-            .players
-            .iter()
-            .filter(|p| p.id != controller)
-            .map(|p| u32_to_i32_saturating(p.life_lost_this_turn))
-            .sum(),
-        // CR 119.3 + CR 603.4: Maximum life lost this turn across all players
-        // (controller and opponents). Used by "if a player lost N or more life
-        // this turn" intervening-if clauses (Y'shtola, Knight of the Ebon
-        // Legion). Per-player max, not sum — "a player lost N+" means "some
-        // single player has individually lost ≥ N".
-        QuantityRef::MaxLifeLostThisTurnAcrossPlayers => state
-            .players
-            .iter()
-            .map(|p| u32_to_i32_saturating(p.life_lost_this_turn))
-            .max()
-            .unwrap_or(0),
         // CR 122.1: Whether the controller added any counter to any permanent this turn.
         QuantityRef::CounterAddedThisTurn => {
             if state
@@ -1133,8 +1117,8 @@ fn resolve_ref(
             }
         }
         // CR 701.9 + CR 603.4: Whether any opponent of the controller discarded
-        // a card this turn. Mirrors OpponentLifeLostThisTurn semantics — scans
-        // the per-turn discard set for any player != controller.
+        // a card this turn. Mirrors `LifeLostThisTurn { Opponent { Sum } }`
+        // semantics — scans the per-turn discard set for any player != controller.
         QuantityRef::OpponentDiscardedCardThisTurn => {
             if state
                 .players_who_discarded_card_this_turn
@@ -2068,8 +2052,34 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
     }
 
-    /// CR 119.3 + CR 603.4: `MaxLifeLostThisTurnAcrossPlayers` returns the
-    /// maximum life-loss across all players (controller + opponents),
+    /// CR 119.3: `LifeLostThisTurn { Opponent { Sum } }` sums life lost across
+    /// opponents, excluding the controller. Three players' losses [2, 5, 1]
+    /// with controller = 0 → sum of opponents 1+2 = 5+1 = 6. Locks in the
+    /// pre-Π-3 `OpponentLifeLostThisTurn` semantic.
+    #[test]
+    fn resolve_quantity_opponent_life_lost_this_turn_sum() {
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 3, 42);
+        state.players[0].life_lost_this_turn = 2;
+        state.players[1].life_lost_this_turn = 5;
+        state.players[2].life_lost_this_turn = 1;
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+        };
+        // Controller = player 0: opponents are 1 and 2 → 5 + 1 = 6.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 6);
+        // Controller = player 1: opponents are 0 and 2 → 2 + 1 = 3.
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(1)), 3);
+    }
+
+    /// CR 119.3 + CR 603.4: `LifeLostThisTurn { AllPlayers { Max } }` returns
+    /// the maximum life-loss across all players (controller + opponents),
     /// not the sum. Three players' losses [2, 5, 1] → max = 5.
     /// Critical: 2 + 5 + 1 = 8 would falsely satisfy a >= 8 threshold,
     /// while max = 5 correctly fails it.
@@ -2083,7 +2093,11 @@ mod tests {
         state.players[2].life_lost_this_turn = 1;
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::MaxLifeLostThisTurnAcrossPlayers,
+            qty: QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                },
+            },
         };
         // Resolves identically regardless of which player is the controller —
         // the variant scans all players, not just opponents.
@@ -2098,7 +2112,11 @@ mod tests {
     fn resolve_quantity_max_life_lost_this_turn_none_lost() {
         let state = GameState::new_two_player(42);
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::MaxLifeLostThisTurnAcrossPlayers,
+            qty: QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Max,
+                },
+            },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 0);
     }

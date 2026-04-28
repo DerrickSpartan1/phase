@@ -763,34 +763,66 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         nom::combinator::opt(alt((tag("the amount of "), tag("amount of ")))).parse(input)?;
     alt((
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("total life you lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("total life you've lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life you've lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life you lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("life you've lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("life you lost this turn"),
         ),
         // Duration-stripped forms (after strip_trailing_duration removes "this turn")
-        value(QuantityRef::LifeLostThisTurn, tag("the life you've lost")),
-        value(QuantityRef::LifeLostThisTurn, tag("the life you lost")),
-        value(QuantityRef::LifeLostThisTurn, tag("life you've lost")),
-        value(QuantityRef::LifeLostThisTurn, tag("life you lost")),
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("the life you've lost"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("the life you lost"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("life you've lost"),
+        ),
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("life you lost"),
+        ),
         // CR 119.3 + CR 608.2k: Third-person variants resolve against the
         // per-target player during effect iteration. The runtime's
         // `LifeLostThisTurn` reads `player.life_lost_this_turn` where
@@ -800,22 +832,35 @@ fn parse_life_lost_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // a new typed variant. Archfiend of Despair, Wound Reflection,
         // Astarion (Feed mode), Blitzwing, Warlock Class.
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life that player lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life they lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the amount of life they lost this turn"),
         ),
         value(
-            QuantityRef::LifeLostThisTurn,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
             tag("the life that player lost"),
         ),
-        value(QuantityRef::LifeLostThisTurn, tag("the life they lost")),
+        value(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller,
+            },
+            tag("the life they lost"),
+        ),
     ))
     .parse(input)
 }
@@ -1535,7 +1580,12 @@ mod tests {
     #[test]
     fn test_parse_quantity_ref_life_lost() {
         let (rest, q) = parse_quantity_ref("the life you've lost this turn").unwrap();
-        assert_eq!(q, QuantityRef::LifeLostThisTurn);
+        assert_eq!(
+            q,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller
+            }
+        );
         assert_eq!(rest, "");
     }
 
@@ -1550,7 +1600,12 @@ mod tests {
     #[test]
     fn test_parse_quantity_ref_amount_of_life_lost() {
         let (rest, q) = parse_quantity_ref("the amount of life you lost this turn").unwrap();
-        assert_eq!(q, QuantityRef::LifeLostThisTurn);
+        assert_eq!(
+            q,
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Controller
+            }
+        );
         assert_eq!(rest, "");
     }
 
