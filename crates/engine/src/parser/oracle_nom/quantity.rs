@@ -1092,6 +1092,7 @@ fn parse_event_context_refs(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         value(QuantityRef::EventContextAmount, tag("that much")),
         value(QuantityRef::EventContextAmount, tag("that many")),
+        value(QuantityRef::EventContextAmount, tag("that damage")),
         value(
             QuantityRef::EventContextSourcePower,
             tag("that creature's power"),
@@ -1922,6 +1923,10 @@ mod tests {
         let (rest, q) = parse_quantity_ref("that much life").unwrap();
         assert_eq!(q, QuantityRef::EventContextAmount);
         assert_eq!(rest, " life");
+
+        let (rest, q) = parse_quantity_ref("that damage").unwrap();
+        assert_eq!(q, QuantityRef::EventContextAmount);
+        assert_eq!(rest, "");
 
         let (rest2, q2) = parse_quantity_ref("that creature's power").unwrap();
         assert_eq!(q2, QuantityRef::EventContextSourcePower);

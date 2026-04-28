@@ -1995,6 +1995,32 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
         return Some(found);
     }
 
+    // CR 202.3: Exact dynamic mana-value match — "with mana value equal to
+    // <quantity>". The RHS composes through `parse_cda_quantity`, so offsets
+    // ("1 plus the sacrificed creature's mana value"), event-context refs
+    // ("that damage"), and game-state counts ("the number of lands you
+    // control") share the same quantity grammar as CDA/static parsing.
+    if let Ok((after_equal_to, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("equal to ").parse(rest)
+    {
+        let (after, phrase) =
+            take_till::<_, _, nom_language::error::VerboseError<&str>>(|c: char| {
+                c == ',' || c == '.'
+            })
+            .parse(after_equal_to)
+            .ok()?;
+        let phrase = phrase.trim();
+        if let Some(value) = crate::parser::oracle_quantity::parse_cda_quantity(phrase) {
+            return Some((
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value,
+                },
+                text.len() - after.len(),
+            ));
+        }
+    }
+
     // Static "N or less" / "N or greater" — also accepts literal X via
     // `parse_quantity_expr_number`, which emits `QuantityRef::Variable { "X" }`
     // resolved at effect time against the resolving ability's `chosen_x`.
@@ -3527,6 +3553,64 @@ mod tests {
                     },
                 },
             }]))
+        );
+    }
+
+    #[test]
+    fn card_with_mana_value_equal_to_lands_you_control() {
+        let (f, rest) = parse_type_phrase(
+            "creature card with mana value equal to the number of lands you control",
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(
+                            TypedFilter::land().controller(ControllerRef::You)
+                        ),
+                    },
+                },
+            }]))
+        );
+    }
+
+    #[test]
+    fn card_with_mana_value_equal_to_offset_event_source() {
+        let (f, rest) = parse_type_phrase(
+            "creature card with mana value equal to 1 plus the sacrificed creature's mana value, put it",
+        );
+        assert_eq!(rest, ", put it");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::CostPaidObjectManaValue,
+                    }),
+                    offset: 1,
+                },
+            }]))
+        );
+    }
+
+    #[test]
+    fn card_with_mana_value_equal_to_that_damage() {
+        let (f, rest) = parse_type_phrase("artifact card with mana value equal to that damage");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::Cmc {
+                    comparator: Comparator::EQ,
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                }
+            ]))
         );
     }
 
