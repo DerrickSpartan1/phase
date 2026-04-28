@@ -181,6 +181,51 @@ impl From<ObjectId> for AttachTarget {
     }
 }
 
+/// CR 709.5c: Which half, or door, of a shared-type-line split permanent is
+/// being locked or unlocked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum RoomDoor {
+    Left,
+    Right,
+}
+
+/// CR 709.5c: Unlocked designations carried by a Room permanent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomUnlockState {
+    #[serde(default)]
+    pub left_unlocked: bool,
+    #[serde(default)]
+    pub right_unlocked: bool,
+}
+
+impl RoomUnlockState {
+    pub fn is_unlocked(&self, door: RoomDoor) -> bool {
+        match door {
+            RoomDoor::Left => self.left_unlocked,
+            RoomDoor::Right => self.right_unlocked,
+        }
+    }
+
+    pub fn unlock(&mut self, door: RoomDoor) -> RoomUnlockOutcome {
+        let was_unlocked = self.is_unlocked(door);
+        let was_fully_unlocked = self.left_unlocked && self.right_unlocked;
+        match door {
+            RoomDoor::Left => self.left_unlocked = true,
+            RoomDoor::Right => self.right_unlocked = true,
+        }
+        RoomUnlockOutcome {
+            changed: !was_unlocked,
+            fully_unlocked: !was_fully_unlocked && self.left_unlocked && self.right_unlocked,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoomUnlockOutcome {
+    pub changed: bool,
+    pub fully_unlocked: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GameObject {
     pub id: ObjectId,
@@ -468,6 +513,11 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub case_state: Option<CaseState>,
 
+    /// CR 709.5c: Unlocked door designations for shared-type-line Room
+    /// permanents. Present only on permanents with the Room subtype.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub room_unlocks: Option<RoomUnlockState>,
+
     /// CR 716.3: Class enchantment level. Present only on Class permanents.
     /// Class level is NOT a counter (CR 716) — proliferate/counter manipulation must not interact.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -677,6 +727,7 @@ impl GameObject {
             assigns_damage_as_though_unblocked: false,
             assigns_no_combat_damage: false,
             case_state: None,
+            room_unlocks: None,
             class_level: None,
             cast_from_zone: None,
             mana_spent_to_cast: false,
@@ -728,6 +779,9 @@ impl GameObject {
         if let Some(ref mut cs) = self.case_state {
             cs.is_solved = false;
         }
+        if self.card_types.subtypes.iter().any(|s| s == "Room") {
+            self.room_unlocks = Some(RoomUnlockState::default());
+        }
     }
 
     /// CR 400.7: Clear battlefield-only designations when a permanent leaves the battlefield.
@@ -753,6 +807,7 @@ impl GameObject {
         // this permanent to the battlefield. When the permanent leaves, the value
         // is no longer meaningful; a re-cast will re-populate it via `finalize_cast`.
         self.cost_x_paid = None;
+        self.room_unlocks = None;
     }
 
     /// Check if this object has a specific keyword, using discriminant-based matching.

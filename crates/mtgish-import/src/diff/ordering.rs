@@ -199,49 +199,94 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
     // ----- StaticMode (SuppressTriggers / type-changing) -----
     (("StaticMode", "events"), OrderingClass::SetEquivalent),
     (("StaticMode", "core_types"), OrderingClass::SetEquivalent),
-    // -----------------------------------------------------------------
-    // TODO(manifest): the following `(carrier, field)` pairs were
-    // surfaced by `tests/manifest_coverage.rs` and require classification
-    // by an agent that knows the rules-meaning of each list.
-    //
-    // Each entry should land here with an `OrderingClass` and a one-line
-    // CR-grounded justification. Do NOT silence the coverage test by
-    // adding placeholder `OrderSignificant` entries blindly — the safe
-    // default already applies on lookup miss; what's missing is the
-    // *intentional* classification.
-    //
-    //   (AbilityCondition, conditions)        — AndAll/OrAny over conditions; likely SetEquivalent
-    //   (CardFace, color_override)            — color set on the face; SetEquivalent
-    //   (CastPermissionConstraint, exiled_misses) — runtime ID list; ConditionallySignificant
-    //   (ContinuousModification, colors)      — CR 105.1: unordered color set
-    //   (CopiableValues, color)               — copy-effect characteristic; SetEquivalent
-    //   (CopiableValues, keywords)            — copy-effect keyword set; SetEquivalent
-    //   (Effect, additional_modifications)    — verify per-variant whether positional
-    //   (Effect, branches)                    — modal branch order matches mode order; OrderSignificant
-    //   (Effect, cards)                       — depends on variant (search list vs sequenced reveal)
-    //   (Effect, categories)                  — distinct-types categories; SetEquivalent
-    //   (Effect, choices)                     — player-facing choice list; OrderSignificant
-    //   (Effect, colors)                      — color set; SetEquivalent
-    //   (Effect, enter_with_counters)         — counter spec list; SetEquivalent (sum semantics)
-    //   (Effect, extra_keywords)              — granted keyword set; SetEquivalent
-    //   (Effect, grants)                      — granted-ability list; CR 613 layer-managed: SetEquivalent
-    //   (Effect, keywords)                    — keyword set; SetEquivalent
-    //   (Effect, per_choice_effect)           — per-mode effect list; OrderSignificant
-    //   (Effect, remove_types)                — CR 305.7: type set; SetEquivalent
-    //   (Effect, restrictions)                — independent restrictions; SetEquivalent
-    //   (Effect, results)                     — die-result branches; OrderSignificant
-    //   (Effect, static_abilities)            — granted statics; SetEquivalent
-    //   (Effect, statics)                     — alias of static_abilities; SetEquivalent
-    //   (Effect, supertypes)                  — CR 205.4: type set; SetEquivalent
-    //   (Effect, triggers)                    — granted triggers; SetEquivalent
-    //   (Effect, types)                       — CR 300.1 type set; SetEquivalent
-    //   (KeywordAction, paid_creature_ids)    — runtime ID list; OrderSignificant (selection order)
-    //   (ReplacementCondition, subtypes)      — subtype set; SetEquivalent
-    //   (ReplacementDefinition, ensure_token_specs) — Manufactor: SetEquivalent (per CR 616 idempotence)
-    //   (ResolvedAbility, distribution)       — DistributionUnit list; OrderSignificant (target index)
-    //   (ResolvedAbility, targets)            — target list, indexed positionally; OrderSignificant
-    //   (TriggerCause, core_types)            — CR 300.1 type set; SetEquivalent
-    //   (TriggerCondition, conditions)        — AndAll/OrAny composite; SetEquivalent
+    // ----- Composite conditions -----
+    (
+        ("AbilityCondition", "conditions"),
+        OrderingClass::SetEquivalent,
+    ),
+    (
+        ("ParsedCondition", "conditions"),
+        OrderingClass::SetEquivalent,
+    ),
+    (
+        ("TriggerCondition", "conditions"),
+        OrderingClass::SetEquivalent,
+    ),
+    // ----- AdditionalCost -----
+    // CR 702.33b: Kicker cost positions are referenced as first/second kicker.
+    (("AdditionalCost", "costs"), OrderingClass::OrderSignificant),
+    // ----- CardFace color override -----
+    (("CardFace", "color_override"), OrderingClass::SetEquivalent),
+    // ----- Cascade cleanup state -----
+    (
+        ("CastPermissionConstraint", "exiled_misses"),
+        OrderingClass::SetEquivalent,
+    ),
+    // ----- Continuous/copiable color and keyword sets -----
+    (
+        ("ContinuousModification", "colors"),
+        OrderingClass::SetEquivalent,
+    ),
+    (("CopiableValues", "color"), OrderingClass::SetEquivalent),
+    (("CopiableValues", "keywords"), OrderingClass::SetEquivalent),
+    // ----- Effect embedded lists -----
+    (
+        ("Effect", "additional_modifications"),
+        OrderingClass::SetEquivalent,
+    ),
+    (("Effect", "branches"), OrderingClass::OrderSignificant),
+    (("Effect", "cards"), OrderingClass::SetEquivalent),
+    (("Effect", "categories"), OrderingClass::SetEquivalent),
+    (("Effect", "choices"), OrderingClass::OrderSignificant),
+    (("Effect", "colors"), OrderingClass::SetEquivalent),
+    (
+        ("Effect", "enter_with_counters"),
+        OrderingClass::SetEquivalent,
+    ),
+    (("Effect", "extra_keywords"), OrderingClass::SetEquivalent),
+    (("Effect", "grants"), OrderingClass::SetEquivalent),
+    (("Effect", "keywords"), OrderingClass::SetEquivalent),
+    (
+        ("Effect", "per_choice_effect"),
+        OrderingClass::OrderSignificant,
+    ),
+    (("Effect", "remove_types"), OrderingClass::SetEquivalent),
+    (("Effect", "restrictions"), OrderingClass::SetEquivalent),
+    (("Effect", "results"), OrderingClass::OrderSignificant),
+    (("Effect", "static_abilities"), OrderingClass::SetEquivalent),
+    (("Effect", "statics"), OrderingClass::SetEquivalent),
+    (("Effect", "supertypes"), OrderingClass::SetEquivalent),
+    (("Effect", "triggers"), OrderingClass::SetEquivalent),
+    (("Effect", "types"), OrderingClass::SetEquivalent),
+    // ----- Keyword/runtime selections -----
+    (
+        ("KeywordAction", "paid_creature_ids"),
+        OrderingClass::OrderSignificant,
+    ),
+    // ----- Quantity / replacement / resolved ability lists -----
+    (("QuantityExpr", "exprs"), OrderingClass::SetEquivalent),
+    (
+        ("ReplacementCondition", "subtypes"),
+        OrderingClass::SetEquivalent,
+    ),
+    (
+        ("ReplacementDefinition", "ensure_token_specs"),
+        OrderingClass::SetEquivalent,
+    ),
+    (
+        ("ResolvedAbility", "distribution"),
+        OrderingClass::OrderSignificant,
+    ),
+    (
+        ("ResolvedAbility", "targets"),
+        OrderingClass::OrderSignificant,
+    ),
+    (
+        ("SpellContext", "kickers_paid"),
+        OrderingClass::SetEquivalent,
+    ),
+    // ----- Trigger cause filters -----
+    (("TriggerCause", "core_types"), OrderingClass::SetEquivalent),
 ];
 
 /// Look up the ordering class for a `(carrier, field)` pair.

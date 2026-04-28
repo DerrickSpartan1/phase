@@ -3325,7 +3325,7 @@ pub enum Effect {
     Sacrifice {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
-        /// CR 701.16a: Number of permanents to sacrifice. Defaults to 1 so every
+        /// CR 701.21a: Number of permanents to sacrifice. Defaults to 1 so every
         /// existing emission site — AST lowering, dungeon rooms, token graveyard
         /// upkeep, emblem cost handlers, Forge importer — keeps its original
         /// "sacrifice one" semantics without code changes. Dynamic quantities
@@ -3486,6 +3486,11 @@ pub enum Effect {
         grant_extra_turn_after: bool,
     },
     Attach {
+        #[serde(
+            default = "default_target_filter_self_ref",
+            skip_serializing_if = "target_filter_is_self_ref"
+        )]
+        attachment: TargetFilter,
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
@@ -4015,6 +4020,11 @@ pub enum Effect {
     /// CR 118.1: Pay a cost during effect resolution (mana or life).
     PayCost {
         cost: PaymentCost,
+        /// CR 608.2c: Player who pays the resolution-time cost. Defaults to
+        /// the ability controller; target-derived refs such as
+        /// `ParentTargetController` cover "that spell's controller may pay".
+        #[serde(default = "default_target_filter_controller")]
+        payer: TargetFilter,
     },
     /// CR 601.2a + CR 118.9: Cast or play a card from a zone.
     /// Grants `ExileWithAltCost` casting permission on target cards (Discover pattern),
@@ -4551,6 +4561,10 @@ fn default_target_filter_self_ref() -> TargetFilter {
     TargetFilter::SelfRef
 }
 
+fn target_filter_is_self_ref(filter: &TargetFilter) -> bool {
+    matches!(filter, TargetFilter::SelfRef)
+}
+
 /// CR 701.38a + CR 101.4: Default starting voter for `Effect::Vote` is the
 /// ability controller ("starting with you"). Defining this as a free function
 /// (not an enum default) keeps the serde shape stable across schema upgrades.
@@ -4574,6 +4588,7 @@ impl TargetFilter {
                 | TargetFilter::TriggeringPlayer
                 | TargetFilter::TriggeringSource
                 | TargetFilter::DefendingPlayer
+                | TargetFilter::AttachedTo
                 | TargetFilter::ParentTarget
                 | TargetFilter::ParentTargetController
                 | TargetFilter::PostReplacementSourceController
@@ -5816,6 +5831,16 @@ pub enum AbilityCondition {
     /// the ability's source object matches the filter. Used by leveler-style cards
     /// (e.g. Figure of Fable) where each activated ability gates on the source's current type.
     SourceMatchesFilter { filter: TargetFilter },
+    /// CR 603.4 + CR 603.6 + CR 603.10: In a trigger-body condition, match the
+    /// object from the current zone-change trigger event against a filter. ETB
+    /// conditions check the live object in its destination zone; death/LTB
+    /// conditions check the zone-change snapshot.
+    ZoneChangeObjectMatchesFilter {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<Zone>,
+        destination: Zone,
+        filter: TargetFilter,
+    },
     /// CR 608.2c + CR 614.1d: "if you control a [filter]" — gates sub_ability on whether
     /// the ability controller controls at least one battlefield permanent matching the
     /// filter (excluding the source itself). For the "controls NO matching permanent"
@@ -6155,6 +6180,17 @@ pub enum TriggerCondition {
         minimum: u32,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         maximum: Option<u32>,
+    },
+
+    /// CR 603.4 + CR 603.6 + CR 603.10: Intervening-if condition whose subject
+    /// is the object from the triggering zone-change event rather than the
+    /// permanent that owns the ability. ETB conditions check the live object in
+    /// its destination zone; death/LTB conditions check the zone-change snapshot.
+    ZoneChangeObjectMatchesFilter {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<Zone>,
+        destination: Zone,
+        filter: TargetFilter,
     },
 
     /// CR 508.1 + CR 603.2c + CR 603.4: Intervening-if for "attacks with N or more creatures"
@@ -6725,6 +6761,14 @@ pub enum ReplacementMode {
     Mandatory,
     /// Player may accept or decline. `execute` runs on accept; `decline` runs on decline.
     Optional {
+        #[serde(default)]
+        decline: Option<Box<AbilityDefinition>>,
+    },
+    /// CR 118.12 + CR 614.12a: Player may pay a cost as the replacement choice
+    /// is made. The cost is paid before the permanent enters; `execute` runs on
+    /// paid, and `decline` runs on decline or failed payment.
+    MayCost {
+        cost: AbilityCost,
         #[serde(default)]
         decline: Option<Box<AbilityDefinition>>,
     },

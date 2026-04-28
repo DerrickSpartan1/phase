@@ -3,6 +3,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till};
 use nom::combinator::{opt, value};
+use nom::multi::many0;
 use nom::Parser;
 
 use crate::types::ability::{
@@ -362,7 +363,11 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
         }
         // "target" + type phrase (generic)
         let (filter, rest) = parse_type_phrase(&text[target_offset..]);
-        return (filter, rest);
+        let consumed_end = lower.len() - rest.len();
+        return (
+            scope_target_spell_phrase(filter, &lower[target_offset..consumed_end]),
+            rest,
+        );
     }
 
     // CR 603.7: Anaphoric tracked-set pronouns
@@ -765,7 +770,11 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
     // Handles "other nonland permanents you own and control" after quantifier stripping.
     let (filter, rest) = parse_type_phrase(text);
     if target_filter_has_meaningful_content(&filter) {
-        (filter, rest)
+        let consumed_end = lower.len() - rest.len();
+        (
+            scope_target_spell_phrase(filter, &lower[..consumed_end]),
+            rest,
+        )
     } else {
         push_warning(format!(
             "target-fallback: parse_target could not classify '{}'",
@@ -1530,6 +1539,69 @@ fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
             filters.iter().any(target_filter_has_meaningful_content)
         }
         _ => false,
+    }
+}
+
+fn scope_target_spell_phrase(filter: TargetFilter, phrase: &str) -> TargetFilter {
+    if !target_phrase_mentions_spell_word(phrase) {
+        return filter;
+    }
+
+    add_stack_zone_to_spell_targets(filter, target_phrase_uses_spell_suffix(phrase))
+}
+
+fn target_phrase_mentions_spell_word(phrase: &str) -> bool {
+    phrase
+        .split(|ch: char| ch.is_ascii_whitespace() || matches!(ch, ',' | ';' | '(' | ')'))
+        .any(|word| matches!(word, "spell" | "spells"))
+}
+
+fn target_phrase_uses_spell_suffix(phrase: &str) -> bool {
+    let mut previous = None;
+    for word in phrase
+        .split(|ch: char| ch.is_ascii_whitespace() || matches!(ch, ',' | ';' | '(' | ')'))
+        .filter(|word| !word.is_empty())
+    {
+        if matches!(word, "spell" | "spells") {
+            return previous.is_some_and(|previous| !matches!(previous, "or" | "and/or"));
+        }
+        previous = Some(word);
+    }
+    false
+}
+
+fn add_stack_zone_to_spell_targets(filter: TargetFilter, scope_all_typed: bool) -> TargetFilter {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            if scope_all_typed || typed.type_filters.contains(&TypeFilter::Card) {
+                if !typed
+                    .properties
+                    .iter()
+                    .any(|prop| matches!(prop, FilterProp::InZone { zone } if *zone == Zone::Stack))
+                {
+                    typed
+                        .properties
+                        .push(FilterProp::InZone { zone: Zone::Stack });
+                }
+            }
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| add_stack_zone_to_spell_targets(filter, scope_all_typed))
+                .collect(),
+        },
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| add_stack_zone_to_spell_targets(filter, scope_all_typed))
+                .collect(),
+        },
+        TargetFilter::Not { filter } => TargetFilter::Not {
+            filter: Box::new(add_stack_zone_to_spell_targets(*filter, scope_all_typed)),
+        },
+        other => other,
     }
 }
 
@@ -2403,6 +2475,10 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
 
+    if let Some(parsed) = parse_color_relative_clause_suffix(trimmed, leading_ws) {
+        return Some(parsed);
+    }
+
     // CR 303.4 + CR 301.5: "that's enchanted or equipped" / "that's enchanted" /
     // "that's equipped" — relative clause attaching an attachment-presence
     // predicate to the enclosing type phrase. Covers the compound-subject grant
@@ -2560,6 +2636,69 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     }
 
     None
+}
+
+fn parse_color_relative_clause_suffix(
+    trimmed: &str,
+    leading_ws: usize,
+) -> Option<(Vec<FilterProp>, usize)> {
+    let (after_intro, intro_len) = if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("that's ").parse(trimmed)
+    {
+        (rest, "that's ".len())
+    } else if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("that is ").parse(trimmed)
+    {
+        (rest, "that is ".len())
+    } else if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("that are ").parse(trimmed)
+    {
+        (rest, "that are ".len())
+    } else {
+        return None;
+    };
+
+    let (rest, colors) = parse_color_disjunction(after_intro).ok()?;
+    let next_char_is_boundary = rest
+        .chars()
+        .next()
+        .is_none_or(|c| !c.is_alphanumeric() && c != '_');
+    if colors.is_empty() || !next_char_is_boundary {
+        return None;
+    }
+
+    let consumed = leading_ws + intro_len + after_intro.len() - rest.len();
+    let props = if colors.len() == 1 {
+        vec![FilterProp::HasColor { color: colors[0] }]
+    } else {
+        vec![FilterProp::AnyOf {
+            props: colors
+                .into_iter()
+                .map(|color| FilterProp::HasColor { color })
+                .collect(),
+        }]
+    };
+    Some((props, consumed))
+}
+
+fn parse_color_disjunction(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, Vec<ManaColor>> {
+    let (rest, first) = nom_primitives::parse_color(input)?;
+    let (rest, mut tail) = many0(preceded_color_separator).parse(rest)?;
+    let mut colors = vec![first];
+    colors.append(&mut tail);
+    Ok((rest, colors))
+}
+
+fn preceded_color_separator(input: &str) -> super::oracle_nom::error::OracleResult<'_, ManaColor> {
+    let (rest, _) = alt((
+        tag::<_, _, nom_language::error::VerboseError<&str>>(", or "),
+        tag(", "),
+        tag(" or "),
+    ))
+    .parse(input)?;
+    nom_primitives::parse_color(rest)
 }
 
 /// CR 205.3 + CR 205.4b: "that isn't a <Subtype>" / "that's not a <Subtype>"
@@ -3966,7 +4105,7 @@ mod tests {
         ] {
             assert!(
                 typed.properties.contains(&FilterProp::WithKeyword {
-                    value: keyword.clone(),
+                    value: keyword.clone()
                 }),
                 "missing {keyword:?} in {:?}",
                 typed.properties
@@ -5673,6 +5812,46 @@ mod tests {
     }
 
     #[test]
+    fn that_s_red_or_green_emits_color_disjunction() {
+        let result = parse_that_clause_suffix(" that's red or green");
+        let (props, consumed) = result.expect("should parse");
+        assert_eq!(consumed, " that's red or green".len());
+        assert_eq!(
+            props,
+            vec![FilterProp::AnyOf {
+                props: vec![
+                    FilterProp::HasColor {
+                        color: ManaColor::Red,
+                    },
+                    FilterProp::HasColor {
+                        color: ManaColor::Green,
+                    },
+                ],
+            }]
+        );
+    }
+
+    #[test]
+    fn target_spell_or_permanent_thats_red_or_green_distributes_color_to_both_legs() {
+        let (filter, rest) = parse_target("target spell or permanent that's red or green");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("Expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert!(filters.iter().all(|filter| matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.properties.iter().any(|prop| matches!(
+                    prop,
+                    FilterProp::AnyOf { props }
+                        if props.contains(&FilterProp::HasColor { color: ManaColor::Red })
+                            && props.contains(&FilterProp::HasColor { color: ManaColor::Green })
+                ))
+        )));
+    }
+
+    #[test]
     fn that_s_enchanted_or_equipped_in_full_target() {
         // Reyav / Dogmeat trigger subject form.
         let (filter, _rest) = parse_target("a creature you control that's enchanted or equipped");
@@ -6083,6 +6262,43 @@ mod tests {
             TargetFilter::Typed(tf)
                 if tf.type_filters.contains(&TypeFilter::Card)
                     && tf.properties.contains(&FilterProp::Another)
+                    && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
+        )));
+    }
+
+    #[test]
+    fn parse_target_spell_or_creature_scopes_spell_leg_to_stack() {
+        let (filter, rest) = parse_target("target spell or creature");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("Expected Or filter, got {filter:?}");
+        };
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Card)
+                    && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
+        )));
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.type_filters.contains(&TypeFilter::Creature)
+                    && !tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
+        )));
+    }
+
+    #[test]
+    fn parse_target_artifact_or_enchantment_spell_scopes_all_legs_to_stack() {
+        let (filter, rest) = parse_target("target artifact or enchantment spell");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("Expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert!(filters.iter().all(|filter| matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
         )));
     }
 

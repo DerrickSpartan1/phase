@@ -853,6 +853,14 @@ pub(crate) fn resolve_player_for_context_ref(
 /// `resolve_library_owner` logic in `search_library.rs` but applies generally
 /// to any optional effect whose embedded player-scope target is a context-ref.
 fn optional_prompt_player(state: &GameState, ability: &ResolvedAbility) -> PlayerId {
+    if let Effect::PayCost { payer, .. } = &ability.effect {
+        if let Some(player) =
+            crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+        {
+            return player;
+        }
+    }
+
     // Subject-anchored SearchLibrary: prompt the library owner / searcher.
     if let Effect::SearchLibrary {
         target_player: Some(TargetFilter::ParentTargetController),
@@ -2035,6 +2043,20 @@ fn evaluate_condition(
                 &crate::game::filter::FilterContext::from_ability(ability),
             )
         }
+        AbilityCondition::ZoneChangeObjectMatchesFilter {
+            origin,
+            destination,
+            filter,
+        } => state.current_trigger_event.as_ref().is_some_and(|event| {
+            crate::game::filter::matches_zone_change_event_object_filter(
+                state,
+                event,
+                *origin,
+                *destination,
+                filter,
+                &crate::game::filter::FilterContext::from_ability(ability),
+            )
+        }),
         // CR 608.2c + CR 614.1d: "if you control a/no [filter]" — scan the battlefield
         // for any other permanent owned/controlled by the ability controller matching
         // `filter`. Excludes the source itself so a Soldier-typed land doesn't satisfy
@@ -2460,6 +2482,7 @@ mod tests {
                 cost: crate::types::ability::PaymentCost::Life {
                     amount: crate::types::ability::QuantityExpr::Fixed { value: 1 },
                 },
+                payer: TargetFilter::Controller,
             },
             vec![],
             ObjectId(100),
@@ -4546,6 +4569,70 @@ mod tests {
             .kickers_paid
             .push(crate::types::ability::KickerVariant::Second);
         assert!(evaluate_condition(&twice, &state, &ability));
+    }
+
+    #[test]
+    fn zone_change_object_ability_condition_checks_current_trigger_event_object() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(210),
+            PlayerId(0),
+            "Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let entering = create_object(
+            &mut state,
+            CardId(211),
+            PlayerId(0),
+            "Countered Entry".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&entering)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&entering)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+        state.current_trigger_event = Some(GameEvent::ZoneChanged {
+            object_id: entering,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(crate::types::game_state::ZoneChangeRecord {
+                core_types: vec![CoreType::Creature],
+                ..crate::types::game_state::ZoneChangeRecord::test_minimal(
+                    entering,
+                    Some(Zone::Hand),
+                    Zone::Battlefield,
+                )
+            }),
+        });
+
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        let condition = AbilityCondition::ZoneChangeObjectMatchesFilter {
+            origin: None,
+            destination: Zone::Battlefield,
+            filter: TargetFilter::Typed(
+                TypedFilter::permanent().properties(vec![FilterProp::HasAnyCounter]),
+            ),
+        };
+
+        assert!(evaluate_condition(&condition, &state, &ability));
     }
 
     #[test]

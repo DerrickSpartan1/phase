@@ -6,7 +6,7 @@
 //! the "enter as a copy" / "enter transformed" / etc. variants land later.
 
 use engine::types::ability::{
-    AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, DamageModification,
+    AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, DamageModification,
     DamageTargetFilter, Effect, QuantityExpr, QuantityModification, ReplacementCondition,
     ReplacementDefinition, ReplacementMode, TargetFilter,
 };
@@ -14,14 +14,16 @@ use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
 
 use crate::convert::filter::{convert as convert_permanents, convert_permanent};
+use crate::convert::mana;
 use crate::convert::quantity;
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::schema::types::{
     Condition, CounterType, Expiration, FutureReplacableEventWouldDealDamage, GameNumber,
-    Permanent, Player, Players, ReplacableEventWouldDealDamage, ReplacableEventWouldDraw,
-    ReplacableEventWouldEnter, ReplacableEventWouldGainLife, ReplacableEventWouldPutCounters,
-    ReplacableEventWouldPutIntoGraveyard, ReplacementActionWouldDealDamage,
-    ReplacementActionWouldDraw, ReplacementActionWouldEnter, ReplacementActionWouldGainLife,
+    Permanent, Permanents, Player, Players, ReplacableEventWouldDealDamage,
+    ReplacableEventWouldDraw, ReplacableEventWouldEnter, ReplacableEventWouldGainLife,
+    ReplacableEventWouldPutCounters, ReplacableEventWouldPutIntoGraveyard,
+    ReplacementActionWouldDealDamage, ReplacementActionWouldDraw, ReplacementActionWouldEnter,
+    ReplacementActionWouldEnterCost, ReplacementActionWouldGainLife,
     ReplacementActionWouldPutCounters, ReplacementActionWouldPutIntoGraveyard,
     SingleDamageRecipient,
 };
@@ -51,7 +53,13 @@ pub fn convert_as_enters(
 ) -> ConvResult<Vec<ReplacementDefinition>> {
     let valid_card = convert_permanent(target)?;
     let mut out = Vec::new();
-    for act in actions {
+    let mut iter = actions.iter().peekable();
+    while let Some(act) = iter.next() {
+        if let Some(def) = try_build_may_cost_pair(act, iter.peek().copied(), &valid_card)? {
+            iter.next();
+            out.push(def);
+            continue;
+        }
         let (condition, mode, exec) = build_replacement_exec(act, &valid_card)?;
         out.push(ReplacementDefinition {
             expires_at_eot: false,
@@ -120,7 +128,13 @@ pub fn convert_replace_would_enter(
     };
 
     let mut out = Vec::new();
-    for act in actions {
+    let mut iter = actions.iter().peekable();
+    while let Some(act) = iter.next() {
+        if let Some(def) = try_build_may_cost_pair(act, iter.peek().copied(), &valid_card)? {
+            iter.next();
+            out.push(def);
+            continue;
+        }
         let (condition, mode, exec) = build_replacement_exec(act, &valid_card)?;
         out.push(ReplacementDefinition {
             expires_at_eot: false,
@@ -1056,6 +1070,111 @@ fn gain_life_action_to_modification(
     }
 }
 
+fn try_build_may_cost_pair(
+    act: &ReplacementActionWouldEnter,
+    next: Option<&ReplacementActionWouldEnter>,
+    target: &TargetFilter,
+) -> ConvResult<Option<ReplacementDefinition>> {
+    let ReplacementActionWouldEnter::MayCost(cost) = act else {
+        return Ok(None);
+    };
+    let Some(next) = next else {
+        return Ok(None);
+    };
+
+    let (execute, decline) = match next {
+        ReplacementActionWouldEnter::If(cond, body) if matches!(cond, Condition::CostWasPaid) => {
+            (Some(may_cost_body_ability(body, target)?), None)
+        }
+        ReplacementActionWouldEnter::Unless(cond, body)
+            if matches!(cond, Condition::CostWasPaid) =>
+        {
+            (None, Some(Box::new(may_cost_body_ability(body, target)?)))
+        }
+        ReplacementActionWouldEnter::IfElse(cond, then_body, else_body)
+            if matches!(&**cond, Condition::CostWasPaid) =>
+        {
+            (
+                Some(may_cost_body_ability(then_body, target)?),
+                Some(Box::new(may_cost_body_ability(else_body, target)?)),
+            )
+        }
+        _ => return Ok(None),
+    };
+
+    Ok(Some(ReplacementDefinition {
+        expires_at_eot: false,
+        event: ReplacementEvent::ChangeZone,
+        execute: execute.map(Box::new),
+        mode: ReplacementMode::MayCost {
+            cost: convert_enter_cost(cost)?,
+            decline,
+        },
+        valid_card: Some(target.clone()),
+        description: None,
+        condition: None,
+        destination_zone: Some(Zone::Battlefield),
+        damage_modification: None,
+        damage_source_filter: None,
+        damage_target_filter: None,
+        combat_scope: None,
+        shield_kind: Default::default(),
+        quantity_modification: None,
+        token_owner_scope: None,
+        valid_player: None,
+        is_consumed: false,
+        redirect_target: None,
+        mana_modification: None,
+        additional_token_spec: None,
+        ensure_token_specs: None,
+    }))
+}
+
+fn may_cost_body_ability(
+    body: &[ReplacementActionWouldEnter],
+    target: &TargetFilter,
+) -> ConvResult<AbilityDefinition> {
+    let [inner] = body else {
+        return Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ReplacementDefinition",
+            needed_variant: format!("ETB MayCost CostWasPaid body with {} actions", body.len()),
+        });
+    };
+    let (condition, mode, exec) = build_replacement_exec(inner, target)?;
+    if condition.is_some() || !matches!(mode, ReplacementMode::Mandatory) {
+        return Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ReplacementDefinition",
+            needed_variant: "ETB MayCost nested conditional/optional body".into(),
+        });
+    }
+    Ok(exec)
+}
+
+fn convert_enter_cost(cost: &ReplacementActionWouldEnterCost) -> ConvResult<AbilityCost> {
+    Ok(match cost {
+        ReplacementActionWouldEnterCost::PayLife(amount) => AbilityCost::PayLife {
+            amount: quantity::convert(amount)?,
+        },
+        other => {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "AbilityCost",
+                needed_variant: format!("ETB MayCost payment ({})", enter_cost_variant_tag(other)),
+            });
+        }
+    })
+}
+
+fn enter_cost_variant_tag(cost: &ReplacementActionWouldEnterCost) -> String {
+    serde_json::to_value(cost)
+        .ok()
+        .and_then(|v| {
+            v.get("_ReplacementActionWouldEnterCost")
+                .and_then(|t| t.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
 /// CR 614.12 + CR 614.1d: Build the `execute` body and (optional) gating
 /// `ReplacementCondition` for one ETB replacement action. The condition slot
 /// is populated when the action is `Unless(cond, body)` and `cond` maps to
@@ -1141,6 +1260,39 @@ fn build_replacement_exec(
             });
         }
         let condition = convert_etb_if_condition(cond)?;
+        return Ok((Some(condition), ReplacementMode::Mandatory, exec));
+    }
+    // CR 614.12 + CR 702.33d: mtgish's `IfPassesFilter` is the source-
+    // predicate sibling of `If(cond, body)`: apply the replacement body only
+    // if the entering permanent itself passes `pred`. The high-frequency
+    // kicked-entry shape maps directly to the engine's existing
+    // `CastViaKicker` replacement gate.
+    if let A::IfPassesFilter(pred, body) = act {
+        let [inner] = body.as_slice() else {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "ReplacementDefinition",
+                needed_variant: format!(
+                    "ETB conditional/gate action (IfPassesFilter multi-action body, {} actions)",
+                    body.len()
+                ),
+            });
+        };
+        let (inner_cond, inner_mode, exec) = build_replacement_exec(inner, target)?;
+        if inner_cond.is_some() {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "ReplacementDefinition",
+                needed_variant: "ETB conditional/gate action (IfPassesFilter nested condition)"
+                    .into(),
+            });
+        }
+        if !matches!(inner_mode, ReplacementMode::Mandatory) {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "ReplacementDefinition",
+                needed_variant:
+                    "ETB conditional/gate action (IfPassesFilter wrapping Optional body)".into(),
+            });
+        }
+        let condition = convert_etb_if_passes_filter_condition(pred)?;
         return Ok((Some(condition), ReplacementMode::Mandatory, exec));
     }
     // CR 614.12 + CR 117.4: `MayActions(body)` — optional ETB action(s).
@@ -1774,6 +1926,33 @@ fn convert_etb_if_condition(cond: &Condition) -> ConvResult<ReplacementCondition
     }
 }
 
+/// CR 614.12 + CR 702.33d: Convert an ETB source predicate from
+/// `ReplacementActionWouldEnter::IfPassesFilter` into an engine replacement
+/// gate. This is intentionally narrower than `filter::convert`: a filter that
+/// can target objects generally is not automatically valid as a replacement
+/// applicability condition on the entering source.
+fn convert_etb_if_passes_filter_condition(pred: &Permanents) -> ConvResult<ReplacementCondition> {
+    Ok(match pred {
+        Permanents::WasKicked => ReplacementCondition::CastViaKicker {
+            variant: None,
+            kicker_cost: None,
+        },
+        Permanents::WasKickedWithKicker(cost) => ReplacementCondition::CastViaKicker {
+            variant: None,
+            kicker_cost: Some(mana::convert(cost)?),
+        },
+        other => {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "ReplacementCondition",
+                needed_variant: format!(
+                    "ETB IfPassesFilter source predicate ({})",
+                    permanents_tag(other)
+                ),
+            });
+        }
+    })
+}
+
 /// CR 614.1d: Convert the `Players` predicate of `PlayerPassesFilter(You, ...)`
 /// in positive `If` context into a `ReplacementCondition::OnlyIfQuantity`
 /// over `ObjectCount { filter }`. The four predicate shapes collapse to one
@@ -1956,6 +2135,17 @@ fn players_tag(p: &Players) -> String {
     serde_json::to_value(p)
         .ok()
         .and_then(|v| v.get("_Players").and_then(|t| t.as_str()).map(String::from))
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+fn permanents_tag(p: &Permanents) -> String {
+    serde_json::to_value(p)
+        .ok()
+        .and_then(|v| {
+            v.get("_Permanents")
+                .and_then(|t| t.as_str())
+                .map(String::from)
+        })
         .unwrap_or_else(|| "<unknown>".to_string())
 }
 
@@ -2294,4 +2484,63 @@ fn expiration_tag(e: &Expiration) -> String {
                 .map(String::from)
         })
         .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use engine::types::ability::{
+        AbilityCost, Effect, QuantityExpr, ReplacementMode, TargetFilter,
+    };
+
+    use super::*;
+    use crate::schema::types::{Condition, GameNumber, Permanent, ReplacementActionWouldEnter};
+
+    #[test]
+    fn as_enters_may_pay_life_unless_tapped_lowers_to_single_cost_gate() {
+        let defs = convert_as_enters(
+            &Permanent::ThisPermanent,
+            &[
+                ReplacementActionWouldEnter::MayCost(ReplacementActionWouldEnterCost::PayLife(
+                    Box::new(GameNumber::Integer(2)),
+                )),
+                ReplacementActionWouldEnter::Unless(
+                    Condition::CostWasPaid,
+                    vec![ReplacementActionWouldEnter::EntersTapped],
+                ),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(defs.len(), 1);
+        assert!(defs[0].execute.is_none());
+        assert_eq!(defs[0].valid_card, Some(TargetFilter::SelfRef));
+        assert!(matches!(
+            &defs[0].mode,
+            ReplacementMode::MayCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 }
+                },
+                decline: Some(decline),
+            } if matches!(&*decline.effect, Effect::Tap { target } if *target == TargetFilter::SelfRef)
+        ));
+    }
+
+    #[test]
+    fn standalone_as_enters_may_cost_remains_a_precise_engine_gap() {
+        let err = convert_as_enters(
+            &Permanent::ThisPermanent,
+            &[ReplacementActionWouldEnter::MayCost(
+                ReplacementActionWouldEnterCost::PayLife(Box::new(GameNumber::Integer(2))),
+            )],
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "ReplacementDefinition",
+                ..
+            }
+        ));
+    }
 }

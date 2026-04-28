@@ -189,6 +189,8 @@ struct InvertedSplit {
     /// Canonical-form rewrite `"<effect> as long as <condition>"` ready for
     /// re-dispatch through `parse_static_line_inner`.
     canonical: String,
+    /// The effect clause in original case.
+    effect_text: String,
     /// The condition clause in original case, suitable for
     /// `StaticCondition::Unrecognized { text }` when the recursed parse fails.
     condition_text: String,
@@ -217,8 +219,41 @@ fn try_split_inverted_as_long_as(tp: &TextPair<'_>) -> Option<InvertedSplit> {
     let canonical = format!("{effect_text} as long as {condition_text}");
     Some(InvertedSplit {
         canonical,
+        effect_text: effect_text.to_string(),
         condition_text,
     })
+}
+
+fn try_parse_inverted_attached_subject_grant(
+    split: &InvertedSplit,
+    description: &str,
+) -> Option<StaticDefinition> {
+    let condition_lower = split.condition_text.to_lowercase();
+    let condition_tp = TextPair::new(&split.condition_text, &condition_lower);
+    let affected = parse_attached_subject_is_legendary(&condition_tp)?;
+
+    let effect_lower = split.effect_text.to_lowercase();
+    let effect_tp = TextPair::new(&split.effect_text, &effect_lower);
+    let predicate = nom_tag_tp(&effect_tp, "it ").or_else(|| nom_tag_tp(&effect_tp, "they "))?;
+
+    parse_continuous_gets_has(predicate.original, affected, description)
+}
+
+fn parse_attached_subject_is_legendary(condition: &TextPair<'_>) -> Option<TargetFilter> {
+    let rest = nom_tag_tp(condition, "equipped ")?;
+    let rest = nom_tag_tp(&rest, "creature is legendary")?;
+    if !rest.original.trim().is_empty() {
+        return None;
+    }
+
+    Some(TargetFilter::Typed(TypedFilter::creature().properties(
+        vec![
+            FilterProp::EquippedBy,
+            FilterProp::HasSupertype {
+                value: Supertype::Legendary,
+            },
+        ],
+    )))
 }
 
 fn target_filter_is_your_graveyard(filter: &TargetFilter) -> bool {
@@ -384,6 +419,9 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     // impossible: the rewrite target cannot begin with "as long as ".
     if matches!(inverted, InvertedAsLongAs::Allow) {
         if let Some(split) = try_split_inverted_as_long_as(&tp) {
+            if let Some(def) = try_parse_inverted_attached_subject_grant(&split, &text) {
+                return Some(def);
+            }
             if let Some(def) = parse_static_line_inner(&split.canonical, InvertedAsLongAs::Skip) {
                 return Some(def.description(text.to_string()));
             }
@@ -10010,6 +10048,33 @@ mod tests {
             "Expected IsPresent condition, got {:?}",
             def.condition
         );
+    }
+
+    #[test]
+    fn static_as_long_as_equipped_creature_is_legendary_grants_to_equipped_creature() {
+        let def = parse_static_line("As long as equipped creature is legendary, it has hexproof.")
+            .expect("should parse attached-subject inverted grant");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter::creature().properties(
+                vec![
+                    FilterProp::EquippedBy,
+                    FilterProp::HasSupertype {
+                        value: Supertype::Legendary,
+                    },
+                ]
+            )))
+        );
+        assert!(
+            def.modifications
+                .contains(&ContinuousModification::AddKeyword {
+                    keyword: Keyword::Hexproof,
+                }),
+            "Expected AddKeyword(Hexproof), got {:?}",
+            def.modifications
+        );
+        assert_eq!(def.condition, None);
     }
 
     #[test]

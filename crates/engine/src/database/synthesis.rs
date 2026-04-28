@@ -163,6 +163,7 @@ pub fn synthesize_equip(face: &mut CardFace) {
                     AbilityDefinition::new(
                         AbilityKind::Activated,
                         Effect::Attach {
+                            attachment: TargetFilter::SelfRef,
                             target: TargetFilter::Typed(
                                 TypedFilter::creature().controller(ControllerRef::You),
                             ),
@@ -317,6 +318,7 @@ pub fn synthesize_job_select(face: &mut CardFace) {
     let attach_effect = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Attach {
+            attachment: TargetFilter::SelfRef,
             target: TargetFilter::LastCreated,
         },
     );
@@ -2159,6 +2161,7 @@ mod job_select_synthesis_tests {
             matches!(
                 sub.effect.as_ref(),
                 Effect::Attach {
+                    attachment: TargetFilter::SelfRef,
                     target: TargetFilter::LastCreated
                 }
             ),

@@ -948,6 +948,13 @@ pub(crate) fn cards_in_graveyard_to_filter(
     use crate::schema::types::CardsInGraveyard as C;
     Ok(match c {
         C::AnyCardInAnyGraveyard => TargetFilter::Typed(TypedFilter::default()),
+        // CR 115.1 / CR 608.2b: Resolution-time references to outer
+        // graveyard-card target slots. The outer targeted wrapper provides
+        // the graveyard-card legality; inside the action body these refs are
+        // anaphoric selectors, so the engine target axis can stay unconstrained.
+        C::Ref_TargetGraveyardCards
+        | C::Ref_TargetGraveyardCards1
+        | C::Ref_TargetGraveyardCards2 => TargetFilter::Any,
         C::IsCardtype(ct) => TargetFilter::Typed(TypedFilter::new(card_type(ct))),
         C::IsNonCardtype(ct) => {
             TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(Box::new(card_type(ct)))))

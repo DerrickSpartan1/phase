@@ -2,9 +2,9 @@ use indexmap::IndexMap;
 use std::collections::HashSet;
 
 use crate::types::ability::{
-    AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification, DamageTargetFilter,
-    Effect, PreventionAmount, QuantityExpr, ReplacementCondition, ReplacementMode, ShieldKind,
-    TargetFilter, TargetRef,
+    AbilityCost, AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification,
+    DamageTargetFilter, Effect, PreventionAmount, QuantityExpr, ReplacementCondition,
+    ReplacementMode, ShieldKind, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 
@@ -56,7 +56,15 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
                     .first()
                     .and_then(|rid| state.objects.get(&rid.source))
                     .and_then(|obj| obj.replacement_definitions.get(p.candidates[0].index))
-                    .and_then(|repl| repl.description.clone())
+                    .map(|repl| match &repl.mode {
+                        ReplacementMode::MayCost { cost, .. } => {
+                            format!("Pay {}", replacement_cost_description(cost))
+                        }
+                        ReplacementMode::Mandatory | ReplacementMode::Optional { .. } => repl
+                            .description
+                            .clone()
+                            .unwrap_or_else(|| "Accept".to_string()),
+                    })
                     .unwrap_or_else(|| "Accept".to_string());
                 vec![accept_desc, "Decline".to_string()]
             } else {
@@ -79,6 +87,69 @@ pub fn replacement_choice_waiting_for(player: PlayerId, state: &GameState) -> Wa
         player,
         candidate_count,
         candidate_descriptions,
+    }
+}
+
+fn replacement_cost_description(cost: &AbilityCost) -> String {
+    match cost {
+        AbilityCost::Mana { cost } => format!("{cost:?}"),
+        AbilityCost::PayLife { amount } => format!("{amount:?} life"),
+        _ => "cost".to_string(),
+    }
+}
+
+fn replacement_mode_is_optional(mode: &ReplacementMode) -> bool {
+    matches!(
+        mode,
+        ReplacementMode::Optional { .. } | ReplacementMode::MayCost { .. }
+    )
+}
+
+fn replacement_mode_decline(mode: &ReplacementMode) -> Option<&AbilityDefinition> {
+    match mode {
+        ReplacementMode::Optional { decline } | ReplacementMode::MayCost { decline, .. } => {
+            decline.as_deref()
+        }
+        ReplacementMode::Mandatory => None,
+    }
+}
+
+fn replacement_mode_decline_cloned(mode: &ReplacementMode) -> Option<Box<AbilityDefinition>> {
+    match mode {
+        ReplacementMode::Optional { decline } | ReplacementMode::MayCost { decline, .. } => {
+            decline.clone()
+        }
+        ReplacementMode::Mandatory => None,
+    }
+}
+
+fn pay_replacement_may_cost(
+    state: &mut GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &AbilityCost,
+    events: &mut Vec<GameEvent>,
+) -> bool {
+    if !cost.is_payable(state, player, source_id) {
+        return false;
+    }
+    match cost {
+        AbilityCost::Mana { cost } => {
+            crate::game::casting::pay_unless_cost(state, player, cost, events).is_ok()
+        }
+        AbilityCost::PayLife { amount } => {
+            let amount =
+                crate::game::quantity::resolve_quantity(state, amount, player, source_id).max(0);
+            let amount = u32::try_from(amount).unwrap_or(0);
+            matches!(
+                crate::game::life_costs::pay_life_as_cost(state, player, amount, events),
+                crate::game::life_costs::PayLifeCostResult::Paid { .. }
+            )
+        }
+        AbilityCost::Composite { costs } => costs
+            .iter()
+            .all(|cost| pay_replacement_may_cost(state, player, source_id, cost, events)),
+        _ => crate::game::casting::pay_ability_cost(state, player, source_id, cost, events).is_ok(),
     }
 }
 
@@ -1914,10 +1985,15 @@ pub fn find_applicable_replacements(
                     // is already set by an Earthbending return: declining would tap it,
                     // but it's tapping anyway — the player shouldn't be offered the
                     // dominated "pay 2 life to avoid a tap that isn't happening" choice.
-                    if let ReplacementMode::Optional { decline } = &repl_def.mode {
-                        if optional_decline_is_noop(event, decline.as_deref(), state, obj.id) {
-                            continue;
-                        }
+                    if replacement_mode_is_optional(&repl_def.mode)
+                        && optional_decline_is_noop(
+                            event,
+                            replacement_mode_decline(&repl_def.mode),
+                            state,
+                            obj.id,
+                        )
+                    {
+                        continue;
                     }
                     candidates.push(rid);
                 }
@@ -2251,10 +2327,7 @@ fn apply_single_replacement(
         Some(repl_def) => {
             let ability = match branch {
                 ReplacementBranch::Execute => repl_def.execute.as_deref(),
-                ReplacementBranch::Decline => match &repl_def.mode {
-                    ReplacementMode::Optional { decline } => decline.as_deref(),
-                    ReplacementMode::Mandatory => None,
-                },
+                ReplacementBranch::Decline => replacement_mode_decline(&repl_def.mode),
             };
             let post_effect = match (branch, &repl_def.mode) {
                 (ReplacementBranch::Execute, ReplacementMode::Mandatory) => {
@@ -2414,7 +2487,7 @@ fn pipeline_loop(
                 .objects
                 .get(&rid.source)
                 .and_then(|obj| obj.replacement_definitions.get(rid.index))
-                .map(|repl| matches!(repl.mode, ReplacementMode::Optional { .. }))
+                .map(|repl| replacement_mode_is_optional(&repl.mode))
                 .unwrap_or(false);
 
             if is_optional {
@@ -2491,25 +2564,35 @@ pub fn continue_replacement(
     // Optional replacement: index 0 = accept, index 1 = decline
     if pending.is_optional {
         let rid = pending.candidates[0];
+        let payer = pending.proposed.affected_player(state);
         let mut proposed = pending.proposed;
         proposed.mark_applied(rid);
 
         // Extract the accept/decline effects before applying
-        let (accept_effect, decline_effect) = state
+        let (accept_effect, decline_effect, may_cost) = state
             .objects
             .get(&rid.source)
             .and_then(|obj| obj.replacement_definitions.get(rid.index))
             .map(|repl| {
                 let accept = repl.execute.clone();
-                let decline = match &repl.mode {
-                    ReplacementMode::Optional { decline } => decline.clone(),
-                    ReplacementMode::Mandatory => None,
+                let decline = replacement_mode_decline_cloned(&repl.mode);
+                let may_cost = match &repl.mode {
+                    ReplacementMode::MayCost { cost, .. } => Some(cost.clone()),
+                    ReplacementMode::Mandatory | ReplacementMode::Optional { .. } => None,
                 };
-                (accept, decline)
+                (accept, decline, may_cost)
             })
-            .unwrap_or((None, None));
+            .unwrap_or((None, None, None));
 
-        let (branch, post_effect) = if chosen_index == 0 {
+        let paid_may_cost = if chosen_index == 0 {
+            may_cost
+                .as_ref()
+                .is_none_or(|cost| pay_replacement_may_cost(state, payer, rid.source, cost, events))
+        } else {
+            false
+        };
+
+        let (branch, post_effect) = if chosen_index == 0 && paid_may_cost {
             // Accept: `execute` runs post-zone-change (e.g., shock lands pay 2 life).
             (ReplacementBranch::Execute, accept_effect)
         } else {
@@ -2574,7 +2657,10 @@ mod tests {
     use super::*;
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::GameObject;
-    use crate::types::ability::{GainLifePlayer, ReplacementDefinition, TargetRef};
+    use crate::types::ability::{
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, GainLifePlayer, ReplacementDefinition,
+        TargetFilter, TargetRef,
+    };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::proposed_event::{EtbTapState, TokenSpec};
@@ -2616,6 +2702,68 @@ mod tests {
             ReplacementResult::NeedsChoice(_) => continue_replacement(state, 0, events),
             other => other,
         }
+    }
+
+    fn may_cost_tapped_replacement(amount: i32) -> ReplacementDefinition {
+        ReplacementDefinition::new(ReplacementEvent::Moved)
+            .mode(ReplacementMode::MayCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: amount },
+                },
+                decline: Some(Box::new(AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Tap {
+                        target: TargetFilter::SelfRef,
+                    },
+                ))),
+            })
+            .valid_card(TargetFilter::SelfRef)
+    }
+
+    #[test]
+    fn may_cost_replacement_accept_pays_cost_and_keeps_event_untapped() {
+        let repl = may_cost_tapped_replacement(2);
+        let mut state = test_state_with_object(ObjectId(10), Zone::Hand, vec![repl]);
+        let mut events = Vec::new();
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(10), Zone::Hand, Zone::Battlefield, None);
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert!(matches!(
+            result,
+            ReplacementResult::NeedsChoice(PlayerId(0))
+        ));
+
+        let result = continue_replacement(&mut state, 0, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange { enter_tapped, .. }) = result
+        else {
+            panic!("expected zone change execute");
+        };
+        assert!(!enter_tapped.resolve(false));
+        assert_eq!(state.players[0].life, 18);
+    }
+
+    #[test]
+    fn may_cost_replacement_decline_applies_decline_branch() {
+        let repl = may_cost_tapped_replacement(2);
+        let mut state = test_state_with_object(ObjectId(10), Zone::Hand, vec![repl]);
+        let mut events = Vec::new();
+        let proposed =
+            ProposedEvent::zone_change(ObjectId(10), Zone::Hand, Zone::Battlefield, None);
+
+        let result = replace_event(&mut state, proposed, &mut events);
+        assert!(matches!(
+            result,
+            ReplacementResult::NeedsChoice(PlayerId(0))
+        ));
+
+        let result = continue_replacement(&mut state, 1, &mut events);
+        let ReplacementResult::Execute(ProposedEvent::ZoneChange { enter_tapped, .. }) = result
+        else {
+            panic!("expected zone change execute");
+        };
+        assert!(enter_tapped.resolve(false));
+        assert_eq!(state.players[0].life, 20);
     }
 
     #[test]

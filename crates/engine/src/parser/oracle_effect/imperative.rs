@@ -1991,7 +1991,10 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
         }
         UtilityImperativeAst::Copy { target } => Effect::CopySpell { target },
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
-        UtilityImperativeAst::Attach { target } => Effect::Attach { target },
+        UtilityImperativeAst::Attach { target } => Effect::Attach {
+            attachment: TargetFilter::SelfRef,
+            target,
+        },
         // CR 613.4d: Switch power and toughness.
         UtilityImperativeAst::SwitchPT { target } => Effect::SwitchPT { target },
     }
@@ -3324,7 +3327,10 @@ pub(super) fn lower_cost_resource_ast(ast: CostResourceImperativeAst) -> Effect 
                 }
             }
         }
-        CostResourceImperativeAst::Pay { cost } => Effect::PayCost { cost },
+        CostResourceImperativeAst::Pay { cost } => Effect::PayCost {
+            cost,
+            payer: TargetFilter::Controller,
+        },
         CostResourceImperativeAst::DamageEffect(effect) => *effect,
     }
 }

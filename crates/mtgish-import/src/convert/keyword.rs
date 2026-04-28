@@ -131,6 +131,19 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Mobilize(g) => Keyword::Mobilize(QuantityExpr::Fixed {
             value: int_or_gap(g, "Rule::Mobilize", path)? as i32,
         }),
+        // CR 702.60a: Ripple N. The engine keyword is currently the fixed
+        // Oracle corpus shape (Ripple 4), so strict-fail any non-4 payload
+        // instead of dropping semantic data.
+        Rule::Ripple(g) => {
+            let count = int_or_gap(g, "Rule::Ripple", path)?;
+            if count != 4 {
+                return Err(ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "Keyword::Ripple",
+                    needed_variant: format!("parameterized Ripple {count}"),
+                });
+            }
+            Keyword::Ripple
+        }
         Rule::Saddle(g) => Keyword::Saddle(int_or_gap(g, "Rule::Saddle", path)?),
         Rule::Soulshift(g) => Keyword::Soulshift(int_or_gap(g, "Rule::Soulshift", path)?),
         Rule::Poisonous(n) => Keyword::Poisonous(non_negative(*n)?),
@@ -253,6 +266,11 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         // the cost as `Box<Cost>`; engine takes only the mana cost.
         Rule::WebSlinging(c) => Keyword::WebSlinging(pure_mana(c, "Rule::WebSlinging", path)?),
 
+        // CR 702.47a: Splice onto [quality] [cost]. The engine keyword
+        // stores the quality string only (matching the native parser);
+        // splice-cost payment is not represented in the current keyword type.
+        Rule::SpliceOnto(spells, _cost) => Keyword::Splice(splice_quality(spells, path)?),
+
         // CR 702.56a: Replicate {cost} — additional-cost-on-cast copy
         // mechanic. Engine carries only the mana cost.
         Rule::Replicate(c) => Keyword::Replicate(pure_mana(c, "Rule::Replicate", path)?),
@@ -311,6 +329,16 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         }
         Rule::SpecializeWithModifiers(c, _modifier) => {
             Keyword::Specialize(pure_mana(c, "Rule::SpecializeWithModifiers", path)?)
+        }
+
+        // CR 702.167a: Craft with [materials] [cost]. The engine keyword
+        // carries only the activation mana cost, matching the native parser;
+        // material requirements are not represented in `Keyword::Craft`.
+        Rule::CraftWithACraftable(_, cost)
+        | Rule::CraftWithCraftables(_, cost)
+        | Rule::CraftWithANumberOfCraftables(_, _, cost)
+        | Rule::CraftWithANumberOfGroupCraftables(_, _, _, cost) => {
+            Keyword::Craft(crate::convert::mana::convert(cost)?)
         }
 
         // CR 702.48a: "[Quality] offering" — additional-cost-on-cast
@@ -713,6 +741,30 @@ fn extract_offering_quality(cards: &crate::schema::types::Cards, path: &str) -> 
             ),
         }),
     }
+}
+
+fn splice_quality(spells: &crate::schema::types::Spells, path: &str) -> ConvResult<String> {
+    use crate::schema::types::{SpellType, Spells};
+    match spells {
+        Spells::IsSpellType(SpellType::Arcane) => Ok("Arcane".to_string()),
+        Spells::Or(parts) if is_instant_or_sorcery(parts) => Ok("Instant or Sorcery".to_string()),
+        other => Err(ConversionGap::MalformedIdiom {
+            idiom: "Rule::SpliceOnto/spells_shape",
+            path: path.to_string(),
+            detail: format!("unsupported Spells filter for splice: {other:?}"),
+        }),
+    }
+}
+
+fn is_instant_or_sorcery(parts: &[crate::schema::types::Spells]) -> bool {
+    use crate::schema::types::{CardType, Spells};
+    parts.len() == 2
+        && parts
+            .iter()
+            .any(|part| matches!(part, Spells::IsCardtype(CardType::Instant)))
+        && parts
+            .iter()
+            .any(|part| matches!(part, Spells::IsCardtype(CardType::Sorcery)))
 }
 
 /// CR 702.138a: Escape's mtgish payload is `Cost::And([PayMana, ExileNumberGraveyardCards(N, ...)])`.

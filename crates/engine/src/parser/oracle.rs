@@ -1807,6 +1807,7 @@ fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
         AbilityDefinition::new(
             AbilityKind::Activated,
             Effect::Attach {
+                attachment: crate::types::ability::TargetFilter::SelfRef,
                 target: crate::types::ability::TargetFilter::Typed(
                     TypedFilter::creature().controller(crate::types::ability::ControllerRef::You),
                 ),

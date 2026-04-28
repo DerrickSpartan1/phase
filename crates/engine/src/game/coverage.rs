@@ -1028,7 +1028,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         | Effect::Untap { target }
         | Effect::Sacrifice { target, .. }
         | Effect::GainControl { target }
-        | Effect::Attach { target }
+        | Effect::Attach { target, .. }
         | Effect::Fight { target, .. }
         | Effect::CopySpell { target }
         | Effect::BecomeCopy { target, .. }
@@ -4135,6 +4135,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         // (Fortified Beachhead, Temple of the Dragon Queen) on_decline gating.
         AbilityCondition::ControllerControlsMatching { .. } => {
             ("ControllerControlsMatching", Handled)
+        }
+        AbilityCondition::ZoneChangeObjectMatchesFilter { .. } => {
+            ("ZoneChangeObjectMatchesFilter", Handled)
         }
         // Variants below are parsed but have no runtime resolver today.
         AbilityCondition::TargetMatchesFilter { .. } => ("TargetMatchesFilter", Unhandled),

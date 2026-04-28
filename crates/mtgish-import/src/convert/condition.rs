@@ -14,6 +14,7 @@ use engine::types::ability::{
 use engine::types::card_type::CoreType;
 use engine::types::zones::Zone;
 
+use crate::convert::mana;
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::schema::types::{
     CardType, Cards, Comparison, Condition, GameNumber, Permanent, Permanents, Player, Players,
@@ -91,13 +92,23 @@ pub fn convert_ability(c: &Condition) -> ConvResult<AbilityCondition> {
         // target → `TargetMatchesFilter`. Other axes (host, attached, etc.)
         // strict-fail — no AbilityCondition variant scopes those today.
         Condition::PermanentPassesFilter(perm, pred) => permanent_filter_to_ability(perm, pred)?,
-        // CR 603.6d + CR 608.2c: "if it [passes predicate]" inside an Action::If
-        // body of an ETB triggered ability — the entering permanent IS the
-        // surrounding trigger's source, so dispatch onto source-bound
-        // AbilityCondition variants.
-        Condition::EnteringPermanentPassesFilter(pred) => {
-            entering_permanent_filter_to_ability(pred)?
-        }
+        // CR 603.4 + CR 603.6: "if it [passes predicate]" inside an
+        // Action::If body of an ETB triggered ability. The subject is the
+        // zone-change event object, which may differ from the trigger source.
+        Condition::EnteringPermanentPassesFilter(pred) => zone_change_object_filter_to_ability(
+            pred,
+            None,
+            Zone::Battlefield,
+            "Condition::EnteringPermanentPassesFilter/predicate",
+        )?,
+        // CR 603.4 + CR 603.10: "if it [passed predicate]" inside a dies/LTB
+        // trigger body. Evaluate the dead permanent's event-time snapshot.
+        Condition::DeadPermanentPassesFilter(pred) => zone_change_object_filter_to_ability(
+            pred,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+            "Condition::DeadPermanentPassesFilter/predicate",
+        )?,
         // CR 608.2c + CR 702.34 (Flashback) + CR 702.143 (Foretell): "If you
         // cast it from [zone], [do A]. Otherwise, [do B]." — self-referential
         // check on the resolving spell's `cast_from_zone`. Maps the zone-bound
@@ -245,15 +256,24 @@ pub fn convert_trigger(c: &Condition) -> ConvResult<TriggerCondition> {
         // `HasCounters`). Other axes / non-source-bound predicates strict-fail
         // because TriggerCondition has no general `Source/TargetMatchesFilter`.
         Condition::PermanentPassesFilter(perm, pred) => permanent_filter_to_trigger(perm, pred)?,
-        // CR 603.6d + CR 603.4: ETB intervening-if "when ~ enters, if it
-        // [passes predicate]". The entering permanent IS the trigger source,
-        // so source-bound predicates (`SourceIsTapped`, `SourceIsAttacking`,
-        // `HasCounters`) apply directly. Type/subtype filter checks on the
-        // *current* state strict-fail today — `WasType` is LKI-keyed and not
-        // appropriate for ETB intervening-ifs (ETB checks current state).
-        Condition::EnteringPermanentPassesFilter(pred) => {
-            entering_permanent_filter_to_trigger(pred)?
-        }
+        // CR 603.4 + CR 603.6: ETB intervening-if "when [object] enters, if
+        // it [passes predicate]". The subject is the zone-change event object,
+        // not necessarily the permanent that owns the ability.
+        Condition::EnteringPermanentPassesFilter(pred) => zone_change_object_filter_to_trigger(
+            pred,
+            None,
+            Zone::Battlefield,
+            "Condition::EnteringPermanentPassesFilter/predicate",
+        )?,
+        // CR 603.4 + CR 603.10: Dies/LTB intervening-if "when [object] dies,
+        // if it [passed predicate]" evaluates the dead permanent's event-time
+        // snapshot.
+        Condition::DeadPermanentPassesFilter(pred) => zone_change_object_filter_to_trigger(
+            pred,
+            Some(Zone::Battlefield),
+            Zone::Graveyard,
+            "Condition::DeadPermanentPassesFilter/predicate",
+        )?,
 
         _ => {
             return Err(ConversionGap::UnknownVariant {
@@ -470,6 +490,55 @@ fn permanent_filter_to_trigger(
     entering_permanent_filter_to_trigger(pred)
 }
 
+fn zone_change_object_filter_to_ability(
+    pred: &Permanents,
+    origin: Option<Zone>,
+    destination: Zone,
+    idiom: &'static str,
+) -> ConvResult<AbilityCondition> {
+    match pred {
+        Permanents::WasKicked | Permanents::WasKickedWithKicker(_) | Permanents::WasKickedTwice
+            if destination == Zone::Battlefield =>
+        {
+            entering_permanent_filter_to_ability(pred)
+        }
+        _ => Ok(AbilityCondition::ZoneChangeObjectMatchesFilter {
+            origin,
+            destination,
+            filter: crate::convert::filter::convert(pred).map_err(|err| match err {
+                ConversionGap::MalformedIdiom { path, detail, .. } => {
+                    ConversionGap::MalformedIdiom {
+                        idiom,
+                        path,
+                        detail,
+                    }
+                }
+                other => other,
+            })?,
+        }),
+    }
+}
+
+fn zone_change_object_filter_to_trigger(
+    pred: &Permanents,
+    origin: Option<Zone>,
+    destination: Zone,
+    idiom: &'static str,
+) -> ConvResult<TriggerCondition> {
+    Ok(TriggerCondition::ZoneChangeObjectMatchesFilter {
+        origin,
+        destination,
+        filter: crate::convert::filter::convert(pred).map_err(|err| match err {
+            ConversionGap::MalformedIdiom { path, detail, .. } => ConversionGap::MalformedIdiom {
+                idiom,
+                path,
+                detail,
+            },
+            other => other,
+        })?,
+    })
+}
+
 /// CR 603.6d + CR 603.4: ETB-style intervening-if where the trigger source
 /// IS the entering/triggering permanent. Predicate dispatched onto
 /// dedicated source-bound TriggerCondition variants.
@@ -484,6 +553,15 @@ fn entering_permanent_filter_to_ability(pred: &Permanents) -> ConvResult<Ability
         Permanents::IsUntapped => AbilityCondition::Not {
             condition: Box::new(AbilityCondition::SourceIsTapped),
         },
+        // CR 702.33d-f + CR 608.2c: ETB body condition "if it was kicked".
+        // Trigger resolution copies the entering source's kicker facts onto
+        // `ResolvedAbility.context`, so the existing ability-condition gate
+        // can evaluate this without a trigger-condition extension.
+        Permanents::WasKicked => AbilityCondition::additional_cost_paid_any(),
+        Permanents::WasKickedWithKicker(cost) => {
+            AbilityCondition::additional_cost_paid_kicker_cost(mana::convert(cost)?)
+        }
+        Permanents::WasKickedTwice => AbilityCondition::additional_cost_paid_n_times(2),
         // Type/subtype/general filter checks — delegate to filter::convert,
         // wrap as source-bound match.
         _ => {
@@ -825,10 +903,15 @@ pub struct TriggerCondExt {
 pub fn convert_trigger_with_etb_filter(c: &Condition) -> ConvResult<TriggerCondExt> {
     match c {
         Condition::EnteringPermanentPassesFilter(pred) => {
-            // Try the trigger-condition path first; fall through to valid_card
-            // only on the catch-all gap (other gaps — e.g. malformed counter
-            // comparators — propagate unchanged).
-            match entering_permanent_filter_to_trigger(pred) {
+            // Try the event-object condition path first; fall through to the
+            // legacy valid_card route only for predicates that still cannot be
+            // expressed as a TargetFilter.
+            match zone_change_object_filter_to_trigger(
+                pred,
+                None,
+                Zone::Battlefield,
+                "Condition::EnteringPermanentPassesFilter/predicate",
+            ) {
                 Ok(tc) => Ok(TriggerCondExt {
                     condition: Some(tc),
                     valid_card: None,
@@ -2661,4 +2744,60 @@ fn card_type_to_core(ct: &CardType) -> ConvResult<CoreType> {
             });
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine::types::ability::{FilterProp, TypedFilter};
+
+    #[test]
+    fn entering_permanent_condition_lowers_to_event_object_filter() {
+        let condition = Condition::EnteringPermanentPassesFilter(Box::new(Permanents::IsCardtype(
+            CardType::Creature,
+        )));
+
+        let converted = convert_trigger(&condition).unwrap();
+
+        match converted {
+            TriggerCondition::ZoneChangeObjectMatchesFilter {
+                origin,
+                destination,
+                filter,
+            } => {
+                assert_eq!(origin, None);
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                        if type_filters.contains(&engine::types::ability::TypeFilter::Creature)
+                ));
+            }
+            other => panic!("expected ZoneChangeObjectMatchesFilter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dead_permanent_condition_lowers_to_snapshot_event_object_filter() {
+        let condition = Condition::DeadPermanentPassesFilter(Box::new(Permanents::HasACounter));
+
+        let converted = convert_ability(&condition).unwrap();
+
+        match converted {
+            AbilityCondition::ZoneChangeObjectMatchesFilter {
+                origin,
+                destination,
+                filter,
+            } => {
+                assert_eq!(origin, Some(Zone::Battlefield));
+                assert_eq!(destination, Zone::Graveyard);
+                assert!(matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { properties, .. })
+                        if properties.contains(&FilterProp::HasAnyCounter)
+                ));
+            }
+            other => panic!("expected ZoneChangeObjectMatchesFilter, got {other:?}"),
+        }
+    }
 }

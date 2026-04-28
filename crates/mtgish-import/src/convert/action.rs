@@ -11,7 +11,7 @@ use engine::types::ability::{
     ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
     GainLifePlayer, LibraryPosition, ManaSpendRestriction, ModalSelectionConstraint, PlayerFilter,
     PlayerScope, QuantityExpr, SearchSelectionConstraint, StaticDefinition, TargetFilter,
-    TriggerDefinition,
+    TriggerDefinition, TypedFilter,
 };
 use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
@@ -31,8 +31,9 @@ use crate::convert::token;
 use crate::convert::trigger as trigger_mod;
 use crate::schema::types::{
     Action, Actions, CardInExile, CardInGraveyard, CardType, CardsInHand, CounterType,
-    DamageRecipient, FutureTrigger, GameNumber, ManaUseModifier, Permanent, Player, Players,
-    ReplacementActionWouldEnter, Rule, SearchLibraryAction, Spells, TokenFlag,
+    CreatureType, DamageRecipient, FutureTrigger, GameNumber, GroupFilter, ManaUseModifier, Player,
+    Players, ReplacementActionWouldEnter, RevealTheTopNumberCardsOfLibraryAction, Rule,
+    SearchLibraryAction, Spell, Spells, TokenFlag,
 };
 
 /// Modal-choice arity for `ActionsConversion::Modal`. Mirrors the engine's
@@ -69,7 +70,10 @@ pub enum ChooseSpec {
 pub enum SegmentOptional {
     Mandatory,
     Optional,
-    OptionalWithCost(AbilityCost),
+    OptionalWithCost {
+        cost: AbilityCost,
+        payer: TargetFilter,
+    },
 }
 
 /// One link in a linear effect chain. Most segments are unconditional
@@ -141,6 +145,7 @@ pub enum ActionsConversion {
     /// gated on payment of an additional cost.
     OptionalWithCost {
         cost: AbilityCost,
+        payer: TargetFilter,
         effects: Vec<Effect>,
     },
     /// CR 117.6 + CR 605.1c + CR 603.12: "You may [pay cost]. When you do, [body]."
@@ -153,6 +158,7 @@ pub enum ActionsConversion {
     /// `oracle.rs:4272-4290`.
     OptionalWithCostReflexive {
         cost: AbilityCost,
+        payer: TargetFilter,
         inner: Box<ActionsConversion>,
     },
     /// CR 700.4 + CR 608.2c: "If [condition], [do X]." (positive form) or
@@ -641,11 +647,16 @@ pub fn convert_actions(actions: &Actions) -> ConvResult<ActionsConversion> {
                     let inner = convert_actions(inner_actions)?;
                     return Ok(ActionsConversion::OptionalWithCostReflexive {
                         cost,
+                        payer: TargetFilter::Controller,
                         inner: Box::new(inner),
                     });
                 }
                 let effects = convert_action_vec(body)?;
-                return Ok(ActionsConversion::OptionalWithCost { cost, effects });
+                return Ok(ActionsConversion::OptionalWithCost {
+                    cost,
+                    payer: TargetFilter::Controller,
+                    effects,
+                });
             }
         }
         if let [head] = actions_vec.as_slice() {
@@ -817,7 +828,10 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             condition: None,
                             effects: body_effects,
                             else_effects: None,
-                            optional: SegmentOptional::OptionalWithCost(cost),
+                            optional: SegmentOptional::OptionalWithCost {
+                                cost,
+                                payer: TargetFilter::Controller,
+                            },
                             player_scope: None,
                         });
                         i += 2;
@@ -839,7 +853,10 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             condition: None,
                             effects: then_effects,
                             else_effects: Some(else_effects),
-                            optional: SegmentOptional::OptionalWithCost(cost),
+                            optional: SegmentOptional::OptionalWithCost {
+                                cost,
+                                payer: TargetFilter::Controller,
+                            },
                             player_scope: None,
                         });
                         i += 2;
@@ -865,12 +882,15 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                         segments.push(ChainSegment {
                             condition: Some(engine::types::ability::AbilityCondition::Not {
                                 condition: Box::new(
-                                    engine::types::ability::AbilityCondition::additional_cost_paid_any(),
+                                    engine::types::ability::AbilityCondition::IfYouDo,
                                 ),
                             }),
                             effects: body_effects,
                             else_effects: None,
-                            optional: SegmentOptional::OptionalWithCost(cost),
+                            optional: SegmentOptional::OptionalWithCost {
+                                cost,
+                                payer: TargetFilter::Controller,
+                            },
                             player_scope: None,
                         });
                         i += 2;
@@ -893,23 +913,18 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
             // same three pair shapes (If / IfElse / Unless of CostWasPaid)
             // with `OptionalWithCost(cost)` segment optionality, but
             // additionally sets `player_scope` so the engine offers the
-            // optional payment to the named player rather than the
-            // controller. Mirrors the bare `MayCost` arm above; the only
-            // delta is the resolved `PlayerFilter` on the segment.
+            // optional payment to the named player rather than always to the
+            // controller. Static player sets use `player_scope`; supported
+            // dynamic single-player refs stay on the `Effect::PayCost.payer`
+            // target slot so the engine can resolve them with the ability's
+            // targets at runtime.
             //
-            // Player references that don't reduce to a static
-            // `PlayerFilter` (e.g. `ControllerOfTargetSpell`,
-            // `OwnerOfPermanent`) strict-fail via `player_to_scope_opt`
-            // returning `None`, surfacing the gap in the report rather
+            // Player references that don't reduce to a `PlayerFilter`
+            // (static set or supported dynamic single-player ref) strict-fail
+            // via `player_to_scope_opt`, surfacing the gap in the report rather
             // than silently dropping the scope.
             Action::PlayerMayCost(player_box, cost_box) => {
-                let scope = player_to_scope_opt(player_box)?.ok_or_else(|| {
-                    ConversionGap::MalformedIdiom {
-                        idiom: "ChainSegment/PlayerMayCost",
-                        path: String::new(),
-                        detail: format!("non-scopable player: {player_box:?}"),
-                    }
-                })?;
+                let (scope, payer) = player_may_cost_scope_and_payer(player_box)?;
                 let next = actions_vec.get(i + 1);
                 let is_cost_was_paid = |c: &crate::schema::types::Condition| -> bool {
                     matches!(c, crate::schema::types::Condition::CostWasPaid)
@@ -924,8 +939,8 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             condition: None,
                             effects: body_effects,
                             else_effects: None,
-                            optional: SegmentOptional::OptionalWithCost(cost),
-                            player_scope: Some(scope),
+                            optional: SegmentOptional::OptionalWithCost { cost, payer },
+                            player_scope: scope,
                         });
                         i += 2;
                         continue;
@@ -943,8 +958,8 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             condition: None,
                             effects: then_effects,
                             else_effects: Some(else_effects),
-                            optional: SegmentOptional::OptionalWithCost(cost),
-                            player_scope: Some(scope),
+                            optional: SegmentOptional::OptionalWithCost { cost, payer },
+                            player_scope: scope,
                         });
                         i += 2;
                         continue;
@@ -963,13 +978,13 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                         segments.push(ChainSegment {
                             condition: Some(engine::types::ability::AbilityCondition::Not {
                                 condition: Box::new(
-                                    engine::types::ability::AbilityCondition::additional_cost_paid_any(),
+                                    engine::types::ability::AbilityCondition::IfYouDo,
                                 ),
                             }),
                             effects: body_effects,
                             else_effects: None,
-                            optional: SegmentOptional::OptionalWithCost(cost),
-                            player_scope: Some(scope),
+                            optional: SegmentOptional::OptionalWithCost { cost, payer },
+                            player_scope: scope,
                         });
                         i += 2;
                         continue;
@@ -1019,10 +1034,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                 // chosen target needs per-resolution binding). Non-target
                 // scopes (Opponent, EachablePlayer) route via `player_scope`.
                 if let Some(filter) = player_to_target_filter(player) {
-                    let body_effects: Vec<Effect> = convert_many(inner)?
-                        .into_iter()
-                        .map(|e| apply_player_target(e, filter.clone()))
-                        .collect::<ConvResult<_>>()?;
+                    let body_effects = apply_player_target_chain(convert_many(inner)?, filter)?;
                     flush_unconditional(&mut current, &mut segments);
                     segments.push(ChainSegment {
                         condition: None,
@@ -1094,10 +1106,8 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
             // `convert_many` provides the transparent passthrough).
             Action::PlayerActions(player, body) if !matches!(**player, Player::You) => {
                 if let Some(filter) = player_to_target_filter(player) {
-                    let body_effects: Vec<Effect> = convert_action_vec(body)?
-                        .into_iter()
-                        .map(|e| apply_player_target(e, filter.clone()))
-                        .collect::<ConvResult<_>>()?;
+                    let body_effects =
+                        apply_player_target_chain(convert_action_vec(body)?, filter)?;
                     flush_unconditional(&mut current, &mut segments);
                     segments.push(ChainSegment {
                         condition: None,
@@ -1135,10 +1145,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
             // optional with no scope (controller default).
             Action::PlayerMayAction(player, inner) => {
                 if let Some(filter) = player_to_target_filter(player) {
-                    let body_effects: Vec<Effect> = convert_many(inner)?
-                        .into_iter()
-                        .map(|e| apply_player_target(e, filter.clone()))
-                        .collect::<ConvResult<_>>()?;
+                    let body_effects = apply_player_target_chain(convert_many(inner)?, filter)?;
                     flush_unconditional(&mut current, &mut segments);
                     segments.push(ChainSegment {
                         condition: None,
@@ -1377,6 +1384,52 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                     });
                 }
             }
+            // CR 701.30b-d: "Clash with an opponent. If you win, [A].
+            // Otherwise, [B]." The engine's `Effect::Clash` handles the
+            // opponent choice/reveal/APNAP placement and sets
+            // `optional_effect_performed` when the controller wins; the
+            // follow-up segment gates on `IfYouDo`. Non-opponent player axes
+            // strict-fail because `Effect::Clash` has no player-target slot.
+            Action::Clash(players, win_body, lose_body) => {
+                require_clash_opponent_axis(players)?;
+                flush_unconditional(&mut current, &mut segments);
+                segments.push(ChainSegment {
+                    condition: None,
+                    effects: vec![Effect::Clash],
+                    else_effects: None,
+                    optional: SegmentOptional::Mandatory,
+                    player_scope: None,
+                });
+
+                let win_is_noop = actions_are_noop(win_body);
+                let lose_is_noop = actions_are_noop(lose_body);
+                match (win_is_noop, lose_is_noop) {
+                    (true, true) => {}
+                    (false, true) => segments.push(ChainSegment {
+                        condition: Some(AbilityCondition::IfYouDo),
+                        effects: convert_action_vec(win_body)?,
+                        else_effects: None,
+                        optional: SegmentOptional::Mandatory,
+                        player_scope: None,
+                    }),
+                    (true, false) => segments.push(ChainSegment {
+                        condition: Some(AbilityCondition::Not {
+                            condition: Box::new(AbilityCondition::IfYouDo),
+                        }),
+                        effects: convert_action_vec(lose_body)?,
+                        else_effects: None,
+                        optional: SegmentOptional::Mandatory,
+                        player_scope: None,
+                    }),
+                    (false, false) => segments.push(ChainSegment {
+                        condition: Some(AbilityCondition::IfYouDo),
+                        effects: convert_action_vec(win_body)?,
+                        else_effects: Some(convert_action_vec(lose_body)?),
+                        optional: SegmentOptional::Mandatory,
+                        player_scope: None,
+                    }),
+                }
+            }
             // Unconditional leaf — append to the current run via the
             // multi-emit lowering (preserves SearchLibrary's chain
             // expansion).
@@ -1499,6 +1552,24 @@ fn convert_action_vec(actions: &[Action]) -> ConvResult<Vec<Effect>> {
     Ok(out)
 }
 
+fn actions_are_noop(actions: &[Action]) -> bool {
+    actions.iter().all(|a| matches!(a, Action::DoNothing))
+}
+
+fn require_clash_opponent_axis(players: &Players) -> ConvResult<()> {
+    if matches!(players, Players::Opponent) {
+        Ok(())
+    } else {
+        Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "Effect::Clash",
+            needed_variant: format!(
+                "player axis other than choose-an-opponent ({})",
+                variant_name_players(players)
+            ),
+        })
+    }
+}
+
 /// Convert one `Action` into one or more `Effect`s. Most actions emit a
 /// single effect (delegating to `convert`). `Action::SearchLibrary` is the
 /// principal multi-emit shape: a tutor expands into the engine's
@@ -1506,6 +1577,69 @@ fn convert_action_vec(actions: &[Action]) -> ConvResult<Vec<Effect>> {
 fn convert_many(a: &Action) -> ConvResult<Vec<Effect>> {
     match a {
         Action::SearchLibrary(actions) => convert_search_library(actions),
+        // CR 701.20a + CR 701.9a: "Target player reveals their hand. You choose
+        // a [filter] card from it. That player discards that card." The engine's
+        // `RevealHand` resolver records the chosen card as a continuation
+        // `TargetRef::Object`; `DiscardCard` then discards that specific hand
+        // object. Non-controller chooser variants strict-fail because
+        // `Effect::RevealHand` prompts the ability controller today.
+        Action::RevealHandAndPlayerChoosesACardToDiscard(player, cards) => {
+            if !matches!(**player, Player::You) {
+                return Err(ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "Effect::RevealHand",
+                    needed_variant: format!(
+                        "chooser player other than controller ({:?})",
+                        player.as_ref()
+                    ),
+                });
+            }
+            Ok(vec![
+                Effect::RevealHand {
+                    target: TargetFilter::Controller,
+                    card_filter: filter_mod::cards_to_filter(cards)?,
+                    count: None,
+                },
+                Effect::DiscardCard {
+                    count: 1,
+                    target: TargetFilter::Any,
+                },
+            ])
+        }
+        // CR 701.20a + CR 701.13a: Same reveal-choice continuation as the
+        // discard sibling, but the chosen hand object moves to exile. The
+        // outer `PlayerAction(Ref_TargetPlayer, ...)` rebinds only the
+        // `RevealHand.target`; the `ChangeZone` continuation consumes the
+        // selected `TargetRef::Object` installed by the reveal-choice handler.
+        Action::RevealHandAndPlayerChoosesACardToExile(player, cards) => {
+            if !matches!(**player, Player::You) {
+                return Err(ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "Effect::RevealHand",
+                    needed_variant: format!(
+                        "chooser player other than controller ({:?})",
+                        player.as_ref()
+                    ),
+                });
+            }
+            Ok(vec![
+                Effect::RevealHand {
+                    target: TargetFilter::Controller,
+                    card_filter: filter_mod::cards_to_filter(cards)?,
+                    count: None,
+                },
+                Effect::ChangeZone {
+                    origin: Some(Zone::Hand),
+                    destination: Zone::Exile,
+                    target: TargetFilter::Any,
+                    owner_library: false,
+                    enter_transformed: false,
+                    under_your_control: false,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+            ])
+        }
         // CR 110.1 + CR 603.7c + CR 614.12: "Exile target permanent until
         // [expiration]" — Banishing Light family. mtgish encodes this as a
         // single `ExilePermanentUntil` action, but the engine's primitive is
@@ -1785,6 +1919,20 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: TargetFilter::Controller,
         },
 
+        // CR 701.20e: "Look at the top card of your library." The engine's
+        // Dig resolver treats `keep_count: Some(0)` + `reveal: false` as a
+        // pure peek: no selection prompt, no zone move, and `last_revealed_ids`
+        // is populated for follow-up conditions/actions.
+        Action::LookAtTopOfLibrary => Effect::Dig {
+            count: QuantityExpr::Fixed { value: 1 },
+            destination: None,
+            keep_count: Some(0),
+            up_to: false,
+            filter: TargetFilter::Any,
+            rest_destination: None,
+            reveal: false,
+        },
+
         // CR 701.20e + CR 608.2c: "Look at the top N cards of your library.
         // Then [dispositions]." Maps onto a single `Effect::Dig` whose
         // (keep_count, up_to, filter, destination, rest_destination, reveal)
@@ -1817,6 +1965,14 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             counter_type: counter_type_name(ct),
             count: 1,
             target: convert_permanent(target)?,
+        },
+
+        // CR 701.47a: Amass [subtype] N. The engine owns the Army-selection,
+        // token-creation, type-addition, and counter placement semantics; the
+        // converter only supplies the subtype/count payload.
+        Action::Amass(n, subtype) => Effect::Amass {
+            subtype: amass_subtype_name(subtype),
+            count: quantity::convert(n)?,
         },
 
         // CR 701.10: Exile via ChangeZone.
@@ -1883,7 +2039,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: convert_permanents(filter)?,
             count: QuantityExpr::Fixed { value: 1 },
         },
-        // CR 701.16a: "Sacrifice N <filter>" — N may be a literal or any
+        // CR 701.21a: "Sacrifice N <filter>" — N may be a literal or any
         // dynamic quantity (Variable, ObjectCount, etc.). Lowers onto the
         // engine's `count: QuantityExpr` slot directly.
         Action::SacrificeNumberPermanents(n, filter) => Effect::Sacrifice {
@@ -2321,27 +2477,15 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             destination: None,
         },
 
-        // CR 701.3a + CR 701.3b: Attach. Engine's `Effect::Attach { target }`
-        // expresses "the source attaches to <target>". The mtgish shape is
-        // `(first, second)` = "attach <first> to <second>". When `first` is the
-        // source (`ThisPermanent`), the mapping is direct: `target =
-        // convert_permanent(second)`. Other shapes (e.g., "attach target
-        // Equipment to target creature" — Auriok Windwalker, Amy Rose) involve
-        // a non-source mover and have no engine slot today; strict-fail with
-        // an explicit prerequisite so the gap surfaces.
-        Action::AttachPermanentToPermanent(first, second) => match &**first {
-            Permanent::ThisPermanent => Effect::Attach {
-                target: convert_permanent(second)?,
-            },
-            other => {
-                return Err(ConversionGap::EnginePrerequisiteMissing {
-                    engine_type: "Effect::Attach",
-                    needed_variant: format!(
-                        "non-source mover: attach {other:?} to <target> (Effect::Attach \
-                         takes only one target — needs an `attached_object` slot)"
-                    ),
-                });
-            }
+        // CR 701.3a + CR 701.3b: Attach. The mtgish shape is
+        // `(first, second)` = "attach <first> to <second>". Engine
+        // `Effect::Attach` defaults `attachment` to SelfRef for legacy
+        // source-attaches forms, and carries a separate attachment filter for
+        // non-source movers such as "attach target Equipment to target
+        // creature".
+        Action::AttachPermanentToPermanent(first, second) => Effect::Attach {
+            attachment: convert_permanent(first)?,
+            target: convert_permanent(second)?,
         },
 
         // CR 110.2 + CR 613.1 (Layer 2) + CR 800.4: Temporary control change
@@ -2513,18 +2657,12 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
         },
 
         // CR 701.20a: "Reveal the top N cards of your library." Engine
-        // `Effect::RevealTop.count` is `u32` (not `QuantityExpr`), so dynamic
-        // counts strict-fail. Bodies (`RevealTheTopNumberCardsOfLibraryAction`)
-        // encode disposition rules over the revealed pile (Dig-shape, separate
-        // primitive); a non-empty body strict-fails until that lowering exists.
+        // `Effect::RevealTop.count` is `u32` (not `QuantityExpr`) for bare
+        // reveal-only bodies. Non-empty bodies are the public sibling of
+        // `LookAtTheTopNumberCardsOfLibrary` and lower to `Effect::Dig`.
         Action::RevealTheTopNumberCardsOfLibrary(n, body) => {
             if !body.is_empty() {
-                return Err(ConversionGap::EnginePrerequisiteMissing {
-                    engine_type: "Effect",
-                    needed_variant: "RevealTheTopNumberCardsOfLibrary/non-empty-body \
-                                     (disposition lowering — needs Dig-shape conversion)"
-                        .to_string(),
-                });
+                return convert_reveal_top_dig(quantity::convert(n)?, body);
             }
             match quantity::convert(n)? {
                 QuantityExpr::Fixed { value } if value >= 0 => Effect::RevealTop {
@@ -3351,6 +3489,97 @@ fn convert_look_at_top(
     }
 }
 
+fn convert_reveal_top_dig(
+    count: QuantityExpr,
+    dispositions: &[RevealTheTopNumberCardsOfLibraryAction],
+) -> ConvResult<Effect> {
+    let prereq = |needed: String| ConversionGap::EnginePrerequisiteMissing {
+        engine_type: "Effect",
+        needed_variant: needed,
+    };
+
+    match dispositions {
+        [RevealTheTopNumberCardsOfLibraryAction::MayPutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
+            Ok(Effect::Dig {
+                count,
+                destination: Some(Zone::Hand),
+                keep_count: Some(1),
+                up_to: true,
+                filter: filter_mod::cards_to_filter(cards)?,
+                rest_destination: None,
+                reveal: true,
+            })
+        }
+        [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
+            Ok(Effect::Dig {
+                count,
+                destination: Some(Zone::Hand),
+                keep_count: Some(1),
+                up_to: false,
+                filter: filter_mod::cards_to_filter(cards)?,
+                rest_destination: None,
+                reveal: true,
+            })
+        }
+        [RevealTheTopNumberCardsOfLibraryAction::PutAGenericCardIntoHand, RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsIntoGraveyard] => {
+            Ok(Effect::Dig {
+                count,
+                destination: Some(Zone::Hand),
+                keep_count: Some(1),
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: None,
+                reveal: true,
+            })
+        }
+        [RevealTheTopNumberCardsOfLibraryAction::MayPutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
+        | [RevealTheTopNumberCardsOfLibraryAction::MayPutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder] => {
+            Ok(Effect::Dig {
+                count,
+                destination: Some(Zone::Hand),
+                keep_count: Some(1),
+                up_to: true,
+                filter: filter_mod::cards_to_filter(cards)?,
+                rest_destination: Some(Zone::Library),
+                reveal: true,
+            })
+        }
+        [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInAnyOrder]
+        | [RevealTheTopNumberCardsOfLibraryAction::PutACardOfTypeIntoHand(cards), RevealTheTopNumberCardsOfLibraryAction::PutTheRemainingCardsOnTheBottomOfLibraryInARandomOrder] => {
+            Ok(Effect::Dig {
+                count,
+                destination: Some(Zone::Hand),
+                keep_count: Some(1),
+                up_to: false,
+                filter: filter_mod::cards_to_filter(cards)?,
+                rest_destination: Some(Zone::Library),
+                reveal: true,
+            })
+        }
+        _ => Err(prereq(format!(
+            "RevealTheTopNumberCardsOfLibrary/Dig::dispositions[{}]",
+            reveal_disposition_tag_list(dispositions)
+        ))),
+    }
+}
+
+fn reveal_disposition_tag_list(dispositions: &[RevealTheTopNumberCardsOfLibraryAction]) -> String {
+    dispositions
+        .iter()
+        .map(|d| {
+            serde_json::to_value(d)
+                .ok()
+                .and_then(|v| {
+                    v.get("_RevealTheTopNumberCardsOfLibraryAction")
+                        .and_then(|t| t.as_str())
+                        .map(String::from)
+                })
+                .unwrap_or_else(|| "<unknown>".to_string())
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 /// Compact comma-joined disposition serde-tag list for diagnostic
 /// `EnginePrerequisiteMissing` payloads. Mirrors the `variant_tag` idiom
 /// used by `Action` / `Cards` strict-fail breadcrumbs.
@@ -3667,7 +3896,9 @@ fn damage_recipient_to_filter(r: &DamageRecipient) -> ConvResult<TargetFilter> {
     use engine::types::ability::{ControllerRef, TypedFilter};
     Ok(match r {
         DamageRecipient::Permanent(p) => convert_permanent(p)?,
-        DamageRecipient::Player(_) => TargetFilter::Player,
+        DamageRecipient::Player(player) => {
+            player_damage_recipient_to_filter(player).unwrap_or(TargetFilter::Player)
+        }
         DamageRecipient::Ref_AnyTarget
         | DamageRecipient::Ref_AnyTarget1
         | DamageRecipient::Ref_AnyTarget2
@@ -3751,6 +3982,102 @@ fn damage_recipient_to_filter(r: &DamageRecipient) -> ConvResult<TargetFilter> {
     })
 }
 
+fn player_damage_recipient_to_filter(player: &Player) -> Option<TargetFilter> {
+    match player {
+        Player::You | Player::SelfPlayer | Player::HostPlayer | Player::HostController => {
+            Some(TargetFilter::Controller)
+        }
+        Player::Trigger_ThatPlayer => Some(TargetFilter::TriggeringPlayer),
+        Player::Trigger_DefendingPlayer | Player::DefendingPlayer => {
+            Some(TargetFilter::DefendingPlayer)
+        }
+        Player::Trigger_ControllerOfThatSpell | Player::ThatSpellsController => {
+            Some(TargetFilter::TriggeringSpellController)
+        }
+        other => player_to_target_filter(other),
+    }
+}
+
+fn apply_player_target_chain(
+    effects: Vec<Effect>,
+    target_filter: TargetFilter,
+) -> ConvResult<Vec<Effect>> {
+    let mut out = Vec::with_capacity(effects.len());
+    for effect in effects {
+        if matches!(out.last(), Some(Effect::RevealHand { .. }))
+            && is_selected_hand_exile_continuation(&effect)
+        {
+            out.push(effect);
+        } else {
+            out.push(apply_player_target(effect, target_filter.clone())?);
+        }
+    }
+    Ok(out)
+}
+
+fn is_selected_hand_exile_continuation(effect: &Effect) -> bool {
+    matches!(
+        effect,
+        Effect::ChangeZone {
+            origin: Some(Zone::Hand),
+            destination: Zone::Exile,
+            target: TargetFilter::Any,
+            ..
+        }
+    )
+}
+
+fn bind_sacrifice_filter_to_target_player(
+    target: TargetFilter,
+    target_filter: TargetFilter,
+) -> ConvResult<TargetFilter> {
+    if !matches!(target_filter, TargetFilter::Player) {
+        return Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "Effect::Sacrifice",
+            needed_variant: format!("player target filter {target_filter:?} as sacrifice actor"),
+        });
+    }
+
+    bind_filter_controller(target, ControllerRef::TargetPlayer)
+}
+
+fn bind_filter_controller(
+    target: TargetFilter,
+    controller: ControllerRef,
+) -> ConvResult<TargetFilter> {
+    Ok(match target {
+        TargetFilter::Typed(mut typed) => {
+            typed.controller = Some(controller);
+            TargetFilter::Typed(typed)
+        }
+        TargetFilter::Any => TargetFilter::Typed(TypedFilter::permanent().controller(controller)),
+        TargetFilter::And { filters } => TargetFilter::And {
+            filters: filters
+                .into_iter()
+                .map(|filter| bind_filter_controller(filter, controller.clone()))
+                .collect::<ConvResult<Vec<_>>>()?,
+        },
+        TargetFilter::Or { filters } => TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(|filter| bind_filter_controller(filter, controller.clone()))
+                .collect::<ConvResult<Vec<_>>>()?,
+        },
+        TargetFilter::Not { filter } => TargetFilter::And {
+            filters: vec![
+                TargetFilter::Typed(TypedFilter::permanent().controller(controller)),
+                TargetFilter::Not { filter },
+            ],
+        },
+        other => {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "Effect::Sacrifice",
+                needed_variant: format!("controller binding for sacrifice filter {other:?}"),
+            });
+        }
+    })
+}
+
 /// Render a `CounterType` as the engine's string identifier. Engine stores
 /// counters as freeform strings; we use the schema's variant name (PascalCase)
 /// for everything except the special PT counters which encode the +N/+M.
@@ -3764,10 +4091,14 @@ pub(crate) fn counter_type_name(ct: &CounterType) -> String {
         .unwrap_or_else(|| format!("{ct:?}"))
 }
 
+fn amass_subtype_name(subtype: &CreatureType) -> String {
+    filter_mod::creature_type_name(subtype)
+}
+
 /// Outcome of attempting to lower an mtgish `Player` / `Players` reference
 /// to an `AbilityDefinition::player_scope`. Three-state:
 ///
-/// * `Ok(Some(filter))` — static scope, wire it.
+/// * `Ok(Some(filter))` — static or engine-resolvable scope, wire it.
 /// * `Ok(None)` — `Player::You` controller default. Head-pattern detector
 ///   routes through the leaf path; strict-fail call sites keep their
 ///   previous fallthrough behavior (treat as "not a scope-bearing shape").
@@ -3777,11 +4108,23 @@ pub(crate) fn counter_type_name(ct: &CounterType) -> String {
 ///   variant exists yet).
 type ScopeOutcome = Result<Option<PlayerFilter>, ConversionGap>;
 
+fn player_may_cost_scope_and_payer(
+    player: &Player,
+) -> Result<(Option<PlayerFilter>, TargetFilter), ConversionGap> {
+    match player {
+        Player::ControllerOfTargetSpell => Ok((None, TargetFilter::ParentTargetController)),
+        Player::ControllerOfSpell(spell) if matches!(**spell, Spell::Ref_TargetSpell) => {
+            Ok((None, TargetFilter::ParentTargetController))
+        }
+        _ => Ok((player_to_scope_opt(player)?, TargetFilter::Controller)),
+    }
+}
+
 /// CR 119.1 + CR 119.3 + CR 101.4 (APNAP): Map an mtgish `Player` to a
 /// `PlayerFilter` for use as `AbilityDefinition::player_scope`. Variants
 /// fall into three buckets:
 ///
-/// 1. **Static scope** — directly wirable to a `PlayerFilter` variant.
+/// 1. **Player scope** — directly wirable to a `PlayerFilter` variant.
 /// 2. **Target reference** (`Ref_TargetPlayer*`, `OwnerOfPermanent`, etc.) —
 ///    these are dynamic targets that belong on effect-level `target_player`
 ///    slots, not on `player_scope`. Strict-fail with a marker that says
@@ -3856,7 +4199,6 @@ fn player_to_scope_opt(player: &Player) -> ScopeOutcome {
         P::Ref_TargetPlayers_1 => Err(target_ref("Ref_TargetPlayers_1")),
         P::ControllerOfTargetPermanent => Err(target_ref("ControllerOfTargetPermanent")),
         P::ControllerOfTargetPermanent2 => Err(target_ref("ControllerOfTargetPermanent2")),
-        P::ControllerOfTargetSpell => Err(target_ref("ControllerOfTargetSpell")),
         P::OwnerOfTargetPermanent => Err(target_ref("OwnerOfTargetPermanent")),
         P::OwnerOfPermanent(_) => Err(target_ref("OwnerOfPermanent")),
         P::ControllerOfPermanent(_) => Err(target_ref("ControllerOfPermanent")),
@@ -3964,7 +4306,7 @@ fn players_to_scope_opt(players: &Players) -> ScopeOutcome {
 /// (e.g. `Player::You`, scope-only refs, predicate-filtered refs); callers
 /// fall through to `player_to_scope_opt` or strict-fail.
 fn player_to_target_filter(player: &Player) -> Option<TargetFilter> {
-    use crate::schema::types::{Permanent, Spell};
+    use crate::schema::types::Permanent;
     use Player as P;
     match player {
         // CR 601.2c: All `Ref_TargetPlayer*` slot references resolve via
@@ -3994,6 +4336,9 @@ fn player_to_target_filter(player: &Player) -> Option<TargetFilter> {
         }
         P::ControllerOfSpell(s) if matches!(**s, Spell::Ref_TargetSpell) => {
             Some(TargetFilter::ParentTargetController)
+        }
+        P::ControllerOfSpell(s) if matches!(**s, Spell::Trigger_ThatSpell) => {
+            Some(TargetFilter::TriggeringSpellController)
         }
         P::ControllerOfPermanent(p) if matches!(**p, Permanent::Ref_TargetPermanent) => {
             Some(TargetFilter::ParentTargetController)
@@ -4062,20 +4407,13 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
             target: target_filter,
         },
         // CR 701.21 + CR 115.2: "Target player sacrifices a [filter]."
-        // Routes via the existing `target` slot — at runtime, when the
-        // resolved target is a Player, the sacrificing player is the
-        // announced target and the choice of permanent uses the implicit
-        // creature/permanent filter from the action body. Today the
-        // mtgish `SacrificeAPermanent(filter)` shape doesn't carry a
-        // separate "by which player" axis, so this is conservative —
-        // strict-fail when reached so the call site is forced to
-        // disambiguate before we silently re-anchor the wrong subject.
-        Effect::Sacrifice { .. } => {
-            return Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "Effect::Sacrifice",
-                needed_variant: "by-target-player sacrifice (subject + actor split)".into(),
-            });
-        }
+        // Keep the existing sacrifice effect and bind the permanent filter's
+        // controller axis to `ControllerRef::TargetPlayer`; runtime sacrifice
+        // resolution reads the announced player from `ability.targets`.
+        Effect::Sacrifice { target, count } => Effect::Sacrifice {
+            target: bind_sacrifice_filter_to_target_player(target, target_filter)?,
+            count,
+        },
         // CR 701.20a + CR 115.2: "Target player reveals the top N cards
         // of their library."
         Effect::RevealTop { count, .. } => Effect::RevealTop {
@@ -4266,12 +4604,14 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
     let any_count = || QuantityExpr::Fixed { value: i32::MAX };
 
     // Lower the first procedure step into (filter, count, up_to, reveal,
-    // destination, enter_replacements, consumed_extra). The optional second
-    // step (e.g. `PutFound...` for the bare `Find` head) is consumed via
-    // `consumed_extra` so the `tail` check below only sees the trailing
-    // Shuffle/DontShuffle.
+    // destination, enter_replacements, consumed_extra_steps). Optional
+    // procedure steps (e.g. `PutFound...` for the bare `Find` head, or
+    // `Shuffle` + `PutOnTopOfLibrary` for top tutors) are consumed here so
+    // the `tail` check below only sees the trailing Shuffle/DontShuffle.
     let no_repls = EnterReplacements::default();
-    let (filter, count, _up_to, reveal, destination, enter_repls, consumed_extra) = match head {
+    let mut selection_constraint = SearchSelectionConstraint::None;
+    let (filter, count, up_to, reveal, destination, enter_repls, consumed_extra_steps) = match head
+    {
         // CR 701.23 — bare-find tutor (Demonic Tutor / Diabolic Tutor).
         S::PutAGenericCardIntoHand => (
             TargetFilter::Any,
@@ -4280,7 +4620,16 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             false,
             Zone::Hand,
             no_repls,
+            0,
+        ),
+        S::PutNumberGenericCardsIntoHand(n) => (
+            TargetFilter::Any,
+            quantity::convert(n)?,
             false,
+            false,
+            Zone::Hand,
+            no_repls,
+            0,
         ),
         S::PutAGenericCardIntoGraveyard => (
             TargetFilter::Any,
@@ -4289,7 +4638,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             false,
             Zone::Graveyard,
             no_repls,
-            false,
+            0,
         ),
         // CR 701.23 — Rampant Growth class. Optional ("may put") encodes as
         // `up_to: true` (CR 107.1c). Accompanying replacements (tapped,
@@ -4303,7 +4652,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             false,
             Zone::Battlefield,
             extract_enter_replacements(repls)?,
-            false,
+            0,
         ),
         S::MayPutAnyNumberOfCardsOntoTheBattlefield(cards, repls) => (
             filter_mod::cards_to_filter(cards)?,
@@ -4312,8 +4661,21 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             false,
             Zone::Battlefield,
             extract_enter_replacements(repls)?,
-            false,
+            0,
         ),
+        S::MayPutAnyNumberOfGroupCardsOntoBattlefield(cards, group, repls)
+        | S::MayPutAnyNumberOfGroupCardsOntoTheBattlefield(cards, group, repls) => {
+            selection_constraint = group_filter_to_search_constraint(group)?;
+            (
+                filter_mod::cards_to_filter(cards)?,
+                any_count(),
+                true,
+                false,
+                Zone::Battlefield,
+                extract_enter_replacements(repls)?,
+                0,
+            )
+        }
         S::MayPutUptoNumberCardsOntoTheBattlefield(n, cards, repls) => (
             filter_mod::cards_to_filter(cards)?,
             quantity::convert(n)?,
@@ -4321,8 +4683,20 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             false,
             Zone::Battlefield,
             extract_enter_replacements(repls)?,
-            false,
+            0,
         ),
+        S::MayPutUptoNumberGroupCardsOntoBattlefield(n, cards, group, repls) => {
+            selection_constraint = group_filter_to_search_constraint(group)?;
+            (
+                filter_mod::cards_to_filter(cards)?,
+                quantity::convert(n)?,
+                true,
+                false,
+                Zone::Battlefield,
+                extract_enter_replacements(repls)?,
+                0,
+            )
+        }
         // CR 701.23 + CR 701.20 — Worldly Tutor class (reveal + hand).
         S::MayRevealACardOfTypeAndPutItIntoHand(cards) => (
             filter_mod::cards_to_filter(cards)?,
@@ -4331,7 +4705,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             true,
             Zone::Hand,
             no_repls,
-            false,
+            0,
         ),
         S::MayRevealUptoNumberCardsOfTypeAndPutThemIntoHand(n, cards)
         | S::MayRevealUptoNumberCardsOfTypeAndPutIntoHand(n, cards) => (
@@ -4341,7 +4715,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             true,
             Zone::Hand,
             no_repls,
-            false,
+            0,
         ),
         S::MayRevealAnyNumberOfCardsOfTypeAndPutThemIntoHand(cards) => (
             filter_mod::cards_to_filter(cards)?,
@@ -4350,7 +4724,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             true,
             Zone::Hand,
             no_repls,
-            false,
+            0,
         ),
         // CR 701.23 + CR 701.7 (Mill) / CR 701.13 (Exile).
         S::MayPutACardOfTypeIntoGraveyard(cards) => (
@@ -4360,7 +4734,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             false,
             Zone::Graveyard,
             no_repls,
-            false,
+            0,
         ),
         // CR 701.23 + CR 701.7: "Search your library for any number of
         // [type] cards and put them into your graveyard" (Mesmeric Orb /
@@ -4373,7 +4747,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             false,
             Zone::Graveyard,
             no_repls,
-            false,
+            0,
         ),
         S::MayExileACardOfType(cards) => (
             filter_mod::cards_to_filter(cards)?,
@@ -4382,7 +4756,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             false,
             Zone::Exile,
             no_repls,
-            false,
+            0,
         ),
         S::MayExileAnyNumberOfCardsOfType(cards) => (
             filter_mod::cards_to_filter(cards)?,
@@ -4391,7 +4765,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             false,
             Zone::Exile,
             no_repls,
-            false,
+            0,
         ),
         // CR 701.23 + CR 701.20: Mystical Tutor / Worldly Tutor / Boggart
         // Harbinger class — search, reveal, put on top of library. The
@@ -4405,7 +4779,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             true,
             Zone::Library,
             no_repls,
-            false,
+            0,
         ),
         // CR 701.23 + CR 701.7 (Mill): Buried Alive class — bounded
         // up-to-N tutor that puts found cards into graveyard.
@@ -4416,7 +4790,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             false,
             Zone::Graveyard,
             no_repls,
-            false,
+            0,
         ),
         // CR 701.23 + CR 701.20 + CR 701.24: Mystical Tutor / Liliana Vess
         // class — "search your library for a card, reveal it, then shuffle
@@ -4436,7 +4810,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
                     true,
                     Zone::Library,
                     no_repls,
-                    true,
+                    1,
                 ),
                 _ => {
                     return Err(ConversionGap::MalformedIdiom {
@@ -4468,9 +4842,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
                     false,
                     Zone::Library,
                     no_repls,
-                    // sentinel: we consumed two — handled below by setting
-                    // `consumed_extra` and forcing the tail length check.
-                    true,
+                    2,
                 )
             }
             _ => {
@@ -4497,7 +4869,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
                     false,
                     Zone::Battlefield,
                     extract_enter_replacements(repls)?,
-                    true,
+                    1,
                 ),
                 _ => {
                     return Err(ConversionGap::MalformedIdiom {
@@ -4527,7 +4899,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
     // remaining sequence must be one of: [], [Shuffle], [DontShuffle].
     // Anything richer (PutTheRemainingCardsIntoHand, etc.) is the long-tail
     // class that strict-fails so it surfaces in the report.
-    let tail = if consumed_extra { &rest[1..] } else { rest };
+    let tail = &rest[consumed_extra_steps..];
     let shuffle = match tail {
         [] => false,
         [S::Shuffle] => true,
@@ -4549,12 +4921,17 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
     // encodes destination via a follow-on `Effect::ChangeZone(Library →
     // dest)`; CR 701.24 (Shuffle): optional terminal `Effect::Shuffle`.
     let mut out = Vec::with_capacity(3);
+    let search_count = if up_to {
+        QuantityExpr::up_to(count)
+    } else {
+        count
+    };
     out.push(Effect::SearchLibrary {
         filter,
-        count,
+        count: search_count,
         reveal,
         target_player: None,
-        selection_constraint: SearchSelectionConstraint::None,
+        selection_constraint,
     });
     out.push(Effect::ChangeZone {
         origin: Some(Zone::Library),
@@ -4574,6 +4951,27 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
         });
     }
     Ok(out)
+}
+
+fn group_filter_to_search_constraint(group: &GroupFilter) -> ConvResult<SearchSelectionConstraint> {
+    match group {
+        GroupFilter::DifferentNames => Ok(SearchSelectionConstraint::DistinctNames),
+        other => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "SearchSelectionConstraint",
+            needed_variant: format!("GroupFilter::{}", group_filter_tag(other)),
+        }),
+    }
+}
+
+fn group_filter_tag(group: &GroupFilter) -> String {
+    serde_json::to_value(group)
+        .ok()
+        .and_then(|v| {
+            v.get("_GroupFilter")
+                .and_then(|t| t.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "<unknown>".to_string())
 }
 
 /// CR 614.12 (replacement effects on enter): the typed projection of an
@@ -4942,4 +5340,74 @@ fn spells_tag(s: &Spells) -> String {
         .ok()
         .and_then(|v| v.get("_Spells").and_then(|t| t.as_str()).map(String::from))
         .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::convert::build_ability_from_actions;
+    use crate::schema::types::{Condition, Cost, ManaSymbol, Permanent, Permanents};
+    use engine::types::ability::{AbilityKind, Effect, TypeFilter};
+
+    #[test]
+    fn player_may_cost_controller_of_target_spell_converts_to_dynamic_player_scope() {
+        let actions = Actions::ActionList(vec![
+            Action::PlayerMayCost(
+                Box::new(Player::ControllerOfSpell(Box::new(Spell::Ref_TargetSpell))),
+                Box::new(Cost::PayMana(vec![ManaSymbol::ManaCostGeneric(3)])),
+            ),
+            Action::If(Condition::CostWasPaid, vec![Action::DrawACard]),
+        ]);
+
+        let conv = convert_actions(&actions).unwrap();
+        let ability = build_ability_from_actions(AbilityKind::Spell, None, conv).unwrap();
+
+        assert!(ability.optional);
+        assert!(ability.player_scope.is_none());
+        let Effect::PayCost { payer, .. } = ability.effect.as_ref() else {
+            panic!("expected PayCost parent, got {:?}", ability.effect);
+        };
+        assert_eq!(*payer, TargetFilter::ParentTargetController);
+        let sub = ability.sub_ability.as_ref().expect("expected paid body");
+        assert!(matches!(sub.effect.as_ref(), Effect::Draw { .. }));
+    }
+
+    #[test]
+    fn attach_permanent_to_permanent_lowers_non_source_attachment() {
+        let effects = convert_action_vec(&[Action::AttachPermanentToPermanent(
+            Box::new(Permanent::Ref_TargetPermanent1),
+            Box::new(Permanent::Ref_TargetPermanent2),
+        )])
+        .unwrap();
+
+        let [Effect::Attach { attachment, target }] = effects.as_slice() else {
+            panic!("expected Attach, got {effects:?}");
+        };
+        assert_eq!(*attachment, TargetFilter::Any);
+        assert_eq!(*target, TargetFilter::Any);
+    }
+
+    #[test]
+    fn target_player_sacrifice_binds_subject_filter_controller() {
+        let effect = convert(&Action::PlayerAction(
+            Box::new(Player::Ref_TargetPlayer),
+            Box::new(Action::SacrificeAPermanent(Box::new(
+                Permanents::IsCardtype(CardType::Creature),
+            ))),
+        ))
+        .unwrap();
+
+        let Effect::Sacrifice { target, count } = effect else {
+            panic!("expected Sacrifice");
+        };
+        assert_eq!(count, QuantityExpr::Fixed { value: 1 });
+        let TargetFilter::Typed(filter) = target else {
+            panic!("expected typed sacrifice filter, got {target:?}");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::TargetPlayer));
+        assert!(filter
+            .type_filters
+            .iter()
+            .any(|filter| matches!(filter, TypeFilter::Creature)));
+    }
 }

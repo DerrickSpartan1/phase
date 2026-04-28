@@ -346,6 +346,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             obj.kickers_paid.clone_from(&ability.context.kickers_paid);
                         }
                     }
+                    super::room::unlock_door_designation(
+                        state,
+                        entry.id,
+                        entry.controller,
+                        crate::game::game_object::RoomDoor::Left,
+                        events,
+                    );
                     // CR 614.12a: Drain mandatory replacement post-effects (e.g., the
                     // Siege protector / Tribute opponent-choice prompt that was stashed
                     // by `apply_single_replacement` while resolving this ZoneChange).

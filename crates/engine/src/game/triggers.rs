@@ -1714,6 +1714,22 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::WasType { card_type } => source_id
             .and_then(|id| state.lki_cache.get(&id))
             .is_some_and(|lki| lki.card_types.contains(card_type)),
+        // CR 603.4 + CR 603.6 + CR 603.10: Intervening-if subject is the
+        // zone-change event object, not necessarily the trigger source.
+        TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin,
+            destination,
+            filter,
+        } => trigger_event.is_some_and(|event| {
+            super::filter::matches_zone_change_event_object_filter(
+                state,
+                event,
+                *origin,
+                *destination,
+                filter,
+                &FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0))),
+            )
+        }),
         // "if you control a [type]" — check for presence of matching permanent.
         TriggerCondition::ControlsType { filter } => {
             let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
@@ -2751,6 +2767,118 @@ pub mod tests {
             1,
             "Creature entering should trigger creature ETB"
         );
+    }
+
+    #[test]
+    fn zone_change_object_condition_checks_entering_object_not_trigger_source() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let entering = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "Countered Entry".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&entering)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        state
+            .objects
+            .get_mut(&entering)
+            .unwrap()
+            .counters
+            .insert(crate::types::counter::CounterType::Plus1Plus1, 1);
+
+        let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin: None,
+            destination: Zone::Battlefield,
+            filter: TargetFilter::Typed(
+                TypedFilter::permanent().properties(vec![FilterProp::HasAnyCounter]),
+            ),
+        };
+        let event = zone_changed_event(
+            entering,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&event),
+        ));
+    }
+
+    #[test]
+    fn zone_change_object_condition_checks_dead_object_snapshot() {
+        let mut state = setup();
+        let source = create_object(
+            &mut state,
+            CardId(32),
+            PlayerId(0),
+            "Observer".to_string(),
+            Zone::Battlefield,
+        );
+        let dead = create_object(
+            &mut state,
+            CardId(33),
+            PlayerId(0),
+            "Countered Dead".to_string(),
+            Zone::Graveyard,
+        );
+        let mut counters = std::collections::HashMap::new();
+        counters.insert(crate::types::counter::CounterType::Plus1Plus1, 1);
+        state.lki_cache.insert(
+            dead,
+            crate::types::game_state::LKISnapshot {
+                name: "Countered Dead".to_string(),
+                power: Some(2),
+                toughness: Some(2),
+                mana_value: 2,
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                card_types: vec![CoreType::Creature],
+                counters,
+            },
+        );
+
+        let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Graveyard,
+            filter: TargetFilter::Typed(
+                TypedFilter::permanent().properties(vec![FilterProp::HasAnyCounter]),
+            ),
+        };
+        let event = zone_changed_event(
+            dead,
+            Zone::Battlefield,
+            Zone::Graveyard,
+            vec![CoreType::Creature],
+            Vec::new(),
+        );
+
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            Some(source),
+            Some(&event),
+        ));
     }
 
     #[test]

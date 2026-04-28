@@ -12773,6 +12773,23 @@ mod tests {
     }
 
     #[test]
+    fn effect_add_one_mana_of_any_exiled_card_color_chrome_mox() {
+        let e = parse_effect("Add one mana of any of the exiled card's colors");
+        assert_eq!(
+            e,
+            Effect::Mana {
+                produced: ManaProduction::ChoiceAmongExiledColors {
+                    source: LinkedExileScope::ThisObject,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            }
+        );
+    }
+
+    #[test]
     fn effect_add_one_mana_of_any_color_among_exiled_cards() {
         // Synonym phrasing also routes to ChoiceAmongExiledColors.
         let e = parse_effect("Add one mana of any color among the exiled cards");
@@ -12861,6 +12878,7 @@ mod tests {
                 cost: PaymentCost::Life {
                     amount: crate::types::ability::QuantityExpr::Fixed { value: 3 },
                 },
+                ..
             }
         ));
     }
@@ -12881,6 +12899,7 @@ mod tests {
                             qty: crate::types::ability::QuantityRef::EventContextSourcePower,
                         },
                     },
+                    ..
                 }
             ),
             "expected PayCost(Life = EventContextSourcePower), got {e:?}"
@@ -12900,6 +12919,7 @@ mod tests {
                                 qty: crate::types::ability::QuantityRef::Variable { name },
                             },
                     },
+                ..
             } if name == "X" => {}
             other => panic!("expected PayCost(Life = Variable(X)), got {other:?}"),
         }
@@ -16818,6 +16838,7 @@ mod tests {
                         TargetFilter::Typed(tf)
                             if tf.type_filters.contains(&TypeFilter::Card)
                                 && tf.properties.contains(&FilterProp::Another)
+                                && tf.properties.contains(&FilterProp::InZone { zone: Zone::Stack })
                     )),
                     "expected spell branch with Another, got {filters:?}"
                 );
@@ -17192,6 +17213,7 @@ mod tests {
                     cost: PaymentCost::Energy {
                         amount: QuantityExpr::Fixed { value: 2 },
                     },
+                    ..
                 }
             ),
             "expected PayCost Energy(2), got: {e:?}"
@@ -17208,6 +17230,7 @@ mod tests {
                     cost: PaymentCost::Energy {
                         amount: QuantityExpr::Fixed { value: 3 },
                     },
+                    ..
                 }
             ),
             "expected PayCost Energy(3), got: {e:?}"
@@ -19229,7 +19252,7 @@ mod tests {
             .as_ref()
             .expect("expected Attach sub_ability");
         match &*attach.effect {
-            Effect::Attach { target } => {
+            Effect::Attach { target, .. } => {
                 // Target slot must not be vacuous (Any) — either a typed
                 // "creature you control" filter or `ParentTarget` (chain
                 // composition routes the player-chosen target through the

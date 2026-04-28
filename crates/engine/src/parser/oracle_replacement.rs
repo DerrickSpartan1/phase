@@ -21,7 +21,7 @@ use super::oracle_util::{
     strip_reminder_text, TextPair,
 };
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, Comparator,
+    AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, Comparator,
     ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
     DamageTargetFilter, Duration, Effect, FilterProp, ManaModification, PreventionAmount,
     QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
@@ -574,7 +574,7 @@ fn tap_self_unless_controls_matching_ability(filter: &TargetFilter) -> AbilityDe
 }
 
 /// Parse shock land pattern: "As ~ enters, you may pay N life. If you don't, it enters tapped."
-/// Returns Optional ReplacementDefinition with execute=LoseLife (accept) and decline=Tap (decline).
+/// Returns a cost-bearing replacement choice: paying life accepts; declining taps.
 fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<ReplacementDefinition> {
     // Match: "you may pay N life" + "enters tapped" (in either sentence order)
     if !nom_primitives::scan_contains(norm_lower, "you may pay")
@@ -591,14 +591,6 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
     // Extract life amount: "pay 2 life", "pay 3 life", etc.
     let amount = extract_life_payment(norm_lower)?;
 
-    let lose_life = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::LoseLife {
-            amount: QuantityExpr::Fixed { value: amount },
-            target: None,
-        },
-    );
-
     let tap_self = AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Tap {
@@ -608,7 +600,7 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
 
     let has_basic_land_type_choice =
         nom_primitives::scan_contains(norm_lower, "choose a basic land type");
-    let execute = if has_basic_land_type_choice {
+    let execute = has_basic_land_type_choice.then(|| {
         AbilityDefinition::new(
             AbilityKind::Spell,
             Effect::Choose {
@@ -616,10 +608,7 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
                 persist: true,
             },
         )
-        .sub_ability(lose_life)
-    } else {
-        lose_life
-    };
+    });
 
     let decline = if has_basic_land_type_choice {
         AbilityDefinition::new(
@@ -635,13 +624,21 @@ fn parse_shock_land(norm_lower: &str, original_text: &str) -> Option<Replacement
     };
 
     Some(
-        ReplacementDefinition::new(ReplacementEvent::Moved)
-            .execute(execute)
-            .mode(ReplacementMode::Optional {
-                decline: Some(Box::new(decline)),
-            })
-            .valid_card(TargetFilter::SelfRef)
-            .description(original_text.to_string()),
+        {
+            let mut def = ReplacementDefinition::new(ReplacementEvent::Moved);
+            if let Some(execute) = execute {
+                def = def.execute(execute);
+            }
+            def
+        }
+        .mode(ReplacementMode::MayCost {
+            cost: AbilityCost::PayLife {
+                amount: QuantityExpr::Fixed { value: amount },
+            },
+            decline: Some(Box::new(decline)),
+        })
+        .valid_card(TargetFilter::SelfRef)
+        .description(original_text.to_string()),
     )
 }
 
@@ -3824,18 +3821,18 @@ mod tests {
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::Moved);
         assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
-        assert!(matches!(def.mode, ReplacementMode::Optional { .. }));
-        // Accept branch: LoseLife { amount: 2 }
-        let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
-            *execute.effect,
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 2 },
+            def.mode,
+            ReplacementMode::MayCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 2 }
+                },
                 ..
             }
         ));
+        assert!(def.execute.is_none());
         // Decline branch: Tap { target: SelfRef }
-        if let ReplacementMode::Optional { decline } = &def.mode {
+        if let ReplacementMode::MayCost { decline, .. } = &def.mode {
             let decline = decline.as_ref().unwrap();
             assert!(matches!(
                 *decline.effect,
@@ -3855,11 +3852,12 @@ mod tests {
             "Some Shock Land",
         )
         .unwrap();
-        let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
-            *execute.effect,
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 3 },
+            def.mode,
+            ReplacementMode::MayCost {
+                cost: AbilityCost::PayLife {
+                    amount: QuantityExpr::Fixed { value: 3 }
+                },
                 ..
             }
         ));
@@ -3873,7 +3871,7 @@ mod tests {
         )
         .unwrap();
 
-        assert!(matches!(def.mode, ReplacementMode::Optional { .. }));
+        assert!(matches!(def.mode, ReplacementMode::MayCost { .. }));
         let execute = def.execute.as_ref().unwrap();
         assert!(matches!(
             *execute.effect,
@@ -3882,15 +3880,9 @@ mod tests {
                 ..
             }
         ));
-        assert!(matches!(
-            *execute.sub_ability.as_ref().unwrap().effect,
-            Effect::LoseLife {
-                amount: QuantityExpr::Fixed { value: 2 },
-                ..
-            }
-        ));
+        assert!(execute.sub_ability.is_none());
 
-        if let ReplacementMode::Optional { decline } = &def.mode {
+        if let ReplacementMode::MayCost { decline, .. } = &def.mode {
             let decline = decline.as_ref().unwrap();
             assert!(matches!(
                 *decline.effect,
@@ -4156,7 +4148,7 @@ mod tests {
         )
         .unwrap();
         // Should be Optional (shock land), not Mandatory (simple choose)
-        assert!(matches!(def.mode, ReplacementMode::Optional { .. }));
+        assert!(matches!(def.mode, ReplacementMode::MayCost { .. }));
     }
 
     #[test]

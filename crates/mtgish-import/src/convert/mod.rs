@@ -30,13 +30,17 @@ pub mod trigger;
 
 use engine::types::ability::{
     AbilityDefinition, AbilityKind, ActivationRestriction, Effect, ReplacementDefinition,
-    StaticDefinition,
+    StaticDefinition, TargetFilter, TypedFilter,
 };
+use engine::types::card_type::CoreType;
+use engine::types::statics::{StaticMode, TriggerCause};
 use engine::types::{Keyword, TriggerDefinition};
 
 use crate::provenance::{CardProvenance, ProvenanceEntry, ProvenanceSlot};
 use crate::report::Ctx;
-use crate::schema::types::{Card, DoorInfo, FlipInfo, OracleCard, Rule};
+use crate::schema::types::{
+    Abilities, Card, CardType, DoorInfo, FlipInfo, OracleCard, Permanents, Rule,
+};
 use result::{ConvResult, ConversionGap};
 
 /// Per-face conversion accumulator. Mirrors the relevant subset of
@@ -515,6 +519,49 @@ fn convert_rule(
             player_effect::apply_for_players(players, effects, &mut stub.statics)?;
             return Ok(());
         }
+        // CR 603.2d: Trigger-doubling statics. mtgish separates the event
+        // cause from the source-ability filter; the engine mirrors that as
+        // `StaticMode::DoubleTriggers { cause }` plus `StaticDefinition.affected`.
+        Rule::AbilitiesTriggerAnAdditionalTime(abilities) => {
+            stub.statics
+                .push(trigger_doubler_static(TriggerCause::Any, abilities)?);
+            return Ok(());
+        }
+        Rule::APermanentEnteringTheBattlefieldCausesAbilitiesToTriggerAnAdditionalTime(
+            permanents,
+            abilities,
+        ) => {
+            let cause = TriggerCause::EntersBattlefield {
+                core_types: trigger_cause_core_types(permanents)?,
+            };
+            stub.statics.push(trigger_doubler_static(cause, abilities)?);
+            return Ok(());
+        }
+        Rule::APermanentDyingCausesAbilitiesToTriggerAnAdditionalTime(permanents, abilities) => {
+            require_pure_creature_trigger_cause(
+                permanents,
+                "Rule::APermanentDyingCausesAbilitiesToTriggerAnAdditionalTime",
+            )?;
+            stub.statics.push(trigger_doubler_static(
+                TriggerCause::CreatureDying,
+                abilities,
+            )?);
+            return Ok(());
+        }
+        Rule::APermanentAttackingCausesAbilitiesToTriggerAnAdditionalTime(
+            permanents,
+            abilities,
+        ) => {
+            require_pure_creature_trigger_cause(
+                permanents,
+                "Rule::APermanentAttackingCausesAbilitiesToTriggerAnAdditionalTime",
+            )?;
+            stub.statics.push(trigger_doubler_static(
+                TriggerCause::CreatureAttacking,
+                abilities,
+            )?);
+            return Ok(());
+        }
         // CR 702.124 + CR 903.4: Deck-construction metadata. Partner family
         // becomes a `Keyword::Partner(PartnerType)`; pure deck-build metadata
         // with no in-game effect (CanBeYourCommander, CanHave*OfThisCard,
@@ -600,6 +647,18 @@ fn convert_rule(
         // ContinuousModification entries for each produced inner item.
         Rule::EachCardInPlayersHandEffect(cards, _whose_hand, effects) => {
             let affected = filter::cards_to_filter(cards)?;
+            for eff in effects {
+                stub.statics
+                    .push(hand_effect_to_static(eff, &affected, face, idx, ctx)?);
+            }
+            return Ok(());
+        }
+        // CR 113.6 + CR 402.2: Same hand-zoned ability grant, but scoped to
+        // each player's hand. `Players::AnyPlayer` means no controller axis
+        // on the affected filter; the hand zone plus card predicate selects
+        // matching cards across all hands.
+        Rule::EachCardInEachPlayersHandEffect(cards, players, effects) => {
+            let affected = cards_in_each_players_hand_filter(cards, players)?;
             for eff in effects {
                 stub.statics
                     .push(hand_effect_to_static(eff, &affected, face, idx, ctx)?);
@@ -1050,7 +1109,7 @@ fn build_ability_segment_chain(
         let else_ability = build_ability_chain(AbilityKind::Spell, None, else_eff)?;
         head.else_ability = Some(Box::new(else_ability));
     }
-    apply_segment_optionality(&mut head, first.optional, cost.is_some())?;
+    head = apply_segment_optionality(head, first.optional, cost.is_some())?;
     // CR 119.1 + CR 119.3 + CR 608.2c: A scoped segment runs its effects
     // per matching player. Mirrors `ActionsConversion::Scoped` materialization.
     if let Some(scope) = first.player_scope {
@@ -1069,7 +1128,7 @@ fn build_ability_segment_chain(
         }
         // Sub-segments never carry a dispatch-site cost, so their
         // `OptionalWithCost` cost slot is always free to fill.
-        apply_segment_optionality(&mut sub, seg.optional, false)?;
+        sub = apply_segment_optionality(sub, seg.optional, false)?;
         // CR 119.1 + CR 119.3 + CR 608.2c: Per-segment player scope —
         // mid-list `Action::EachPlayerAction(s)` / non-You `PlayerAction`.
         if let Some(scope) = seg.player_scope {
@@ -1089,16 +1148,16 @@ fn build_ability_segment_chain(
 /// `OptionalWithCost` segment strict-fails — additive cost composition is
 /// not yet expressible.
 fn apply_segment_optionality(
-    ability: &mut AbilityDefinition,
+    mut ability: AbilityDefinition,
     optional: action::SegmentOptional,
     host_has_cost: bool,
-) -> ConvResult<()> {
+) -> ConvResult<AbilityDefinition> {
     match optional {
         action::SegmentOptional::Mandatory => {}
         action::SegmentOptional::Optional => {
             ability.optional = true;
         }
-        action::SegmentOptional::OptionalWithCost(extra_cost) => {
+        action::SegmentOptional::OptionalWithCost { cost, payer } => {
             if host_has_cost {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
                     engine_type: "AbilityCost",
@@ -1106,11 +1165,23 @@ fn apply_segment_optionality(
                         "additive cost composition (head-segment cost + MayCost extra cost)".into(),
                 });
             }
-            ability.cost = Some(extra_cost);
-            ability.optional = true;
+            if ability.condition.is_none() {
+                ability.condition = Some(engine::types::ability::AbilityCondition::IfYouDo);
+            }
+            let payment_cost = ability_cost_to_payment_cost(&cost)?;
+            let mut parent = AbilityDefinition::new(
+                ability.kind,
+                Effect::PayCost {
+                    cost: payment_cost,
+                    payer,
+                },
+            )
+            .sub_ability(ability);
+            parent.optional = true;
+            return Ok(parent);
         }
     }
-    Ok(())
+    Ok(ability)
 }
 
 /// Walk to the deepest `sub_ability` in `root` and attach `tail` there.
@@ -1217,6 +1288,7 @@ pub(crate) fn build_ability_from_actions(
         // additive-cost shape we haven't built yet.
         A::OptionalWithCost {
             cost: extra_cost,
+            payer,
             effects,
         } => {
             if cost.is_some() {
@@ -1226,9 +1298,19 @@ pub(crate) fn build_ability_from_actions(
                         "additive cost composition (Activated cost + MayCost extra cost)".into(),
                 });
             }
-            let mut ability = build_ability_chain(kind, Some(extra_cost), effects)?;
-            ability.optional = true;
-            Ok(ability)
+            let mut body = build_ability_chain(kind, None, effects)?;
+            body.condition = Some(engine::types::ability::AbilityCondition::IfYouDo);
+            let payment_cost = ability_cost_to_payment_cost(&extra_cost)?;
+            let mut parent = AbilityDefinition::new(
+                kind,
+                Effect::PayCost {
+                    cost: payment_cost,
+                    payer,
+                },
+            )
+            .sub_ability(body);
+            parent.optional = true;
+            Ok(parent)
         }
 
         // CR 117.6 + CR 605.1c + CR 603.12: Reflexive form of "you may pay X.
@@ -1238,6 +1320,7 @@ pub(crate) fn build_ability_from_actions(
         // reflexive-trigger lowering (oracle.rs:4272-4290).
         A::OptionalWithCostReflexive {
             cost: extra_cost,
+            payer,
             inner,
         } => {
             if cost.is_some() {
@@ -1250,7 +1333,10 @@ pub(crate) fn build_ability_from_actions(
             let payment_cost = ability_cost_to_payment_cost(&extra_cost)?;
             let mut sub = build_ability_from_actions(AbilityKind::Spell, None, *inner)?;
             sub.condition = Some(engine::types::ability::AbilityCondition::WhenYouDo);
-            let parent_effect = engine::types::ability::Effect::PayCost { cost: payment_cost };
+            let parent_effect = engine::types::ability::Effect::PayCost {
+                cost: payment_cost,
+                payer,
+            };
             // CR 117.6: `optional = true` on the parent gates `Effect::PayCost`
             // through `WaitingFor::OptionalEffectChoice` (effects/mod.rs:1205+
             // / 2454) — this is the "you may" prompt. Without this flag the
@@ -1497,6 +1583,170 @@ fn apply_this_spell_effect(
     Ok(())
 }
 
+fn trigger_doubler_static(
+    cause: TriggerCause,
+    abilities: &Abilities,
+) -> ConvResult<StaticDefinition> {
+    let mut static_def = StaticDefinition::new(StaticMode::DoubleTriggers { cause });
+    if let Some(affected) = abilities_to_source_filter(abilities)? {
+        static_def = static_def.affected(affected);
+    }
+    Ok(static_def)
+}
+
+fn abilities_to_source_filter(abilities: &Abilities) -> ConvResult<Option<TargetFilter>> {
+    Ok(match abilities {
+        Abilities::AnyAbility => None,
+        Abilities::AbilityOfAPermanent(permanents) => Some(filter::convert(permanents)?),
+        Abilities::AbilityOfPermanent(permanent) => Some(filter::convert_permanent(permanent)?),
+        Abilities::AbilityOfASpell(spells) => Some(filter::spells_to_filter(spells)?),
+        Abilities::ControlledByAPlayer(players) => Some(TargetFilter::Typed(
+            TypedFilter::default().controller(filter::players_to_controller(players)?),
+        )),
+        Abilities::IsCardtype(card_type) => Some(TargetFilter::Typed(TypedFilter::new(
+            filter::card_type(card_type),
+        ))),
+        Abilities::And(parts) => {
+            let mut filters = Vec::new();
+            for part in parts {
+                if let Some(filter) = abilities_to_source_filter(part)? {
+                    filters.push(filter);
+                }
+            }
+            match filters.len() {
+                0 => None,
+                1 => filters.into_iter().next(),
+                _ => Some(TargetFilter::And { filters }),
+            }
+        }
+        Abilities::Or(parts) => {
+            let mut filters = Vec::new();
+            for part in parts {
+                let Some(filter) = abilities_to_source_filter(part)? else {
+                    return Ok(None);
+                };
+                filters.push(filter);
+            }
+            match filters.len() {
+                0 => None,
+                1 => filters.into_iter().next(),
+                _ => Some(TargetFilter::Or { filters }),
+            }
+        }
+        other => {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "StaticMode::DoubleTriggers.affected",
+                needed_variant: format!("Abilities::{}", abilities_variant_tag(other)),
+            });
+        }
+    })
+}
+
+fn trigger_cause_core_types(permanents: &Permanents) -> ConvResult<Vec<CoreType>> {
+    match permanents {
+        Permanents::AnyPermanent | Permanents::IsPermanent => Ok(Vec::new()),
+        Permanents::IsCardtype(card_type) => permanent_core_type(card_type)
+            .map(|core_type| vec![core_type])
+            .ok_or_else(|| unsupported_trigger_cause(permanents)),
+        Permanents::Or(parts) => {
+            let mut core_types = Vec::new();
+            for part in parts {
+                let part_types = trigger_cause_core_types(part)?;
+                if part_types.is_empty() {
+                    return Ok(Vec::new());
+                }
+                for core_type in part_types {
+                    if !core_types.contains(&core_type) {
+                        core_types.push(core_type);
+                    }
+                }
+            }
+            Ok(core_types)
+        }
+        Permanents::And(parts) => {
+            let mut core_types: Option<Vec<CoreType>> = None;
+            for part in parts {
+                match part {
+                    Permanents::AnyPermanent | Permanents::IsPermanent => {}
+                    Permanents::IsCardtype(_) | Permanents::Or(_) => {
+                        let part_types = trigger_cause_core_types(part)?;
+                        if part_types.is_empty() {
+                            continue;
+                        } else if let Some(existing) = &mut core_types {
+                            existing.retain(|core_type| part_types.contains(core_type));
+                        } else {
+                            core_types = Some(part_types);
+                        }
+                    }
+                    _ => return Err(unsupported_trigger_cause(permanents)),
+                }
+            }
+            Ok(core_types.unwrap_or_default())
+        }
+        _ => Err(unsupported_trigger_cause(permanents)),
+    }
+}
+
+fn require_pure_creature_trigger_cause(
+    permanents: &Permanents,
+    idiom: &'static str,
+) -> ConvResult<()> {
+    let core_types = trigger_cause_core_types(permanents)?;
+    if core_types == [CoreType::Creature] {
+        Ok(())
+    } else {
+        Err(ConversionGap::MalformedIdiom {
+            idiom,
+            path: String::new(),
+            detail: format!("expected pure creature cause, got {permanents:?}"),
+        })
+    }
+}
+
+fn permanent_core_type(card_type: &CardType) -> Option<CoreType> {
+    match card_type {
+        CardType::Artifact => Some(CoreType::Artifact),
+        CardType::Battle => Some(CoreType::Battle),
+        CardType::Creature => Some(CoreType::Creature),
+        CardType::Enchantment => Some(CoreType::Enchantment),
+        CardType::Land => Some(CoreType::Land),
+        CardType::Planeswalker => Some(CoreType::Planeswalker),
+        _ => None,
+    }
+}
+
+fn unsupported_trigger_cause(permanents: &Permanents) -> ConversionGap {
+    ConversionGap::EnginePrerequisiteMissing {
+        engine_type: "TriggerCause",
+        needed_variant: format!(
+            "permanent cause filter {}",
+            permanents_variant_tag(permanents)
+        ),
+    }
+}
+
+fn abilities_variant_tag(abilities: &Abilities) -> String {
+    serde_json::to_value(abilities)
+        .ok()
+        .and_then(|v| {
+            v.get("_Abilities")
+                .and_then(|t| t.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+fn permanents_variant_tag(permanents: &Permanents) -> String {
+    serde_json::to_value(permanents)
+        .ok()
+        .and_then(|v| {
+            v.get("_Permanents")
+                .and_then(|t| t.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
 /// CR 101.2 + CR 117.7: Apply a single `SpellEffect` (inner of
 /// `Rule::StackSpellsEffect`) against a precomputed spell-target filter.
 /// Mirrors `apply_this_spell_effect` but emits the static with `affected
@@ -1736,6 +1986,30 @@ fn hand_effect_to_static(
         .affected(affected.clone())
         .affected_zone(engine::types::zones::Zone::Hand)
         .modifications(mods))
+}
+
+fn cards_in_each_players_hand_filter(
+    cards: &crate::schema::types::Cards,
+    players: &crate::schema::types::Players,
+) -> ConvResult<engine::types::ability::TargetFilter> {
+    let cards_filter = filter::cards_to_filter(cards)?;
+    match players {
+        crate::schema::types::Players::AnyPlayer => Ok(cards_filter),
+        other => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "TargetFilter",
+            needed_variant: format!(
+                "EachCardInEachPlayersHandEffect/Players::{}",
+                players_variant_tag(other)
+            ),
+        }),
+    }
+}
+
+fn players_variant_tag(players: &crate::schema::types::Players) -> String {
+    serde_json::to_value(players)
+        .ok()
+        .and_then(|v| v.get("_Players").and_then(|t| t.as_str()).map(String::from))
+        .unwrap_or_else(|| "<unknown>".to_string())
 }
 
 /// Strict-failure on inner SpellEffects without a clean StaticMode
