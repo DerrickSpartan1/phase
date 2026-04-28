@@ -1249,9 +1249,34 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // "<type> you control" arm — same reason as in
         // `parse_number_of_inner`.
         parse_creature_in_party_for_each,
+        // CR 700.4 + CR 700.7: "creature that died this turn" / "creature that
+        // died under your control this turn" — event-based count of dies-events
+        // tracked in `state.zone_changes_this_turn`. Must precede
+        // `parse_for_each_controlled_type` since the leading "creature" token
+        // would otherwise commit the simple `<type> you control` arm.
+        parse_for_each_creature_died_this_turn,
         parse_for_each_controlled_type,
     ))
     .parse(input)
+}
+
+/// CR 700.4 + CR 700.7: Parse "creature that died" / "creature that died
+/// under your control" → CreaturesDiedThisTurn.
+///
+/// Engine tracking is per-turn-only (no last-turn / total counts), so the
+/// trailing "this turn" qualifier is semantically redundant — it gets stripped
+/// upstream by `strip_trailing_duration` before this arm sees the clause.
+/// Both the with-qualifier and without-qualifier forms map to the same
+/// `CreaturesDiedThisTurn` quantity ref.
+fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((
+        tag("creature that died under your control this turn"),
+        tag("creature that died under your control"),
+        tag("creature that died this turn"),
+        tag("creature that died"),
+    ))
+    .parse(input)?;
+    Ok((rest, QuantityRef::CreaturesDiedThisTurn))
 }
 
 /// CR 301.5 + CR 303.4: Parse "<type> [and <type>]* attached to ~" — counts
