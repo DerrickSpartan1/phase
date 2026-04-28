@@ -713,7 +713,27 @@ pub(super) enum ShuffleImperativeAst {
     ShuffleLibrary {
         target: TargetFilter,
     },
-    ChangeZoneToLibrary,
+    /// CR 701.24a + CR 400.3: "shuffle <pronoun> into <possessive> library".
+    /// Examples: "shuffle it into its owner's library" (Cavalier of Gales),
+    /// "shuffle that card into its owner's library" (search-then-shuffle
+    /// tutors), "shuffle them into their owners' libraries" (compound
+    /// subject).
+    ///
+    /// `target` carries the pronoun resolution — `SelfRef` for "it" / "~",
+    /// `ParentTarget` for "them" / "that card" / "those cards".
+    /// `owner_library` is `true` when the possessive resolves unambiguously
+    /// to the moving card's owner ("its owner's", "their owner's", "their
+    /// owners'") and `false` for "your library". Bare "their library" is
+    /// intentionally not treated as owner-routing because the antecedent is
+    /// ambiguous.
+    ///
+    /// Lowered to `Effect::ChangeZone { destination: Library, target,
+    /// owner_library, … }` + a `Shuffle` sub_ability via
+    /// `with_shuffle_sub_ability`.
+    ChangeZoneToLibrary {
+        target: TargetFilter,
+        owner_library: bool,
+    },
     ChangeZoneAllToLibrary {
         origin: Zone,
     },
