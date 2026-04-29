@@ -9503,6 +9503,10 @@ fn parse_where_x_is(text: &str) -> Option<QuantityExpr> {
     let (rest, _) = tag::<_, _, VerboseError<&str>>("where x is ")
         .parse(trimmed)
         .ok()?;
+    let qty_text = rest.trim_end_matches('.').trim();
+    if let Some(qty) = crate::parser::oracle_quantity::parse_quantity_ref(qty_text) {
+        return Some(QuantityExpr::Ref { qty });
+    }
     if scan_contains_phrase(rest, "power") {
         Some(QuantityExpr::Ref {
             qty: QuantityRef::Power {
@@ -10788,6 +10792,28 @@ mod tests {
                     )
                 ),
                 "unless payment should multiply tracked-set count, got {unless_payment:?}"
+            );
+        } else {
+            panic!("expected Counter effect, got {e:?}");
+        }
+    }
+
+    #[test]
+    fn effect_counter_unless_pays_x_where_x_is_devotion() {
+        let e = parse_effect(
+            "Counter target spell unless its controller pays {X}, where X is your devotion to blue",
+        );
+        if let Effect::Counter { unless_payment, .. } = &e {
+            assert_eq!(
+                *unless_payment,
+                Some(UnlessCost::DynamicGeneric {
+                    quantity: QuantityExpr::Ref {
+                        qty: QuantityRef::Devotion {
+                            colors: vec![ManaColor::Blue],
+                        },
+                    },
+                }),
+                "unless payment should use devotion quantity, got {unless_payment:?}"
             );
         } else {
             panic!("expected Counter effect, got {e:?}");
