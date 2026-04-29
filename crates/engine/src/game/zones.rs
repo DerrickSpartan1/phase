@@ -91,6 +91,10 @@ fn apply_zone_exit_cleanup(state: &mut GameState, object_id: ObjectId, from: Zon
         // CR 400.7 + CR 113.6e: Clear exile-based casting permissions when leaving exile
         // (prevents re-casting if the card returns to exile via a different effect).
         if from == Zone::Exile {
+            // CR 702.143c-d + CR 400.7: Foretold is a designation of the card
+            // while it remains in exile. Once it changes zones, the new object
+            // is no longer a foretold card.
+            obj_mut.foretold = false;
             obj_mut.casting_permissions.retain(|p| {
                 !matches!(
                     p,

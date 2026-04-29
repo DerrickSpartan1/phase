@@ -1345,6 +1345,10 @@ pub enum FilterProp {
     Owned {
         controller: ControllerRef,
     },
+    /// CR 702.143c-d: Matches cards in exile that have the foretold designation.
+    /// This is a status of the exiled card, not equivalent to having the
+    /// Foretell keyword or a generic exile casting permission.
+    Foretold,
     EnchantedBy,
     EquippedBy,
     /// CR 301.5 + CR 303.4: True when the matched object's `attached_to` field

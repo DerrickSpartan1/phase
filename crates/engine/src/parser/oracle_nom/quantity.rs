@@ -1300,6 +1300,7 @@ pub fn parse_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
 pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_distinct_card_types_in_zone,
+        parse_foretold_cards_owned_in_exile,
         parse_zone_card_count,
         parse_for_each_attached_to_source,
         // CR 700.8: "creature in your party" must precede the generic
@@ -1320,6 +1321,29 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_for_each_controlled_type,
     ))
     .parse(input)
+}
+
+/// CR 702.143c-d: "foretold card you own in exile" counts cards carrying the
+/// foretold designation in exile. The designation is distinct from the
+/// Foretell keyword; a foretold card may be made foretold by an effect.
+fn parse_foretold_cards_owned_in_exile(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("foretold ").parse(input)?;
+    let (rest, _) = alt((tag("card"), tag("cards"))).parse(rest)?;
+    let (rest, _) = tag(" you own in exile").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::Foretold,
+                FilterProp::Owned {
+                    controller: ControllerRef::You,
+                },
+                FilterProp::InZone {
+                    zone: crate::types::zones::Zone::Exile,
+                },
+            ])),
+        },
+    ))
 }
 
 fn parse_for_each_commander_cast_count(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -1711,6 +1735,26 @@ mod tests {
             },
             other => panic!("expected ObjectCount, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_for_each_foretold_card_owned_in_exile() {
+        let (rest, q) = parse_for_each_clause_ref("foretold card you own in exile").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::Foretold,
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::InZone {
+                        zone: crate::types::zones::Zone::Exile,
+                    },
+                ])),
+            }
+        );
     }
 
     #[test]

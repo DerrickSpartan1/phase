@@ -1174,6 +1174,7 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         | FilterProp::HasAnyCounter
         | FilterProp::InZone { .. }
         | FilterProp::Owned { .. }
+        | FilterProp::Foretold
         | FilterProp::EnchantedBy
         | FilterProp::EquippedBy
         | FilterProp::AttachedToSource
@@ -1377,6 +1378,9 @@ fn matches_filter_prop(
             let cmc = obj.mana_cost.mana_value() as i32;
             comparator.evaluate(cmc, resolve_filter_threshold(state, value, source))
         }
+        // CR 702.143c-d: Foretold is a designation of a card in exile, tracked
+        // directly on the object. It is not equivalent to `KeywordKind::Foretell`.
+        FilterProp::Foretold => obj.foretold,
         // CR 107.3 + CR 202.1: "spell with {X} in its mana cost" — inspects the
         // printed mana cost for an `{X}` shard. Applies to spells on the stack
         // and to any live-object evaluation path (e.g. static-ability filters).
@@ -1978,6 +1982,7 @@ fn zone_change_record_matches_property(
         | FilterProp::HasAttachment { .. }
         | FilterProp::HasAnyAttachmentOf { .. }
         | FilterProp::FaceDown
+        | FilterProp::Foretold
         // CR 201.2: Name-matches-any-permanent is a live-battlefield predicate
         // — a zone-change snapshot cannot represent it. Fail closed.
         | FilterProp::NameMatchesAnyPermanent { .. } => false,

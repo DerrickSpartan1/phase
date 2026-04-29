@@ -3353,6 +3353,60 @@ mod tests {
     }
 
     #[test]
+    fn object_count_matches_owned_foretold_cards_in_exile() {
+        let mut state = GameState::new_two_player(42);
+        let player_id = state.players[0].id;
+        let opponent_id = state.players[1].id;
+
+        let owned_foretold_a = create_object(
+            &mut state,
+            CardId(10),
+            player_id,
+            "Foretold A".to_string(),
+            Zone::Exile,
+        );
+        let owned_foretold_b = create_object(
+            &mut state,
+            CardId(11),
+            player_id,
+            "Foretold B".to_string(),
+            Zone::Exile,
+        );
+        let owned_not_foretold = create_object(
+            &mut state,
+            CardId(12),
+            player_id,
+            "Not Foretold".to_string(),
+            Zone::Exile,
+        );
+        let opponent_foretold = create_object(
+            &mut state,
+            CardId(13),
+            opponent_id,
+            "Opponent Foretold".to_string(),
+            Zone::Exile,
+        );
+
+        for id in [owned_foretold_a, owned_foretold_b, opponent_foretold] {
+            state.objects.get_mut(&id).unwrap().foretold = true;
+        }
+        assert!(!state.objects.get(&owned_not_foretold).unwrap().foretold);
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::Foretold,
+                    FilterProp::Owned {
+                        controller: ControllerRef::You,
+                    },
+                    FilterProp::InZone { zone: Zone::Exile },
+                ])),
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, player_id, ObjectId(1)), 2);
+    }
+
+    #[test]
     fn resolve_event_context_amount_from_damage() {
         let mut state = GameState::new_two_player(42);
         state.current_trigger_event = Some(crate::types::events::GameEvent::DamageDealt {

@@ -10381,6 +10381,45 @@ mod tests {
     }
 
     #[test]
+    fn static_self_ref_alrund_sum_for_each_emits_dynamic_pt() {
+        let def = parse_static_line(
+            "~ gets +1/+1 for each card in your hand and each foretold card you own in exile.",
+        )
+        .expect("Alrund static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+
+        let dyn_pow = def
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected dynamic power modification");
+        assert!(
+            matches!(dyn_pow, QuantityExpr::Sum { exprs } if exprs.len() == 2),
+            "expected Sum quantity for Alrund static, got {dyn_pow:?}"
+        );
+        assert!(
+            def.modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { value } if matches!(value, QuantityExpr::Sum { exprs } if exprs.len() == 2))),
+            "expected dynamic toughness Sum, got {:?}",
+            def.modifications
+        );
+        assert!(
+            !def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddPower { .. }
+                    | ContinuousModification::AddToughness { .. }
+            )),
+            "must not emit flat P/T modifications alongside dynamic ones: {:?}",
+            def.modifications
+        );
+    }
+
+    #[test]
     fn static_strong_back_attached_to_recipient_emits_attached_to_recipient_prop() {
         // CR 301.5 + CR 303.4 + CR 613.4c: Strong Back's third static —
         // "Enchanted creature gets +2/+2 for each Aura and Equipment attached

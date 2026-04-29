@@ -7948,6 +7948,57 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn alrund_static_sum_for_each_does_not_emit_dynamic_qty_warning() {
+        let oracle = "Alrund gets +1/+1 for each card in your hand and each foretold card you own in exile.\n\
+             At the beginning of your end step, choose a card type, then reveal the top two cards of your library. \
+             Put all cards of the chosen type revealed this way into your hand and the rest on the bottom of your library in any order.";
+        let parsed = parse(
+            oracle,
+            "Alrund, God of the Cosmos",
+            &[],
+            &["Creature"],
+            &["God"],
+        );
+
+        assert_eq!(
+            parsed.triggers.len(),
+            1,
+            "end-step trigger must remain parsed"
+        );
+        assert_eq!(
+            parsed.triggers[0].phase,
+            Some(crate::types::phase::Phase::End)
+        );
+        assert_eq!(parsed.statics.len(), 1, "expected Alrund static pump");
+        let static_def = &parsed.statics[0];
+        assert!(
+            static_def
+                .modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddDynamicPower { value } if matches!(value, QuantityExpr::Sum { exprs } if exprs.len() == 2))),
+            "expected dynamic power Sum, got {:?}",
+            static_def.modifications
+        );
+        assert!(
+            static_def.modifications.iter().all(|m| !matches!(
+                m,
+                ContinuousModification::AddPower { .. }
+                    | ContinuousModification::AddToughness { .. }
+            )),
+            "must not emit fixed P/T mods: {:?}",
+            static_def.modifications
+        );
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+            "unexpected DynamicQty warning: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
     // ------------------------------------------------------------------
     // merge_ability_condition — single-authority merge for ability-word
     // plus literal-if condition composition.

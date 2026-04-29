@@ -447,6 +447,11 @@ pub struct GameObject {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub casting_permissions: Vec<CastingPermission>,
 
+    /// CR 702.143c-d: Whether this card in exile is foretold. Cleared when
+    /// the card leaves exile because a zone change creates a new object.
+    #[serde(default)]
+    pub foretold: bool,
+
     /// Choices made as this permanent entered (e.g., "choose a color").
     /// Persists for the object's lifetime on the battlefield.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -717,6 +722,7 @@ impl GameObject {
             casting_restrictions: Vec::new(),
             casting_options: Vec::new(),
             casting_permissions: Vec::new(),
+            foretold: false,
             chosen_attributes: Vec::new(),
             goaded_by: std::collections::HashSet::new(),
             detained_by: std::collections::HashSet::new(),
@@ -757,6 +763,7 @@ impl GameObject {
         self.is_suspected = false;
         self.is_renowned = false;
         self.monstrous = false;
+        self.foretold = false;
         // CR 702.xxx: Prepared (Strixhaven) is a new-object-on-entry reset, per
         // CR 400.7. A re-entering permanent has no memory of a prior prepared
         // state. Assign when WotC publishes SOS CR update.

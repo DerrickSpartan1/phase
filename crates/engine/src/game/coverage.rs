@@ -309,6 +309,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             },
             FilterProp::InZone { zone } => parts.push(format!("in {}", fmt_zone(zone))),
             FilterProp::Owned { controller } => parts.push(fmt_controller(controller)),
+            FilterProp::Foretold => parts.push("foretold".into()),
             FilterProp::EnchantedBy => parts.push("enchanted by self".into()),
             FilterProp::EquippedBy => parts.push("equipped by self".into()),
             FilterProp::AttachedToSource => parts.push("attached to self".into()),

@@ -1859,9 +1859,7 @@ mod tests {
     #[test]
     fn for_each_conjunction_returns_sum_of_refs() {
         // Conjunction infrastructure: two segments that BOTH parse on their
-        // own should compose into a Sum. We use two zone-card-count refs to
-        // exercise the join path without depending on more exotic filters
-        // like "foretold card you own in exile" (which has its own gap).
+        // own should compose into a Sum.
         let result =
             parse_for_each_clause_expr("card in your hand and each card in your graveyard");
         let Some(QuantityExpr::Sum { exprs }) = result else {
@@ -1894,6 +1892,49 @@ mod tests {
             "expected ZoneCardCount{{Graveyard}} for second segment, got {:?}",
             exprs[1]
         );
+    }
+
+    #[test]
+    fn for_each_conjunction_alrund_shape_returns_sum_of_refs() {
+        let result =
+            parse_for_each_clause_expr("card in your hand and each foretold card you own in exile");
+        let Some(QuantityExpr::Sum { exprs }) = result else {
+            panic!("expected Sum, got {result:?}");
+        };
+        assert_eq!(exprs.len(), 2, "expected two summed exprs, got {exprs:?}");
+        assert!(
+            matches!(
+                exprs[0],
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneCardCount {
+                        zone: ZoneRef::Hand,
+                        scope: CountScope::Controller,
+                        ..
+                    }
+                }
+            ),
+            "expected controller hand count for first segment, got {:?}",
+            exprs[0]
+        );
+        match &exprs[1] {
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } => match filter {
+                TargetFilter::Typed(TypedFilter { properties, .. }) => {
+                    assert!(properties.iter().any(|prop| prop == &FilterProp::Foretold));
+                    assert!(properties.iter().any(|prop| prop
+                        == &FilterProp::Owned {
+                            controller: ControllerRef::You,
+                        }));
+                    assert!(properties.iter().any(|prop| prop
+                        == &FilterProp::InZone {
+                            zone: crate::types::zones::Zone::Exile,
+                        }));
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount ref, got {other:?}"),
+        }
     }
 
     #[test]
