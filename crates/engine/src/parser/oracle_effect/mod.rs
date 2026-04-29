@@ -17313,6 +17313,44 @@ mod tests {
     }
 
     #[test]
+    fn effect_gain_life_for_each_creature_attacking_you() {
+        let e = parse_effect("you gain 3 life for each creature attacking you");
+        assert_eq!(
+            e,
+            Effect::GainLife {
+                amount: QuantityExpr::Multiply {
+                    factor: 3,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::creature()
+                                    .properties(vec![FilterProp::AttackingController]),
+                            ),
+                        },
+                    }),
+                },
+                player: GainLifePlayer::Controller,
+            },
+        );
+    }
+
+    #[test]
+    fn effect_gain_life_for_each_creature_on_the_battlefield() {
+        let e = parse_effect("you gain 1 life for each creature on the battlefield");
+        assert_eq!(
+            e,
+            Effect::GainLife {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter::creature()),
+                    },
+                },
+                player: GainLifePlayer::Controller,
+            },
+        );
+    }
+
+    #[test]
     fn effect_pay_energy_double() {
         let e = parse_effect("pay {e}{e}");
         assert!(

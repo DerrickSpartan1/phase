@@ -1262,6 +1262,8 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // `parse_for_each_controlled_type` since the leading "creature" token
         // would otherwise commit the simple `<type> you control` arm.
         parse_for_each_creature_died_this_turn,
+        parse_for_each_attacking_controller_type,
+        parse_for_each_battlefield_type,
         parse_for_each_controlled_type,
     ))
     .parse(input)
@@ -1341,6 +1343,36 @@ fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRe
                 type_filters,
                 controller: None,
                 properties: vec![prop],
+            }),
+        },
+    ))
+}
+
+fn parse_for_each_attacking_controller_type(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, tf) = parse_type_filter_word(input)?;
+    let (rest, _) = tag(" attacking you").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![tf],
+                controller: None,
+                properties: vec![FilterProp::AttackingController],
+            }),
+        },
+    ))
+}
+
+fn parse_for_each_battlefield_type(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, tf) = parse_type_filter_word(input)?;
+    let (rest, _) = tag(" on the battlefield").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![tf],
+                controller: None,
+                properties: Vec::new(),
             }),
         },
     ))

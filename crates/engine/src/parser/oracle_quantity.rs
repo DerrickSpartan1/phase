@@ -880,7 +880,7 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ControllerRef, FilterProp, TypeFilter};
+    use crate::types::ability::{ControllerRef, FilterProp, TypeFilter, TypedFilter};
     use crate::types::mana::ManaColor;
 
     #[test]
@@ -953,6 +953,30 @@ mod tests {
         // counter type. Must produce the same dispatch.
         let qty = parse_for_each_clause("storage counter removed this way").unwrap();
         assert_eq!(qty, QuantityRef::PreviousEffectAmount);
+    }
+
+    #[test]
+    fn for_each_creature_attacking_you_counts_attacking_controller() {
+        let qty = parse_for_each_clause("creature attacking you").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::creature().properties(vec![FilterProp::AttackingController])
+                ),
+            },
+        );
+    }
+
+    #[test]
+    fn for_each_creature_on_the_battlefield_counts_battlefield_creatures() {
+        let qty = parse_for_each_clause("creature on the battlefield").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature()),
+            },
+        );
     }
 
     #[test]
