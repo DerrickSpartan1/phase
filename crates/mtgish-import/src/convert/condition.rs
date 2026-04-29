@@ -69,6 +69,7 @@ pub fn convert_ability(c: &Condition) -> ConvResult<AbilityCondition> {
                 });
             }
         },
+        Condition::IsAPlayersTurn(players) => player_set_turn_to_ability(players)?,
         // CR 608.2c: "if [player] [passes predicate]" — dispatched per leaf
         // predicate so each maps onto an existing AbilityCondition.
         Condition::PlayerPassesFilter(player, predicate) => {
@@ -255,6 +256,7 @@ pub fn convert_trigger(c: &Condition) -> ConvResult<TriggerCondition> {
                 });
             }
         },
+        Condition::IsAPlayersTurn(players) => player_set_turn_to_trigger(players)?,
 
         // CR 603.4: "if [player] [passes predicate]" — dispatched per leaf
         // predicate so each maps onto an existing TriggerCondition variant.
@@ -357,6 +359,7 @@ pub fn convert_static(c: &Condition) -> ConvResult<StaticCondition> {
                 });
             }
         },
+        Condition::IsAPlayersTurn(players) => player_set_turn_to_static(players)?,
         // CR 613 + CR 608.2c: "as long as [player] [passes predicate]" — per-leaf
         // dispatch onto existing StaticCondition variants.
         Condition::PlayerPassesFilter(player, predicate) => {
@@ -426,6 +429,54 @@ fn morbid_static_condition() -> StaticCondition {
         lhs: morbid_quantity_lhs(),
         comparator: Comparator::GE,
         rhs: morbid_quantity_rhs(),
+    }
+}
+
+fn player_set_turn_to_ability(players: &Players) -> ConvResult<AbilityCondition> {
+    match players {
+        Players::SinglePlayer(player) if matches!(**player, Player::You) => {
+            Ok(AbilityCondition::IsYourTurn)
+        }
+        Players::Opponent => Ok(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::IsYourTurn),
+        }),
+        other => Err(ConversionGap::MalformedIdiom {
+            idiom: "Condition::IsAPlayersTurn (ability)",
+            path: String::new(),
+            detail: format!("unsupported Players: {other:?}"),
+        }),
+    }
+}
+
+fn player_set_turn_to_trigger(players: &Players) -> ConvResult<TriggerCondition> {
+    match players {
+        Players::SinglePlayer(player) if matches!(**player, Player::You) => {
+            Ok(TriggerCondition::DuringYourTurn)
+        }
+        Players::Opponent => Ok(TriggerCondition::Not {
+            condition: Box::new(TriggerCondition::DuringYourTurn),
+        }),
+        other => Err(ConversionGap::MalformedIdiom {
+            idiom: "Condition::IsAPlayersTurn (trigger)",
+            path: String::new(),
+            detail: format!("unsupported Players: {other:?}"),
+        }),
+    }
+}
+
+fn player_set_turn_to_static(players: &Players) -> ConvResult<StaticCondition> {
+    match players {
+        Players::SinglePlayer(player) if matches!(**player, Player::You) => {
+            Ok(StaticCondition::DuringYourTurn)
+        }
+        Players::Opponent => Ok(StaticCondition::Not {
+            condition: Box::new(StaticCondition::DuringYourTurn),
+        }),
+        other => Err(ConversionGap::MalformedIdiom {
+            idiom: "Condition::IsAPlayersTurn (static)",
+            path: String::new(),
+            detail: format!("unsupported Players: {other:?}"),
+        }),
     }
 }
 
@@ -3278,6 +3329,34 @@ mod tests {
             ConversionGap::EnginePrerequisiteMissing { engine_type, .. }
                 if engine_type == "QuantityRef::CreaturesDiedThisTurn"
         ));
+    }
+
+    #[test]
+    fn opponent_turn_lowers_to_negated_your_turn_trigger_condition() {
+        let condition = Condition::IsAPlayersTurn(Box::new(Players::Opponent));
+
+        let converted = convert_trigger(&condition).unwrap();
+
+        assert_eq!(
+            converted,
+            TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::DuringYourTurn),
+            }
+        );
+    }
+
+    #[test]
+    fn opponent_turn_lowers_to_negated_your_turn_ability_condition() {
+        let condition = Condition::IsAPlayersTurn(Box::new(Players::Opponent));
+
+        let converted = convert_ability(&condition).unwrap();
+
+        assert_eq!(
+            converted,
+            AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::IsYourTurn),
+            }
+        );
     }
 
     #[test]
