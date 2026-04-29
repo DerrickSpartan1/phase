@@ -2188,6 +2188,19 @@ fn object_shares_quality_with_reference_filter(
         });
     }
 
+    if let Some(TargetRef::Object(reference_id)) =
+        crate::game::targeting::resolve_event_context_target(state, reference_filter, source.id)
+    {
+        return state
+            .objects
+            .get(&reference_id)
+            .is_some_and(|reference_obj| {
+                let values =
+                    object_shared_quality_values(reference_obj, quality, &state.all_creature_types);
+                object_shares_quality_values(obj, quality, &values, &state.all_creature_types)
+            });
+    }
+
     state.objects.keys().copied().any(|reference_id| {
         filter_inner(
             state,
@@ -2360,6 +2373,7 @@ mod tests {
         ChosenAttribute, Comparator, ControllerRef, FilterProp, TargetFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
+    use crate::types::events::GameEvent;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
     use crate::types::mana::ManaColor;
@@ -3226,6 +3240,70 @@ mod tests {
 
         assert!(matches_target_filter(&state, blue, &filter, source));
         assert!(!matches_target_filter(&state, red, &filter, source));
+    }
+
+    #[test]
+    fn shares_quality_reference_can_use_discarded_trigger_object() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Diviner");
+        let discarded = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Discarded Instant".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&discarded)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        let instant = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Candidate Instant".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&instant)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        let sorcery = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Candidate Sorcery".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&sorcery)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Sorcery);
+        state.current_trigger_event = Some(GameEvent::Discarded {
+            player_id: PlayerId(0),
+            object_id: discarded,
+        });
+
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::CardType,
+                    reference: Some(Box::new(TargetFilter::TriggeringSource)),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+            );
+
+        assert!(matches_target_filter(&state, instant, &filter, source));
+        assert!(!matches_target_filter(&state, sorcery, &filter, source));
     }
 
     #[test]

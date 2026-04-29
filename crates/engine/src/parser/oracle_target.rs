@@ -2710,6 +2710,15 @@ fn parse_shared_quality_reference(
     input: &str,
 ) -> nom::IResult<&str, TargetFilter, nom_language::error::VerboseError<&str>> {
     if let Ok((rest, filter)) = value(
+        TargetFilter::TriggeringSource,
+        tag::<_, _, nom_language::error::VerboseError<&str>>("one of the discarded cards"),
+    )
+    .parse(input)
+    {
+        return Ok((rest, filter));
+    }
+
+    if let Ok((rest, filter)) = value(
         TargetFilter::ParentTarget,
         tag::<_, _, nom_language::error::VerboseError<&str>>("the discarded card"),
     )
@@ -6044,6 +6053,24 @@ mod tests {
                 reference: Some(reference),
                 relation: SharedQualityRelation::DoesNotShare,
             } if matches!(reference.as_ref(), TargetFilter::ParentTarget)
+        )));
+        assert!(rest.trim().is_empty(), "remainder: {rest:?}");
+    }
+
+    #[test]
+    fn that_shares_card_type_with_one_discarded_card_consumed() {
+        let (filter, rest) =
+            parse_type_phrase("card that shares a card type with one of the discarded cards");
+        let TargetFilter::Typed(ref tf) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(tf.properties.iter().any(|p| matches!(
+            p,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CardType,
+                reference: Some(reference),
+                relation: SharedQualityRelation::Shares,
+            } if matches!(reference.as_ref(), TargetFilter::TriggeringSource)
         )));
         assert!(rest.trim().is_empty(), "remainder: {rest:?}");
     }
