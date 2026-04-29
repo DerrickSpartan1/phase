@@ -17303,6 +17303,27 @@ mod tests {
     }
 
     #[test]
+    fn bridge_if_you_do_or_control_condition() {
+        let result =
+            try_nom_condition_as_ability_condition("you do or if you control another Dinosaur");
+        match result {
+            Some(AbilityCondition::Or { conditions }) => {
+                assert_eq!(conditions.len(), 2);
+                assert!(matches!(conditions[0], AbilityCondition::IfYouDo));
+                assert!(matches!(
+                    conditions[1],
+                    AbilityCondition::QuantityCheck {
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                        ..
+                    }
+                ));
+            }
+            other => panic!("expected Or(IfYouDo, ObjectCount GE 1), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn bridge_source_tapped_maps_to_ability_condition() {
         // CR 611.2b: SourceIsTapped bridges to AbilityCondition::SourceIsTapped.
         let result = try_nom_condition_as_ability_condition("~ is tapped");

@@ -1543,6 +1543,18 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
         return Some(AbilityCondition::NthResolutionThisTurn { n });
     }
 
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("you do or if ").parse(lower.as_str()) {
+        let (rest, condition) = parse_inner_condition(rest).ok()?;
+        if rest.trim().is_empty() {
+            return Some(AbilityCondition::Or {
+                conditions: vec![
+                    AbilityCondition::IfYouDo,
+                    static_condition_to_ability_condition(&condition)?,
+                ],
+            });
+        }
+    }
+
     if tag::<_, _, VerboseError<&str>>("you win the clash")
         .parse(lower.as_str())
         .is_ok()
