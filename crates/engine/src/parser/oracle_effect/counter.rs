@@ -1,5 +1,6 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
+use nom::character::complete::multispace0;
 use nom::combinator::value;
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -12,8 +13,10 @@ use crate::types::mana::ManaColor;
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
+use super::super::oracle_quantity::parse_for_each_clause_expr;
 use super::super::oracle_target::{parse_target, parse_type_phrase};
 use super::super::oracle_util::{parse_count_expr, parse_number};
+use super::types::replace_fixed_quantity;
 use super::{resolve_it_pronoun, ParseContext};
 
 /// Check if text starts with a self-reference: "this ", "~"
@@ -145,8 +148,11 @@ fn resolve_counter_placement_target<'a>(
         lower.len(),
         "counter target offset math requires ASCII-equal-length lower/original pair"
     );
-    if is_self_ref(on_rest) {
-        return (TargetFilter::SelfRef, "", None);
+    let on_offset = lower.len() - on_rest.len();
+    let on_text = &text[on_offset..];
+    let (parsed_target, parsed_remainder) = parse_target(on_text);
+    if matches!(parsed_target, TargetFilter::SelfRef) {
+        return (TargetFilter::SelfRef, parsed_remainder, None);
     }
     if is_it_pronoun(on_rest) {
         return (resolve_it_pronoun(ctx), "", None);
@@ -272,7 +278,7 @@ pub(super) fn try_parse_put_counter<'a>(
     // eagerly, it MUST appear here after the counter noun. Consume it and
     // overwrite the placeholder count. Abort the dynamic path if the clause
     // is missing — the phrase is malformed as a dynamic-count.
-    let (count_expr, after_counter_word) = if dynamic_pending {
+    let (mut count_expr, after_counter_word) = if dynamic_pending {
         let (after_clause, qty) = nom_quantity::parse_equal_to(after_counter_word).ok()?;
         let after_clause = after_clause.strip_prefix(' ').unwrap_or(after_clause);
         (qty, after_clause)
@@ -289,8 +295,12 @@ pub(super) fn try_parse_put_counter<'a>(
     let ((), on_rest) = nom_on_lower(after_counter_word, after_counter_word, |i| {
         value((), tag("on ")).parse(i)
     })?;
-    let (target, remainder, multi_target) =
+    let (target, mut remainder, multi_target) =
         resolve_counter_placement_target(on_rest, lower, text, ctx);
+    if let Some((for_each_count, after_suffix)) = parse_counter_for_each_suffix(remainder) {
+        count_expr = replace_fixed_quantity(count_expr, for_each_count);
+        remainder = after_suffix;
+    }
 
     Some((
         Effect::PutCounter {
@@ -301,6 +311,18 @@ pub(super) fn try_parse_put_counter<'a>(
         remainder,
         multi_target,
     ))
+}
+
+fn parse_counter_for_each_suffix(remainder: &str) -> Option<(QuantityExpr, &str)> {
+    let remainder_lower = remainder.to_lowercase();
+    let ((), for_each_clause) = nom_on_lower(remainder, &remainder_lower, |input| {
+        let (rest, _) = multispace0.parse(input)?;
+        let (rest, _) = tag::<_, _, VerboseError<&str>>("for each ").parse(rest)?;
+        Ok((rest, ()))
+    })?;
+    let clause_lower = for_each_clause.to_lowercase();
+    let count = parse_for_each_clause_expr(clause_lower.trim())?;
+    Some((count, ""))
 }
 
 /// CR 122.1: Consume the "a number of " prefix used in dynamic counter-count
@@ -1079,6 +1101,94 @@ mod tests {
             "count should be hand-card-count reference, got {count:?}"
         );
         assert!(matches!(target, TargetFilter::SelfRef));
+    }
+
+    #[test]
+    fn put_counter_for_each_suffix_preserves_self_target() {
+        use crate::types::ability::QuantityRef;
+        use crate::types::zones::Zone;
+
+        let (effect, rem, _) = try_parse_put_counter(
+            "put a corpse counter on this creature for each creature that died this turn",
+            "put a corpse counter on this creature for each creature that died this turn",
+            &default_ctx(),
+        )
+        .expect("parse");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = effect
+        else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+
+        assert_eq!(counter_type, "corpse");
+        assert!(matches!(target, TargetFilter::SelfRef));
+        assert!(
+            rem.is_empty(),
+            "for-each suffix should be consumed, got {rem:?}"
+        );
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeCountThisTurn {
+                        from: Some(Zone::Battlefield),
+                        to: Some(Zone::Graveyard),
+                        filter: TargetFilter::Typed(_),
+                    }
+                }
+            ),
+            "count should be died-this-turn quantity, got {count:?}"
+        );
+    }
+
+    #[test]
+    fn put_counter_for_each_suffix_multiplies_fixed_count_on_target() {
+        use crate::types::ability::{QuantityRef, ZoneRef};
+
+        let (effect, rem, _) = try_parse_put_counter(
+            "put two charge counters on target artifact for each card in your hand",
+            "put two charge counters on target artifact for each card in your hand",
+            &default_ctx(),
+        )
+        .expect("parse");
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            target,
+        } = effect
+        else {
+            panic!("expected PutCounter, got {effect:?}");
+        };
+
+        assert_eq!(counter_type, "charge");
+        assert!(matches!(target, TargetFilter::Typed(_)));
+        assert!(
+            rem.is_empty(),
+            "for-each suffix should be consumed, got {rem:?}"
+        );
+        assert!(
+            matches!(
+                count,
+                QuantityExpr::Multiply {
+                    factor: 2,
+                    ref inner,
+                } if matches!(
+                    **inner,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ZoneCardCount {
+                            zone: ZoneRef::Hand,
+                            ..
+                        }
+                    } | QuantityExpr::Ref {
+                        qty: QuantityRef::HandSize { .. }
+                    }
+                )
+            ),
+            "two counters per card should multiply the hand-card quantity, got {count:?}"
+        );
     }
 
     /// CR 122.8 + CR 400.7: "put those counters on [target]" — anaphoric
