@@ -84,6 +84,7 @@ pub fn resolve(
 /// CR 702.104a: "That player may put an additional N +1/+1 counters on it."
 pub(crate) fn apply_paid(
     state: &mut GameState,
+    actor: crate::types::player::PlayerId,
     source_id: crate::types::identifiers::ObjectId,
     count: u32,
     events: &mut Vec<GameEvent>,
@@ -91,6 +92,7 @@ pub(crate) fn apply_paid(
     if count > 0 {
         super::counters::add_counter_with_replacement(
             state,
+            actor,
             source_id,
             crate::types::counter::CounterType::Plus1Plus1,
             count,
@@ -149,7 +151,7 @@ mod tests {
         seed_tribute_source(&mut state, ObjectId(500));
 
         let mut events = Vec::new();
-        apply_paid(&mut state, ObjectId(500), 2, &mut events);
+        apply_paid(&mut state, PlayerId(1), ObjectId(500), 2, &mut events);
 
         let obj = state.objects.get(&ObjectId(500)).unwrap();
         assert_eq!(

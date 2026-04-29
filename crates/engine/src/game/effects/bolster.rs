@@ -66,7 +66,14 @@ pub fn resolve(
     if tied.len() == 1 {
         // CR 701.39a: Unique minimum — auto-choose and add counters.
         if n > 0 {
-            add_counter_with_replacement(state, tied[0], CounterType::Plus1Plus1, n, events);
+            add_counter_with_replacement(
+                state,
+                ability.controller,
+                tied[0],
+                CounterType::Plus1Plus1,
+                n,
+                events,
+            );
         }
 
         events.push(GameEvent::EffectResolved {

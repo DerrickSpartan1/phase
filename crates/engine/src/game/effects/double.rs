@@ -2,7 +2,7 @@ use crate::game::mana_sources::mana_color_to_type;
 use crate::types::ability::{
     DoubleTarget, Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter, TargetRef,
 };
-use crate::types::counter::{parse_counter_type, CounterType};
+use crate::types::counter::parse_counter_type;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
@@ -71,25 +71,16 @@ fn resolve_double_counters(
             }
         };
 
-        // CR 701.10e: Add N more of each counter type where N = current count
-        // Uses direct manipulation (like resolve_multiply) rather than replacement pipeline.
+        // CR 701.10e: Add N more of each counter type where N = current count.
         for (ct, current_count) in counters_snapshot {
-            let obj = state
-                .objects
-                .get_mut(&obj_id)
-                .ok_or(EffectError::ObjectNotFound(obj_id))?;
-            let entry = obj.counters.entry(ct.clone()).or_insert(0);
-            *entry += current_count;
-
-            if matches!(ct, CounterType::Plus1Plus1 | CounterType::Minus1Minus1) {
-                state.layers_dirty = true;
-            }
-
-            events.push(GameEvent::CounterAdded {
-                object_id: obj_id,
-                counter_type: ct,
-                count: current_count,
-            });
+            super::counters::apply_counter_addition(
+                state,
+                ability.controller,
+                obj_id,
+                ct,
+                current_count,
+                events,
+            );
         }
     }
 

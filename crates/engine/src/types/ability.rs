@@ -2194,8 +2194,16 @@ pub enum QuantityRef {
     /// CR 117.1: Number of spells cast last turn (by any player).
     /// Used for werewolf transform conditions.
     SpellsCastLastTurn,
-    /// CR 122.1: Whether the controller added any counter to any permanent this turn.
-    CounterAddedThisTurn,
+    /// CR 122.1 + CR 122.6: Count counters put this turn by `actor` on objects
+    /// matching `target`. `counters` narrows the counter kind; `CounterMatch::Any`
+    /// counts every counter type. This parameterizes the legacy boolean
+    /// "counter added this turn" slot for Hornbeetle/Paladin-style dynamic counts
+    /// without adding counter-type or recipient-filter sibling variants.
+    CounterAddedThisTurn {
+        actor: CountScope,
+        counters: crate::types::counter::CounterMatch,
+        target: TargetFilter,
+    },
     /// CR 701.9 + CR 603.4: Whether any opponent of the controller discarded a
     /// card this turn. Resolves to 1 when at least one opponent is recorded in
     /// `players_who_discarded_card_this_turn`, else 0. Used by intervening-if

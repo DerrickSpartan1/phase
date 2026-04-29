@@ -18,6 +18,11 @@ use super::resolve_ability_chain;
 /// Add a +1/+1 counter to the exploring creature via the replacement pipeline.
 fn add_explore_counter(state: &mut GameState, explorer_id: ObjectId, events: &mut Vec<GameEvent>) {
     let proposed = ProposedEvent::AddCounter {
+        actor: state
+            .objects
+            .get(&explorer_id)
+            .map(|obj| obj.controller)
+            .unwrap_or(PlayerId(0)),
         object_id: explorer_id,
         counter_type: CounterType::Plus1Plus1,
         count: 1,
@@ -25,22 +30,21 @@ fn add_explore_counter(state: &mut GameState, explorer_id: ObjectId, events: &mu
     };
 
     if let ReplacementResult::Execute(ProposedEvent::AddCounter {
+        actor,
         object_id,
         counter_type,
         count,
         ..
     }) = replacement::replace_event(state, proposed, events)
     {
-        if let Some(obj) = state.objects.get_mut(&object_id) {
-            let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
-            *entry += count;
-            state.layers_dirty = true;
-        }
-        events.push(GameEvent::CounterAdded {
+        super::counters::apply_counter_addition(
+            state,
+            actor,
             object_id,
             counter_type,
             count,
-        });
+            events,
+        );
     }
 }
 

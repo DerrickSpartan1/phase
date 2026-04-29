@@ -318,7 +318,9 @@ fn apply_token_modifications(
                     continue;
                 }
                 let ct = crate::types::counter::parse_counter_type(counter_type);
-                super::counters::add_counter_with_replacement(state, token_id, ct, n, events);
+                super::counters::add_counter_with_replacement(
+                    state, controller, token_id, ct, n, events,
+                );
             }
             // CR 707.9b: Name override applied at copy time.
             ContinuousModification::SetName { name } => {

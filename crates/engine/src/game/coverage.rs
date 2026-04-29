@@ -784,7 +784,16 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::AttackedThisTurn => "attacked this turn".into(),
         QuantityRef::DescendedThisTurn => "descended this turn".into(),
         QuantityRef::SpellsCastLastTurn => "spells cast last turn".into(),
-        QuantityRef::CounterAddedThisTurn => "counter added this turn".into(),
+        QuantityRef::CounterAddedThisTurn {
+            actor,
+            counters,
+            target,
+        } => {
+            format!(
+                "counters added this turn ({actor:?}, {counters:?}, {})",
+                fmt_target(target)
+            )
+        }
         QuantityRef::OpponentDiscardedCardThisTurn => "opponent discarded card this turn".into(),
         QuantityRef::DungeonsCompleted => "dungeons completed".into(),
         QuantityRef::TargetZoneCardCount { .. } => "target zone card count".into(),
@@ -4323,7 +4332,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::AttackedThisTurn => ("AttackedThisTurn", Unhandled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
         QuantityRef::SpellsCastLastTurn => ("SpellsCastLastTurn", Unhandled),
-        QuantityRef::CounterAddedThisTurn => ("CounterAddedThisTurn", Unhandled),
+        QuantityRef::CounterAddedThisTurn { .. } => ("CounterAddedThisTurn", Handled),
         QuantityRef::OpponentDiscardedCardThisTurn => ("OpponentDiscardedCardThisTurn", Handled),
         QuantityRef::DungeonsCompleted => ("DungeonsCompleted", Unhandled),
         QuantityRef::TargetZoneCardCount { .. } => ("TargetZoneCardCount", Unhandled),

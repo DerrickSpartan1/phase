@@ -61,7 +61,14 @@ pub fn resolve(
 
     // CR 701.53a: The Incubator enters with N +1/+1 counters.
     if n > 0 {
-        add_counter_with_replacement(state, obj_id, CounterType::Plus1Plus1, n, events);
+        add_counter_with_replacement(
+            state,
+            ability.controller,
+            obj_id,
+            CounterType::Plus1Plus1,
+            n,
+            events,
+        );
     }
 
     events.push(GameEvent::EffectResolved {

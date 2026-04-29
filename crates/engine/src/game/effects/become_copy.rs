@@ -105,6 +105,7 @@ pub fn resolve(
                 let ct = crate::types::counter::parse_counter_type(&counter_type);
                 super::counters::add_counter_with_replacement(
                     state,
+                    ability.controller,
                     ability.source_id,
                     ct,
                     n,

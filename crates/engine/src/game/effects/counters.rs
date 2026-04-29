@@ -7,8 +7,9 @@ use crate::types::ability::{
 };
 use crate::types::counter::{parse_counter_type, CounterType};
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{CounterAddedRecord, GameState};
 use crate::types::identifiers::ObjectId;
+use crate::types::player::PlayerId;
 use crate::types::proposed_event::ProposedEvent;
 
 /// CR 306.5b + CR 310.4c: After mutating the counter map, re-derive the
@@ -79,12 +80,17 @@ fn counter_type_affects_layers(counter_type: &CounterType) -> bool {
 /// - damage redirection to battles (CR 120.3h) — reversed via the remove path
 pub fn add_counter_with_replacement(
     state: &mut GameState,
+    actor: PlayerId,
     object_id: ObjectId,
     counter_type: CounterType,
     count: u32,
     events: &mut Vec<GameEvent>,
 ) {
+    if count == 0 {
+        return;
+    }
     let proposed = ProposedEvent::AddCounter {
+        actor,
         object_id,
         counter_type,
         count,
@@ -94,35 +100,14 @@ pub fn add_counter_with_replacement(
     match replacement::replace_event(state, proposed, events) {
         ReplacementResult::Execute(event) => {
             if let ProposedEvent::AddCounter {
+                actor,
                 object_id,
                 counter_type,
                 count,
                 ..
             } = event
             {
-                if let Some(obj) = state.objects.get_mut(&object_id) {
-                    let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
-                    *entry += count;
-
-                    // CR 306.5b / CR 310.4c: Keep obj.loyalty / obj.defense in
-                    // sync with the counter map — the field IS the counter count.
-                    sync_derived_from_counters(obj, &counter_type);
-
-                    if counter_type_affects_layers(&counter_type) {
-                        state.layers_dirty = true;
-                    }
-
-                    // CR 122.1: Track that this player added a counter this turn
-                    state
-                        .players_who_added_counter_this_turn
-                        .insert(obj.controller);
-
-                    events.push(GameEvent::CounterAdded {
-                        object_id,
-                        counter_type,
-                        count,
-                    });
-                }
+                apply_counter_addition(state, actor, object_id, counter_type, count, events);
             }
         }
         ReplacementResult::Prevented => {}
@@ -131,6 +116,65 @@ pub fn add_counter_with_replacement(
                 crate::game::replacement::replacement_choice_waiting_for(player, state);
         }
     }
+}
+
+/// CR 122.1 + CR 122.6: Apply an already-accepted counter addition and record
+/// the actor/recipient snapshot for "counters you've put this turn" quantities.
+pub(crate) fn apply_counter_addition(
+    state: &mut GameState,
+    actor: PlayerId,
+    object_id: ObjectId,
+    counter_type: CounterType,
+    count: u32,
+    events: &mut Vec<GameEvent>,
+) {
+    if count == 0 {
+        return;
+    }
+
+    let Some(obj) = state.objects.get_mut(&object_id) else {
+        return;
+    };
+
+    let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
+    *entry += count;
+
+    // CR 306.5b / CR 310.4c: Keep obj.loyalty / obj.defense in
+    // sync with the counter map — the field IS the counter count.
+    sync_derived_from_counters(obj, &counter_type);
+
+    if counter_type_affects_layers(&counter_type) {
+        state.layers_dirty = true;
+    }
+
+    state.counter_added_this_turn.push(CounterAddedRecord {
+        actor,
+        object_id,
+        counter_type: counter_type.clone(),
+        count,
+        name: obj.name.clone(),
+        core_types: obj.card_types.core_types.clone(),
+        subtypes: obj.card_types.subtypes.clone(),
+        supertypes: obj.card_types.supertypes.clone(),
+        keywords: obj.keywords.clone(),
+        power: obj.power,
+        toughness: obj.toughness,
+        colors: obj.color.clone(),
+        mana_value: obj.mana_cost.mana_value(),
+        controller: obj.controller,
+        owner: obj.owner,
+        counters: obj
+            .counters
+            .iter()
+            .map(|(ct, n)| (ct.clone(), *n))
+            .collect(),
+    });
+
+    events.push(GameEvent::CounterAdded {
+        object_id,
+        counter_type,
+        count,
+    });
 }
 
 /// CR 614.1: Remove counters from an object through the replacement pipeline.
@@ -231,13 +275,27 @@ pub fn resolve_add(
     if let Some(distribution) = &ability.distribution {
         for (target, count) in distribution {
             if let crate::types::ability::TargetRef::Object(obj_id) = target {
-                add_counter_with_replacement(state, *obj_id, ct.clone(), *count, events);
+                add_counter_with_replacement(
+                    state,
+                    ability.controller,
+                    *obj_id,
+                    ct.clone(),
+                    *count,
+                    events,
+                );
             }
         }
     } else {
         let targets = resolve_defined_or_targets(ability);
         for obj_id in targets {
-            add_counter_with_replacement(state, obj_id, ct.clone(), counter_num, events);
+            add_counter_with_replacement(
+                state,
+                ability.controller,
+                obj_id,
+                ct.clone(),
+                counter_num,
+                events,
+            );
         }
     }
 
@@ -282,7 +340,14 @@ pub fn resolve_add_all(
         .collect();
 
     for obj_id in matching_ids {
-        add_counter_with_replacement(state, obj_id, ct.clone(), counter_num, events);
+        add_counter_with_replacement(
+            state,
+            ability.controller,
+            obj_id,
+            ct.clone(),
+            counter_num,
+            events,
+        );
     }
 
     events.push(GameEvent::EffectResolved {
@@ -311,25 +376,21 @@ pub fn resolve_multiply(
     let targets = resolve_defined_or_targets(ability);
     for obj_id in targets {
         let ct = parse_counter_type(&counter_type_str);
-        let obj = state
+        let current = state
             .objects
-            .get_mut(&obj_id)
-            .ok_or(EffectError::ObjectNotFound(obj_id))?;
-        let current = obj.counters.get(&ct).copied().unwrap_or(0);
+            .get(&obj_id)
+            .ok_or(EffectError::ObjectNotFound(obj_id))?
+            .counters
+            .get(&ct)
+            .copied()
+            .unwrap_or(0);
         let to_add = current.saturating_mul(multiplier).saturating_sub(current);
         if to_add > 0 {
-            let entry = obj.counters.entry(ct.clone()).or_insert(0);
-            *entry += to_add;
-
-            if matches!(ct, CounterType::Plus1Plus1 | CounterType::Minus1Minus1) {
-                state.layers_dirty = true;
-            }
-
-            events.push(GameEvent::CounterAdded {
-                object_id: obj_id,
-                counter_type: ct.clone(),
-                count: to_add,
-            });
+            // CR 701.10e: doubling counters gives the permanent that many
+            // additional counters, so this must flow through the central
+            // counter-addition path for replacement effects and per-turn
+            // "counters you've put" history.
+            add_counter_with_replacement(state, ability.controller, obj_id, ct, to_add, events);
         }
     }
 
@@ -444,7 +505,14 @@ pub fn resolve_move(
                     continue;
                 }
             }
-            add_counter_with_replacement(state, dest_id, ct.clone(), count, events);
+            add_counter_with_replacement(
+                state,
+                ability.controller,
+                dest_id,
+                ct.clone(),
+                count,
+                events,
+            );
         }
     }
 
@@ -700,6 +768,49 @@ mod tests {
         )));
     }
 
+    #[test]
+    fn multiply_counter_records_added_counter_history() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&obj_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 2);
+        let mut events = Vec::new();
+
+        resolve_multiply(
+            &mut state,
+            &make_counter_ability(
+                Effect::MultiplyCounter {
+                    counter_type: "P1P1".to_string(),
+                    multiplier: 2,
+                    target: TargetFilter::Any,
+                },
+                obj_id,
+            ),
+            &mut events,
+        )
+        .unwrap();
+
+        assert_eq!(state.objects[&obj_id].counters[&CounterType::Plus1Plus1], 4);
+        assert_eq!(state.counter_added_this_turn.len(), 1);
+        assert_eq!(state.counter_added_this_turn[0].actor, PlayerId(0));
+        assert_eq!(state.counter_added_this_turn[0].object_id, obj_id);
+        assert_eq!(
+            state.counter_added_this_turn[0].counter_type,
+            CounterType::Plus1Plus1
+        );
+        assert_eq!(state.counter_added_this_turn[0].count, 2);
+    }
+
     /// Regression test: SelfRef PutCounter (Ajani's Pridemate trigger) must apply the counter
     /// to the source object even when ability.targets is empty.
     #[test]
@@ -944,7 +1055,14 @@ mod tests {
         obj.counters.insert(CounterType::Loyalty, 4);
 
         let mut events = Vec::new();
-        add_counter_with_replacement(&mut state, pw_id, CounterType::Loyalty, 1, &mut events);
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(0),
+            pw_id,
+            CounterType::Loyalty,
+            1,
+            &mut events,
+        );
 
         let obj = &state.objects[&pw_id];
         assert_eq!(
@@ -1001,7 +1119,14 @@ mod tests {
         obj.counters.insert(CounterType::Defense, 4);
 
         let mut events = Vec::new();
-        add_counter_with_replacement(&mut state, battle_id, CounterType::Defense, 2, &mut events);
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(0),
+            battle_id,
+            CounterType::Defense,
+            2,
+            &mut events,
+        );
         assert_eq!(state.objects[&battle_id].defense, Some(6));
         assert_eq!(
             state.objects[&battle_id]
@@ -1052,7 +1177,14 @@ mod tests {
         obj.counters.insert(CounterType::Loyalty, 4);
 
         let mut events = Vec::new();
-        add_counter_with_replacement(&mut state, pw_id, CounterType::Loyalty, 1, &mut events);
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(0),
+            pw_id,
+            CounterType::Loyalty,
+            1,
+            &mut events,
+        );
         assert_eq!(state.objects[&pw_id].loyalty, Some(5));
 
         // Force layer re-evaluation: should re-derive obj.loyalty from the
@@ -1095,7 +1227,14 @@ mod tests {
 
         let mut events = Vec::new();
         // Trigger 1 fires.
-        add_counter_with_replacement(&mut state, pw_id, CounterType::Loyalty, 1, &mut events);
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(0),
+            pw_id,
+            CounterType::Loyalty,
+            1,
+            &mut events,
+        );
         assert_eq!(state.objects[&pw_id].loyalty, Some(5));
         assert_eq!(
             state.objects[&pw_id]
@@ -1106,7 +1245,14 @@ mod tests {
         );
 
         // Trigger 2 fires.
-        add_counter_with_replacement(&mut state, pw_id, CounterType::Loyalty, 1, &mut events);
+        add_counter_with_replacement(
+            &mut state,
+            PlayerId(0),
+            pw_id,
+            CounterType::Loyalty,
+            1,
+            &mut events,
+        );
         assert_eq!(
             state.objects[&pw_id].loyalty,
             Some(6),

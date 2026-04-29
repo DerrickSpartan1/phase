@@ -2030,8 +2030,9 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::HasMaxSpeed => has_max_speed(state, controller),
         // CR 122.1: "if you put a counter on a permanent this turn"
         TriggerCondition::CounterAddedThisTurn => state
-            .players_who_added_counter_this_turn
-            .contains(&controller),
+            .counter_added_this_turn
+            .iter()
+            .any(|record| record.actor == controller),
         // CR 603.4: "if an opponent lost life during their last turn" — check the opponent's
         // snapshotted life_lost_last_turn. True if any opponent lost life during the previous turn.
         TriggerCondition::LostLifeLastTurn => state

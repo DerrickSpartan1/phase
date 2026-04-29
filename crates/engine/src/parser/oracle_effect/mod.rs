@@ -1609,6 +1609,15 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
     if peel_ctx.is_empty() {
         return parse_effect_clause_inner(text, ctx);
     }
+    if let Some(mut clause) = try_parse_for_each_effect(text) {
+        peel_ctx.apply_optional(&mut clause.optional);
+        if clause.condition.is_none() {
+            if let Some(cond) = peel_ctx.condition().cloned() {
+                clause.condition = Some(cond);
+            }
+        }
+        return clause;
+    }
     let mut clause = parse_effect_clause_inner(&peeled_text, ctx);
     // Trial-parse fallback: peeling may have removed disambiguation signal
     // a specialized parser depends on (e.g., `the next spell you cast this
@@ -3054,13 +3063,24 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     let base_tp = base_tp.trim_end();
     let for_each_clause = &tp.lower[for_each_idx + "for each ".len()..];
 
-    // Parse the "for each" clause into a QuantityExpr.
-    // Strip duration from the for-each clause text first — handles unusual ordering
-    // like "for each card in your hand until end of turn" (Ral's Staticaster).
-    let (for_each_no_duration, for_each_duration) = strip_trailing_duration(for_each_clause);
-    let quantity = parse_for_each_clause_expr(for_each_no_duration.trim_end_matches('.'))?;
-    let reference_target =
-        for_each_clause_target_controller_filter(for_each_no_duration.trim_end_matches('.'));
+    // Parse the "for each" clause into a QuantityExpr. Try the full clause
+    // before stripping duration-like suffixes: "this turn" is part of
+    // counter-history quantities, not an effect duration.
+    let for_each_full = for_each_clause.trim_end_matches('.');
+    let (for_each_no_duration, stripped_for_each_duration) =
+        strip_trailing_duration(for_each_clause);
+    let for_each_stripped = for_each_no_duration.trim_end_matches('.');
+    let (quantity, for_each_duration, reference_clause) =
+        if let Some(quantity) = parse_for_each_clause_expr(for_each_full) {
+            (quantity, None, for_each_full)
+        } else {
+            (
+                parse_for_each_clause_expr(for_each_stripped)?,
+                stripped_for_each_duration,
+                for_each_stripped,
+            )
+        };
+    let reference_target = for_each_clause_target_controller_filter(reference_clause);
 
     // Strip trailing duration from the base text (e.g., "gets +2/+0 until end of turn"
     // → "gets +2/+0" with duration=UntilEndOfTurn). Duration often appears between
@@ -11652,6 +11672,52 @@ mod tests {
             ),
             "token count should be a Ref quantity, not Fixed"
         );
+    }
+
+    #[test]
+    fn for_each_token_count_keeps_counter_history_this_turn_clause() {
+        let clause = try_parse_for_each_effect(
+            "create a 1/1 green Insect creature token for each +1/+1 counter you've put on creatures under your control this turn",
+        )
+        .expect("for-each token parser should match");
+        match clause.effect {
+            Effect::Token { count, .. } => assert_eq!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CounterAddedThisTurn {
+                        actor: crate::types::ability::CountScope::Controller,
+                        counters: crate::types::counter::CounterMatch::OfType(
+                            crate::types::counter::CounterType::Plus1Plus1,
+                        ),
+                        target: TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::You),
+                        ),
+                    },
+                }
+            ),
+            other => panic!("expected Token, got {other:?}"),
+        }
+
+        let e = parse_effect(
+            "create a 1/1 green Insect creature token for each +1/+1 counter you've put on creatures under your control this turn",
+        );
+        match e {
+            Effect::Token { count, .. } => assert_eq!(
+                count,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::CounterAddedThisTurn {
+                        actor: crate::types::ability::CountScope::Controller,
+                        counters: crate::types::counter::CounterMatch::OfType(
+                            crate::types::counter::CounterType::Plus1Plus1,
+                        ),
+                        target: TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::You),
+                        ),
+                    },
+                }
+            ),
+            other => panic!("expected Token, got {other:?}"),
+        }
     }
 
     #[test]

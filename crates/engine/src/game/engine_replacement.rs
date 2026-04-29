@@ -104,30 +104,20 @@ pub(super) fn handle_replacement_choice(
                 // CR 122.1: Counter addition accepted after replacement choice (e.g.,
                 // Corpsejack Menace doubler on a prompted counter-placement).
                 ProposedEvent::AddCounter {
+                    actor,
                     object_id,
                     counter_type,
                     count,
                     ..
                 } => {
-                    if let Some(obj) = state.objects.get_mut(&object_id) {
-                        let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
-                        *entry += count;
-                        if matches!(
-                            counter_type,
-                            crate::types::counter::CounterType::Plus1Plus1
-                                | crate::types::counter::CounterType::Minus1Minus1
-                        ) {
-                            state.layers_dirty = true;
-                        }
-                        state
-                            .players_who_added_counter_this_turn
-                            .insert(obj.controller);
-                        events.push(GameEvent::CounterAdded {
-                            object_id,
-                            counter_type,
-                            count,
-                        });
-                    }
+                    effects::counters::apply_counter_addition(
+                        state,
+                        actor,
+                        object_id,
+                        counter_type,
+                        count,
+                        events,
+                    );
                 }
                 // CR 122.1: Counter removal accepted after replacement choice.
                 ProposedEvent::RemoveCounter {
@@ -559,10 +549,15 @@ pub(super) fn apply_etb_counters(
     counters: &[(String, u32)],
     events: &mut Vec<GameEvent>,
 ) {
+    let actor = state
+        .objects
+        .get(&object_id)
+        .map(|obj| obj.controller)
+        .unwrap_or(PlayerId(0));
     for (counter_type_str, count) in counters {
         let ct = crate::types::counter::parse_counter_type(counter_type_str);
         super::effects::counters::add_counter_with_replacement(
-            state, object_id, ct, *count, events,
+            state, actor, object_id, ct, *count, events,
         );
     }
 }
@@ -689,6 +684,7 @@ mod tests {
 
         let mut events = Vec::new();
         let proposed = ProposedEvent::AddCounter {
+            actor: PlayerId(0),
             object_id: target,
             counter_type: CounterType::Plus1Plus1,
             count: 2,

@@ -165,7 +165,10 @@ pub(super) fn handle_tribute_choice(
     events: &mut Vec<GameEvent>,
 ) -> Result<ActionResult, EngineError> {
     let WaitingFor::TributeChoice {
-        source_id, count, ..
+        player,
+        source_id,
+        count,
+        ..
     } = waiting_for
     else {
         return Err(EngineError::InvalidAction(
@@ -174,7 +177,7 @@ pub(super) fn handle_tribute_choice(
     };
 
     if accept {
-        effects::tribute::apply_paid(state, source_id, count, events);
+        effects::tribute::apply_paid(state, player, source_id, count, events);
     } else {
         effects::tribute::apply_declined(state, source_id);
     }

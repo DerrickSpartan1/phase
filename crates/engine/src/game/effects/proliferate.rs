@@ -2,6 +2,7 @@ use crate::types::ability::{EffectError, EffectKind, ResolvedAbility, TargetRef}
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::player::PlayerId;
 
 /// CR 701.34a: Proliferate — controller chooses any number of permanents and/or
 /// players that already have counters, then gives each another counter of a kind
@@ -55,6 +56,7 @@ pub fn resolve(
 /// already present. Called from the engine handler after player makes their choice.
 pub fn apply_proliferate(
     state: &mut GameState,
+    actor: PlayerId,
     selected: &[TargetRef],
     events: &mut Vec<GameEvent>,
 ) {
@@ -68,19 +70,7 @@ pub fn apply_proliferate(
                     .unwrap_or_default();
 
                 for ct in counter_types {
-                    if let Some(obj) = state.objects.get_mut(obj_id) {
-                        if let Some(entry) = obj.counters.get_mut(&ct) {
-                            *entry += 1;
-                        }
-                    }
-                    if matches!(ct, CounterType::Plus1Plus1 | CounterType::Minus1Minus1) {
-                        state.layers_dirty = true;
-                    }
-                    events.push(GameEvent::CounterAdded {
-                        object_id: *obj_id,
-                        counter_type: ct.clone(),
-                        count: 1,
-                    });
+                    super::counters::apply_counter_addition(state, actor, *obj_id, ct, 1, events);
                 }
             }
             TargetRef::Player(pid) => {
@@ -181,7 +171,12 @@ mod tests {
             .insert(CounterType::Plus1Plus1, 2);
 
         let mut events = Vec::new();
-        apply_proliferate(&mut state, &[TargetRef::Object(obj1)], &mut events);
+        apply_proliferate(
+            &mut state,
+            PlayerId(0),
+            &[TargetRef::Object(obj1)],
+            &mut events,
+        );
 
         assert_eq!(state.objects[&obj1].counters[&CounterType::Plus1Plus1], 3);
     }
@@ -210,7 +205,12 @@ mod tests {
             .insert(CounterType::Generic("charge".to_string()), 3);
 
         let mut events = Vec::new();
-        apply_proliferate(&mut state, &[TargetRef::Object(obj)], &mut events);
+        apply_proliferate(
+            &mut state,
+            PlayerId(0),
+            &[TargetRef::Object(obj)],
+            &mut events,
+        );
 
         assert_eq!(state.objects[&obj].counters[&CounterType::Plus1Plus1], 2);
         assert_eq!(
@@ -237,7 +237,12 @@ mod tests {
             .insert(CounterType::Plus1Plus1, 1);
 
         let mut events = Vec::new();
-        apply_proliferate(&mut state, &[TargetRef::Object(obj)], &mut events);
+        apply_proliferate(
+            &mut state,
+            PlayerId(0),
+            &[TargetRef::Object(obj)],
+            &mut events,
+        );
 
         assert!(events.iter().any(|e| matches!(
             e,

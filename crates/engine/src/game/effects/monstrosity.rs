@@ -37,7 +37,14 @@ pub fn resolve(
 
     // CR 701.37a: Put N +1/+1 counters on the permanent.
     if n > 0 {
-        add_counter_with_replacement(state, source_id, CounterType::Plus1Plus1, n, events);
+        add_counter_with_replacement(
+            state,
+            ability.controller,
+            source_id,
+            CounterType::Plus1Plus1,
+            n,
+            events,
+        );
     }
 
     // CR 701.37a + CR 701.37b: Set the monstrous designation.

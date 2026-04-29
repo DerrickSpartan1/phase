@@ -739,13 +739,15 @@ fn resolve_keyword_action(
             snapshot_power,
         } => {
             let counters_added = snapshot_power.max(0) as u32;
-            let still_on_battlefield = state
+            let spacecraft_controller = state
                 .objects
                 .get(&spacecraft_id)
-                .is_some_and(|sc| sc.zone == Zone::Battlefield);
-            if still_on_battlefield && counters_added > 0 {
+                .filter(|sc| sc.zone == Zone::Battlefield)
+                .map(|sc| sc.controller);
+            if let (Some(controller), true) = (spacecraft_controller, counters_added > 0) {
                 effects::counters::add_counter_with_replacement(
                     state,
+                    controller,
                     spacecraft_id,
                     CounterType::Generic("charge".to_string()),
                     counters_added,

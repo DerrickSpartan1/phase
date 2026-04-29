@@ -13,7 +13,9 @@ use crate::types::ability::{
     SharedQuality, SharedQualityRelation, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
-use crate::types::game_state::{GameState, LKISnapshot, SpellCastRecord, ZoneChangeRecord};
+use crate::types::game_state::{
+    CounterAddedRecord, GameState, LKISnapshot, SpellCastRecord, ZoneChangeRecord,
+};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
@@ -240,6 +242,44 @@ pub fn matches_target_filter_on_zone_change_record(
         ctx.source_id,
         ctx.source_controller,
         ctx.ability,
+    )
+}
+
+/// CR 122.1 + CR 122.6: Check whether a per-turn counter-placement snapshot
+/// matches a target filter using the recipient's event-time characteristics.
+pub fn matches_target_filter_on_counter_added_record(
+    state: &GameState,
+    record: &CounterAddedRecord,
+    filter: &TargetFilter,
+    ctx: &FilterContext<'_>,
+) -> bool {
+    let mut obj = GameObject::new(
+        record.object_id,
+        CardId(0),
+        record.owner,
+        record.name.clone(),
+        Zone::Battlefield,
+    );
+    obj.controller = record.controller;
+    obj.power = record.power;
+    obj.toughness = record.toughness;
+    obj.card_types.core_types = record.core_types.clone();
+    obj.card_types.subtypes = record.subtypes.clone();
+    obj.card_types.supertypes = record.supertypes.clone();
+    obj.mana_cost = crate::types::mana::ManaCost::generic(record.mana_value);
+    obj.keywords = record.keywords.clone();
+    obj.color = record.colors.clone();
+    obj.counters = record.counters.clone();
+
+    filter_inner_for_object(
+        state,
+        &obj,
+        record.object_id,
+        filter,
+        ctx.source_id,
+        ctx.source_controller,
+        ctx.ability,
+        ctx.recipient_id,
     )
 }
 

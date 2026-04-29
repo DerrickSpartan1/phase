@@ -746,6 +746,7 @@ fn add_counter_applier(
         return ApplyResult::Modified(event);
     };
     if let ProposedEvent::AddCounter {
+        actor,
         object_id,
         counter_type,
         count,
@@ -759,6 +760,7 @@ fn add_counter_applier(
             QuantityModification::Minus { value } => count.saturating_sub(value),
         };
         ApplyResult::Modified(ProposedEvent::AddCounter {
+            actor,
             object_id,
             counter_type,
             count: new_count,

@@ -369,6 +369,33 @@ pub struct DamageRecord {
     pub is_combat: bool,
 }
 
+/// CR 122.1 + CR 122.6: Snapshot of counters put on an object this turn.
+///
+/// Captures both the player who put the counters and the recipient object's
+/// event-time characteristics, so dynamic quantities can later answer
+/// "for each +1/+1 counter you've put on creatures under your control this turn"
+/// even if the recipient has changed zones or characteristics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CounterAddedRecord {
+    pub actor: PlayerId,
+    pub object_id: ObjectId,
+    pub counter_type: CounterType,
+    pub count: u32,
+    pub name: String,
+    pub core_types: Vec<CoreType>,
+    pub subtypes: Vec<String>,
+    pub supertypes: Vec<Supertype>,
+    pub keywords: Vec<Keyword>,
+    pub power: Option<i32>,
+    pub toughness: Option<i32>,
+    pub colors: Vec<ManaColor>,
+    pub mana_value: u32,
+    pub controller: PlayerId,
+    pub owner: PlayerId,
+    #[serde(default)]
+    pub counters: HashMap<CounterType, u32>,
+}
+
 /// CR 607.2a + CR 406.6: Tracks the link between an exiling source and the exiled card.
 /// When the source leaves the battlefield, the exiled card returns (CR 610.3a).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2572,8 +2599,8 @@ pub struct GameState {
     pub creatures_blocked_this_turn: HashSet<ObjectId>,
     #[serde(default)]
     pub players_who_created_token_this_turn: HashSet<PlayerId>,
-    #[serde(default)]
-    pub players_who_added_counter_this_turn: HashSet<PlayerId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub counter_added_this_turn: Vec<CounterAddedRecord>,
     #[serde(default)]
     pub players_who_discarded_card_this_turn: HashSet<PlayerId>,
     #[serde(default)]
@@ -2993,7 +3020,7 @@ impl GameState {
             creatures_attacked_this_turn: HashSet::new(),
             creatures_blocked_this_turn: HashSet::new(),
             players_who_created_token_this_turn: HashSet::new(),
-            players_who_added_counter_this_turn: HashSet::new(),
+            counter_added_this_turn: Vec::new(),
             players_who_discarded_card_this_turn: HashSet::new(),
             players_who_sacrificed_artifact_this_turn: HashSet::new(),
             zone_changes_this_turn: Vec::new(),
@@ -3167,7 +3194,7 @@ impl PartialEq for GameState {
             && self.creatures_attacked_this_turn == other.creatures_attacked_this_turn
             && self.creatures_blocked_this_turn == other.creatures_blocked_this_turn
             && self.players_who_created_token_this_turn == other.players_who_created_token_this_turn
-            && self.players_who_added_counter_this_turn == other.players_who_added_counter_this_turn
+            && self.counter_added_this_turn == other.counter_added_this_turn
             && self.players_who_discarded_card_this_turn
                 == other.players_who_discarded_card_this_turn
             && self.players_who_sacrificed_artifact_this_turn

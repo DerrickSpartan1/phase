@@ -627,6 +627,7 @@ pub fn apply_create_token_after_replacement(
                 let ct = crate::types::counter::parse_counter_type(counter_type_str);
                 super::counters::add_counter_with_replacement(
                     state,
+                    owner,
                     obj_id,
                     ct,
                     *counter_count,

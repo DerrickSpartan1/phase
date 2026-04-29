@@ -9,9 +9,10 @@
 use engine::types::ability::{
     AbilityCondition, AggregateFunction, CardTypeSetSource, Comparator, ControllerRef, CountScope,
     FilterProp, ParsedCondition, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-    StaticCondition, TargetFilter, TriggerCondition, TypedFilter, ZoneRef,
+    StaticCondition, TargetFilter, TriggerCondition, TypeFilter, TypedFilter, ZoneRef,
 };
 use engine::types::card_type::CoreType;
+use engine::types::counter::CounterMatch;
 use engine::types::mana::ManaColor;
 use engine::types::zones::Zone;
 
@@ -22,6 +23,14 @@ use crate::schema::types::{
     CardType, Cards, ColorList, Comparison, Condition, GameNumber, Permanent, Permanents, Player,
     Players, Spell, Spells,
 };
+
+fn counter_added_this_turn_on_permanent_quantity() -> QuantityRef {
+    QuantityRef::CounterAddedThisTurn {
+        actor: CountScope::Controller,
+        counters: CounterMatch::Any,
+        target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Permanent)),
+    }
+}
 
 /// CR 608.2c + CR 700.4: Convert an mtgish `Condition` for use as an
 /// `AbilityCondition` (sub-ability gating: "if [cond], [effect]"). The
@@ -2078,7 +2087,7 @@ pub fn convert_player_predicate_ability(
             )?;
             AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::CounterAddedThisTurn,
+                    qty: counter_added_this_turn_on_permanent_quantity(),
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -2391,7 +2400,7 @@ pub fn convert_player_predicate_static(
             )?;
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::CounterAddedThisTurn,
+                    qty: counter_added_this_turn_on_permanent_quantity(),
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },

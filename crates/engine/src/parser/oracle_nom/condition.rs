@@ -1535,15 +1535,12 @@ fn parse_spells_cast_last_turn(input: &str) -> OracleResult<'_, StaticCondition>
     Ok((rest, make_quantity_ge(QuantityRef::SpellsCastLastTurn, n)))
 }
 
-/// Parse "you [put/ve put] [a counter/one or more counters] on a [permanent/creature] this turn".
-/// Composes prefix × quantity × target × suffix via chained combinators.
+/// Parse "you [put/ve put] [a counter/one or more counters] on a
+/// [permanent/creature] this turn". The quantity module owns the shared
+/// counter-kind/recipient grammar so conditions and dynamic counts stay aligned.
 fn parse_counter_added_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((tag("you put "), tag("you've put "))).parse(input)?;
-    let (rest, _) = alt((tag("one or more counters"), tag("a counter"))).parse(rest)?;
-    let (rest, _) = tag(" on a ").parse(rest)?;
-    let (rest, _) = alt((tag("permanent"), tag("creature"))).parse(rest)?;
-    let (rest, _) = tag(" this turn").parse(rest)?;
-    Ok((rest, make_quantity_ge(QuantityRef::CounterAddedThisTurn, 1)))
+    let (rest, qty) = nom_quantity::parse_counter_added_this_turn_condition(input)?;
+    Ok((rest, make_quantity_ge(qty, 1)))
 }
 
 /// Parse negated event-state conditions: "you didn't cast a spell this turn",
@@ -2069,6 +2066,36 @@ mod tests {
         let (rest, c) = parse_condition("as long as ~ is tapped").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(c, StaticCondition::SourceIsTapped));
+    }
+
+    #[test]
+    fn parse_condition_as_long_as_counter_added_this_turn_uses_typed_quantity() {
+        let (rest, c) = parse_condition(
+            "as long as you've put one or more +1/+1 counters on a creature this turn",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 1 });
+                assert_eq!(
+                    lhs,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::CounterAddedThisTurn {
+                            actor: crate::types::ability::CountScope::Controller,
+                            counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                            target: TargetFilter::Typed(TypedFilter::creature()),
+                        },
+                    }
+                );
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
     }
 
     #[test]

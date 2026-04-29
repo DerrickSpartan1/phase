@@ -209,28 +209,32 @@ pub(crate) fn add_connive_counters(
     }
 
     let proposed = ProposedEvent::AddCounter {
+        actor: state
+            .objects
+            .get(&conniver_id)
+            .map(|obj| obj.controller)
+            .unwrap_or(crate::types::player::PlayerId(0)),
         object_id: conniver_id,
         counter_type: CounterType::Plus1Plus1,
         count,
         applied: HashSet::new(),
     };
     if let ReplacementResult::Execute(ProposedEvent::AddCounter {
+        actor,
         object_id,
         counter_type,
         count: final_count,
         ..
     }) = replacement::replace_event(state, proposed, events)
     {
-        if let Some(obj) = state.objects.get_mut(&object_id) {
-            let entry = obj.counters.entry(counter_type.clone()).or_insert(0);
-            *entry += final_count;
-            state.layers_dirty = true;
-        }
-        events.push(GameEvent::CounterAdded {
+        super::counters::apply_counter_addition(
+            state,
+            actor,
             object_id,
             counter_type,
-            count: final_count,
-        });
+            final_count,
+            events,
+        );
     }
 }
 

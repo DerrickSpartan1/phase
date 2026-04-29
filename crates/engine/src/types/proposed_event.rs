@@ -147,6 +147,8 @@ pub enum ProposedEvent {
         applied: HashSet<ReplacementId>,
     },
     AddCounter {
+        #[serde(default)]
+        actor: PlayerId,
         object_id: ObjectId,
         counter_type: CounterType,
         count: u32,
@@ -440,6 +442,7 @@ mod tests {
                 applied: HashSet::new(),
             },
             ProposedEvent::AddCounter {
+                actor: PlayerId(0),
                 object_id: ObjectId(1),
                 counter_type: CounterType::Plus1Plus1,
                 count: 1,

@@ -8,8 +8,9 @@ use std::collections::HashSet;
 
 use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
 use crate::game::filter::{
-    matches_target_filter, matches_target_filter_on_zone_change_record,
-    spell_record_matches_filter, type_filter_matches, FilterContext,
+    matches_target_filter, matches_target_filter_on_counter_added_record,
+    matches_target_filter_on_zone_change_record, spell_record_matches_filter, type_filter_matches,
+    FilterContext,
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
@@ -18,7 +19,7 @@ use crate::types::ability::{
     RoundingMode, TargetFilter, TargetRef, TypeFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
-use crate::types::counter::parse_counter_type;
+use crate::types::counter::{parse_counter_type, CounterMatch, CounterType};
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost};
@@ -1234,17 +1235,28 @@ fn resolve_ref(
         }
         // CR 117.1: Total spells cast last turn (by any player).
         QuantityRef::SpellsCastLastTurn => state.spells_cast_last_turn.map_or(0, i32::from),
-        // CR 122.1: Whether the controller added any counter to any permanent this turn.
-        QuantityRef::CounterAddedThisTurn => {
-            if state
-                .players_who_added_counter_this_turn
-                .contains(&controller)
-            {
-                1
-            } else {
-                0
-            }
-        }
+        // CR 122.1 + CR 122.6: Count counters put this turn by the scoped
+        // actor onto objects matching event-time recipient characteristics.
+        QuantityRef::CounterAddedThisTurn {
+            actor,
+            counters,
+            target,
+        } => u32_to_i32_saturating(
+            state
+                .counter_added_this_turn
+                .iter()
+                .filter(|record| {
+                    counter_added_actor_matches(actor, controller, record.actor)
+                        && counter_match_matches(counters, &record.counter_type)
+                        && matches_target_filter_on_counter_added_record(
+                            state,
+                            record,
+                            target,
+                            &filter_ctx,
+                        )
+                })
+                .fold(0, |total: u32, record| total.saturating_add(record.count)),
+        ),
         // CR 701.9 + CR 603.4: Whether any opponent of the controller discarded
         // a card this turn. Mirrors `LifeLostThisTurn { Opponent { Sum } }`
         // semantics — scans the per-turn discard set for any player != controller.
@@ -1356,6 +1368,21 @@ fn scoped_players<'a>(
         CountScope::All => true,
         CountScope::Opponents => p.id != controller,
     })
+}
+
+fn counter_added_actor_matches(scope: &CountScope, controller: PlayerId, actor: PlayerId) -> bool {
+    match scope {
+        CountScope::Controller => actor == controller,
+        CountScope::All => true,
+        CountScope::Opponents => actor != controller,
+    }
+}
+
+fn counter_match_matches(counter_match: &CounterMatch, counter_type: &CounterType) -> bool {
+    match counter_match {
+        CounterMatch::Any => true,
+        CounterMatch::OfType(expected) => expected == counter_type,
+    }
 }
 
 /// Resolve an object scope to a live object.
@@ -1947,6 +1974,88 @@ mod tests {
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 1);
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(0)), 0);
+    }
+
+    #[test]
+    fn counter_added_this_turn_quantity_counts_by_actor_counter_and_recipient_filter() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let friendly = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Friendly Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let opposing = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Opposing Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&friendly)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+        state
+            .objects
+            .get_mut(&opposing)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let mut events = Vec::new();
+        crate::game::effects::counters::apply_counter_addition(
+            &mut state,
+            PlayerId(0),
+            friendly,
+            CounterType::Plus1Plus1,
+            2,
+            &mut events,
+        );
+        crate::game::effects::counters::apply_counter_addition(
+            &mut state,
+            PlayerId(0),
+            opposing,
+            CounterType::Plus1Plus1,
+            3,
+            &mut events,
+        );
+        crate::game::effects::counters::apply_counter_addition(
+            &mut state,
+            PlayerId(1),
+            friendly,
+            CounterType::Plus1Plus1,
+            5,
+            &mut events,
+        );
+        crate::game::effects::counters::apply_counter_addition(
+            &mut state,
+            PlayerId(0),
+            friendly,
+            CounterType::Loyalty,
+            7,
+            &mut events,
+        );
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::CounterAddedThisTurn {
+                actor: CountScope::Controller,
+                counters: CounterMatch::OfType(CounterType::Plus1Plus1),
+                target: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        };
+
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source_id), 2);
     }
 
     /// CR 122.1: PlayerCounter resolves controller scope from the named player.

@@ -2669,7 +2669,7 @@ fn apply_action(
                     ));
                 }
             }
-            effects::proliferate::apply_proliferate(state, &targets, &mut events);
+            effects::proliferate::apply_proliferate(state, p, &targets, &mut events);
             events.push(GameEvent::EffectResolved {
                 kind: crate::types::ability::EffectKind::Proliferate,
                 source_id: ObjectId(0), // Source not tracked through choice state

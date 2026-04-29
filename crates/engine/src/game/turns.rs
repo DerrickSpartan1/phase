@@ -234,7 +234,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.creatures_attacked_this_turn.clear();
     state.creatures_blocked_this_turn.clear();
     state.players_who_created_token_this_turn.clear();
-    state.players_who_added_counter_this_turn.clear();
+    state.counter_added_this_turn.clear();
     state.players_who_discarded_card_this_turn.clear();
     state.players_who_sacrificed_artifact_this_turn.clear();
     state.zone_changes_this_turn.clear();
@@ -911,6 +911,7 @@ fn add_lore_counters_to_sagas(state: &mut GameState, events: &mut Vec<GameEvent>
     for saga_id in saga_ids {
         super::effects::counters::add_counter_with_replacement(
             state,
+            active,
             saga_id,
             CounterType::Lore,
             1,
@@ -1631,6 +1632,22 @@ mod tests {
         state.lands_played_this_turn = 1;
         state.players[0].has_drawn_this_turn = true;
         state.players[0].lands_played_this_turn = 1;
+        let object_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Counter Test".to_string(),
+            Zone::Battlefield,
+        );
+        crate::game::effects::counters::apply_counter_addition(
+            &mut state,
+            PlayerId(0),
+            object_id,
+            crate::types::counter::CounterType::Plus1Plus1,
+            1,
+            &mut Vec::new(),
+        );
+        assert_eq!(state.counter_added_this_turn.len(), 1);
 
         let mut events = Vec::new();
         start_next_turn(&mut state, &mut events);
@@ -1638,6 +1655,7 @@ mod tests {
         assert_eq!(state.lands_played_this_turn, 0);
         assert!(!state.players[0].has_drawn_this_turn);
         assert_eq!(state.players[0].lands_played_this_turn, 0);
+        assert!(state.counter_added_this_turn.is_empty());
     }
 
     #[test]

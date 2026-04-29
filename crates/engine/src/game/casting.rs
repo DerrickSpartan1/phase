@@ -3499,6 +3499,7 @@ pub fn pay_ability_cost(
                 std::cmp::Ordering::Greater => {
                     super::effects::counters::add_counter_with_replacement(
                         state,
+                        player,
                         source_id,
                         crate::types::counter::CounterType::Loyalty,
                         amount as u32,

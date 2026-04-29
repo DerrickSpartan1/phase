@@ -42,7 +42,14 @@ pub fn resolve(
 
     // CR 701.47a: Put N +1/+1 counters on the chosen Army.
     if n > 0 {
-        add_counter_with_replacement(state, target_id, CounterType::Plus1Plus1, n, events);
+        add_counter_with_replacement(
+            state,
+            ability.controller,
+            target_id,
+            CounterType::Plus1Plus1,
+            n,
+            events,
+        );
     }
 
     // CR 701.47a: If it isn't a [subtype], it becomes a [subtype] in addition to its other types.
