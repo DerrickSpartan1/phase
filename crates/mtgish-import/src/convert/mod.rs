@@ -1213,6 +1213,20 @@ pub(crate) fn build_ability_from_actions(
         // CR 608.2c: Linear effect chain — legacy path.
         A::Linear { effects } => build_ability_chain(kind, cost, effects),
 
+        // CR 601.2d: Distributed effects use the same effect chain as
+        // ordinary damage/counter effects, plus ability-level metadata that
+        // drives target selection and distribution before resolution.
+        A::Distributed {
+            effects,
+            multi_target,
+            distribute,
+        } => {
+            let mut ability = build_ability_chain(kind, cost, effects)?;
+            ability.multi_target = Some(multi_target);
+            ability.distribute = Some(distribute);
+            Ok(ability)
+        }
+
         // CR 608.2c + CR 700.4: Linear chain with mid-list conditional gates.
         // Each segment becomes one or more AbilityDefinition links; the head
         // AD of each segment carries the segment's `condition` (and

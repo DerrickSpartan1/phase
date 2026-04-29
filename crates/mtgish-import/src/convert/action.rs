@@ -9,10 +9,11 @@
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChoiceType,
     ContinuousModification, ControllerRef, DelayedTriggerCondition, Duration, Effect,
-    GainLifePlayer, LibraryPosition, ManaSpendRestriction, ModalSelectionConstraint, PlayerFilter,
-    PlayerScope, QuantityExpr, SearchSelectionConstraint, StaticDefinition, TargetFilter,
-    TriggerDefinition, TypedFilter,
+    GainLifePlayer, LibraryPosition, ManaSpendRestriction, ModalSelectionConstraint,
+    MultiTargetSpec, PlayerFilter, PlayerScope, QuantityExpr, SearchSelectionConstraint,
+    StaticDefinition, TargetFilter, TriggerDefinition, TypedFilter,
 };
+use engine::types::game_state::DistributionUnit;
 use engine::types::mana::ManaCost;
 use engine::types::player::PlayerId;
 use engine::types::statics::StaticMode;
@@ -31,9 +32,9 @@ use crate::convert::token;
 use crate::convert::trigger as trigger_mod;
 use crate::schema::types::{
     Action, Actions, CardInExile, CardInGraveyard, CardType, CardsInHand, CounterType,
-    CreatureType, DamageRecipient, FutureTrigger, GameNumber, GroupFilter, ManaUseModifier, Player,
-    Players, ReplacementActionWouldEnter, RevealTheTopNumberCardsOfLibraryAction, Rule,
-    SearchLibraryAction, Spell, Spells, TokenFlag,
+    CreatureType, DamageRecipient, DistributedTarget, Distribution, FutureTrigger, GameNumber,
+    GroupFilter, ManaUseModifier, Player, Players, ReplacementActionWouldEnter,
+    RevealTheTopNumberCardsOfLibraryAction, Rule, SearchLibraryAction, Spell, Spells, TokenFlag,
 };
 
 /// Modal-choice arity for `ActionsConversion::Modal`. Mirrors the engine's
@@ -118,6 +119,15 @@ pub struct ChainSegment {
 pub enum ActionsConversion {
     /// CR 608.2c: Sequential effect chain — the legacy `convert_list` shape.
     Linear { effects: Vec<Effect> },
+    /// CR 601.2d: Distributed target wrapper. The effect body is still a
+    /// normal chain, but the head `AbilityDefinition` must carry the
+    /// multi-target and distribution metadata so casting can collect a legal
+    /// distribution before resolution.
+    Distributed {
+        effects: Vec<Effect>,
+        multi_target: MultiTargetSpec,
+        distribute: DistributionUnit,
+    },
     /// CR 608.2c + CR 700.4: Sequential chain with mid-list conditional gates.
     /// Each segment is a contiguous run of effects that share an optional
     /// `condition`. The chain is rendered by linking segments via
@@ -199,6 +209,13 @@ pub fn convert_actions(actions: &Actions) -> ConvResult<ActionsConversion> {
     // Outer Actions-level wrappers: Modal_*. Future: Targeted_Modal,
     // Modal_ChooseTwo, etc.
     match actions {
+        // CR 601.2d: Distributed damage/counters choose targets during casting,
+        // then assign quantities among those targets. The engine already owns
+        // that metadata on `AbilityDefinition`; keep it at this layer rather
+        // than lowering it into a lossy standalone `Effect`.
+        Actions::TargetedDistributed(targets, distribution, inner) => {
+            return convert_targeted_distributed(targets, distribution, inner);
+        }
         // CR 700.2: "Choose one —" — each branch is a Modal mode.
         Actions::Modal_ChooseOne(modes) => {
             return convert_modal(modes, ChooseSpec::One, "Modal_ChooseOne");
@@ -744,6 +761,149 @@ pub fn convert_actions(actions: &Actions) -> ConvResult<ActionsConversion> {
     Ok(ActionsConversion::Linear {
         effects: convert_list(actions)?,
     })
+}
+
+/// CR 601.2d: Lower an mtgish distributed-target wrapper into the engine's
+/// native `AbilityDefinition::{multi_target, distribute}` metadata plus the
+/// underlying damage effect. The wrapper is the single authority for the
+/// distribution amount and target arity, so the distributed leaf actions are
+/// only accepted in this context.
+fn convert_targeted_distributed(
+    targets: &[DistributedTarget],
+    distribution: &Distribution,
+    inner: &Actions,
+) -> ConvResult<ActionsConversion> {
+    let amount = distribution_quantity(distribution)?;
+    let (target, multi_target) = distributed_target_to_target_filter(targets)?;
+    let action = match inner {
+        Actions::ActionList(actions) if actions.len() == 1 => &actions[0],
+        other => {
+            return Err(ConversionGap::MalformedIdiom {
+                idiom: "Actions::TargetedDistributed",
+                path: String::new(),
+                detail: format!(
+                    "expected single distributed action, got {}",
+                    actions_tag(other)
+                ),
+            });
+        }
+    };
+
+    match action {
+        Action::SpellDealsDistributedDamage(source) if matches!(**source, Spell::ThisSpell) => {
+            Ok(ActionsConversion::Distributed {
+                effects: vec![Effect::DealDamage {
+                    amount,
+                    target,
+                    damage_source: None,
+                }],
+                multi_target,
+                distribute: DistributionUnit::Damage,
+            })
+        }
+        Action::PutDistributedCounters(counter_type) => {
+            let counter_type = counter_type_name(counter_type);
+            Ok(ActionsConversion::Distributed {
+                effects: vec![Effect::PutCounter {
+                    counter_type: counter_type.clone(),
+                    count: amount,
+                    target,
+                }],
+                multi_target,
+                distribute: DistributionUnit::Counters(counter_type),
+            })
+        }
+        Action::SpellDealsDistributedDamage(source) => {
+            Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "Effect::DealDamage.damage_source",
+                needed_variant: format!("distributed spell damage source: {}", spell_tag(source)),
+            })
+        }
+        other => Err(ConversionGap::MalformedIdiom {
+            idiom: "Actions::TargetedDistributed",
+            path: String::new(),
+            detail: format!(
+                "unsupported distributed action head: {}",
+                variant_tag(other)
+            ),
+        }),
+    }
+}
+
+fn distribution_quantity(distribution: &Distribution) -> ConvResult<QuantityExpr> {
+    match distribution {
+        Distribution::DistributeNumberAmongTargets(n)
+        | Distribution::DistributeNumberAmongAnyTargets(n) => quantity::convert(n),
+        Distribution::IfElse(..) => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "AbilityDefinition::distribute",
+            needed_variant: "conditional distribution amount".into(),
+        }),
+    }
+}
+
+fn distributed_target_to_target_filter(
+    targets: &[DistributedTarget],
+) -> ConvResult<(TargetFilter, MultiTargetSpec)> {
+    let [target] = targets else {
+        return Err(ConversionGap::MalformedIdiom {
+            idiom: "Actions::TargetedDistributed/targets",
+            path: String::new(),
+            detail: format!("expected one distributed target group, got {}", targets.len()),
+        });
+    };
+
+    let fixed_max = |n: &GameNumber, idiom: &'static str| -> ConvResult<usize> {
+        match quantity::convert(n)? {
+            QuantityExpr::Fixed { value } if value >= 0 => Ok(value as usize),
+            other => Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "MultiTargetSpec",
+                needed_variant: format!("{idiom} dynamic target count: {other:?}"),
+            }),
+        }
+    };
+
+    match target {
+        DistributedTarget::BetweenOneAndNumberAnyTargets(n) => Ok((
+            TargetFilter::Any,
+            MultiTargetSpec {
+                min: 1,
+                max: Some(fixed_max(n, "BetweenOneAndNumberAnyTargets")?),
+            },
+        )),
+        DistributedTarget::UptoNumberAnyTargets(n) => Ok((
+            TargetFilter::Any,
+            MultiTargetSpec {
+                min: 0,
+                max: Some(fixed_max(n, "UptoNumberAnyTargets")?),
+            },
+        )),
+        DistributedTarget::AnyNumberOfAnyTargets => Ok((
+            TargetFilter::Any,
+            MultiTargetSpec { min: 1, max: None },
+        )),
+        DistributedTarget::BetweenOneAndNumberTargetPermanents(n, permanents) => Ok((
+            convert_permanents(permanents)?,
+            MultiTargetSpec {
+                min: 1,
+                max: Some(fixed_max(n, "BetweenOneAndNumberTargetPermanents")?),
+            },
+        )),
+        DistributedTarget::UptoNumberTargetPermanents(n, permanents) => Ok((
+            convert_permanents(permanents)?,
+            MultiTargetSpec {
+                min: 0,
+                max: Some(fixed_max(n, "UptoNumberTargetPermanents")?),
+            },
+        )),
+        DistributedTarget::AnyNumberOfTargetPermanents(permanents) => Ok((
+            convert_permanents(permanents)?,
+            MultiTargetSpec { min: 1, max: None },
+        )),
+        other => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "MultiTargetSpec",
+            needed_variant: format!("DistributedTarget::{}", distributed_target_tag(other)),
+        }),
+    }
 }
 
 /// CR 115.1 + CR 601.2c: Unwrap `Actions::Targeted` and
@@ -5329,6 +5489,24 @@ fn spells_tag(s: &Spells) -> String {
         .unwrap_or_else(|| "<unknown>".to_string())
 }
 
+fn spell_tag(s: &Spell) -> String {
+    serde_json::to_value(s)
+        .ok()
+        .and_then(|v| v.get("_Spell").and_then(|t| t.as_str()).map(String::from))
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+fn distributed_target_tag(t: &DistributedTarget) -> String {
+    serde_json::to_value(t)
+        .ok()
+        .and_then(|v| {
+            v.get("_DistributedTarget")
+                .and_then(|tag| tag.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -5425,4 +5603,108 @@ mod tests {
             },
         );
     }
+
+    #[test]
+    fn targeted_distributed_spell_damage_sets_ability_metadata() {
+        let actions = Actions::TargetedDistributed(
+            vec![DistributedTarget::BetweenOneAndNumberAnyTargets(Box::new(
+                GameNumber::Integer(3),
+            ))],
+            Box::new(Distribution::DistributeNumberAmongTargets(Box::new(
+                GameNumber::Integer(3),
+            ))),
+            Box::new(Actions::ActionList(vec![
+                Action::SpellDealsDistributedDamage(Box::new(Spell::ThisSpell)),
+            ])),
+        );
+
+        let conv = convert_actions(&actions).unwrap();
+        let ability = build_ability_from_actions(AbilityKind::Spell, None, conv).unwrap();
+
+        assert_eq!(
+            ability.multi_target,
+            Some(MultiTargetSpec {
+                min: 1,
+                max: Some(3),
+            })
+        );
+        assert_eq!(ability.distribute, Some(DistributionUnit::Damage));
+        let Effect::DealDamage { amount, target, .. } = ability.effect.as_ref() else {
+            panic!("expected DealDamage, got {:?}", ability.effect);
+        };
+        assert_eq!(*amount, QuantityExpr::Fixed { value: 3 });
+        assert_eq!(*target, TargetFilter::Any);
+    }
+
+    #[test]
+    fn targeted_distributed_permanent_damage_preserves_target_filter() {
+        let actions = Actions::TargetedDistributed(
+            vec![DistributedTarget::BetweenOneAndNumberTargetPermanents(
+                Box::new(GameNumber::Integer(3)),
+                Box::new(Permanents::IsCardtype(CardType::Creature)),
+            )],
+            Box::new(Distribution::DistributeNumberAmongTargets(Box::new(
+                GameNumber::Integer(3),
+            ))),
+            Box::new(Actions::ActionList(vec![
+                Action::SpellDealsDistributedDamage(Box::new(Spell::ThisSpell)),
+            ])),
+        );
+
+        let conv = convert_actions(&actions).unwrap();
+        let ability = build_ability_from_actions(AbilityKind::Spell, None, conv).unwrap();
+
+        let Effect::DealDamage { target, .. } = ability.effect.as_ref() else {
+            panic!("expected DealDamage, got {:?}", ability.effect);
+        };
+        let TargetFilter::Typed(filter) = target else {
+            panic!("expected typed creature filter, got {target:?}");
+        };
+        assert!(filter
+            .type_filters
+            .iter()
+            .any(|filter| matches!(filter, TypeFilter::Creature)));
+    }
+
+    #[test]
+    fn targeted_distributed_counters_sets_counter_distribution() {
+        let actions = Actions::TargetedDistributed(
+            vec![DistributedTarget::UptoNumberTargetPermanents(
+                Box::new(GameNumber::Integer(4)),
+                Box::new(Permanents::IsCardtype(CardType::Creature)),
+            )],
+            Box::new(Distribution::DistributeNumberAmongTargets(Box::new(
+                GameNumber::Integer(4),
+            ))),
+            Box::new(Actions::ActionList(vec![Action::PutDistributedCounters(
+                CounterType::PTCounter(1, 1),
+            )])),
+        );
+
+        let conv = convert_actions(&actions).unwrap();
+        let ability = build_ability_from_actions(AbilityKind::Spell, None, conv).unwrap();
+
+        assert_eq!(
+            ability.multi_target,
+            Some(MultiTargetSpec {
+                min: 0,
+                max: Some(4),
+            })
+        );
+        assert_eq!(
+            ability.distribute,
+            Some(DistributionUnit::Counters("+1/+1".to_string()))
+        );
+        let Effect::PutCounter {
+            counter_type,
+            count,
+            ..
+        } = ability.effect.as_ref()
+        else {
+            panic!("expected PutCounter, got {:?}", ability.effect);
+        };
+        assert_eq!(counter_type, "+1/+1");
+        assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+    }
+
 }
