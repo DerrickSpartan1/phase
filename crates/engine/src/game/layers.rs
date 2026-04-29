@@ -545,19 +545,22 @@ pub fn evaluate_layers(state: &mut GameState) {
             continue;
         }
 
-        if layer_bucket.is_empty() {
-            continue;
+        if !layer_bucket.is_empty() {
+            let layer_effects: Vec<&ActiveContinuousEffect> = layer_bucket.iter().collect();
+
+            let ordered = if layer.has_dependency_ordering() {
+                order_with_dependencies(&layer_effects, state)
+            } else {
+                order_by_timestamp(&layer_effects)
+            };
+
+            for effect in &ordered {
+                apply_continuous_effect(state, effect);
+            }
         }
-        let layer_effects: Vec<&ActiveContinuousEffect> = layer_bucket.iter().collect();
 
-        let ordered = if layer.has_dependency_ordering() {
-            order_with_dependencies(&layer_effects, state)
-        } else {
-            order_by_timestamp(&layer_effects)
-        };
-
-        for effect in &ordered {
-            apply_continuous_effect(state, effect);
+        if *layer == Layer::Type {
+            apply_intrinsic_basic_land_mana_abilities(state, &bf_ids);
         }
     }
 
@@ -1310,11 +1313,6 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                 if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
                     obj.card_types.subtypes.push(subtype.clone());
                 }
-                // CR 305.6: A land that gains a basic land type also gains the
-                // appropriate mana ability for that type. When a type is ADDED
-                // (as opposed to replaced via SetBasicLandType), the land keeps
-                // its existing abilities AND gains the basic mana ability.
-                inject_basic_mana_ability_for_subtype(obj, subtype);
             }
             ContinuousModification::RemoveSubtype { ref subtype } => {
                 obj.card_types.subtypes.retain(|s| s != subtype);
@@ -1353,11 +1351,8 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                 for land_type in BasicLandType::all() {
                     let subtype = land_type.as_subtype_str().to_string();
                     if !obj.card_types.subtypes.iter().any(|s| s == &subtype) {
-                        obj.card_types.subtypes.push(subtype.clone());
+                        obj.card_types.subtypes.push(subtype);
                     }
-                    // CR 305.6: Inject the basic mana ability for each basic
-                    // land type that was added.
-                    inject_basic_mana_ability_for_subtype(obj, &subtype);
                 }
             }
             ContinuousModification::AddChosenSubtype { .. } => {
@@ -1365,8 +1360,6 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
                     if !obj.card_types.subtypes.iter().any(|s| s == subtype) {
                         obj.card_types.subtypes.push(subtype.clone());
                     }
-                    // CR 305.6: A chosen basic land type grants its mana ability.
-                    inject_basic_mana_ability_for_subtype(obj, subtype);
                 }
             }
             // CR 105.3: Set the object's color to the chosen color.
@@ -1505,62 +1498,73 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     }
 }
 
-/// CR 305.6: Inject the intrinsic basic-land mana ability for `subtype` when it
-/// is added additively to an object. No-op unless the object is a land and the
-/// subtype names a basic land type. Idempotent: if the object already has an
-/// activated mana ability producing only the matching color via a plain `{T}`
-/// cost (whether printed or previously injected by another layer pass), the
-/// injection is skipped so double-Urborg or Urborg + basic Swamp does not
-/// duplicate the ability.
-fn inject_basic_mana_ability_for_subtype(
+/// CR 305.6: After layer 4 establishes final land types, derive each land's
+/// intrinsic basic-land mana abilities before layer 6 ability effects apply.
+fn apply_intrinsic_basic_land_mana_abilities(state: &mut GameState, battlefield_ids: &[ObjectId]) {
+    for &id in battlefield_ids {
+        let Some(obj) = state.objects.get_mut(&id) else {
+            continue;
+        };
+        if !obj.card_types.core_types.contains(&CoreType::Land) {
+            continue;
+        }
+
+        let land_types: Vec<BasicLandType> = obj
+            .card_types
+            .subtypes
+            .iter()
+            .filter_map(|subtype| subtype.parse().ok())
+            .collect();
+        for land_type in land_types {
+            add_basic_land_mana_ability(obj, land_type);
+        }
+    }
+}
+
+fn add_basic_land_mana_ability(
     obj: &mut crate::game::game_object::GameObject,
-    subtype: &str,
+    land_type: BasicLandType,
 ) {
-    if !obj.card_types.core_types.contains(&CoreType::Land) {
-        return;
-    }
-    let Ok(land_type) = subtype.parse::<BasicLandType>() else {
-        return;
-    };
     let color = land_type.mana_color();
-
-    // Idempotent: skip if an existing `{T}: Add {color}` ability is already
-    // present (base printed ability or a prior injection).
-    let already_present = obj.abilities.iter().any(|ability| {
-        if ability.kind != AbilityKind::Activated {
-            return false;
-        }
-        if !matches!(ability.cost, Some(AbilityCost::Tap)) {
-            return false;
-        }
-        matches!(
-            &*ability.effect,
-            Effect::Mana {
-                produced: ManaProduction::Fixed { colors, .. },
-                ..
-            } if colors.as_slice() == [color]
-        )
-    });
-    if already_present {
+    if has_basic_land_mana_ability(obj, color) {
         return;
     }
 
-    Arc::make_mut(&mut obj.abilities).push(
-        AbilityDefinition::new(
-            AbilityKind::Activated,
-            Effect::Mana {
-                produced: ManaProduction::Fixed {
-                    colors: vec![color],
-                    contribution: ManaContribution::Base,
-                },
-                restrictions: Vec::new(),
-                grants: Vec::new(),
-                expiry: None,
-                target: None,
+    Arc::make_mut(&mut obj.abilities).push(basic_land_mana_ability(color));
+}
+
+fn has_basic_land_mana_ability(
+    obj: &crate::game::game_object::GameObject,
+    color: crate::types::mana::ManaColor,
+) -> bool {
+    obj.abilities.iter().any(|ability| {
+        ability.kind == AbilityKind::Activated
+            && matches!(ability.cost, Some(AbilityCost::Tap))
+            && matches!(
+                &*ability.effect,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed { colors, .. },
+                    ..
+                } if colors.as_slice() == [color]
+            )
+    })
+}
+
+fn basic_land_mana_ability(color: crate::types::mana::ManaColor) -> AbilityDefinition {
+    AbilityDefinition::new(
+        AbilityKind::Activated,
+        Effect::Mana {
+            produced: ManaProduction::Fixed {
+                colors: vec![color],
+                contribution: ManaContribution::Base,
             },
-        )
-        .cost(AbilityCost::Tap),
-    );
+            restrictions: Vec::new(),
+            grants: Vec::new(),
+            expiry: None,
+            target: None,
+        },
+    )
+    .cost(AbilityCost::Tap)
 }
 
 pub(crate) fn compute_current_copiable_values(
@@ -3825,7 +3829,7 @@ mod tests {
     }
 
     #[test]
-    fn set_basic_land_type_removes_rules_text_abilities() {
+    fn set_basic_land_type_replaces_rules_text_with_intrinsic_mana_ability() {
         // CR 305.7: A land whose type is set loses rules-text abilities.
         let mut state = setup();
         let p0 = PlayerId(0);
@@ -3872,8 +3876,16 @@ mod tests {
 
         let land = state.objects.get(&land_id).unwrap();
         assert!(
-            land.abilities.is_empty(),
+            !land
+                .abilities
+                .iter()
+                .any(|ability| matches!(&*ability.effect, Effect::GainLife { .. })),
             "CR 305.7: Rules-text abilities should be removed"
+        );
+        assert_eq!(
+            count_mana_abilities(land, ManaColor::Red),
+            1,
+            "CR 305.7: SetBasicLandType Mountain should grant the intrinsic red mana ability"
         );
         assert!(land.card_types.subtypes.contains(&"Mountain".to_string()));
         assert!(
@@ -3995,6 +4007,51 @@ mod tests {
                 "Missing basic land type: {name}"
             );
         }
+    }
+
+    #[test]
+    fn remove_all_abilities_removes_basic_land_intrinsic_mana_ability() {
+        // CR 613.1d + CR 613.1f: basic land intrinsic abilities are derived
+        // after type effects, then ordinary ability-removing effects in layer 6
+        // can remove them.
+        let mut state = setup();
+        let p0 = PlayerId(0);
+
+        let land_id = make_land(&mut state, "Forest", p0);
+        {
+            let obj = state.objects.get_mut(&land_id).unwrap();
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.base_card_types = obj.card_types.clone();
+        }
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            p0,
+            "Blanker".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&source_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.base_card_types = obj.card_types.clone();
+            obj.timestamp = ts;
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(TypedFilter::land()))
+                    .modifications(vec![ContinuousModification::RemoveAllAbilities]),
+            );
+        }
+
+        evaluate_layers(&mut state);
+
+        let land = state.objects.get(&land_id).unwrap();
+        assert_eq!(
+            count_mana_abilities(land, ManaColor::Green),
+            0,
+            "Layer 6 RemoveAllAbilities must remove the derived Forest mana ability"
+        );
     }
 
     #[test]
