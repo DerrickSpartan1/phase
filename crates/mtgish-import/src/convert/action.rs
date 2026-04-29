@@ -74,7 +74,7 @@ pub enum SegmentOptional {
     Mandatory,
     Optional,
     OptionalWithCost {
-        cost: AbilityCost,
+        cost: Box<AbilityCost>,
         payer: TargetFilter,
     },
 }
@@ -1324,7 +1324,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             effects: body_effects,
                             else_effects: None,
                             optional: SegmentOptional::OptionalWithCost {
-                                cost,
+                                cost: Box::new(cost),
                                 payer: TargetFilter::Controller,
                             },
                             player_scope: None,
@@ -1349,7 +1349,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             effects: then_effects,
                             else_effects: Some(else_effects),
                             optional: SegmentOptional::OptionalWithCost {
-                                cost,
+                                cost: Box::new(cost),
                                 payer: TargetFilter::Controller,
                             },
                             player_scope: None,
@@ -1383,7 +1383,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             effects: body_effects,
                             else_effects: None,
                             optional: SegmentOptional::OptionalWithCost {
-                                cost,
+                                cost: Box::new(cost),
                                 payer: TargetFilter::Controller,
                             },
                             player_scope: None,
@@ -1434,7 +1434,10 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             condition: None,
                             effects: body_effects,
                             else_effects: None,
-                            optional: SegmentOptional::OptionalWithCost { cost, payer },
+                            optional: SegmentOptional::OptionalWithCost {
+                                cost: Box::new(cost),
+                                payer,
+                            },
                             player_scope: scope,
                         });
                         i += 2;
@@ -1453,7 +1456,10 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             condition: None,
                             effects: then_effects,
                             else_effects: Some(else_effects),
-                            optional: SegmentOptional::OptionalWithCost { cost, payer },
+                            optional: SegmentOptional::OptionalWithCost {
+                                cost: Box::new(cost),
+                                payer,
+                            },
                             player_scope: scope,
                         });
                         i += 2;
@@ -1478,7 +1484,10 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             }),
                             effects: body_effects,
                             else_effects: None,
-                            optional: SegmentOptional::OptionalWithCost { cost, payer },
+                            optional: SegmentOptional::OptionalWithCost {
+                                cost: Box::new(cost),
+                                payer,
+                            },
                             player_scope: scope,
                         });
                         i += 2;

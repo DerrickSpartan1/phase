@@ -11,6 +11,7 @@
 //! `canonicalize` reduces a `Value` to the smallest equivalent form so the
 //! classifier compares only meaningful content:
 //! - Object keys sorted (`BTreeMap`).
+//! - Diagnostic/display descriptions stripped recursively.
 //! - Default-valued fields stripped (`null`, empty `""`, empty `[]`,
 //!   empty `{}`, `false`).
 //! - List ordering preserved — the diff layer applies set-vs-positional
@@ -44,6 +45,9 @@ fn canonicalize_object(map: Map<String, Value>) -> Value {
     // refuse HashMap throughout the diff path.
     let mut sorted: BTreeMap<String, Value> = BTreeMap::new();
     for (k, v) in map {
+        if k == "description" {
+            continue;
+        }
         let canon = canonicalize(v);
         if is_default(&canon) {
             continue;
@@ -86,6 +90,7 @@ mod tests {
             "empty_vec": [],
             "empty_obj": {},
             "false_flag": false,
+            "description": "display text only",
             "true_flag": true,
             "zero": 0,
         });
@@ -115,9 +120,10 @@ mod tests {
         let input = json!({
             "outer": {
                 "inner_empty": [],
+                "description": "nested display text",
                 "inner_keep": {"b": 1, "a": 2}
             },
-            "list": [{"y": 0, "x": null, "z": "v"}]
+            "list": [{"y": 0, "x": null, "z": "v", "description": "nested list text"}]
         });
         let out = canonicalize(input);
         assert_eq!(
