@@ -5536,42 +5536,7 @@ fn parse_continuous_gets_has(
                 super::oracle_quantity::parse_for_each_clause_expr(for_each_clause)
             {
                 let mut modifications = Vec::new();
-                if p != 0 {
-                    let value = if p.abs() == 1 {
-                        if p > 0 {
-                            quantity.clone()
-                        } else {
-                            QuantityExpr::Multiply {
-                                factor: -1,
-                                inner: Box::new(quantity.clone()),
-                            }
-                        }
-                    } else {
-                        QuantityExpr::Multiply {
-                            factor: p,
-                            inner: Box::new(quantity.clone()),
-                        }
-                    };
-                    modifications.push(ContinuousModification::AddDynamicPower { value });
-                }
-                if t != 0 {
-                    let value = if t.abs() == 1 {
-                        if t > 0 {
-                            quantity
-                        } else {
-                            QuantityExpr::Multiply {
-                                factor: -1,
-                                inner: Box::new(quantity),
-                            }
-                        }
-                    } else {
-                        QuantityExpr::Multiply {
-                            factor: t,
-                            inner: Box::new(quantity),
-                        }
-                    };
-                    modifications.push(ContinuousModification::AddDynamicToughness { value });
-                }
+                push_dynamic_pt_modifications(&mut modifications, p, t, quantity);
                 if !modifications.is_empty() {
                     // Check for trailing "and has [keyword]" after the for-each clause
                     // e.g., "gets +1/+0 for each Mountain you control and has first strike"
@@ -5608,6 +5573,59 @@ fn parse_continuous_gets_has(
     )
 }
 
+fn push_dynamic_pt_modifications(
+    modifications: &mut Vec<ContinuousModification>,
+    power: i32,
+    toughness: i32,
+    quantity: QuantityExpr,
+) {
+    if power != 0 {
+        modifications.push(ContinuousModification::AddDynamicPower {
+            value: scale_pt_quantity(power, &quantity),
+        });
+    }
+    if toughness != 0 {
+        modifications.push(ContinuousModification::AddDynamicToughness {
+            value: scale_pt_quantity(toughness, &quantity),
+        });
+    }
+}
+
+fn scale_pt_quantity(amount: i32, quantity: &QuantityExpr) -> QuantityExpr {
+    match amount {
+        1 => quantity.clone(),
+        -1 => QuantityExpr::Multiply {
+            factor: -1,
+            inner: Box::new(quantity.clone()),
+        },
+        n => QuantityExpr::Multiply {
+            factor: n,
+            inner: Box::new(quantity.clone()),
+        },
+    }
+}
+
+fn parse_dynamic_for_each_pt_modifications(text: &str) -> Option<Vec<ContinuousModification>> {
+    let lower = text.to_lowercase();
+    let (for_each_with_marker, pt_text) = take_until::<_, _, VerboseError<&str>>("for each ")
+        .parse(lower.as_str())
+        .ok()?;
+    let (for_each_clause, _) = tag::<_, _, VerboseError<&str>>("for each ")
+        .parse(for_each_with_marker)
+        .ok()?;
+    let pt_text = pt_text.trim();
+    let pt_source = nom_tag_lower(pt_text, pt_text, "gets ")
+        .or_else(|| nom_tag_lower(pt_text, pt_text, "get "))?;
+    let (power, toughness) = parse_pt_mod(pt_source)?;
+    let quantity = super::oracle_quantity::parse_for_each_clause_expr(
+        strip_trailing_keyword_clause(for_each_clause.trim_end_matches('.')),
+    )?;
+
+    let mut modifications = Vec::new();
+    push_dynamic_pt_modifications(&mut modifications, power, toughness, quantity);
+    (!modifications.is_empty()).then_some(modifications)
+}
+
 pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModification> {
     // Strip "where X is [quantity]" before parsing modifications,
     // but only if the text doesn't contain quoted abilities (which have their
@@ -5628,7 +5646,9 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
         modifications.push(ContinuousModification::RemoveAllAbilities);
     }
 
-    if let Some(rest_tp) = nom_tag_tp(&tp, "gets ").or_else(|| nom_tag_tp(&tp, "get ")) {
+    if let Some(dynamic_mods) = parse_dynamic_for_each_pt_modifications(text_stripped) {
+        modifications.extend(dynamic_mods);
+    } else if let Some(rest_tp) = nom_tag_tp(&tp, "gets ").or_else(|| nom_tag_tp(&tp, "get ")) {
         let after = rest_tp.original.trim();
         if let Some((p, t)) = parse_pt_mod(after) {
             modifications.push(ContinuousModification::AddPower { value: p });
@@ -7483,7 +7503,7 @@ fn try_parse_scoped_must_attack_block(lower: &str, text: &str) -> Option<Vec<Sta
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{CountScope, TypeFilter, ZoneRef};
+    use crate::types::ability::{CardTypeSetSource, CountScope, TypeFilter, ZoneRef};
 
     /// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: "becomes a [subtype]*
     /// [core-type]+ in addition to its other types" must decompose into
@@ -8222,7 +8242,9 @@ mod tests {
             def.condition,
             Some(StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::DistinctCardTypesExiledBySource,
+                    qty: QuantityRef::DistinctCardTypes {
+                        source: CardTypeSetSource::ExiledBySource,
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 4 },
@@ -8714,9 +8736,11 @@ mod tests {
             .modifications
             .contains(&ContinuousModification::SetDynamicPower {
                 value: QuantityExpr::Ref {
-                    qty: QuantityRef::DistinctCardTypesInZone {
-                        zone: ZoneRef::Graveyard,
-                        scope: CountScope::All,
+                    qty: QuantityRef::DistinctCardTypes {
+                        source: CardTypeSetSource::Zone {
+                            zone: ZoneRef::Graveyard,
+                            scope: CountScope::All,
+                        },
                     },
                 },
             }));
@@ -8725,9 +8749,11 @@ mod tests {
             .contains(&ContinuousModification::SetDynamicToughness {
                 value: QuantityExpr::Offset {
                     inner: Box::new(QuantityExpr::Ref {
-                        qty: QuantityRef::DistinctCardTypesInZone {
-                            zone: ZoneRef::Graveyard,
-                            scope: CountScope::All,
+                        qty: QuantityRef::DistinctCardTypes {
+                            source: CardTypeSetSource::Zone {
+                                zone: ZoneRef::Graveyard,
+                                scope: CountScope::All,
+                            },
                         },
                     }),
                     offset: 1,
@@ -11652,9 +11678,12 @@ mod tests {
         match def.mode {
             StaticMode::ReduceCost {
                 dynamic_count:
-                    Some(QuantityRef::DistinctCardTypesInZone {
-                        zone: ZoneRef::Graveyard,
-                        scope,
+                    Some(QuantityRef::DistinctCardTypes {
+                        source:
+                            CardTypeSetSource::Zone {
+                                zone: ZoneRef::Graveyard,
+                                scope,
+                            },
                     }),
                 ..
             } => assert_eq!(scope, CountScope::Controller),

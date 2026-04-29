@@ -7,9 +7,9 @@
 //! strict-fails so the report surfaces it.
 
 use engine::types::ability::{
-    AbilityCondition, AggregateFunction, Comparator, ControllerRef, CountScope, FilterProp,
-    ParsedCondition, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
-    TriggerCondition, TypedFilter, ZoneRef,
+    AbilityCondition, AggregateFunction, CardTypeSetSource, Comparator, ControllerRef, CountScope,
+    FilterProp, ParsedCondition, PlayerScope, QuantityExpr, QuantityRef, StaticCondition,
+    TargetFilter, TriggerCondition, TypedFilter, ZoneRef,
 };
 use engine::types::card_type::CoreType;
 use engine::types::mana::ManaColor;
@@ -1461,9 +1461,11 @@ pub fn convert_player_predicate_trigger(
             let (comparator, rhs) = comparison_to_pair(cmp)?;
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::DistinctCardTypesInZone {
-                        zone: ZoneRef::Graveyard,
-                        scope: CountScope::Controller,
+                    qty: QuantityRef::DistinctCardTypes {
+                        source: CardTypeSetSource::Zone {
+                            zone: ZoneRef::Graveyard,
+                            scope: CountScope::Controller,
+                        },
                     },
                 },
                 comparator,
@@ -1477,9 +1479,9 @@ pub fn convert_player_predicate_trigger(
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::Devotion {
-                        colors: engine::types::ability::DevotionColors::Fixed(
-                            devotion_color_list(colors)?,
-                        ),
+                        colors: engine::types::ability::DevotionColors::Fixed(devotion_color_list(
+                            colors,
+                        )?),
                     },
                 },
                 comparator,
@@ -1739,9 +1741,11 @@ pub fn convert_player_predicate_ability(
             let (comparator, rhs) = comparison_to_pair(cmp)?;
             AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::DistinctCardTypesInZone {
-                        zone: ZoneRef::Graveyard,
-                        scope: CountScope::Controller,
+                    qty: QuantityRef::DistinctCardTypes {
+                        source: CardTypeSetSource::Zone {
+                            zone: ZoneRef::Graveyard,
+                            scope: CountScope::Controller,
+                        },
                     },
                 },
                 comparator,
@@ -1754,9 +1758,9 @@ pub fn convert_player_predicate_ability(
             AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::Devotion {
-                        colors: engine::types::ability::DevotionColors::Fixed(
-                            devotion_color_list(colors)?,
-                        ),
+                        colors: engine::types::ability::DevotionColors::Fixed(devotion_color_list(
+                            colors,
+                        )?),
                     },
                 },
                 comparator,
@@ -2052,9 +2056,11 @@ pub fn convert_player_predicate_static(
             let (comparator, rhs) = comparison_to_pair(cmp)?;
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::DistinctCardTypesInZone {
-                        zone: ZoneRef::Graveyard,
-                        scope: CountScope::Controller,
+                    qty: QuantityRef::DistinctCardTypes {
+                        source: CardTypeSetSource::Zone {
+                            zone: ZoneRef::Graveyard,
+                            scope: CountScope::Controller,
+                        },
                     },
                 },
                 comparator,
@@ -2067,9 +2073,9 @@ pub fn convert_player_predicate_static(
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::Devotion {
-                        colors: engine::types::ability::DevotionColors::Fixed(
-                            devotion_color_list(colors)?,
-                        ),
+                        colors: engine::types::ability::DevotionColors::Fixed(devotion_color_list(
+                            colors,
+                        )?),
                     },
                 },
                 comparator,
@@ -3113,7 +3119,9 @@ mod tests {
     fn devotion_condition_lowers_to_quantity_comparison() {
         let predicate = Players::DevotionToColorsIs(
             ColorList::Colors(vec![Color::Blue, Color::Black]),
-            Box::new(Comparison::GreaterThanOrEqualTo(Box::new(GameNumber::Integer(7)))),
+            Box::new(Comparison::GreaterThanOrEqualTo(Box::new(
+                GameNumber::Integer(7),
+            ))),
         );
 
         let converted = convert_player_predicate_ability(&Player::You, &predicate).unwrap();

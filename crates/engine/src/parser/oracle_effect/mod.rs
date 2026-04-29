@@ -9590,7 +9590,8 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
         | Effect::PutCounter { count: amount, .. }
         | Effect::PutCounterAll { count: amount, .. }
         | Effect::Token { count: amount, .. }
-        | Effect::Dig { count: amount, .. } => {
+        | Effect::Dig { count: amount, .. }
+        | Effect::ExileTop { count: amount, .. } => {
             *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
         }
         Effect::Pump {
@@ -10192,9 +10193,9 @@ fn extract_effect_verb(effect: &Effect) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        CastVariantPaid, ChoiceType, Comparator, ContinuousModification, ControllerRef, CountScope,
-        DoublePTMode, Duration, FilterProp, GainLifePlayer, LinkedExileScope, ManaContribution,
-        ManaProduction, PaymentCost, TypeFilter, ZoneRef,
+        CardTypeSetSource, CastVariantPaid, ChoiceType, Comparator, ContinuousModification,
+        ControllerRef, CountScope, DoublePTMode, Duration, FilterProp, GainLifePlayer,
+        LinkedExileScope, ManaContribution, ManaProduction, PaymentCost, TypeFilter, ZoneRef,
     };
     use crate::types::card_type::Supertype;
     use crate::types::keywords::Keyword;
@@ -14928,6 +14929,46 @@ mod tests {
     }
 
     #[test]
+    fn exile_top_x_cards_with_where_x_card_types_among_other_nonland_permanents() {
+        let def = parse_effect_chain(
+            "Exile the top X cards of your library, where X is the number of card types among other nonland permanents you control.",
+            AbilityKind::Spell,
+        );
+        let Effect::ExileTop {
+            player: TargetFilter::Controller,
+            count:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::DistinctCardTypes {
+                            source:
+                                CardTypeSetSource::Objects {
+                                    filter: TargetFilter::Typed(filter),
+                                },
+                        },
+                },
+        } = &*def.effect
+        else {
+            panic!(
+                "Expected ExileTop(controller, DistinctCardTypes), got {:?}",
+                def.effect
+            );
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter
+            .type_filters
+            .iter()
+            .any(|type_filter| matches!(type_filter, TypeFilter::Permanent)));
+        assert!(filter
+            .type_filters
+            .iter()
+            .any(|type_filter| matches!(type_filter, TypeFilter::Non(inner) if **inner == TypeFilter::Land)));
+        assert!(filter
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::Another)));
+    }
+
+    #[test]
     fn exile_top_card_of_that_players_library_uses_parent_target() {
         let def = parse_effect_chain(
             "Exile the top card of that player's library. Until end of turn, you may cast that card.",
@@ -18023,6 +18064,90 @@ mod tests {
             }
             other => panic!("expected Pump, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn for_each_pump_with_keyword_uses_dynamic_continuous_modifications() {
+        let def = parse_effect_chain(
+            "Until end of turn, target creature gets +1/+1 for each creature you control and gains trample.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+
+        let Effect::GenericEffect {
+            static_abilities,
+            target: Some(TargetFilter::Typed(_)),
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected targeted GenericEffect, got {:?}", def.effect);
+        };
+        let modifications = &static_abilities
+            .first()
+            .expect("expected continuous static")
+            .modifications;
+        assert!(
+            modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddDynamicPower { .. })),
+            "expected AddDynamicPower, got {modifications:?}"
+        );
+        assert!(
+            modifications
+                .iter()
+                .any(|m| matches!(m, ContinuousModification::AddDynamicToughness { .. })),
+            "expected AddDynamicToughness, got {modifications:?}"
+        );
+        assert!(
+            modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Trample,
+                }
+            )),
+            "expected trample keyword, got {modifications:?}"
+        );
+        assert!(
+            !modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddPower { .. }
+                    | ContinuousModification::AddToughness { .. }
+            )),
+            "dynamic pump must not also emit fixed P/T mods: {modifications:?}"
+        );
+    }
+
+    #[test]
+    fn for_each_pump_with_keyword_preserves_must_be_blocked_followup() {
+        let def = parse_effect_chain(
+            "Until end of turn, target creature gets +1/+1 for each creature you control and gains trample. It must be blocked this turn if able.",
+            AbilityKind::Spell,
+        );
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected must-be-blocked follow-up");
+
+        assert!(
+            matches!(&*def.effect, Effect::GenericEffect { static_abilities, .. }
+                if static_abilities.first().is_some_and(|sd|
+                    sd.modifications.iter().any(|m|
+                        matches!(m, ContinuousModification::AddDynamicPower { .. })
+                    )
+                )
+            ),
+            "expected primary dynamic GenericEffect, got {:?}",
+            def.effect
+        );
+        assert!(
+            matches!(&*sub.effect, Effect::GenericEffect { static_abilities, .. }
+                if static_abilities.iter().any(|sd|
+                    sd.mode == crate::types::statics::StaticMode::MustBeBlocked
+                )
+            ),
+            "expected sub_ability GenericEffect with MustBeBlocked, got {:?}",
+            sub.effect
+        );
     }
 
     #[test]

@@ -1867,6 +1867,18 @@ pub enum ObjectScope {
     Target,
 }
 
+/// Source set for counting distinct card types.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum CardTypeSetSource {
+    /// CR 109.2a + CR 400.1: Cards in a specific zone, scoped by player.
+    Zone { zone: ZoneRef, scope: CountScope },
+    /// CR 607.2a + CR 406.6: Cards exiled by the source's linked ability.
+    ExiledBySource,
+    /// CR 109.2: Objects matching a battlefield-style filter.
+    Objects { filter: TargetFilter },
+}
+
 /// A dynamic game quantity — a runtime lookup into the game state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -1985,12 +1997,10 @@ pub enum QuantityRef {
     TargetZoneCardCount { zone: ZoneRef },
     /// CR 700.5: Devotion to one or more colors.
     Devotion { colors: DevotionColors },
-    /// CR 604.3: Count distinct card types (CoreType) across cards in a zone.
-    /// Scope controls which players' zones are counted.
-    DistinctCardTypesInZone { zone: ZoneRef, scope: CountScope },
-    /// CR 607.2a + CR 406.6: Count distinct card types across cards exiled with the source.
-    /// Used for linked-exile patterns like "card types among cards exiled with this creature".
-    DistinctCardTypesExiledBySource,
+    /// CR 205.2a: Count distinct card types (CoreType) across a parameterized
+    /// source set. Covers zone cards, linked-exile cards, and matching objects
+    /// without proliferating card-type-count siblings.
+    DistinctCardTypes { source: CardTypeSetSource },
     /// CR 406.6 + CR 607.1: Count of cards currently in exile that are linked to the source
     /// via its exile-linked ability. Used by "as long as there are N or more cards exiled
     /// with ~" conditional statics (Veteran Survivor, etc.) — composes with

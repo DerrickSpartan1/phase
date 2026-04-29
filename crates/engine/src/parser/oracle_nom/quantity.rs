@@ -15,9 +15,9 @@ use super::primitives::parse_number;
 use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    AggregateFunction, ControllerRef, CountScope, DevotionColors, FilterProp, ObjectProperty,
-    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter,
-    ZoneRef,
+    AggregateFunction, CardTypeSetSource, ControllerRef, CountScope, DevotionColors, FilterProp,
+    ObjectProperty, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter,
+    TypedFilter, ZoneRef,
 };
 use crate::types::player::PlayerCounterKind;
 
@@ -347,6 +347,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_distinct_card_types_exiled_with_source,
         parse_linked_exile_mana_value_ref,
         parse_distinct_card_types_in_zone,
+        parse_distinct_card_types_among_objects,
         // CR 406.6: "cards exiled with ~" — must precede `parse_cards_in_zone_ref`
         // so "cards exiled with …" wins over the generic "cards in …" zone phrase.
         parse_cards_exiled_with_source,
@@ -459,6 +460,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_distinct_card_types_exiled_with_source,
         parse_distinct_card_types_in_zone,
+        parse_distinct_card_types_among_objects,
         // CR 122.1: "[kind] counters <possessor>" must be tried BEFORE the
         // generic type-filter arm so the typed player-counter ref wins over a
         // "[typeword] you control" misread (no `TypeFilter` for counter kinds).
@@ -591,7 +593,12 @@ fn parse_distinct_card_types_in_zone(input: &str) -> OracleResult<'_, QuantityRe
     let (rest, _) = opt(tag("s")).parse(rest)?;
     let (rest, _) = tag(" among cards in ").parse(rest)?;
     let (rest, (zone, scope)) = parse_scoped_zone_ref(rest)?;
-    Ok((rest, QuantityRef::DistinctCardTypesInZone { zone, scope }))
+    Ok((
+        rest,
+        QuantityRef::DistinctCardTypes {
+            source: CardTypeSetSource::Zone { zone, scope },
+        },
+    ))
 }
 
 fn parse_distinct_card_types_exiled_with_source(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -607,7 +614,35 @@ fn parse_distinct_card_types_exiled_with_source(input: &str) -> OracleResult<'_,
         ),
     ))
     .parse(rest)?;
-    Ok((rest, QuantityRef::DistinctCardTypesExiledBySource))
+    Ok((
+        rest,
+        QuantityRef::DistinctCardTypes {
+            source: CardTypeSetSource::ExiledBySource,
+        },
+    ))
+}
+
+fn parse_distinct_card_types_among_objects(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("card type").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" among ").parse(rest)?;
+    let type_text = rest.trim_end_matches('.').trim_end_matches(',');
+    let (filter, remainder) = parse_type_phrase(type_text);
+    if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
+        return Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
+            )],
+        }));
+    }
+    let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
+    Ok((
+        &input[consumed..],
+        QuantityRef::DistinctCardTypes {
+            source: CardTypeSetSource::Objects { filter },
+        },
+    ))
 }
 
 /// CR 406.6 + CR 607.1: Parse bare "cards exiled with ~" (or "cards exiled with this X")
@@ -1440,9 +1475,17 @@ fn parse_for_each_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> 
     .parse(input)?;
     let (rest, tf) = parse_type_filter_word(rest)?;
     let (rest, _) = tag(" you control").parse(rest)?;
+    let (rest, chosen_type_prop) = opt(alt((
+        value(FilterProp::IsChosenCreatureType, tag(" of that type")),
+        value(FilterProp::IsChosenCreatureType, tag(" of the chosen type")),
+    )))
+    .parse(rest)?;
     let mut properties = Vec::new();
     if has_other.is_some() {
         properties.push(FilterProp::Another);
+    }
+    if let Some(prop) = chosen_type_prop {
+        properties.push(prop);
     }
     if !properties.is_empty() {
         return Ok((
@@ -1466,6 +1509,27 @@ fn parse_for_each_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> 
             }),
         },
     ))
+}
+
+#[cfg(test)]
+fn assert_for_each_controlled_chosen_type(
+    clause: &str,
+    expected_type: TypeFilter,
+    expected_properties: Vec<FilterProp>,
+) {
+    let (rest, q) = parse_for_each_clause_ref(clause).unwrap();
+    assert_eq!(rest, "");
+    match q {
+        QuantityRef::ObjectCount { filter } => match filter {
+            TargetFilter::Typed(tf) => {
+                assert_eq!(tf.type_filters, vec![expected_type]);
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert_eq!(tf.properties, expected_properties);
+            }
+            other => panic!("expected Typed filter, got {other:?}"),
+        },
+        other => panic!("expected ObjectCount, got {other:?}"),
+    }
 }
 
 /// Parse "your speed".
@@ -1647,6 +1711,33 @@ mod tests {
             },
             other => panic!("expected ObjectCount, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_for_each_permanent_you_control_of_that_type() {
+        assert_for_each_controlled_chosen_type(
+            "permanent you control of that type",
+            TypeFilter::Permanent,
+            vec![FilterProp::IsChosenCreatureType],
+        );
+    }
+
+    #[test]
+    fn parse_for_each_permanent_you_control_of_the_chosen_type() {
+        assert_for_each_controlled_chosen_type(
+            "permanent you control of the chosen type",
+            TypeFilter::Permanent,
+            vec![FilterProp::IsChosenCreatureType],
+        );
+    }
+
+    #[test]
+    fn parse_for_each_other_creature_you_control_of_that_type() {
+        assert_for_each_controlled_chosen_type(
+            "other creature you control of that type",
+            TypeFilter::Creature,
+            vec![FilterProp::Another, FilterProp::IsChosenCreatureType],
+        );
     }
 
     #[test]
@@ -1903,9 +1994,11 @@ mod tests {
             parse_quantity_ref("the number of card types among cards in exile").unwrap();
         assert_eq!(
             q,
-            QuantityRef::DistinctCardTypesInZone {
-                zone: ZoneRef::Exile,
-                scope: CountScope::All,
+            QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::Zone {
+                    zone: ZoneRef::Exile,
+                    scope: CountScope::All,
+                },
             }
         );
         assert_eq!(rest, "");
@@ -1915,7 +2008,12 @@ mod tests {
     fn test_parse_distinct_card_types_exiled_with_source() {
         let (rest, q) =
             parse_quantity_ref("the number of card types among cards exiled with ~").unwrap();
-        assert_eq!(q, QuantityRef::DistinctCardTypesExiledBySource);
+        assert_eq!(
+            q,
+            QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::ExiledBySource,
+            }
+        );
         assert_eq!(rest, "");
     }
 
@@ -1924,8 +2022,44 @@ mod tests {
         let (rest, q) =
             parse_quantity_ref("the number of card types among cards exiled with this creature")
                 .unwrap();
-        assert_eq!(q, QuantityRef::DistinctCardTypesExiledBySource);
+        assert_eq!(
+            q,
+            QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::ExiledBySource,
+            }
+        );
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_distinct_card_types_among_other_nonland_permanents() {
+        let (rest, q) = parse_quantity_ref(
+            "the number of card types among other nonland permanents you control",
+        )
+        .unwrap();
+        let QuantityRef::DistinctCardTypes {
+            source:
+                CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(filter),
+                },
+        } = q
+        else {
+            panic!("expected object-scoped DistinctCardTypes, got {q:?}");
+        };
+        assert_eq!(rest, "");
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter
+            .type_filters
+            .iter()
+            .any(|type_filter| matches!(type_filter, TypeFilter::Permanent)));
+        assert!(filter
+            .type_filters
+            .iter()
+            .any(|type_filter| matches!(type_filter, TypeFilter::Non(inner) if **inner == TypeFilter::Land)));
+        assert!(filter
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::Another)));
     }
 
     #[test]

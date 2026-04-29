@@ -6,13 +6,13 @@ use crate::game::triggers::build_trigger_registry;
 use crate::parser::oracle::is_commander_permission_sentence;
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    AdditionalCost, AggregateFunction, ChoiceType, Comparator, ContinuousModification,
-    ControllerRef, CountScope, DelayedTriggerCondition, DoublePTMode, Duration, Effect, FilterProp,
-    GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerScope, PtValue, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
-    ReplacementMode, SharedQuality, SharedQualityRelation, SpellCastingOption,
-    SpellCastingOptionKind, StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition,
-    TypeFilter, TypedFilter, ZoneRef,
+    AdditionalCost, AggregateFunction, CardTypeSetSource, ChoiceType, Comparator,
+    ContinuousModification, ControllerRef, CountScope, DelayedTriggerCondition, DoublePTMode,
+    Duration, Effect, FilterProp, GainLifePlayer, GameRestriction, ManaProduction, ObjectProperty,
+    ObjectScope, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, SharedQuality,
+    SharedQualityRelation, SpellCastingOption, SpellCastingOptionKind, StaticCondition,
+    StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::card::CardFace;
 use crate::types::card_type::CoreType;
@@ -675,16 +675,19 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             }
             crate::types::ability::DevotionColors::ChosenColor => "devotion to chosen color".into(),
         },
-        QuantityRef::DistinctCardTypesInZone { zone, scope } => {
-            format!(
-                "card types in {} {}",
-                fmt_count_scope(scope),
-                fmt_zone_ref(zone)
-            )
-        }
-        QuantityRef::DistinctCardTypesExiledBySource => {
-            "card types among cards exiled with source".into()
-        }
+        QuantityRef::DistinctCardTypes { source } => match source {
+            CardTypeSetSource::Zone { zone, scope } => {
+                format!(
+                    "card types in {} {}",
+                    fmt_count_scope(scope),
+                    fmt_zone_ref(zone)
+                )
+            }
+            CardTypeSetSource::ExiledBySource => "card types among cards exiled with source".into(),
+            CardTypeSetSource::Objects { filter } => {
+                format!("card types among {}", fmt_target(filter))
+            }
+        },
         QuantityRef::CardsExiledBySource => "cards exiled with source".into(),
         QuantityRef::ZoneCardCount {
             zone,
@@ -4232,10 +4235,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
         QuantityRef::Devotion { .. } => ("Devotion", Handled),
-        QuantityRef::DistinctCardTypesInZone { .. } => ("DistinctCardTypesInZone", Handled),
-        QuantityRef::DistinctCardTypesExiledBySource => {
-            ("DistinctCardTypesExiledBySource", Unhandled)
-        }
+        QuantityRef::DistinctCardTypes { .. } => ("DistinctCardTypes", Handled),
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
         QuantityRef::BasicLandTypeCount { .. } => ("BasicLandTypeCount", Handled),

@@ -1258,12 +1258,15 @@ fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuo
 /// the count is computed against each affected creature, not against the
 /// static's source object.
 fn quantity_expr_uses_recipient(expr: &crate::types::ability::QuantityExpr) -> bool {
-    use crate::types::ability::{QuantityExpr, QuantityRef};
+    use crate::types::ability::{CardTypeSetSource, QuantityExpr, QuantityRef};
     match expr {
         QuantityExpr::Fixed { .. } => false,
         QuantityExpr::Ref { qty } => match qty {
             QuantityRef::ObjectCount { filter }
-            | QuantityRef::ObjectCountDistinctNames { filter } => filter_uses_recipient(filter),
+            | QuantityRef::ObjectCountDistinctNames { filter }
+            | QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::Objects { filter },
+            } => filter_uses_recipient(filter),
             _ => false,
         },
         QuantityExpr::HalfRounded { inner, .. }
@@ -3152,18 +3155,22 @@ mod tests {
                     .modifications(vec![
                         ContinuousModification::SetDynamicPower {
                             value: QuantityExpr::Ref {
-                                qty: QuantityRef::DistinctCardTypesInZone {
-                                    zone: ZoneRef::Graveyard,
-                                    scope: CountScope::All,
+                                qty: QuantityRef::DistinctCardTypes {
+                                    source: crate::types::ability::CardTypeSetSource::Zone {
+                                        zone: ZoneRef::Graveyard,
+                                        scope: CountScope::All,
+                                    },
                                 },
                             },
                         },
                         ContinuousModification::SetDynamicToughness {
                             value: QuantityExpr::Offset {
                                 inner: Box::new(QuantityExpr::Ref {
-                                    qty: QuantityRef::DistinctCardTypesInZone {
-                                        zone: ZoneRef::Graveyard,
-                                        scope: CountScope::All,
+                                    qty: QuantityRef::DistinctCardTypes {
+                                        source: crate::types::ability::CardTypeSetSource::Zone {
+                                            zone: ZoneRef::Graveyard,
+                                            scope: CountScope::All,
+                                        },
                                     },
                                 }),
                                 offset: 1,

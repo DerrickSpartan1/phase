@@ -6,8 +6,9 @@
 //! per-variant mapping into engine `QuantityRef` and lands in later phases.
 
 use engine::types::ability::{
-    AggregateFunction, CountScope, DevotionColors, FilterProp, ObjectProperty, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypedFilter, ZoneRef,
+    AggregateFunction, CardTypeSetSource, CountScope, DevotionColors, FilterProp, ObjectProperty,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypedFilter,
+    ZoneRef,
 };
 use engine::types::player::PlayerCounterKind;
 use engine::types::zones::Zone;
@@ -844,9 +845,11 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
                 }
             };
             QuantityExpr::Ref {
-                qty: QuantityRef::DistinctCardTypesInZone {
-                    zone: ZoneRef::Graveyard,
-                    scope,
+                qty: QuantityRef::DistinctCardTypes {
+                    source: CardTypeSetSource::Zone {
+                        zone: ZoneRef::Graveyard,
+                        scope,
+                    },
                 },
             }
         }

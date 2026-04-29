@@ -56,7 +56,11 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::{QuantityExpr, TargetFilter, TargetRef};
+    use crate::types::ability::{
+        CardTypeSetSource, ControllerRef, FilterProp, QuantityExpr, QuantityRef, TargetFilter,
+        TargetRef, TypeFilter, TypedFilter,
+    };
+    use crate::types::card_type::CoreType;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
 
@@ -191,6 +195,136 @@ mod tests {
             state.objects.get(&p1_top).map(|obj| obj.zone),
             Some(Zone::Library),
             "P1's library must NOT be exiled — parent target inheritance must not override Controller filter"
+        );
+    }
+
+    #[test]
+    fn exile_top_dynamic_card_type_count_moves_that_many_cards() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Loot, the Key to Everything".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let artifact = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Artifact];
+
+        let enchantment = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Enchantment".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&enchantment)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Enchantment];
+
+        let creature = create_object(
+            &mut state,
+            CardId(13),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let top = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "First".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Second".to_string(),
+            Zone::Library,
+        );
+        let third = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Third".to_string(),
+            Zone::Library,
+        );
+        let fourth = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Fourth".to_string(),
+            Zone::Library,
+        );
+
+        let ability = ResolvedAbility::new(
+            Effect::ExileTop {
+                player: TargetFilter::Controller,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::DistinctCardTypes {
+                        source: CardTypeSetSource::Objects {
+                            filter: TargetFilter::Typed(
+                                TypedFilter::new(TypeFilter::Permanent)
+                                    .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+                                    .controller(ControllerRef::You)
+                                    .properties(vec![FilterProp::Another]),
+                            ),
+                        },
+                    },
+                },
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&top).map(|obj| obj.zone),
+            Some(Zone::Exile)
+        );
+        assert_eq!(
+            state.objects.get(&second).map(|obj| obj.zone),
+            Some(Zone::Exile)
+        );
+        assert_eq!(
+            state.objects.get(&third).map(|obj| obj.zone),
+            Some(Zone::Exile)
+        );
+        assert_eq!(
+            state.objects.get(&fourth).map(|obj| obj.zone),
+            Some(Zone::Library)
         );
     }
 

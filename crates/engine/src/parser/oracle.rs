@@ -355,8 +355,8 @@ fn strip_instead_suffix(text: &str) -> (String, Option<AbilityCondition>, bool) 
 /// - Revolt: a permanent you controlled left the battlefield this turn
 fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::StaticCondition> {
     use crate::types::ability::{
-        ControllerRef, CountScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
-        TypeFilter, TypedFilter, ZoneRef,
+        CardTypeSetSource, ControllerRef, CountScope, QuantityExpr, QuantityRef, StaticCondition,
+        TargetFilter, TypeFilter, TypedFilter, ZoneRef,
     };
 
     match word {
@@ -380,9 +380,11 @@ fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::Static
         }),
         "delirium" => Some(StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::DistinctCardTypesInZone {
-                    zone: ZoneRef::Graveyard,
-                    scope: CountScope::Controller,
+                qty: QuantityRef::DistinctCardTypes {
+                    source: CardTypeSetSource::Zone {
+                        zone: ZoneRef::Graveyard,
+                        scope: CountScope::Controller,
+                    },
                 },
             },
             comparator: Comparator::GE,
@@ -7853,9 +7855,11 @@ mod tests {
     fn cond_delirium() -> AbilityCondition {
         AbilityCondition::QuantityCheck {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::DistinctCardTypesInZone {
-                    zone: crate::types::ability::ZoneRef::Graveyard,
-                    scope: crate::types::ability::CountScope::Controller,
+                qty: QuantityRef::DistinctCardTypes {
+                    source: crate::types::ability::CardTypeSetSource::Zone {
+                        zone: crate::types::ability::ZoneRef::Graveyard,
+                        scope: crate::types::ability::CountScope::Controller,
+                    },
                 },
             },
             comparator: crate::types::ability::Comparator::GE,

@@ -12,9 +12,9 @@ use crate::game::filter::{
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
-    AggregateFunction, ControllerRef, CountScope, ObjectProperty, ObjectScope, PlayerFilter,
-    PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, TargetRef, TypeFilter,
-    ZoneRef,
+    AggregateFunction, CardTypeSetSource, ControllerRef, CountScope, ObjectProperty, ObjectScope,
+    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ResolvedAbility, RoundingMode, TargetRef,
+    TypeFilter, ZoneRef,
 };
 use crate::types::card_type::CoreType;
 use crate::types::counter::parse_counter_type;
@@ -725,52 +725,69 @@ fn resolve_ref(
                 0
             }
         }
-        // CR 604.3: Count distinct card types (CoreType) across cards in a zone.
-        QuantityRef::DistinctCardTypesInZone { zone, scope } => {
+        // CR 205.2a: Count distinct card types (CoreType) across a source set.
+        QuantityRef::DistinctCardTypes { source } => {
             let mut seen = HashSet::new();
-            match zone {
-                ZoneRef::Exile => {
-                    for &obj_id in &state.exile {
-                        if let Some(obj) = state.objects.get(&obj_id) {
-                            let owner_matches = match scope {
-                                CountScope::Controller => obj.owner == controller,
-                                CountScope::All => true,
-                                CountScope::Opponents => obj.owner != controller,
-                            };
-                            if owner_matches {
-                                for ct in &obj.card_types.core_types {
-                                    seen.insert(*ct);
-                                }
-                            }
-                        }
-                    }
-                }
-                ZoneRef::Graveyard | ZoneRef::Library | ZoneRef::Hand => {
-                    for player in scoped_players(state, scope, controller) {
-                        let zone_ids = match zone {
-                            ZoneRef::Graveyard => &player.graveyard,
-                            ZoneRef::Library => &player.library,
-                            ZoneRef::Hand => &player.hand,
-                            ZoneRef::Exile => unreachable!(),
-                        };
-                        for &obj_id in zone_ids {
+            match source {
+                CardTypeSetSource::Zone { zone, scope } => match zone {
+                    ZoneRef::Exile => {
+                        for &obj_id in &state.exile {
                             if let Some(obj) = state.objects.get(&obj_id) {
-                                for ct in &obj.card_types.core_types {
-                                    seen.insert(*ct);
+                                let owner_matches = match scope {
+                                    CountScope::Controller => obj.owner == controller,
+                                    CountScope::All => true,
+                                    CountScope::Opponents => obj.owner != controller,
+                                };
+                                if owner_matches {
+                                    for ct in &obj.card_types.core_types {
+                                        seen.insert(*ct);
+                                    }
                                 }
                             }
                         }
                     }
+                    ZoneRef::Graveyard | ZoneRef::Library | ZoneRef::Hand => {
+                        for player in scoped_players(state, scope, controller) {
+                            let zone_ids = match zone {
+                                ZoneRef::Graveyard => &player.graveyard,
+                                ZoneRef::Library => &player.library,
+                                ZoneRef::Hand => &player.hand,
+                                ZoneRef::Exile => unreachable!(),
+                            };
+                            for &obj_id in zone_ids {
+                                if let Some(obj) = state.objects.get(&obj_id) {
+                                    for ct in &obj.card_types.core_types {
+                                        seen.insert(*ct);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                CardTypeSetSource::ExiledBySource => {
+                    for linked in
+                        crate::game::players::linked_exile_cards_for_source(state, source_id)
+                    {
+                        if let Some(obj) = state.objects.get(&linked.exiled_id) {
+                            for ct in &obj.card_types.core_types {
+                                seen.insert(*ct);
+                            }
+                        }
+                    }
                 }
-            }
-            usize_to_i32_saturating(seen.len())
-        }
-        QuantityRef::DistinctCardTypesExiledBySource => {
-            let mut seen = HashSet::new();
-            for linked in crate::game::players::linked_exile_cards_for_source(state, source_id) {
-                if let Some(obj) = state.objects.get(&linked.exiled_id) {
-                    for ct in &obj.card_types.core_types {
-                        seen.insert(*ct);
+                CardTypeSetSource::Objects { filter } => {
+                    let zone = filter
+                        .extract_in_zone()
+                        .unwrap_or(crate::types::zones::Zone::Battlefield);
+                    for obj_id in crate::game::targeting::zone_object_ids(state, zone) {
+                        if !matches_target_filter(state, obj_id, filter, &filter_ctx) {
+                            continue;
+                        }
+                        if let Some(obj) = state.objects.get(&obj_id) {
+                            for ct in &obj.card_types.core_types {
+                                seen.insert(*ct);
+                            }
+                        }
                     }
                 }
             }
@@ -1861,6 +1878,95 @@ mod tests {
     }
 
     #[test]
+    fn distinct_card_types_among_other_nonland_permanents_counts_matching_objects() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Loot, the Key to Everything".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&source)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        let artifact_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Artifact Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&artifact_creature)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Artifact, CoreType::Creature];
+
+        let enchantment = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Enchantment".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&enchantment)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Enchantment];
+
+        let land_artifact = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Land Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&land_artifact)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Land, CoreType::Artifact];
+
+        let opponent_planeswalker = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(1),
+            "Opponent Planeswalker".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&opponent_planeswalker)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Planeswalker];
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::Objects {
+                    filter: TargetFilter::Typed(
+                        TypedFilter::new(TypeFilter::Permanent)
+                            .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+                            .controller(ControllerRef::You)
+                            .properties(vec![FilterProp::Another]),
+                    ),
+                },
+            },
+        };
+
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 3);
+    }
+
+    #[test]
     fn object_count_controller_ref_defending_player_uses_combat_attacker() {
         let mut state = GameState::new_two_player(42);
         let attacker = create_object(
@@ -2464,7 +2570,9 @@ mod tests {
         });
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::DistinctCardTypesExiledBySource,
+            qty: QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::ExiledBySource,
+            },
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 2);
     }

@@ -936,7 +936,9 @@ fn with_target_player_controller(filter: TargetFilter) -> Option<TargetFilter> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{ControllerRef, FilterProp, TypeFilter, TypedFilter};
+    use crate::types::ability::{
+        CardTypeSetSource, ControllerRef, FilterProp, TypeFilter, TypedFilter,
+    };
     use crate::types::mana::ManaColor;
 
     #[test]
@@ -1753,12 +1755,47 @@ mod tests {
         assert_eq!(
             result,
             Some(QuantityExpr::Ref {
-                qty: QuantityRef::DistinctCardTypesInZone {
-                    zone: ZoneRef::Hand,
-                    scope: CountScope::Controller,
+                qty: QuantityRef::DistinctCardTypes {
+                    source: CardTypeSetSource::Zone {
+                        zone: ZoneRef::Hand,
+                        scope: CountScope::Controller,
+                    },
                 },
             })
         );
+    }
+
+    #[test]
+    fn cda_distinct_card_types_among_other_nonland_permanents_you_control() {
+        let result = parse_cda_quantity(
+            "the number of card types among other nonland permanents you control",
+        )
+        .unwrap();
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::DistinctCardTypes {
+                    source:
+                        CardTypeSetSource::Objects {
+                            filter: TargetFilter::Typed(filter),
+                        },
+                },
+        } = result
+        else {
+            panic!("expected object-scoped DistinctCardTypes, got {result:?}");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+        assert!(filter
+            .type_filters
+            .iter()
+            .any(|type_filter| matches!(type_filter, TypeFilter::Permanent)));
+        assert!(filter
+            .type_filters
+            .iter()
+            .any(|type_filter| matches!(type_filter, TypeFilter::Non(inner) if **inner == TypeFilter::Land)));
+        assert!(filter
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::Another)));
     }
 
     /// CR 601.2h: "the amount of mana spent to cast this spell" in a spell

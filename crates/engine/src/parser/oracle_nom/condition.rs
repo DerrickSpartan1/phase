@@ -2024,7 +2024,7 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{TypeFilter, TypedFilter};
+    use crate::types::ability::{CardTypeSetSource, TypeFilter, TypedFilter};
     use crate::types::mana::ManaCost;
 
     #[test]
@@ -2782,12 +2782,15 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::DistinctCardTypesInZone { .. },
+                        qty:
+                            QuantityRef::DistinctCardTypes {
+                                source: CardTypeSetSource::Zone { .. },
+                            },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 4 },
             } => {}
-            other => panic!("expected DistinctCardTypesInZone GE 4, got {other:?}"),
+            other => panic!("expected zone-scoped DistinctCardTypes GE 4, got {other:?}"),
         }
     }
 
@@ -2831,12 +2834,15 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::DistinctCardTypesExiledBySource,
+                        qty:
+                            QuantityRef::DistinctCardTypes {
+                                source: CardTypeSetSource::ExiledBySource,
+                            },
                     },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 4 },
             } => {}
-            other => panic!("expected DistinctCardTypesExiledBySource GE 4, got {other:?}"),
+            other => panic!("expected linked-exile DistinctCardTypes GE 4, got {other:?}"),
         }
     }
 
