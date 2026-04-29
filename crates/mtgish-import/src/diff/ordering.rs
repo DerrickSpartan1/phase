@@ -204,6 +204,7 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("AbilityCondition", "conditions"),
         OrderingClass::SetEquivalent,
     ),
+    (("AbilityCondition", "phases"), OrderingClass::SetEquivalent),
     (
         ("ParsedCondition", "conditions"),
         OrderingClass::SetEquivalent,
@@ -212,6 +213,7 @@ pub const ORDERING_MANIFEST: &[((&str, &str), OrderingClass)] = &[
         ("TriggerCondition", "conditions"),
         OrderingClass::SetEquivalent,
     ),
+    (("TriggerCondition", "phases"), OrderingClass::SetEquivalent),
     // ----- AdditionalCost -----
     // CR 702.33b: Kicker cost positions are referenced as first/second kicker.
     (("AdditionalCost", "costs"), OrderingClass::OrderSignificant),
