@@ -146,14 +146,23 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
 
 fn filter_uses_recipient(filter: &TargetFilter) -> bool {
     match filter {
-        TargetFilter::Typed(tf) => tf
-            .properties
-            .iter()
-            .any(|p| matches!(p, FilterProp::AttachedToRecipient)),
+        TargetFilter::Typed(tf) => tf.properties.iter().any(filter_prop_uses_recipient),
         TargetFilter::Not { filter: inner } => filter_uses_recipient(inner),
         TargetFilter::And { filters } | TargetFilter::Or { filters } => {
             filters.iter().any(filter_uses_recipient)
         }
+        _ => false,
+    }
+}
+
+fn filter_prop_uses_recipient(prop: &FilterProp) -> bool {
+    match prop {
+        FilterProp::AttachedToRecipient | FilterProp::Another => true,
+        FilterProp::AnyOf { props } => props.iter().any(filter_prop_uses_recipient),
+        FilterProp::SharesQuality {
+            reference: Some(reference),
+            ..
+        } => matches!(reference.as_ref(), TargetFilter::ParentTarget),
         _ => false,
     }
 }

@@ -13,7 +13,7 @@ use nom::Parser;
 use super::error::OracleResult;
 use super::primitives::parse_number;
 use super::target::parse_type_filter_word;
-use crate::parser::oracle_target::parse_type_phrase;
+use crate::parser::oracle_target::{parse_shared_quality_clause, parse_type_phrase};
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, ControllerRef, CountScope, DevotionColors, FilterProp,
     ObjectProperty, ObjectScope, PlayerScope, QuantityExpr, QuantityRef, RoundingMode,
@@ -1363,6 +1363,7 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_for_each_combat_creature_other_than_source,
         parse_for_each_attacking_controller_type,
         parse_for_each_blocking_source_type,
+        parse_for_each_recipient_shared_quality,
         parse_for_each_battlefield_type,
         parse_for_each_commander_cast_count,
         parse_for_each_controlled_type,
@@ -1625,6 +1626,31 @@ fn parse_for_each_blocking_source_type(input: &str) -> OracleResult<'_, Quantity
     ))
 }
 
+fn parse_for_each_recipient_shared_quality(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, has_other) =
+        opt(alt((value((), tag("other ")), value((), tag("another "))))).parse(input)?;
+    let (rest, type_filter) = parse_type_filter_word(rest)?;
+    let (rest, _) = tag(" on the battlefield ").parse(rest)?;
+    let (rest, shared_quality) = parse_shared_quality_clause(rest)?;
+
+    let mut properties = Vec::new();
+    if has_other.is_some() {
+        properties.push(FilterProp::Another);
+    }
+    properties.push(shared_quality);
+
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![type_filter],
+                controller: None,
+                properties,
+            }),
+        },
+    ))
+}
+
 fn parse_for_each_battlefield_type(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, tf) = parse_type_filter_word(input)?;
     let (rest, _) = tag(" on the battlefield").parse(rest)?;
@@ -1771,7 +1797,8 @@ fn parse_player_counter_possessor(input: &str) -> OracleResult<'_, CountScope> {
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AggregateFunction, FilterProp, ObjectProperty, TargetFilter, TypeFilter, TypedFilter,
+        AggregateFunction, FilterProp, ObjectProperty, SharedQuality, SharedQualityRelation,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::mana::ManaColor;
 
@@ -1907,6 +1934,38 @@ mod tests {
                     assert_eq!(controller, None);
                     assert_eq!(properties, vec![FilterProp::AttachedToRecipient]);
                     assert_eq!(type_filters, vec![TypeFilter::Subtype("Aura".into())]);
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_for_each_other_battlefield_creature_sharing_type_with_recipient() {
+        let (rest, q) = parse_for_each_clause_ref(
+            "other creature on the battlefield that shares a creature type with it",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match q {
+            QuantityRef::ObjectCount { filter } => match filter {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller,
+                    properties,
+                }) => {
+                    assert_eq!(type_filters, vec![TypeFilter::Creature]);
+                    assert_eq!(controller, None);
+                    assert!(properties.iter().any(|prop| prop == &FilterProp::Another));
+                    assert!(properties.iter().any(|prop| matches!(
+                        prop,
+                        FilterProp::SharesQuality {
+                            quality: SharedQuality::CreatureType,
+                            reference: Some(reference),
+                            relation: SharedQualityRelation::Shares,
+                        } if matches!(reference.as_ref(), TargetFilter::ParentTarget)
+                    )));
                 }
                 other => panic!("expected Typed filter, got {other:?}"),
             },

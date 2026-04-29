@@ -87,11 +87,10 @@ pub struct FilterContext<'a> {
     pub source_id: ObjectId,
     pub source_controller: Option<PlayerId>,
     pub ability: Option<&'a ResolvedAbility>,
-    /// CR 613.4c: Per-recipient binding for "<subject> gets +N/+M for each X
-    /// attached to it" statics. The pronoun "it" in an Aura/Equipment continuous
-    /// modification refers to the *affected* object (the per-id recipient in
-    /// `apply_continuous_effect`'s loop), NOT the static's source. When set,
-    /// `FilterProp::AttachedToRecipient` evaluates against this id.
+    /// CR 613.4c: Per-recipient binding for dynamic P/T statics whose quantity
+    /// is relative to the affected object ("attached to it", "other", "shares a
+    /// type with it"). The pronoun "it" refers to the per-id recipient in
+    /// `apply_continuous_effect`'s loop, not necessarily the static's source.
     pub recipient_id: Option<ObjectId>,
 }
 
@@ -121,12 +120,9 @@ impl<'a> FilterContext<'a> {
         }
     }
 
-    /// CR 613.4c: Builder used by layer evaluation when an additive dynamic
-    /// modification's filter contains `FilterProp::AttachedToRecipient`. The
-    /// recipient is the per-object `id` in the affected loop (the creature
-    /// being modified), allowing "for each Aura and Equipment attached to it"
-    /// to count attachments on the affected object rather than on the static's
-    /// source (which would be the Aura/Equipment itself).
+    /// CR 613.4c: Builder used by layer evaluation when a dynamic modification's
+    /// quantity is relative to the affected object. The recipient is the
+    /// per-object `id` in the affected loop (the creature being modified).
     pub fn from_source_with_recipient(
         state: &GameState,
         source_id: ObjectId,
@@ -1249,10 +1245,10 @@ struct SourceContext<'a> {
     /// case, per CR 107.2, any `Variable("X")` fallback resolves to 0.
     ability: Option<&'a ResolvedAbility>,
     /// CR 613.4c: The per-object recipient of an ongoing layer evaluation, when
-    /// one is bound. Used by `FilterProp::AttachedToRecipient` so "for each X
-    /// attached to it" resolves against the affected creature instead of the
-    /// static's source. `None` outside per-recipient contexts (e.g., target
-    /// validation, spell-record matching, single-shot quantity resolution).
+    /// one is bound. Used for recipient-relative quantities ("attached to it",
+    /// "other", "shares a type with it"). `None` outside per-recipient contexts
+    /// (e.g., target validation, spell-record matching, single-shot quantity
+    /// resolution).
     recipient_id: Option<ObjectId>,
 }
 
@@ -1617,7 +1613,9 @@ fn matches_filter_prop(
                 }
             })
         }
-        FilterProp::Another => object_id != source.id,
+        // CR 613.4c: In per-recipient layer contexts, "other" is relative to
+        // the affected object. Outside those contexts, it remains source-relative.
+        FilterProp::Another => object_id != source.recipient_id.unwrap_or(source.id),
         // CR 603.4 + CR 109.3: `OtherThanTriggerObject` is a typed marker that
         // signals "exclude the triggering object" for count semantics. The
         // exclusion is applied at the `QuantityRef::ObjectCount` resolver level
@@ -2166,14 +2164,18 @@ fn parent_target_shared_quality_values(
     source: &SourceContext<'_>,
     quality: &SharedQuality,
 ) -> Option<HashSet<String>> {
+    // `ParentTarget` normally references the first selected object target.
+    // In layer evaluation there is no selected target, so recipient-relative
+    // quantities bind it to the affected object instead.
     let target_id = source
-        .ability?
-        .targets
-        .iter()
-        .find_map(|target| match target {
-            TargetRef::Object(id) => Some(*id),
-            TargetRef::Player(_) => None,
-        })?;
+        .ability
+        .and_then(|ability| {
+            ability.targets.iter().find_map(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+        })
+        .or(source.recipient_id)?;
 
     if let Some(obj) = state.objects.get(&target_id) {
         return Some(object_shared_quality_values(

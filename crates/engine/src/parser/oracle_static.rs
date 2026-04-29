@@ -7582,7 +7582,8 @@ fn try_parse_scoped_must_attack_block(lower: &str, text: &str) -> Option<Vec<Sta
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AggregateFunction, CardTypeSetSource, CountScope, PlayerScope, TypeFilter, ZoneRef,
+        AggregateFunction, CardTypeSetSource, CountScope, PlayerScope, SharedQuality,
+        SharedQualityRelation, TypeFilter, ZoneRef,
     };
 
     /// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: "becomes a [subtype]*
@@ -10682,6 +10683,78 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m, ContinuousModification::AddPower { .. })),
             "must not emit a flat AddPower alongside AddDynamicPower; got {:?}",
+            def.modifications
+        );
+    }
+
+    #[test]
+    fn static_alpha_status_shared_creature_type_emits_dynamic_pt() {
+        let def = parse_static_line(
+            "Enchanted creature gets +2/+2 for each other creature on the battlefield that shares a creature type with it.",
+        )
+        .expect("Alpha Status static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+        );
+
+        let dyn_pow = def
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower");
+
+        let inner = match dyn_pow {
+            QuantityExpr::Multiply { factor, inner } => {
+                assert_eq!(*factor, 2);
+                inner.as_ref()
+            }
+            other => panic!("expected QuantityExpr::Multiply, got {other:?}"),
+        };
+        match inner {
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter },
+            } => match filter {
+                TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    properties,
+                    ..
+                }) => {
+                    assert_eq!(type_filters, &vec![TypeFilter::Creature]);
+                    assert!(properties.iter().any(|prop| prop == &FilterProp::Another));
+                    assert!(properties.iter().any(|prop| matches!(
+                        prop,
+                        FilterProp::SharesQuality {
+                            quality: SharedQuality::CreatureType,
+                            reference: Some(reference),
+                            relation: SharedQualityRelation::Shares,
+                        } if matches!(reference.as_ref(), TargetFilter::ParentTarget)
+                    )));
+                }
+                other => panic!("expected Typed filter, got {other:?}"),
+            },
+            other => panic!("expected ObjectCount ref, got {other:?}"),
+        }
+
+        assert!(def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddDynamicToughness {
+                value: QuantityExpr::Multiply { factor: 2, .. }
+            }
+        )));
+        assert!(
+            !def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddPower { .. }
+                    | ContinuousModification::AddToughness { .. }
+            )),
+            "must not emit flat P/T modifications alongside dynamic ones: {:?}",
             def.modifications
         );
     }

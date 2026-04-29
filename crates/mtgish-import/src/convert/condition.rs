@@ -127,6 +127,9 @@ pub fn convert_ability(c: &Condition) -> ConvResult<AbilityCondition> {
             require_broad_creature_died_filter(filter)?;
             morbid_ability_condition()
         }
+        Condition::APermanentLeftTheBattlefieldThisTurn(filter) => {
+            left_battlefield_ability_condition(filter)?
+        }
         // CR 608.2c: "if target spell [matches predicate]" — the announced
         // spell target is an object on the stack, so reuse the existing
         // Spells -> TargetFilter converter and gate the sub-ability against
@@ -303,6 +306,9 @@ pub fn convert_trigger(c: &Condition) -> ConvResult<TriggerCondition> {
             require_broad_creature_died_filter(filter)?;
             morbid_trigger_condition()
         }
+        Condition::APermanentLeftTheBattlefieldThisTurn(filter) => {
+            left_battlefield_trigger_condition(filter)?
+        }
 
         _ => {
             return Err(ConversionGap::UnknownVariant {
@@ -378,6 +384,9 @@ pub fn convert_static(c: &Condition) -> ConvResult<StaticCondition> {
         Condition::ACreatureOrPlaneswalkerDiedThisTurn(filter) => {
             require_broad_creature_died_filter(filter)?;
             morbid_static_condition()
+        }
+        Condition::APermanentLeftTheBattlefieldThisTurn(filter) => {
+            left_battlefield_static_condition(filter)?
         }
         _ => {
             return Err(ConversionGap::UnknownVariant {
@@ -478,6 +487,51 @@ fn player_set_turn_to_static(players: &Players) -> ConvResult<StaticCondition> {
             detail: format!("unsupported Players: {other:?}"),
         }),
     }
+}
+
+fn left_battlefield_quantity_ref(filter: &Permanents) -> ConvResult<QuantityRef> {
+    match filter {
+        Permanents::ControlledByAPlayer(players) if matches!(&**players, Players::SinglePlayer(player) if matches!(**player, Player::You)) => {
+            Ok(QuantityRef::PermanentsLeftBattlefieldThisTurn)
+        }
+        Permanents::IsNonCardtype(CardType::Land) => {
+            Ok(QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn)
+        }
+        other => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "QuantityRef::PermanentsLeftBattlefieldThisTurn",
+            needed_variant: format!("filtered left-battlefield predicate: {other:?}"),
+        }),
+    }
+}
+
+fn left_battlefield_lhs(filter: &Permanents) -> ConvResult<QuantityExpr> {
+    Ok(QuantityExpr::Ref {
+        qty: left_battlefield_quantity_ref(filter)?,
+    })
+}
+
+fn left_battlefield_ability_condition(filter: &Permanents) -> ConvResult<AbilityCondition> {
+    Ok(AbilityCondition::QuantityCheck {
+        lhs: left_battlefield_lhs(filter)?,
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    })
+}
+
+fn left_battlefield_trigger_condition(filter: &Permanents) -> ConvResult<TriggerCondition> {
+    Ok(TriggerCondition::QuantityComparison {
+        lhs: left_battlefield_lhs(filter)?,
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    })
+}
+
+fn left_battlefield_static_condition(filter: &Permanents) -> ConvResult<StaticCondition> {
+    Ok(StaticCondition::QuantityComparison {
+        lhs: left_battlefield_lhs(filter)?,
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    })
 }
 
 /// Classify the permanent-axis of a `Condition::PermanentPassesFilter`'s
@@ -3355,6 +3409,46 @@ mod tests {
             converted,
             AbilityCondition::Not {
                 condition: Box::new(AbilityCondition::IsYourTurn),
+            }
+        );
+    }
+
+    #[test]
+    fn left_battlefield_you_controlled_lowers_to_trigger_quantity_condition() {
+        let condition = Condition::APermanentLeftTheBattlefieldThisTurn(Box::new(
+            Permanents::ControlledByAPlayer(Box::new(Players::SinglePlayer(Box::new(Player::You)))),
+        ));
+
+        let converted = convert_trigger(&condition).unwrap();
+
+        assert_eq!(
+            converted,
+            TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::PermanentsLeftBattlefieldThisTurn,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }
+        );
+    }
+
+    #[test]
+    fn nonland_left_battlefield_lowers_to_ability_quantity_condition() {
+        let condition = Condition::APermanentLeftTheBattlefieldThisTurn(Box::new(
+            Permanents::IsNonCardtype(CardType::Land),
+        ));
+
+        let converted = convert_ability(&condition).unwrap();
+
+        assert_eq!(
+            converted,
+            AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn,
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
             }
         );
     }

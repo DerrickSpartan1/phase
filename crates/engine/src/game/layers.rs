@@ -1301,11 +1301,9 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     //
     // CR 613.4c: Most dynamic modifications resolve to a single value shared
     // across every affected object — the static's source is the natural
-    // referent. The exception is the "<subject> gets +N/+M for each X
-    // attached to it" family (Strong Back, Mantle of the Ancients, Bruenor
-    // Battlehammer, etc.), where the pronoun "it" is anaphoric on the
-    // recipient creature, not the source. For that family we defer
-    // resolution into the per-recipient loop below.
+    // referent. Recipient-relative quantities ("attached to it", "other",
+    // "shares a type with it") need the affected object bound before
+    // resolution, so those defer into the per-recipient loop below.
     let dynamic_pt_expr = match &effect.modification {
         ContinuousModification::SetDynamicPower { value }
         | ContinuousModification::SetDynamicToughness { value }
@@ -1351,10 +1349,9 @@ fn apply_continuous_effect(state: &mut GameState, effect: &ActiveContinuousEffec
     };
 
     for id in affected_ids {
-        // CR 613.4c: When the dynamic modification's QuantityExpr counts
-        // attachments on the recipient, resolve here under a recipient-bound
-        // FilterContext. The immutable read finishes before the mutable
-        // borrow of `obj` below.
+        // CR 613.4c: When the dynamic modification's QuantityExpr depends on
+        // the recipient, resolve here under a recipient-bound FilterContext.
+        // The immutable read finishes before the mutable borrow of `obj` below.
         let dynamic_pt = if dynamic_uses_recipient {
             dynamic_pt_expr.map(|value| {
                 crate::game::quantity::resolve_quantity_with_recipient(
@@ -2434,6 +2431,128 @@ mod tests {
         let final_other = state.objects.get(&other).unwrap();
         assert_eq!(final_other.power, Some(2));
         assert_eq!(final_other.toughness, Some(2));
+    }
+
+    #[test]
+    fn alpha_status_counts_other_creatures_sharing_recipient_creature_type() {
+        use crate::types::ability::{
+            FilterProp, QuantityRef, SharedQuality, SharedQualityRelation, TargetFilter,
+            TypeFilter, TypedFilter,
+        };
+
+        let mut state = setup();
+        state.all_creature_types = vec![
+            "Bear".to_string(),
+            "Elf".to_string(),
+            "Shapeshifter".to_string(),
+        ];
+
+        let bear = make_creature(&mut state, "Bear", 2, 2, PlayerId(0));
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Bear".into());
+        state.objects.get_mut(&bear).unwrap().base_card_types =
+            state.objects.get(&bear).unwrap().card_types.clone();
+
+        let other_bear = make_creature(&mut state, "Other Bear", 2, 2, PlayerId(0));
+        state
+            .objects
+            .get_mut(&other_bear)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Bear".into());
+        state.objects.get_mut(&other_bear).unwrap().base_card_types =
+            state.objects.get(&other_bear).unwrap().card_types.clone();
+
+        let elf = make_creature(&mut state, "Elf", 2, 2, PlayerId(0));
+        state
+            .objects
+            .get_mut(&elf)
+            .unwrap()
+            .card_types
+            .subtypes
+            .push("Elf".into());
+        state.objects.get_mut(&elf).unwrap().base_card_types =
+            state.objects.get(&elf).unwrap().card_types.clone();
+
+        let changeling = make_creature(&mut state, "Changeling", 2, 2, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&changeling).unwrap();
+            obj.card_types.subtypes.push("Shapeshifter".into());
+            obj.keywords.push(Keyword::Changeling);
+            obj.base_card_types = obj.card_types.clone();
+            obj.base_keywords = obj.keywords.clone();
+        }
+
+        let alpha_status = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Alpha Status".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&alpha_status).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".into());
+            obj.attached_to = Some(bear.into());
+            obj.timestamp = ts;
+
+            let qty = QuantityExpr::Multiply {
+                factor: 2,
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: None,
+                            properties: vec![
+                                FilterProp::Another,
+                                FilterProp::SharesQuality {
+                                    quality: SharedQuality::CreatureType,
+                                    reference: Some(Box::new(TargetFilter::ParentTarget)),
+                                    relation: SharedQualityRelation::Shares,
+                                },
+                            ],
+                        }),
+                    },
+                }),
+            };
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                    ))
+                    .modifications(vec![
+                        ContinuousModification::AddDynamicPower { value: qty.clone() },
+                        ContinuousModification::AddDynamicToughness { value: qty },
+                    ]),
+            );
+        }
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .attachments
+            .push(alpha_status);
+
+        evaluate_layers(&mut state);
+
+        let final_bear = state.objects.get(&bear).unwrap();
+        assert_eq!(
+            final_bear.power,
+            Some(6),
+            "Bear should get +2/+2 for other Bear and Changeling only"
+        );
+        assert_eq!(final_bear.toughness, Some(6));
+        assert_eq!(state.objects.get(&other_bear).unwrap().power, Some(2));
+        assert_eq!(state.objects.get(&elf).unwrap().power, Some(2));
+        assert_eq!(state.objects.get(&changeling).unwrap().power, Some(2));
     }
 
     /// CR 301.5 + CR 303.4: Negative regression — Wild Growth on a different
