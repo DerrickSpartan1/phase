@@ -1771,6 +1771,13 @@ pub(crate) fn check_trigger_condition(
                 &FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0))),
             )
         }),
+        // CR 603.4 + CR 611.2b: Source-bound intervening-if predicate. Reuse
+        // the engine's normal TargetFilter matcher so properties such as
+        // enchanted/equipped, attacked this turn, and other composable
+        // source-state checks do not need bespoke TriggerCondition siblings.
+        TriggerCondition::SourceMatchesFilter { filter } => source_id.is_some_and(|id| {
+            matches_target_filter(state, id, filter, &FilterContext::from_source(state, id))
+        }),
         // "if you control a [type]" — check for presence of matching permanent.
         TriggerCondition::ControlsType { filter } => {
             let ctx = FilterContext::from_source(state, source_id.unwrap_or(ObjectId(0)));
@@ -4815,6 +4822,56 @@ pub mod tests {
         state.objects.get_mut(&src).unwrap().tapped = true;
 
         let cond = TriggerCondition::SourceIsTapped;
+        assert!(check_trigger_condition(
+            &state,
+            &cond,
+            PlayerId(0),
+            Some(src),
+            None,
+        ));
+    }
+
+    #[test]
+    fn source_matches_filter_checks_trigger_source_properties() {
+        let mut state = setup();
+        let src = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Dreampod Druid".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&src)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let aura = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Test Aura".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let aura_obj = state.objects.get_mut(&aura).unwrap();
+            aura_obj.card_types.core_types.push(CoreType::Enchantment);
+            aura_obj.card_types.subtypes.push("Aura".to_string());
+            aura_obj.attached_to = Some(crate::game::game_object::AttachTarget::Object(src));
+        }
+        state.objects.get_mut(&src).unwrap().attachments.push(aura);
+
+        let cond = TriggerCondition::SourceMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::HasAttachment {
+                    kind: crate::types::ability::AttachmentKind::Aura,
+                    controller: None,
+                },
+            ])),
+        };
+
         assert!(check_trigger_condition(
             &state,
             &cond,

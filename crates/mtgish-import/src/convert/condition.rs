@@ -707,16 +707,9 @@ fn entering_permanent_filter_to_trigger(pred: &Permanents) -> ConvResult<Trigger
         Permanents::Not(inner) => TriggerCondition::Not {
             condition: Box::new(entering_permanent_filter_to_trigger(inner)?),
         },
-        other => {
-            return Err(ConversionGap::MalformedIdiom {
-                idiom: "Condition::EnteringPermanentPassesFilter/predicate",
-                path: String::new(),
-                detail: format!(
-                    "no source-bound TriggerCondition for predicate: {}",
-                    permanents_variant_tag(other)
-                ),
-            });
-        }
+        _ => TriggerCondition::SourceMatchesFilter {
+            filter: crate::convert::filter::convert(pred)?,
+        },
     })
 }
 
@@ -2872,6 +2865,30 @@ mod tests {
                 ));
             }
             other => panic!("expected ZoneChangeObjectMatchesFilter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn source_permanent_filter_lowers_to_trigger_source_matches_filter() {
+        let condition = Condition::PermanentPassesFilter(
+            Box::new(Permanent::ThisPermanent),
+            Box::new(Permanents::IsEnchanted),
+        );
+
+        let converted = convert_trigger(&condition).unwrap();
+
+        match converted {
+            TriggerCondition::SourceMatchesFilter { filter } => {
+                assert!(matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { properties, .. })
+                        if properties.contains(&FilterProp::HasAttachment {
+                            kind: engine::types::ability::AttachmentKind::Aura,
+                            controller: None
+                        })
+                ));
+            }
+            other => panic!("expected SourceMatchesFilter, got {other:?}"),
         }
     }
 

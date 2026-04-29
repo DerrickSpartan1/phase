@@ -6297,6 +6297,9 @@ pub enum TriggerCondition {
         destination: Zone,
         filter: TargetFilter,
     },
+    /// CR 603.4 + CR 611.2b: Source-bound intervening-if predicate expressed
+    /// as a normal target filter evaluated against the trigger source.
+    SourceMatchesFilter { filter: TargetFilter },
 
     /// CR 508.1 + CR 603.2c + CR 603.4: Intervening-if for "attacks with N or more creatures"
     /// triggers. Reads the triggering `AttackersDeclared` event and counts attackers whose
