@@ -451,7 +451,7 @@ fn parse_counters_among_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 
 /// Parse "the number of [type] you control" → ObjectCount.
 fn parse_the_number_of(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, _) = tag("the number of ").parse(input)?;
+    let (rest, _) = alt((tag("the total number of "), tag("the number of "))).parse(input)?;
     parse_number_of_inner(rest)
 }
 
@@ -477,6 +477,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // target in scope) instead of falling back to a controller-less
         // `InZone` filter that counts every player's cards.
         parse_number_of_cards_in_target_zone,
+        parse_number_of_cards_in_all_players_hands,
         parse_number_of_cards_in_zone,
         parse_number_of_opponents,
     ))
@@ -534,6 +535,20 @@ fn parse_number_of_cards_in_target_zone(input: &str) -> OracleResult<'_, Quantit
         QuantityRef::TargetZoneCardCount { zone }
     })
     .parse(rest)
+}
+
+fn parse_number_of_cards_in_all_players_hands(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("cards"), tag("card"))).parse(input)?;
+    let (rest, _) = tag(" in all players' hand").parse(rest)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::HandSize {
+            player: PlayerScope::AllPlayers {
+                aggregate: AggregateFunction::Sum,
+            },
+        },
+    ))
 }
 
 /// CR 115.1 + CR 115.7: Parse "target opponent's <zone>" / "target player's <zone>"
@@ -1843,6 +1858,21 @@ mod tests {
                 zone: ZoneRef::Hand,
                 card_types: Vec::new(),
                 scope: CountScope::Controller,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_quantity_ref_total_cards_in_all_players_hands() {
+        let (rest, q) =
+            parse_quantity_ref("the total number of cards in all players' hands").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Sum,
+                },
             }
         );
         assert_eq!(rest, "");

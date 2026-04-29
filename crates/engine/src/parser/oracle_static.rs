@@ -7503,7 +7503,9 @@ fn try_parse_scoped_must_attack_block(lower: &str, text: &str) -> Option<Vec<Sta
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{CardTypeSetSource, CountScope, TypeFilter, ZoneRef};
+    use crate::types::ability::{
+        AggregateFunction, CardTypeSetSource, CountScope, PlayerScope, TypeFilter, ZoneRef,
+    };
 
     /// CR 205.1a + CR 205.2 + CR 205.3 + CR 613.1c: "becomes a [subtype]*
     /// [core-type]+ in addition to its other types" must decompose into
@@ -8814,6 +8816,32 @@ mod tests {
                         qty: QuantityRef::CardsExiledBySource,
                     },
                 },
+            ]
+        );
+    }
+
+    #[test]
+    fn static_multani_cda_total_cards_in_all_players_hands() {
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+        };
+        let def = parse_static_line(
+            "Multani, Maro-Sorcerer's power and toughness are each equal to the total number of cards in all players' hands.",
+        )
+        .unwrap();
+
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert!(def.characteristic_defining);
+        assert_eq!(
+            def.modifications,
+            vec![
+                ContinuousModification::SetDynamicPower { value: qty.clone() },
+                ContinuousModification::SetDynamicToughness { value: qty },
             ]
         );
     }

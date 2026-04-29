@@ -1169,6 +1169,21 @@ mod tests {
     }
 
     #[test]
+    fn cda_quantity_total_cards_in_all_players_hands() {
+        let qty = parse_cda_quantity("the total number of cards in all players' hands").unwrap();
+        assert_eq!(
+            qty,
+            QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::AllPlayers {
+                        aggregate: AggregateFunction::Sum,
+                    },
+                },
+            }
+        );
+    }
+
+    #[test]
     fn cda_quantity_counters_on_self() {
         let qty = parse_cda_quantity("the number of +1/+1 counters on ~").unwrap();
         match qty {

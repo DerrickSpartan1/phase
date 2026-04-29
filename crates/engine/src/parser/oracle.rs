@@ -2548,10 +2548,10 @@ pub(super) fn parse_activated_with_self_ref_fallback(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        AbilityCondition, Comparator, ContinuousModification, FilterProp, ManaSpendRestriction,
-        ModalSelectionCondition, ModalSelectionConstraint, ObjectScope, ParsedCondition,
-        PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, ReplacementCondition,
-        StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+        AbilityCondition, AggregateFunction, Comparator, ContinuousModification, FilterProp,
+        ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint, ObjectScope,
+        ParsedCondition, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
+        ReplacementCondition, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaCost, ManaCostShard};
@@ -2598,6 +2598,38 @@ mod tests {
         );
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
+    }
+
+    #[test]
+    fn multani_cda_parses_total_cards_in_all_players_hands() {
+        let r = parse(
+            "Multani's power and toughness are each equal to the total number of cards in all players' hands.",
+            "Multani, Maro-Sorcerer",
+            &[],
+            &["Creature"],
+            &[],
+        );
+
+        assert!(
+            r.abilities.is_empty(),
+            "unexpected abilities: {:?}",
+            r.abilities
+        );
+        assert_eq!(r.statics.len(), 1);
+        let qty = QuantityExpr::Ref {
+            qty: QuantityRef::HandSize {
+                player: PlayerScope::AllPlayers {
+                    aggregate: AggregateFunction::Sum,
+                },
+            },
+        };
+        assert_eq!(
+            r.statics[0].modifications,
+            vec![
+                ContinuousModification::SetDynamicPower { value: qty.clone() },
+                ContinuousModification::SetDynamicToughness { value: qty },
+            ]
+        );
     }
 
     #[test]
