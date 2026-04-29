@@ -431,6 +431,12 @@ fn parse_hand_condition(text: &str) -> Option<ParsedCondition> {
     {
         return Some(ParsedCondition::HandSizeExact { count: 0 });
     }
+    if tag::<_, _, VerboseError<&str>>("you have one or fewer cards in hand")
+        .parse(text)
+        .is_ok()
+    {
+        return Some(ParsedCondition::HandSizeOneOf { counts: vec![0, 1] });
+    }
     // "you have more cards in hand than each opponent"
     if tag::<_, _, VerboseError<&str>>("you have more cards in hand than")
         .parse(text)

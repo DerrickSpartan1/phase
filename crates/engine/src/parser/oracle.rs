@@ -2101,6 +2101,23 @@ pub(super) fn strip_activated_constraints(text: &str) -> (String, ActivatedConst
         let lower = remaining.to_lowercase();
         let tp = TextPair::new(&remaining, &lower);
 
+        if let Some((before, after)) = tp.rsplit_around(" and only if ") {
+            if !before.original.trim().is_empty() {
+                let mut condition_text = after.original.trim().to_string();
+                strip_once_per_turn_suffix(&mut condition_text, &mut constraints.restrictions);
+                remaining = before
+                    .original
+                    .trim_end_matches(|c: char| c == '.' || c == ',' || c.is_whitespace())
+                    .to_string();
+                constraints
+                    .restrictions
+                    .push(ActivationRestriction::RequiresCondition {
+                        condition: parse_restriction_condition(&condition_text),
+                    });
+                continue;
+            }
+        }
+
         // CR 602.2: "Any player may activate this ability." — strip as a recognized
         // annotation. This appears as a trailing sentence on activated abilities.
         if let Some(prefix) = lower.strip_suffix("any player may activate this ability") {
@@ -3870,6 +3887,55 @@ mod tests {
             }
         )));
         assert_eq!(r.parse_warnings, Vec::<String>::new());
+    }
+
+    #[test]
+    fn parses_activate_only_timing_and_only_if_condition() {
+        let r = parse(
+            "{1}{B}: Return this card from your graveyard to your hand. Activate only during your turn and only if an opponent lost life this turn.",
+            "Gutterbones",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        let restrictions = &r.abilities[0].activation_restrictions;
+        assert!(restrictions.contains(&ActivationRestriction::DuringYourTurn));
+        assert!(restrictions.iter().any(|restriction| matches!(
+            restriction,
+            ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::PlayerCountAtLeast {
+                    filter: PlayerFilter::OpponentLostLife,
+                    minimum: 1,
+                })
+            }
+        )));
+        assert!(r
+            .parse_warnings
+            .iter()
+            .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")));
+    }
+
+    #[test]
+    fn parses_activate_only_as_sorcery_and_only_if_hand_size_condition() {
+        let r = parse(
+            "{2}{B}: Return this card from your graveyard to the battlefield. Activate only as a sorcery and only if you have one or fewer cards in hand.",
+            "Dread Wanderer",
+            &[],
+            &["Creature"],
+            &[],
+        );
+        let restrictions = &r.abilities[0].activation_restrictions;
+        assert!(restrictions.contains(&ActivationRestriction::AsSorcery));
+        assert!(restrictions.iter().any(|restriction| matches!(
+            restriction,
+            ActivationRestriction::RequiresCondition {
+                condition: Some(ParsedCondition::HandSizeOneOf { counts })
+            } if counts == &vec![0, 1]
+        )));
+        assert!(r
+            .parse_warnings
+            .iter()
+            .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")));
     }
 
     #[test]
