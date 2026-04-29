@@ -115,10 +115,11 @@ impl ContinuousModification {
             | ContinuousModification::AddChosenColor => Layer::Color,
             // CR 613.4d: Switch P/T is applied in layer 7d.
             ContinuousModification::SwitchPowerToughness => Layer::SwitchPT,
-            // CR 510.1c: Rule-modification effect processed in Ability layer (layer 6).
             ContinuousModification::AssignDamageFromToughness
             | ContinuousModification::AssignDamageAsThoughUnblocked
-            | ContinuousModification::AssignNoCombatDamage => Layer::Ability,
+            | ContinuousModification::AssignNoCombatDamage => unreachable!(
+                "combat-damage assignment rule modifications are applied after layer evaluation"
+            ),
             // CR 613.2: Control-changing effects are applied in Layer 2.
             ContinuousModification::ChangeController => Layer::Control,
             // CR 707.9a: A copy effect that grants "this ability" makes that

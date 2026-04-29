@@ -494,18 +494,18 @@ pub struct GameObject {
     #[serde(default)]
     pub is_saddled: bool,
 
-    /// CR 613 + CR 510.1: This creature assigns combat damage equal to its toughness
-    /// rather than its power. Set by continuous effects during layer evaluation.
+    /// CR 613.11 + CR 510.1a: This creature assigns combat damage equal to its
+    /// toughness rather than its power. Set after object-characteristic layers.
     #[serde(default)]
     pub assigns_damage_from_toughness: bool,
 
     /// CR 510.1c: This creature assigns combat damage as though it weren't blocked.
-    /// Set by continuous effects during layer evaluation.
+    /// Set after object-characteristic layers.
     #[serde(default)]
     pub assigns_damage_as_though_unblocked: bool,
 
     /// CR 510.1a: This creature assigns no combat damage.
-    /// Set by continuous effects during layer evaluation (e.g., "~ assigns no combat damage").
+    /// Set after object-characteristic layers (e.g., "~ assigns no combat damage").
     #[serde(default)]
     pub assigns_no_combat_damage: bool,
 
