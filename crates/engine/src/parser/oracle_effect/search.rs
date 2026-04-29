@@ -1103,7 +1103,7 @@ pub(super) fn parse_search_destination(lower: &str) -> Zone {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::Comparator;
+    use crate::types::ability::{Comparator, QuantityRef};
     use crate::types::keywords::Keyword;
 
     #[test]
@@ -1159,7 +1159,6 @@ mod tests {
     fn search_up_to_x_cards_emits_variable_count() {
         // CR 107.3a + CR 601.2b: `up to X` emits `QuantityRef::Variable` so the
         // resolver can pick up the caster's announced X at effect time.
-        use crate::types::ability::QuantityRef;
         let details =
             parse_search_library_details("search your library for up to x creature cards");
         assert_eq!(
@@ -1323,6 +1322,41 @@ mod tests {
                 comparator: Comparator::GE,
                 value: QuantityExpr::Fixed { value: 7 }
             }
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_that_have_mana_value() {
+        let filter = parse_search_filter("cards that have mana value 9, reveal them");
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Fixed { value: 9 }
+            }
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_that_each_have_mana_value_x_or_less() {
+        let filter = parse_search_filter(
+            "creature cards that each have mana value x or less and reveal them",
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Cmc {
+                comparator: Comparator::LE,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable { name }
+                }
+            } if name == "X"
         )));
     }
 

@@ -2083,14 +2083,19 @@ fn parse_pt_quantity_comparison_tail(input: &str) -> Option<(Comparator, Quantit
     Some((comparator, value, after_qty))
 }
 
-/// Parse "with mana value N or less" / "with mana value N or greater" suffix,
-/// and dynamic "with mana value less than or equal to that [type]" patterns.
+/// Parse "with/that have/that each have mana value N or less" / "… or greater"
+/// suffixes, and dynamic "with mana value less than or equal to that [type]"
+/// patterns.
 /// Returns (FilterProp, bytes consumed from the original text).
 pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)> {
     let trimmed = text.trim_start();
-    let (rest, _) = tag::<_, _, nom_language::error::VerboseError<&str>>("with mana value ")
-        .parse(trimmed)
-        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, nom_language::error::VerboseError<&str>>("with mana value "),
+        tag::<_, _, nom_language::error::VerboseError<&str>>("that have mana value "),
+        tag::<_, _, nom_language::error::VerboseError<&str>>("that each have mana value "),
+    ))
+    .parse(trimmed)
+    .ok()?;
 
     // CR 202.3 + CR 120.3: Dynamic comparisons referencing the triggering event.
     // "that damage" → `EventContextAmount` (damage amount captured at trigger).
