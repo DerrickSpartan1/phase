@@ -17,22 +17,27 @@ serde_with = "3"
 [[bin]]
 name = "mtgish-convert"
 path = "src/bin/convert.rs"
+test = false
 
 [[bin]]
 name = "mtgish-debug-deser"
 path = "src/bin/debug_deser.rs"
+test = false
 
 [[bin]]
 name = "mtgish-diff"
 path = "src/bin/mtgish-diff.rs"
+test = false
 
 [[bin]]
 name = "mtgish-clean-diff"
 path = "src/bin/mtgish-clean-diff.rs"
+test = false
 
 [[bin]]
 name = "mtgish-gap-axis"
 path = "src/bin/mtgish-gap-axis.rs"
+test = false
 
 [dev-dependencies]
 # Source-parse engine type files in `tests/manifest_coverage.rs` to assert

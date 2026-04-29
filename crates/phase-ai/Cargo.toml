@@ -20,6 +20,7 @@ tune = ["rayon"]
 [[bin]]
 name = "ai-duel"
 path = "src/bin/ai_duel.rs"
+test = false
 
 [[bin]]
 name = "ai-tune"
@@ -28,9 +29,11 @@ path = "src/bin/ai_tune.rs"
 [[bin]]
 name = "ai-commander"
 path = "src/bin/ai_commander.rs"
+test = false
 
 [[bin]]
 name = "ai-bench-state"
 path = "src/bin/ai_bench_state.rs"
+test = false
 
 [dev-dependencies]

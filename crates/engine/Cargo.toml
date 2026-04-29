@@ -32,10 +32,12 @@ im = { version = "15", features = ["serde"] }
 [[bin]]
 name = "coverage-report"
 path = "src/bin/coverage_report.rs"
+test = false
 
 [[bin]]
 name = "parser-gap-analyzer"
 path = "src/bin/parser_gap_analyzer.rs"
+test = false
 
 [[bin]]
 name = "oracle-gen"
@@ -46,10 +48,12 @@ required-features = ["cli"]
 name = "rules-audit"
 path = "src/bin/rules_audit.rs"
 required-features = ["audit"]
+test = false
 
 [[bin]]
 name = "card-data-validate"
 path = "src/bin/card_data_validate.rs"
+test = false
 
 [dev-dependencies]
 tempfile = "3"

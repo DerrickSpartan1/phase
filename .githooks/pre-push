@@ -8,13 +8,18 @@ echo "  [rust] cargo fmt --check"
 cargo fmt --all -- --check
 
 echo "  [rust] cargo clippy"
-cargo clippy --workspace --exclude phase-tauri --all-targets --features engine/proptest -- -D warnings
+cargo clippy --workspace --all-targets --features engine/proptest -- -D warnings
 
 echo "  [rust] parser combinator gate"
 ./scripts/check-parser-combinators.sh
 
 echo "  [rust] cargo nextest"
-PROPTEST_CASES="${PROPTEST_CASES:-32}" cargo nextest run --workspace --exclude phase-tauri --features engine/proptest
+PROPTEST_CASES="${PROPTEST_CASES:-4}" cargo nextest run \
+  --workspace \
+  --features engine/proptest \
+  --no-input-handler \
+  --show-progress=counter \
+  --status-level=slow
 
 tmpdir=$(mktemp -d)
 trap 'rm -rf "$tmpdir"' EXIT

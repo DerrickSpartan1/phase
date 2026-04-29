@@ -2,7 +2,7 @@
 release-local = "release --workspace --execute --no-confirm --no-publish --no-push"
 wasm = "build --package engine-wasm --target wasm32-unknown-unknown --profile wasm-dev"
 wasm-release = "build --package engine-wasm --target wasm32-unknown-unknown --release"
-test-all = "nextest run --workspace --exclude phase-tauri --features engine/proptest"
+test-all = "nextest run --workspace --features engine/proptest"
 clippy-strict = "clippy --all-targets -- -D warnings"
 export-cards = "run --profile tool --bin card-data-export --"
 export-json = "run --profile tool --bin json-export --"
