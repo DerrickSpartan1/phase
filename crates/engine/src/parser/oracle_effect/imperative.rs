@@ -1993,7 +1993,7 @@ pub(super) fn parse_utility_imperative_ast(
         }
     }
     if let Some(((attachment_text, target_text), rem)) =
-        nom_on_lower(text, lower, |input| parse_explicit_targeted_attach(input))
+        nom_on_lower(text, lower, parse_explicit_targeted_attach)
     {
         if rem.trim().is_empty() && nom_primitives::scan_contains(&attachment_text, "target ") {
             let (attachment, attachment_rem) = parse_target(&attachment_text);
