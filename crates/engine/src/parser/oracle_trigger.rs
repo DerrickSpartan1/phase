@@ -1440,6 +1440,45 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         return result;
     }
 
+    // CR 603.4 + CR 603.10a + CR 509.1g: Death-trigger look-back condition.
+    // The subject is the dying event object, not the source in its current zone.
+    if let Some((prefix, negated, rest)) = scan_preceded(&lower, |i| {
+        preceded(
+            tag::<_, _, VerboseError<&str>>("if it "),
+            alt((
+                value(
+                    true,
+                    alt((
+                        tag::<_, _, VerboseError<&str>>("wasn't blocking"),
+                        tag("was not blocking"),
+                    )),
+                ),
+                value(false, tag("was blocking")),
+            )),
+        )
+        .parse(i)
+    }) {
+        let filter =
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Blocking]));
+        let condition = TriggerCondition::ZoneChangeObjectMatchesFilter {
+            origin: Some(Zone::Battlefield),
+            destination: Zone::Graveyard,
+            filter,
+        };
+        let condition = if negated {
+            TriggerCondition::Not {
+                condition: Box::new(condition),
+            }
+        } else {
+            condition
+        };
+        let consumed = lower.len() - prefix.len() - rest.len();
+        return (
+            strip_condition_clause(text, prefix.len(), consumed),
+            Some(condition),
+        );
+    }
+
     (text.to_string(), None)
 }
 
@@ -10847,6 +10886,24 @@ mod tests {
             cond.unwrap(),
             TriggerCondition::HadCounters {
                 counter_type: Some("+1/+1".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn extract_if_it_wasnt_blocking_as_zone_change_lookback() {
+        let (cleaned, cond) = extract_if_condition("if it wasn't blocking, draw a card");
+        assert_eq!(cleaned, "draw a card");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::ZoneChangeObjectMatchesFilter {
+                    origin: Some(Zone::Battlefield),
+                    destination: Zone::Graveyard,
+                    filter: TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::Blocking])
+                    ),
+                }),
             }
         );
     }

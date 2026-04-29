@@ -596,6 +596,7 @@ impl GameObject {
             // snapshotted for post-LTB trigger-filter evaluation (e.g.,
             // "whenever a creature token dies").
             is_token: self.is_token,
+            combat_status: Default::default(),
         }
     }
 

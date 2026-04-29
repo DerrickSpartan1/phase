@@ -1693,10 +1693,13 @@ fn matches_filter_prop(
 ///    keywords, supertypes, types, owner/controller, name.
 /// 2. **Source/event relational.** Compare the record against the source object or its
 ///    chosen attributes — `Another`, `Owned`, `IsChosenCreatureType`, `Named`.
-/// 3. **Dynamic battlefield state.** Inherently requires the live object (tapped,
-///    attacking, blocking, counters, attached-to). A zone-change subject has already
-///    left its public zone, so these are semantically not applicable and return `false`.
-/// 4. **Not-yet-supported.** Could plausibly be snapshotted or cross-referenced but
+/// 3. **Combat snapshot state.** Attacking/blocking/unblocked predicates read
+///    `ZoneChangeRecord::combat_status`, because leaving a zone removes the
+///    object from live combat.
+/// 4. **Dynamic battlefield state.** Inherently requires the live object (tapped,
+///    counters, attached-to). A zone-change subject has already left its public
+///    zone, so these are semantically not applicable and return `false`.
+/// 5. **Not-yet-supported.** Could plausibly be snapshotted or cross-referenced but
 ///    are not currently required. Returning `false` is a known conservative gap.
 fn zone_change_record_matches_property(
     prop: &FilterProp,
@@ -1816,10 +1819,23 @@ fn zone_change_record_matches_property(
         FilterProp::SameNameAsParentTarget => parent_target_name(state, source.ability)
             .is_some_and(|name| record.name.eq_ignore_ascii_case(&name)),
 
-        // -------- Group 3: dynamic battlefield state (N/A once left zone) --------
-        // These predicates query live battlefield state (tap status, combat role,
-        // attachment, current counters, face-down). The snapshot has already left
-        // its public zone, so the predicate is semantically not applicable.
+        // -------- Group 3: combat snapshot state --------
+        // CR 508.1k / CR 509.1g / CR 509.1h: Combat state as of the zone change.
+        // Live combat maps are cleared when an object leaves combat (CR 506.4),
+        // so look-back filters must read the zone-change snapshot.
+        FilterProp::Attacking => record.combat_status.attacking,
+        FilterProp::AttackingController => {
+            record.combat_status.attacking
+                && source.controller == record.combat_status.defending_player
+        }
+        FilterProp::Blocking => record.combat_status.blocking,
+        FilterProp::Unblocked => {
+            record.combat_status.attacking && !record.combat_status.blocked
+        }
+
+        // These predicates query live battlefield state (tap status, attachment,
+        // current counters, face-down). The snapshot has already left its public
+        // zone, so the predicate is semantically not applicable.
         FilterProp::CountersGE {
             counter_type,
             count,
@@ -1833,10 +1849,6 @@ fn zone_change_record_matches_property(
             .is_some_and(|lki| lki.counters.values().any(|&count| count > 0)),
         FilterProp::Tapped
         | FilterProp::Untapped
-        | FilterProp::Attacking
-        | FilterProp::AttackingController
-        | FilterProp::Blocking
-        | FilterProp::Unblocked
         | FilterProp::AttackedThisTurn
         | FilterProp::BlockedThisTurn
         | FilterProp::AttackedOrBlockedThisTurn
@@ -4160,6 +4172,68 @@ mod tests {
         ));
     }
 
+    /// CR 506.4 + CR 603.10a: Combat predicates on a zone-change object read
+    /// the event snapshot because live combat state no longer contains objects
+    /// that have left combat.
+    #[test]
+    fn zone_change_record_combat_properties_match_snapshot() {
+        use crate::types::game_state::{ZoneChangeCombatStatus, ZoneChangeRecord};
+
+        let state = GameState::default();
+        let source_ctx = SourceContext {
+            id: ObjectId(1),
+            controller: Some(PlayerId(0)),
+            attached_to: None,
+            chosen_creature_type: None,
+            chosen_attributes: &[],
+            ability: None,
+            recipient_id: None,
+        };
+        let attacking_record = ZoneChangeRecord {
+            combat_status: ZoneChangeCombatStatus {
+                attacking: true,
+                blocking: false,
+                blocked: false,
+                defending_player: Some(PlayerId(0)),
+            },
+            ..ZoneChangeRecord::test_minimal(ObjectId(42), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        let blocking_record = ZoneChangeRecord {
+            combat_status: ZoneChangeCombatStatus {
+                attacking: false,
+                blocking: true,
+                blocked: false,
+                defending_player: None,
+            },
+            ..ZoneChangeRecord::test_minimal(ObjectId(43), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+
+        assert!(zone_change_record_matches_property(
+            &FilterProp::Attacking,
+            &state,
+            &attacking_record,
+            &source_ctx,
+        ));
+        assert!(zone_change_record_matches_property(
+            &FilterProp::Unblocked,
+            &state,
+            &attacking_record,
+            &source_ctx,
+        ));
+        assert!(zone_change_record_matches_property(
+            &FilterProp::AttackingController,
+            &state,
+            &attacking_record,
+            &source_ctx,
+        ));
+        assert!(zone_change_record_matches_property(
+            &FilterProp::Blocking,
+            &state,
+            &blocking_record,
+            &source_ctx,
+        ));
+    }
+
     // ===========================================================================
     // CR 702.73a — Changeling subtype expansion cascade.
     //
@@ -4364,6 +4438,7 @@ mod tests {
             attachments: vec![],
             linked_exile_snapshot: vec![],
             is_token: false,
+            combat_status: Default::default(),
         };
         let goblin_filter = make_subtype_filter("Goblin");
         let plains_filter = make_subtype_filter("Plains");

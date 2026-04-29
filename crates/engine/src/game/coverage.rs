@@ -6003,7 +6003,6 @@ fn line_has_condition_text(lower: &str) -> Option<&'static str> {
             // "if it attacked or blocked this turn" — resolve-time combat state
             || lower.contains("if it attacked")
             || lower.contains("if it blocked")
-            || lower.contains("it wasn't blocking")
             // "if the discovered card's" — resolve-time check on discovered card
             || lower.contains("if the discovered")
             // "if it's night" / "if it's day" — day/night state check (not ability gating)

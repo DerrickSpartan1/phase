@@ -251,6 +251,26 @@ pub struct ZoneChangeRecord {
     /// snapshot after the object has left the battlefield.
     #[serde(default)]
     pub is_token: bool,
+    /// CR 506.4 + CR 603.10a: Combat status immediately before the object left
+    /// its zone. Leaving combat clears live combat maps, so LTB filters such as
+    /// "attacking creatures die" and "if it wasn't blocking" must read this
+    /// snapshot rather than current combat state.
+    #[serde(default)]
+    pub combat_status: ZoneChangeCombatStatus,
+}
+
+/// CR 506.4 / CR 508.1k / CR 509.1g / CR 509.1h: Combat role snapshot for an
+/// object leaving its current zone.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ZoneChangeCombatStatus {
+    #[serde(default)]
+    pub attacking: bool,
+    #[serde(default)]
+    pub blocking: bool,
+    #[serde(default)]
+    pub blocked: bool,
+    #[serde(default)]
+    pub defending_player: Option<PlayerId>,
 }
 
 /// CR 603.10a: Snapshot of a single attachment on a leaving-battlefield object
@@ -300,6 +320,7 @@ impl ZoneChangeRecord {
             attachments: Vec::new(),
             linked_exile_snapshot: Vec::new(),
             is_token: false,
+            combat_status: ZoneChangeCombatStatus::default(),
         }
     }
 }

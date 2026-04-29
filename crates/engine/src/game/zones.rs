@@ -1,8 +1,8 @@
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
 #[cfg(test)]
 use crate::types::game_state::ZoneChangeRecord;
+use crate::types::game_state::{GameState, ZoneChangeCombatStatus};
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::player::PlayerId;
 use crate::types::statics::StaticMode;
@@ -231,6 +231,7 @@ pub fn move_to_zone(
     // with" cards here, before CR 400.7 cleanup prunes `TrackedBySource`.
     zone_change_record.linked_exile_snapshot =
         capture_linked_exile_snapshot(state, object_id, from);
+    zone_change_record.combat_status = capture_combat_status(state, object_id);
 
     apply_zone_exit_cleanup(state, object_id, from);
 
@@ -341,6 +342,23 @@ fn capture_linked_exile_snapshot(
         .collect()
 }
 
+fn capture_combat_status(state: &GameState, object_id: ObjectId) -> ZoneChangeCombatStatus {
+    let Some(combat) = &state.combat else {
+        return ZoneChangeCombatStatus::default();
+    };
+    let attacker = combat
+        .attackers
+        .iter()
+        .find(|attacker| attacker.object_id == object_id);
+
+    ZoneChangeCombatStatus {
+        attacking: attacker.is_some(),
+        blocking: combat.blocker_to_attacker.contains_key(&object_id),
+        blocked: attacker.is_some_and(|attacker| attacker.blocked),
+        defending_player: attacker.map(|attacker| attacker.defending_player),
+    }
+}
+
 /// Move an object to a specific position in its owner's library (top or bottom), emitting a ZoneChanged event.
 /// Convention: library[0] = top of library.
 pub fn move_to_library_position(
@@ -369,6 +387,7 @@ pub fn move_to_library_at_index(
     let mut zone_change_record = obj.snapshot_for_zone_change(object_id, Some(from), Zone::Library);
     // CR 603.10a + CR 603.6e: Capture attachment snapshot before SBA can detach.
     zone_change_record.attachments = capture_attachment_snapshot(state, obj);
+    zone_change_record.combat_status = capture_combat_status(state, object_id);
 
     apply_zone_exit_cleanup(state, object_id, from);
 

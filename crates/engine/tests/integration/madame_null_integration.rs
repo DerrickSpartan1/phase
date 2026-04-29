@@ -92,6 +92,7 @@ fn set_etb_event(state: &mut GameState, entering: ObjectId) {
             attachments: Vec::new(),
             linked_exile_snapshot: Vec::new(),
             is_token: false,
+            combat_status: Default::default(),
         }),
     });
 }
