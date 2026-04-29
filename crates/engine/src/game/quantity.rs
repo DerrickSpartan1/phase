@@ -77,11 +77,9 @@ pub fn resolve_quantity(
 }
 
 /// CR 613.4c: Resolve a `QuantityExpr` for a layer-evaluated dynamic
-/// modification whose filter references the per-recipient pronoun "it"
-/// (`FilterProp::AttachedToRecipient`). The recipient is the affected
-/// object in the layer evaluator's loop — for "Enchanted creature gets
-/// +N/+M for each Aura and Equipment attached to it", that is the
-/// enchanted creature, not the static's source.
+/// modification whose quantity references the affected object ("attached to
+/// it", "its name", "its colors", etc.). The recipient is the affected object
+/// in the layer evaluator's loop, not necessarily the static's source.
 pub fn resolve_quantity_with_recipient(
     state: &GameState,
     expr: &QuantityExpr,
@@ -102,7 +100,8 @@ pub fn resolve_quantity_with_recipient(
 }
 
 /// True when the QuantityExpr needs a per-object recipient binding to resolve
-/// an anaphoric quantity such as "for each Aura attached to it/that creature."
+/// an anaphoric quantity such as "for each Aura attached to it" or "for each
+/// word in its name."
 pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
     match expr {
         QuantityExpr::Fixed { .. } => false,
@@ -128,6 +127,9 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
                 source: CardTypeSetSource::Objects { filter },
             } => filter_uses_recipient(filter),
             QuantityRef::ObjectColorCount {
+                scope: ObjectScope::Recipient,
+            }
+            | QuantityRef::ObjectNameWordCount {
                 scope: ObjectScope::Recipient,
             }
             | QuantityRef::ManaSymbolsInManaCost {
@@ -470,8 +472,8 @@ fn resolve_ref(
     // path when no ability is in scope (X → 0).
     //
     // CR 613.4c: The optional `recipient` from `QuantityContext` flows into
-    // `FilterContext::recipient_id` so `FilterProp::AttachedToRecipient`
-    // resolves against the per-object recipient bound by the layer evaluator.
+    // `FilterContext::recipient_id` so recipient-relative filter properties
+    // resolve against the per-object recipient bound by the layer evaluator.
     let mut filter_ctx = match ability {
         Some(a) => FilterContext::from_ability(a),
         None => FilterContext::from_source_with_controller(source_id, controller),
@@ -685,6 +687,9 @@ fn resolve_ref(
         // see color-changing effects correctly when this resolves in layer 7c.
         QuantityRef::ObjectColorCount { scope } => {
             resolve_object_color_count(state, *scope, ctx, targets)
+        }
+        QuantityRef::ObjectNameWordCount { scope } => {
+            resolve_object_name_word_count(state, *scope, ctx, targets)
         }
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             resolve_mana_symbols_in_mana_cost(state, *scope, *color, ctx, targets)
@@ -1440,6 +1445,24 @@ fn resolve_object_color_count(
         });
     colors
         .map(|colors| usize_to_i32_saturating(colors.iter().copied().collect::<HashSet<_>>().len()))
+        .unwrap_or(0)
+}
+
+fn resolve_object_name_word_count(
+    state: &GameState,
+    scope: ObjectScope,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+) -> i32 {
+    let Some(object_id) = object_id_for_scope(state, scope, ctx, targets) else {
+        return 0;
+    };
+    let name = state
+        .objects
+        .get(&object_id)
+        .map(|obj| obj.name.as_str())
+        .or_else(|| state.lki_cache.get(&object_id).map(|lki| lki.name.as_str()));
+    name.map(|name| usize_to_i32_saturating(name.split_whitespace().count()))
         .unwrap_or(0)
 }
 
@@ -3385,6 +3408,46 @@ mod tests {
                 recipient
             ),
             3
+        );
+    }
+
+    #[test]
+    fn resolve_object_name_word_count_uses_recipient_name_not_source_name() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Wordmail".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Swords to Plowshares".to_string(),
+            Zone::Battlefield,
+        );
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectNameWordCount {
+                scope: ObjectScope::Recipient,
+            },
+        };
+
+        assert_eq!(
+            resolve_quantity_with_recipient(&state, &expr, PlayerId(0), source, recipient),
+            3
+        );
+
+        let source_expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectNameWordCount {
+                scope: ObjectScope::Source,
+            },
+        };
+        assert_eq!(
+            resolve_quantity_with_recipient(&state, &source_expr, PlayerId(0), source, recipient),
+            1
         );
     }
 

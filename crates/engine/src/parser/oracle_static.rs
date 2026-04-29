@@ -10573,6 +10573,46 @@ mod tests {
     }
 
     #[test]
+    fn static_wordmail_name_word_count_is_recipient_dynamic_pt() {
+        let def = parse_static_line("Enchanted creature gets +1/+1 for each word in its name.")
+            .expect("Wordmail static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+        );
+
+        let expected = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectNameWordCount {
+                scope: ObjectScope::Recipient,
+            },
+        };
+        assert!(def.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddDynamicPower { value } if value == &expected
+            )
+        }));
+        assert!(def.modifications.iter().any(|m| {
+            matches!(
+                m,
+                ContinuousModification::AddDynamicToughness { value } if value == &expected
+            )
+        }));
+        assert!(
+            !def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddPower { .. }
+                    | ContinuousModification::AddToughness { .. }
+            )),
+            "must not emit flat P/T modifications alongside dynamic ones: {:?}",
+            def.modifications
+        );
+    }
+
+    #[test]
     fn static_self_ref_alrund_sum_for_each_emits_dynamic_pt() {
         let def = parse_static_line(
             "~ gets +1/+1 for each card in your hand and each foretold card you own in exile.",

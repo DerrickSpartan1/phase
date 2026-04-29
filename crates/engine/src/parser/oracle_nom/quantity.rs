@@ -494,6 +494,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
             QuantityRef::ColorsSpentOnSelf,
             tag("colors of mana spent to cast it"),
         ),
+        parse_number_of_object_name_words_tail,
         parse_number_of_object_colors_tail,
     )))
     .parse(input)
@@ -1344,6 +1345,7 @@ pub fn parse_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
 pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
         parse_object_colors_for_each,
+        parse_object_name_word_count_for_each,
         parse_mana_symbols_in_object_mana_cost_for_each,
         parse_distinct_card_types_in_zone,
         parse_foretold_cards_owned_in_exile,
@@ -1371,6 +1373,18 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
+/// CR 201.1 + CR 201.2: Parse
+/// "word[s] in <object>'s name" into a scoped object-name word count. The
+/// `"its"` form is recipient-relative so Aura/Equipment statics bind to the
+/// enchanted/equipped object rather than the source permanent.
+fn parse_object_name_word_count_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("words"), tag("word"))).parse(input)?;
+    let (rest, _) = tag(" in ").parse(rest)?;
+    let (rest, scope) = parse_object_possessive_scope(rest)?;
+    let (rest, _) = tag(" name").parse(rest)?;
+    Ok((rest, QuantityRef::ObjectNameWordCount { scope }))
+}
+
 /// CR 107.4 + CR 202.1: Parse
 /// "<color> mana symbol[s] in <object>'s mana cost" into a scoped per-object
 /// mana-cost symbol count. The `"its"` form is recipient-relative so static
@@ -1380,7 +1394,7 @@ fn parse_mana_symbols_in_object_mana_cost_for_each(input: &str) -> OracleResult<
     let (rest, _) = tag(" mana symbol").parse(rest)?;
     let (rest, _) = opt(tag("s")).parse(rest)?;
     let (rest, _) = tag(" in ").parse(rest)?;
-    let (rest, scope) = parse_object_color_scope(rest)?;
+    let (rest, scope) = parse_object_possessive_scope(rest)?;
     let (rest, _) = tag(" mana cost").parse(rest)?;
     Ok((rest, QuantityRef::ManaSymbolsInManaCost { scope, color }))
 }
@@ -1395,10 +1409,17 @@ fn parse_object_colors_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
 }
 
 fn parse_object_colors_ref_tail(input: &str) -> OracleResult<'_, QuantityRef> {
-    let (rest, scope) = parse_object_color_scope(input)?;
+    let (rest, scope) = parse_object_possessive_scope(input)?;
     let (rest, _) = tag(" color").parse(rest)?;
     let (rest, _) = opt(tag("s")).parse(rest)?;
     Ok((rest, QuantityRef::ObjectColorCount { scope }))
+}
+
+fn parse_number_of_object_name_words_tail(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((tag("words in "), tag("word in "))).parse(input)?;
+    let (rest, scope) = parse_object_possessive_scope(rest)?;
+    let (rest, _) = tag(" name").parse(rest)?;
+    Ok((rest, QuantityRef::ObjectNameWordCount { scope }))
 }
 
 fn parse_number_of_object_colors_tail(input: &str) -> OracleResult<'_, QuantityRef> {
@@ -1432,7 +1453,7 @@ fn parse_for_each_combat_creature_other_than_source(input: &str) -> OracleResult
     ))
 }
 
-fn parse_object_color_scope(input: &str) -> OracleResult<'_, ObjectScope> {
+fn parse_object_possessive_scope(input: &str) -> OracleResult<'_, ObjectScope> {
     alt((
         value(ObjectScope::Recipient, tag("its")),
         value(ObjectScope::Recipient, tag("their")),
@@ -2098,6 +2119,27 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_for_each_object_name_word_count_recipient_and_target() {
+        let (rest, q) = parse_for_each("for each word in its name").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectNameWordCount {
+                scope: crate::types::ability::ObjectScope::Recipient
+            }
+        );
+        assert_eq!(rest, "");
+
+        let (rest, q) = parse_for_each_clause_ref("words in that creature's name").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectNameWordCount {
+                scope: crate::types::ability::ObjectScope::Target
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
     fn test_parse_for_each_mana_symbols_in_recipient_mana_cost() {
         let (rest, q) = parse_for_each("for each white mana symbol in its mana cost").unwrap();
         assert_eq!(
@@ -2116,6 +2158,19 @@ mod tests {
         assert_eq!(
             q,
             QuantityRef::ObjectColorCount {
+                scope: crate::types::ability::ObjectScope::Target
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_number_of_object_name_words() {
+        let (rest, q) =
+            parse_quantity_ref("the number of words in target creature's name").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectNameWordCount {
                 scope: crate::types::ability::ObjectScope::Target
             }
         );

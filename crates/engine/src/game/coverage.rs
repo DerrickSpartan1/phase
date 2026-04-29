@@ -667,6 +667,12 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             ObjectScope::Recipient => "recipient's colors".into(),
             ObjectScope::EventSource => "event source's colors".into(),
         },
+        QuantityRef::ObjectNameWordCount { scope } => match scope {
+            ObjectScope::Source => "words in self name".into(),
+            ObjectScope::Target => "words in target's name".into(),
+            ObjectScope::Recipient => "words in recipient's name".into(),
+            ObjectScope::EventSource => "words in event source's name".into(),
+        },
         QuantityRef::ManaSymbolsInManaCost { scope, color } => {
             let scope_str = match scope {
                 ObjectScope::Source => "self",
@@ -4273,6 +4279,12 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
             ObjectScope::Target => ("TargetObjectColorCount", Handled),
             ObjectScope::Recipient => ("RecipientObjectColorCount", Handled),
             ObjectScope::EventSource => ("EventSourceObjectColorCount", Handled),
+        },
+        QuantityRef::ObjectNameWordCount { scope } => match scope {
+            ObjectScope::Source => ("SourceObjectNameWordCount", Handled),
+            ObjectScope::Target => ("TargetObjectNameWordCount", Handled),
+            ObjectScope::Recipient => ("RecipientObjectNameWordCount", Handled),
+            ObjectScope::EventSource => ("EventSourceObjectNameWordCount", Handled),
         },
         QuantityRef::ManaSymbolsInManaCost { scope, .. } => match scope {
             ObjectScope::Source => ("SourceManaSymbolsInManaCost", Handled),

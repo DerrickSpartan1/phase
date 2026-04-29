@@ -2009,6 +2009,11 @@ pub enum QuantityRef {
     /// static/layered boosts by binding to the affected object rather than the
     /// Aura, Equipment, or anthem source.
     ObjectColorCount { scope: ObjectScope },
+    /// CR 201.1 + CR 201.2: Number of words in an object's current name,
+    /// scoped via ObjectScope. `Recipient` preserves Aura/Equipment
+    /// "enchanted/equipped creature gets +N/+N for each word in its name" by
+    /// binding to the affected object rather than the Aura or Equipment source.
+    ObjectNameWordCount { scope: ObjectScope },
     /// CR 107.4 + CR 202.1: Count colored mana symbols in an object's mana
     /// cost. Hybrid, monocolored hybrid, Phyrexian, hybrid Phyrexian, and
     /// colorless hybrid symbols count when they contain `color`, via

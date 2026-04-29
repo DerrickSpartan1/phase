@@ -1768,9 +1768,9 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, BasicLandType, ChosenSubtypeKind, ContinuousModification,
-        ControllerRef, CountScope, Duration, Effect, FilterProp, GainLifePlayer, PlayerScope,
-        QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
-        TypedFilter, ZoneRef,
+        ControllerRef, CountScope, Duration, Effect, FilterProp, GainLifePlayer, ObjectScope,
+        PlayerScope, QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter,
+        TypeFilter, TypedFilter, ZoneRef,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::TransientContinuousEffect;
@@ -2739,6 +2739,63 @@ mod tests {
             "expected 2 base + P1 hand size 4, not P0 hand size 1"
         );
         assert_eq!(final_bear.toughness, Some(6));
+    }
+
+    /// CR 201.1 + CR 201.2 + CR 303.4m + CR 613.4c: Wordmail-style Aura
+    /// statics count words in the enchanted creature's name, not the Aura
+    /// source's name.
+    #[test]
+    fn dynamic_pt_counts_words_in_recipient_name_not_source_name() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Silvercoat Lion Cub", 2, 2, PlayerId(0));
+
+        let wordmail = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Wordmail".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&wordmail).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".into());
+            obj.attached_to = Some(bear.into());
+            obj.timestamp = ts;
+
+            let qty = QuantityExpr::Ref {
+                qty: QuantityRef::ObjectNameWordCount {
+                    scope: ObjectScope::Recipient,
+                },
+            };
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                    ))
+                    .modifications(vec![
+                        ContinuousModification::AddDynamicPower { value: qty.clone() },
+                        ContinuousModification::AddDynamicToughness { value: qty },
+                    ]),
+            );
+        }
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .attachments
+            .push(wordmail);
+
+        evaluate_layers(&mut state);
+
+        let final_bear = state.objects.get(&bear).unwrap();
+        assert_eq!(
+            final_bear.power,
+            Some(5),
+            "expected 2 base + 3 words in recipient name, not 1 word in source name"
+        );
+        assert_eq!(final_bear.toughness, Some(5));
     }
 
     /// CR 107.4 + CR 202.1 + CR 613.4c: Light from Within-style statics count
