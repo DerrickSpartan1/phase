@@ -516,13 +516,7 @@ fn resolve_ref(
             scope,
             counter_type,
         } => {
-            let object = match scope {
-                ObjectScope::Source => state.objects.get(&source_id),
-                ObjectScope::Target => targets.iter().find_map(|t| match t {
-                    TargetRef::Object(id) => state.objects.get(id),
-                    _ => None,
-                }),
-            };
+            let object = object_for_scope(state, *scope, ctx, targets);
             object
                 .map(|obj| match counter_type {
                     Some(ct) => {
@@ -575,7 +569,7 @@ fn resolve_ref(
         QuantityRef::Power { scope } => resolve_object_pt(
             state,
             *scope,
-            source_id,
+            ctx,
             targets,
             |obj| obj.power,
             |lki| lki.power,
@@ -583,13 +577,19 @@ fn resolve_ref(
         QuantityRef::Toughness { scope } => resolve_object_pt(
             state,
             *scope,
-            source_id,
+            ctx,
             targets,
             |obj| obj.toughness,
             |lki| lki.toughness,
         ),
         QuantityRef::ObjectManaValue { scope } => {
-            resolve_object_mana_value(state, *scope, source_id, targets)
+            resolve_object_mana_value(state, *scope, ctx, targets)
+        }
+        // CR 105.1 + CR 105.2: Count the object's current colors. The color
+        // vector is maintained by layer 5, so recipient-relative static boosts
+        // see color-changing effects correctly when this resolves in layer 7c.
+        QuantityRef::ObjectColorCount { scope } => {
+            resolve_object_color_count(state, *scope, ctx, targets)
         }
         // CR 202.3 + CR 118.9: Mana value of the source object. Used by
         // alt-cost cast permissions ("pay life equal to its mana value rather
@@ -1258,6 +1258,93 @@ fn scoped_players<'a>(
     })
 }
 
+/// Resolve an object scope to a live object.
+///
+/// `Recipient` is the per-object binding supplied by layer evaluation. Outside
+/// layers, it falls back to the first object target and then the source, matching
+/// the affected-object reading of "its" in targeted spell effects.
+fn object_for_scope<'a>(
+    state: &'a GameState,
+    scope: ObjectScope,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+) -> Option<&'a crate::game::game_object::GameObject> {
+    match scope {
+        ObjectScope::Source => state.objects.get(&ctx.source),
+        ObjectScope::Target => targets.iter().find_map(|t| match t {
+            TargetRef::Object(id) => state.objects.get(id),
+            _ => None,
+        }),
+        ObjectScope::Recipient => ctx
+            .recipient
+            .and_then(|id| state.objects.get(&id))
+            .or_else(|| {
+                targets.iter().find_map(|t| match t {
+                    TargetRef::Object(id) => state.objects.get(id),
+                    _ => None,
+                })
+            })
+            .or_else(|| state.objects.get(&ctx.source)),
+        ObjectScope::EventSource => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(crate::game::targeting::extract_source_from_event)
+            .and_then(|id| state.objects.get(&id)),
+    }
+}
+
+fn object_id_for_scope(
+    state: &GameState,
+    scope: ObjectScope,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+) -> Option<ObjectId> {
+    match scope {
+        ObjectScope::Source => Some(ctx.source),
+        ObjectScope::Target => targets.iter().find_map(|t| match t {
+            TargetRef::Object(id) => Some(*id),
+            _ => None,
+        }),
+        ObjectScope::Recipient => ctx
+            .recipient
+            .or_else(|| {
+                targets.iter().find_map(|t| match t {
+                    TargetRef::Object(id) => Some(*id),
+                    _ => None,
+                })
+            })
+            .or(Some(ctx.source)),
+        ObjectScope::EventSource => state
+            .current_trigger_event
+            .as_ref()
+            .and_then(crate::game::targeting::extract_source_from_event),
+    }
+}
+
+fn resolve_object_color_count(
+    state: &GameState,
+    scope: ObjectScope,
+    ctx: QuantityContext,
+    targets: &[TargetRef],
+) -> i32 {
+    let Some(object_id) = object_id_for_scope(state, scope, ctx, targets) else {
+        return 0;
+    };
+    let colors = state
+        .objects
+        .get(&object_id)
+        .map(|obj| obj.color.as_slice())
+        .or_else(|| {
+            state
+                .lki_cache
+                .get(&object_id)
+                .map(|lki| lki.colors.as_slice())
+        });
+    colors
+        .map(|colors| usize_to_i32_saturating(colors.iter().copied().collect::<HashSet<_>>().len()))
+        .unwrap_or(0)
+}
+
 /// CR 208.3 + CR 113.6 + CR 400.7: Resolve a per-object scalar (power, toughness)
 /// through an `ObjectScope`, with LKI fallback for the source.
 ///
@@ -1269,7 +1356,7 @@ fn scoped_players<'a>(
 fn resolve_object_pt<F, G>(
     state: &GameState,
     scope: ObjectScope,
-    source_id: ObjectId,
+    ctx: QuantityContext,
     targets: &[TargetRef],
     obj_extract: F,
     lki_extract: G,
@@ -1281,9 +1368,9 @@ where
     match scope {
         ObjectScope::Source => state
             .objects
-            .get(&source_id)
+            .get(&ctx.source)
             .and_then(&obj_extract)
-            .or_else(|| state.lki_cache.get(&source_id).and_then(&lki_extract))
+            .or_else(|| state.lki_cache.get(&ctx.source).and_then(&lki_extract))
             .unwrap_or(0),
         ObjectScope::Target => targets
             .iter()
@@ -1293,6 +1380,22 @@ where
             })
             .and_then(&obj_extract)
             .unwrap_or(0),
+        ObjectScope::Recipient => object_for_scope(state, ObjectScope::Recipient, ctx, targets)
+            .and_then(&obj_extract)
+            .unwrap_or(0),
+        ObjectScope::EventSource => {
+            let Some(object_id) =
+                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
+            else {
+                return 0;
+            };
+            state
+                .objects
+                .get(&object_id)
+                .and_then(&obj_extract)
+                .or_else(|| state.lki_cache.get(&object_id).and_then(&lki_extract))
+                .unwrap_or(0)
+        }
     }
 }
 
@@ -1302,18 +1405,18 @@ where
 fn resolve_object_mana_value(
     state: &GameState,
     scope: ObjectScope,
-    source_id: ObjectId,
+    ctx: QuantityContext,
     targets: &[TargetRef],
 ) -> i32 {
     match scope {
         ObjectScope::Source => state
             .objects
-            .get(&source_id)
+            .get(&ctx.source)
             .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
             .or_else(|| {
                 state
                     .lki_cache
-                    .get(&source_id)
+                    .get(&ctx.source)
                     .map(|lki| u32_to_i32_saturating(lki.mana_value))
             })
             .unwrap_or(0),
@@ -1325,6 +1428,27 @@ fn resolve_object_mana_value(
             })
             .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
             .unwrap_or(0),
+        ObjectScope::Recipient => object_for_scope(state, ObjectScope::Recipient, ctx, targets)
+            .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+            .unwrap_or(0),
+        ObjectScope::EventSource => {
+            let Some(object_id) =
+                object_id_for_scope(state, ObjectScope::EventSource, ctx, targets)
+            else {
+                return 0;
+            };
+            state
+                .objects
+                .get(&object_id)
+                .map(|obj| u32_to_i32_saturating(obj.mana_cost.mana_value()))
+                .or_else(|| {
+                    state
+                        .lki_cache
+                        .get(&object_id)
+                        .map(|lki| u32_to_i32_saturating(lki.mana_value))
+                })
+                .unwrap_or(0)
+        }
     }
 }
 
@@ -3048,6 +3172,83 @@ mod tests {
             },
         };
         assert_eq!(resolve_quantity(&state, &expr_t, PlayerId(0), source), 3);
+    }
+
+    #[test]
+    fn resolve_object_color_count_source_target_and_recipient() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Recipient".to_string(),
+            Zone::Battlefield,
+        );
+
+        state.objects.get_mut(&source).unwrap().color = vec![ManaColor::White];
+        state.objects.get_mut(&target).unwrap().color =
+            vec![ManaColor::Blue, ManaColor::Black, ManaColor::Blue];
+        state.objects.get_mut(&recipient).unwrap().color =
+            vec![ManaColor::Red, ManaColor::Green, ManaColor::White];
+
+        let source_expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectColorCount {
+                scope: ObjectScope::Source,
+            },
+        };
+        assert_eq!(
+            resolve_quantity(&state, &source_expr, PlayerId(0), source),
+            1
+        );
+
+        let target_expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectColorCount {
+                scope: ObjectScope::Target,
+            },
+        };
+        let ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: target_expr.clone(),
+                player: crate::types::ability::GainLifePlayer::Controller,
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+        assert_eq!(
+            resolve_quantity_with_targets(&state, &target_expr, &ability),
+            2
+        );
+
+        let recipient_expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectColorCount {
+                scope: ObjectScope::Recipient,
+            },
+        };
+        assert_eq!(
+            resolve_quantity_with_recipient(
+                &state,
+                &recipient_expr,
+                PlayerId(0),
+                source,
+                recipient
+            ),
+            3
+        );
     }
 
     #[test]

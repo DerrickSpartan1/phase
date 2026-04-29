@@ -1873,6 +1873,14 @@ pub enum ObjectScope {
     /// CR 115.1: The first object target of the resolving ability — "that
     /// creature", "the creature", "it" (when "it" anaphors back to a target).
     Target,
+    /// CR 613.4c + CR 115.10: The object currently receiving an effect.
+    /// In layer evaluation this is the per-object recipient. Outside layers,
+    /// it resolves to the first object target when present, then to the source.
+    /// Used for recipient-relative "its colors" boosts such as Blessing of
+    /// the Nephilim and Civic Saber.
+    Recipient,
+    /// CR 603.2: The object referenced by the current trigger event.
+    EventSource,
 }
 
 /// Source set for counting distinct card types.
@@ -1984,6 +1992,12 @@ pub enum QuantityRef {
     /// target. Used by source/target-relative mana-value filters such as
     /// "with the same mana value as that spell".
     ObjectManaValue { scope: ObjectScope },
+    /// CR 105.1 + CR 105.2: Number of colors of an object, scoped via
+    /// ObjectScope. Counts the object's current W/U/B/R/G color set; colorless
+    /// objects return 0. `Recipient` preserves "for each of its colors" on
+    /// static/layered boosts by binding to the affected object rather than the
+    /// Aura, Equipment, or anthem source.
+    ObjectColorCount { scope: ObjectScope },
     /// CR 202.3: The mana value of the source object — i.e. the object passed
     /// as `source` to `resolve_quantity`. For an alt-cost cast (CR 118.9) this
     /// is the spell-being-cast, so "pay life equal to its mana value" reads

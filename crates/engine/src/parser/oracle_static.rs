@@ -10524,6 +10524,43 @@ mod tests {
     }
 
     #[test]
+    fn static_for_each_of_its_colors_emits_recipient_color_count() {
+        let def = parse_static_line("Each creature you control gets +1/+1 for each of its colors.")
+            .expect("color-count anthem static must parse");
+
+        let dyn_pow = def
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected dynamic power");
+        assert_eq!(
+            dyn_pow,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::ObjectColorCount {
+                    scope: ObjectScope::Recipient,
+                },
+            }
+        );
+        assert!(def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddDynamicToughness {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectColorCount {
+                        scope: ObjectScope::Recipient
+                    }
+                }
+            }
+        )));
+        assert!(!def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::AddPower { .. })));
+    }
+
+    #[test]
     fn static_enchanted_creature_dynamic_where_x() {
         // Dynamic grant: "enchanted creature gets +X/+X, where X is the number of cards in your hand"
         let def = parse_static_line(

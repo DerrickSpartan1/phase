@@ -1267,6 +1267,9 @@ fn quantity_expr_uses_recipient(expr: &crate::types::ability::QuantityExpr) -> b
             | QuantityRef::DistinctCardTypes {
                 source: CardTypeSetSource::Objects { filter },
             } => filter_uses_recipient(filter),
+            QuantityRef::ObjectColorCount {
+                scope: crate::types::ability::ObjectScope::Recipient,
+            } => true,
             _ => false,
         },
         QuantityExpr::HalfRounded { inner, .. }

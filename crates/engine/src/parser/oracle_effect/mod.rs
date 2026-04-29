@@ -11491,6 +11491,48 @@ mod tests {
     }
 
     #[test]
+    fn for_each_pump_of_its_colors_is_recipient_relative() {
+        let e = parse_effect("target creature gets +2/+2 until end of turn for each of its colors");
+        match e {
+            Effect::Pump {
+                power,
+                toughness,
+                target: TargetFilter::Typed(..),
+            } => {
+                let expected = QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectColorCount {
+                            scope: crate::types::ability::ObjectScope::Recipient,
+                        },
+                    }),
+                };
+                assert_eq!(power, PtValue::Quantity(expected.clone()));
+                assert_eq!(toughness, PtValue::Quantity(expected));
+            }
+            other => panic!("expected Pump, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_each_gain_life_of_its_colors_uses_dynamic_amount() {
+        let e = parse_effect("you gain 1 life for each of its colors");
+        match e {
+            Effect::GainLife { amount, .. } => {
+                assert_eq!(
+                    amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectColorCount {
+                            scope: crate::types::ability::ObjectScope::Recipient,
+                        },
+                    }
+                );
+            }
+            other => panic!("expected GainLife, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn for_each_pump_self_ref() {
         let e = parse_effect("~ gets +1/+1 for each creature you control");
         assert!(

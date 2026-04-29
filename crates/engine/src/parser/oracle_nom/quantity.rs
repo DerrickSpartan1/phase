@@ -16,8 +16,8 @@ use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, ControllerRef, CountScope, DevotionColors, FilterProp,
-    ObjectProperty, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter,
-    TypedFilter, ZoneRef,
+    ObjectProperty, ObjectScope, PlayerScope, QuantityExpr, QuantityRef, RoundingMode,
+    TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::player::PlayerCounterKind;
 
@@ -494,6 +494,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
             QuantityRef::ColorsSpentOnSelf,
             tag("colors of mana spent to cast it"),
         ),
+        parse_number_of_object_colors_tail,
     )))
     .parse(input)
 }
@@ -1314,6 +1315,7 @@ pub fn parse_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
 /// Parse the inner content after "for each ".
 pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     alt((
+        parse_object_colors_for_each,
         parse_distinct_card_types_in_zone,
         parse_foretold_cards_owned_in_exile,
         parse_zone_card_count,
@@ -1334,6 +1336,70 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_for_each_battlefield_type,
         parse_for_each_commander_cast_count,
         parse_for_each_controlled_type,
+    ))
+    .parse(input)
+}
+
+/// CR 105.1 + CR 105.2: Parse "for each [of] <object>'s colors" into a
+/// scoped object-color count. The `"its"` form is recipient-relative: in
+/// continuous effects it binds to the affected object; in targeted effects it
+/// falls back to the selected object target.
+fn parse_object_colors_for_each(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = opt(tag("of ")).parse(input)?;
+    parse_object_colors_ref_tail(rest)
+}
+
+fn parse_object_colors_ref_tail(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, scope) = parse_object_color_scope(input)?;
+    let (rest, _) = tag(" color").parse(rest)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    Ok((rest, QuantityRef::ObjectColorCount { scope }))
+}
+
+fn parse_number_of_object_colors_tail(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("colors of ").parse(input)?;
+    let (rest, scope) = parse_object_color_of_scope(rest)?;
+    Ok((rest, QuantityRef::ObjectColorCount { scope }))
+}
+
+fn parse_object_color_scope(input: &str) -> OracleResult<'_, ObjectScope> {
+    alt((
+        value(ObjectScope::Recipient, tag("its")),
+        value(ObjectScope::Recipient, tag("their")),
+        value(ObjectScope::Recipient, tag("enchanted creature's")),
+        value(ObjectScope::Recipient, tag("equipped creature's")),
+        value(ObjectScope::Target, tag("target creature's")),
+        value(ObjectScope::Target, tag("target permanent's")),
+        value(ObjectScope::EventSource, tag("that spell's")),
+        value(ObjectScope::Target, tag("that creature's")),
+        value(ObjectScope::Target, tag("that permanent's")),
+        value(ObjectScope::Target, tag("that planeswalker's")),
+        value(ObjectScope::Source, tag("~'s")),
+        value(ObjectScope::Source, tag("this creature's")),
+        value(ObjectScope::Source, tag("this permanent's")),
+        value(ObjectScope::Source, tag("this spell's")),
+        value(ObjectScope::Source, tag("this card's")),
+    ))
+    .parse(input)
+}
+
+fn parse_object_color_of_scope(input: &str) -> OracleResult<'_, ObjectScope> {
+    alt((
+        value(ObjectScope::Recipient, tag("it")),
+        value(ObjectScope::Recipient, tag("the enchanted creature")),
+        value(ObjectScope::Recipient, tag("the equipped creature")),
+        value(ObjectScope::Target, tag("target creature")),
+        value(ObjectScope::Target, tag("target permanent")),
+        value(ObjectScope::EventSource, tag("the triggering spell")),
+        value(ObjectScope::EventSource, tag("that spell")),
+        value(ObjectScope::Target, tag("that creature")),
+        value(ObjectScope::Target, tag("that permanent")),
+        value(ObjectScope::Target, tag("that planeswalker")),
+        value(ObjectScope::Source, tag("~")),
+        value(ObjectScope::Source, tag("this creature")),
+        value(ObjectScope::Source, tag("this permanent")),
+        value(ObjectScope::Source, tag("this spell")),
+        value(ObjectScope::Source, tag("this card")),
     ))
     .parse(input)
 }
@@ -1844,6 +1910,45 @@ mod tests {
             q,
             QuantityRef::PartySize {
                 player: PlayerScope::Controller
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_for_each_object_colors_recipient_and_target() {
+        for phrase in [
+            "for each of its colors",
+            "for each of enchanted creature's colors",
+        ] {
+            let (rest, q) = parse_for_each(phrase).unwrap();
+            assert_eq!(
+                q,
+                QuantityRef::ObjectColorCount {
+                    scope: crate::types::ability::ObjectScope::Recipient
+                },
+                "phrase: {phrase}"
+            );
+            assert_eq!(rest, "", "phrase: {phrase}");
+        }
+
+        let (rest, q) = parse_for_each("for each of that creature's colors").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectColorCount {
+                scope: crate::types::ability::ObjectScope::Target
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_number_of_object_colors() {
+        let (rest, q) = parse_quantity_ref("the number of colors of target creature").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectColorCount {
+                scope: crate::types::ability::ObjectScope::Target
             }
         );
         assert_eq!(rest, "");

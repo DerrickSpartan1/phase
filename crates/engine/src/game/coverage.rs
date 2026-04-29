@@ -626,6 +626,8 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             let scope_str = match scope {
                 ObjectScope::Source => "self",
                 ObjectScope::Target => "target",
+                ObjectScope::Recipient => "recipient",
+                ObjectScope::EventSource => "event source",
             };
             match counter_type {
                 Some(ct) => format!("{ct} counters on {scope_str}"),
@@ -643,14 +645,26 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::Power { scope } => match scope {
             ObjectScope::Source => "self power".into(),
             ObjectScope::Target => "target's power".into(),
+            ObjectScope::Recipient => "recipient's power".into(),
+            ObjectScope::EventSource => "event source's power".into(),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source => "self toughness".into(),
             ObjectScope::Target => "target's toughness".into(),
+            ObjectScope::Recipient => "recipient's toughness".into(),
+            ObjectScope::EventSource => "event source's toughness".into(),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source => "self mana value".into(),
             ObjectScope::Target => "target's mana value".into(),
+            ObjectScope::Recipient => "recipient's mana value".into(),
+            ObjectScope::EventSource => "event source's mana value".into(),
+        },
+        QuantityRef::ObjectColorCount { scope } => match scope {
+            ObjectScope::Source => "self colors".into(),
+            ObjectScope::Target => "target's colors".into(),
+            ObjectScope::Recipient => "recipient's colors".into(),
+            ObjectScope::EventSource => "event source's colors".into(),
         },
         QuantityRef::SelfManaValue => "self mana value".into(),
         QuantityRef::Aggregate {
@@ -4228,14 +4242,26 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::Power { scope } => match scope {
             ObjectScope::Source => ("SelfPower", Handled),
             ObjectScope::Target => ("TargetPower", Handled),
+            ObjectScope::Recipient => ("RecipientPower", Handled),
+            ObjectScope::EventSource => ("EventSourcePower", Handled),
         },
         QuantityRef::Toughness { scope } => match scope {
             ObjectScope::Source => ("SelfToughness", Handled),
             ObjectScope::Target => ("TargetToughness", Handled),
+            ObjectScope::Recipient => ("RecipientToughness", Handled),
+            ObjectScope::EventSource => ("EventSourceToughness", Handled),
         },
         QuantityRef::ObjectManaValue { scope } => match scope {
             ObjectScope::Source => ("SelfManaValue", Handled),
             ObjectScope::Target => ("TargetManaValue", Handled),
+            ObjectScope::Recipient => ("RecipientManaValue", Handled),
+            ObjectScope::EventSource => ("EventSourceManaValue", Handled),
+        },
+        QuantityRef::ObjectColorCount { scope } => match scope {
+            ObjectScope::Source => ("SourceObjectColorCount", Handled),
+            ObjectScope::Target => ("TargetObjectColorCount", Handled),
+            ObjectScope::Recipient => ("RecipientObjectColorCount", Handled),
+            ObjectScope::EventSource => ("EventSourceObjectColorCount", Handled),
         },
         QuantityRef::SelfManaValue => ("SelfManaValue", Handled),
         QuantityRef::Aggregate { .. } => ("Aggregate", Handled),
