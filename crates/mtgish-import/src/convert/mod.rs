@@ -2219,11 +2219,9 @@ fn build_two_branch_spell(
 
 /// CR 118.1: Map an activation-time `AbilityCost` to a resolution-time
 /// `PaymentCost`. Reflexive triggers ("you may pay X. when you do, Y")
-/// materialize the cost choice as `Effect::PayCost`, which only accepts
-/// the resolution-time payment shapes (Mana / Life / Speed / Energy).
-/// Non-payment costs (Tap / Sacrifice / Discard / Exile / etc.) cannot be
-/// deferred to resolution — they belong on the parent's activation cost
-/// slot only and strict-fail here.
+/// materialize the cost choice as `Effect::PayCost`. Resource costs map to
+/// dedicated `PaymentCost` leaves; supported non-resource resolution costs
+/// reuse the engine's `AbilityCost` taxonomy through `PaymentCost::AbilityCost`.
 fn ability_cost_to_payment_cost(
     cost: &engine::types::ability::AbilityCost,
 ) -> ConvResult<engine::types::ability::PaymentCost> {
@@ -2243,6 +2241,11 @@ fn ability_cost_to_payment_cost(
         AC::PaySpeed { amount } => PC::Speed {
             amount: amount.clone(),
         },
+        AC::Discard {
+            random: false,
+            self_ref: false,
+            ..
+        } => PC::AbilityCost { cost: cost.clone() },
         _ => {
             return Err(ConversionGap::EnginePrerequisiteMissing {
                 engine_type: "PaymentCost",

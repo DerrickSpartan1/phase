@@ -2875,6 +2875,13 @@ pub enum PaymentCost {
     Energy {
         amount: QuantityExpr,
     },
+    /// CR 118.1 + CR 118.12: Non-resource cost instructions paid while a spell or
+    /// ability resolves. Reuses the engine's existing `AbilityCost` taxonomy so
+    /// resolution-time costs such as "discard a card" do not grow a parallel
+    /// payment hierarchy.
+    AbilityCost {
+        cost: AbilityCost,
+    },
 }
 
 // ---------------------------------------------------------------------------

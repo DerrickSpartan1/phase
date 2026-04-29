@@ -3,9 +3,12 @@ use crate::game::life_costs::{pay_life_as_cost, PayLifeCostResult};
 use crate::game::quantity::resolve_quantity_with_targets;
 use crate::game::speed::{effective_speed, set_speed};
 use crate::game::targeting::resolve_effect_player_ref;
-use crate::types::ability::{Effect, PaymentCost, QuantityExpr, QuantityRef};
+use crate::types::ability::{
+    AbilityCost, Effect, EffectKind, PaymentCost, QuantityExpr, QuantityRef,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, PayableResource, WaitingFor};
+use crate::types::player::PlayerId;
 
 use super::{EffectError, ResolvedAbility};
 
@@ -130,6 +133,73 @@ pub fn resolve(
             } else {
                 state.cost_payment_failed_flag = true;
             }
+        }
+        PaymentCost::AbilityCost { cost } => {
+            resolve_ability_cost_payment(state, &payment_ability, payer, cost, events)?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_ability_cost_payment(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    payer: PlayerId,
+    cost: &AbilityCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EffectError> {
+    match cost {
+        AbilityCost::Discard {
+            count,
+            filter,
+            random: false,
+            self_ref: false,
+        } => {
+            let count = resolve_quantity_with_targets(state, count, ability).max(0) as usize;
+            let eligible = casting::find_eligible_discard_targets(
+                state,
+                payer,
+                ability.source_id,
+                filter.as_ref(),
+            );
+            if eligible.len() < count {
+                state.cost_payment_failed_flag = true;
+                return Ok(());
+            }
+            if count == 0 {
+                state.last_effect_count = Some(0);
+                return Ok(());
+            }
+            if eligible.len() == count {
+                for card_id in eligible {
+                    if let super::discard::DiscardOutcome::NeedsReplacementChoice(choice_player) =
+                        super::discard::discard_as_cost(state, card_id, payer, events)
+                    {
+                        state.waiting_for =
+                            crate::game::replacement::replacement_choice_waiting_for(
+                                choice_player,
+                                state,
+                            );
+                        return Ok(());
+                    }
+                }
+                state.last_effect_count = Some(count as i32);
+            } else {
+                state.waiting_for = WaitingFor::DiscardChoice {
+                    player: payer,
+                    count,
+                    cards: eligible,
+                    source_id: ability.source_id,
+                    effect_kind: EffectKind::PayCost,
+                    up_to: false,
+                    unless_filter: None,
+                };
+            }
+        }
+        unsupported => {
+            return Err(EffectError::InvalidParam(format!(
+                "unsupported resolution-time AbilityCost payment: {unsupported:?}"
+            )));
         }
     }
     Ok(())
@@ -269,6 +339,120 @@ mod tests {
         assert!(result.is_ok());
         assert!(state.cost_payment_failed_flag);
         assert_eq!(state.players[0].energy, 1); // No change
+    }
+
+    #[test]
+    fn ability_cost_discard_payment_enters_discard_choice() {
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let first = create_object(&mut state, CardId(10), PlayerId(0), "A".into(), Zone::Hand);
+        let second = create_object(&mut state, CardId(11), PlayerId(0), "B".into(), Zone::Hand);
+        let ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: PaymentCost::AbilityCost {
+                    cost: AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        random: false,
+                        self_ref: false,
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::DiscardChoice {
+                player,
+                count,
+                cards,
+                effect_kind,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 1);
+                assert_eq!(*effect_kind, crate::types::ability::EffectKind::PayCost);
+                assert!(cards.contains(&first));
+                assert!(cards.contains(&second));
+            }
+            other => panic!("expected DiscardChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ability_cost_discard_choice_drains_continuation() {
+        use crate::game::effects::resolve_ability_chain;
+        use crate::game::engine_resolution_choices::{
+            handle_resolution_choice, ResolutionChoiceOutcome,
+        };
+        use crate::game::zones::create_object;
+        use crate::types::actions::GameAction;
+        use crate::types::identifiers::CardId;
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let first = create_object(&mut state, CardId(10), PlayerId(0), "A".into(), Zone::Hand);
+        create_object(&mut state, CardId(11), PlayerId(0), "B".into(), Zone::Hand);
+        state.players[0].life = 20;
+
+        let gain_life = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: crate::types::ability::GainLifePlayer::Controller,
+            },
+            vec![],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        let mut pay_ability = ResolvedAbility::new(
+            Effect::PayCost {
+                cost: PaymentCost::AbilityCost {
+                    cost: AbilityCost::Discard {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        filter: None,
+                        random: false,
+                        self_ref: false,
+                    },
+                },
+                payer: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(500),
+            PlayerId(0),
+        );
+        pay_ability.sub_ability = Some(Box::new(gain_life));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &pay_ability, &mut events, 0).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::DiscardChoice { .. }
+        ));
+
+        let waiting_for = state.waiting_for.clone();
+        let outcome = handle_resolution_choice(
+            &mut state,
+            waiting_for,
+            GameAction::SelectCards { cards: vec![first] },
+            &mut events,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            ResolutionChoiceOutcome::WaitingFor(_) | ResolutionChoiceOutcome::ActionResult(_)
+        ));
+        assert_eq!(state.players[0].life, 23);
+        assert_eq!(state.last_effect_count, Some(1));
     }
 
     /// CR 107.14: A fixed-amount energy payment stamps `last_effect_count`

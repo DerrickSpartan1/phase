@@ -299,7 +299,40 @@ fn rewrite_bound_x_in_payment_cost(cost: &mut PaymentCost, binding: &QuantityExp
         PaymentCost::Life { amount }
         | PaymentCost::Speed { amount }
         | PaymentCost::Energy { amount } => rewrite_bound_x_in_quantity_expr(amount, binding),
+        PaymentCost::AbilityCost { cost } => rewrite_bound_x_in_ability_cost(cost, binding),
         PaymentCost::Mana { .. } => 0,
+    }
+}
+
+fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExpr) -> usize {
+    match cost {
+        AbilityCost::PayLife { amount }
+        | AbilityCost::PaySpeed { amount }
+        | AbilityCost::Discard { count: amount, .. } => {
+            rewrite_bound_x_in_quantity_expr(amount, binding)
+        }
+        AbilityCost::Composite { costs } => costs
+            .iter_mut()
+            .map(|cost| rewrite_bound_x_in_ability_cost(cost, binding))
+            .sum(),
+        AbilityCost::Mana { .. }
+        | AbilityCost::Tap
+        | AbilityCost::Untap
+        | AbilityCost::Loyalty { .. }
+        | AbilityCost::Sacrifice { .. }
+        | AbilityCost::Exile { .. }
+        | AbilityCost::CollectEvidence { .. }
+        | AbilityCost::TapCreatures { .. }
+        | AbilityCost::RemoveCounter { .. }
+        | AbilityCost::PayEnergy { .. }
+        | AbilityCost::ReturnToHand { .. }
+        | AbilityCost::Mill { .. }
+        | AbilityCost::Exert
+        | AbilityCost::Blight { .. }
+        | AbilityCost::Reveal { .. }
+        | AbilityCost::Waterbend { .. }
+        | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::Unimplemented { .. } => 0,
     }
 }
 
@@ -6293,6 +6326,39 @@ mod tests {
         };
         assert_eq!(*payer, TargetFilter::ParentTargetController);
         let sub = ability.sub_ability.as_ref().expect("expected paid body");
+        assert!(matches!(sub.effect.as_ref(), Effect::Draw { .. }));
+    }
+
+    #[test]
+    fn may_cost_discard_converts_to_paycost_ability_cost() {
+        let actions = Actions::ActionList(vec![
+            Action::MayCost(Box::new(Cost::DiscardACard)),
+            Action::If(Condition::CostWasPaid, vec![Action::DrawACard]),
+        ]);
+
+        let conv = convert_actions(&actions).unwrap();
+        let ability = build_ability_from_actions(AbilityKind::Spell, None, conv).unwrap();
+
+        assert!(ability.optional);
+        let Effect::PayCost { cost, .. } = ability.effect.as_ref() else {
+            panic!("expected PayCost parent, got {:?}", ability.effect);
+        };
+        assert!(matches!(
+            cost,
+            PaymentCost::AbilityCost {
+                cost: AbilityCost::Discard {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    filter: None,
+                    random: false,
+                    self_ref: false,
+                },
+            }
+        ));
+        let sub = ability.sub_ability.as_ref().expect("expected paid body");
+        assert_eq!(
+            sub.condition,
+            Some(engine::types::ability::AbilityCondition::IfYouDo)
+        );
         assert!(matches!(sub.effect.as_ref(), Effect::Draw { .. }));
     }
 
