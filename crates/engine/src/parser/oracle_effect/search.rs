@@ -923,6 +923,14 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
             }
         }
 
+        if let Ok((rest, _)) =
+            tag::<_, _, VerboseError<&str>>("with the same name").parse(remaining)
+        {
+            suffix.properties.push(FilterProp::SameNameAsParentTarget);
+            remaining = rest.trim_start();
+            continue;
+        }
+
         // CR 608.2c: "with different names" / "with different name" — distinct-names
         // constraint is already encoded on the search details upstream via
         // `scan_distinct_names_clause`. The chomping arm here exists solely to
@@ -1178,6 +1186,15 @@ mod tests {
             .properties
             .iter()
             .any(|property| matches!(property, FilterProp::SameName)));
+    }
+
+    #[test]
+    fn build_search_suffix_constraints_same_name_uses_parent_target() {
+        let suffix = build_search_suffix_constraints(" with the same name", false);
+        assert!(suffix
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::SameNameAsParentTarget)));
     }
 
     #[test]
