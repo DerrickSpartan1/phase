@@ -2155,6 +2155,9 @@ fn evaluate_condition(
         }
         // CR 608.2c: "If it's your turn" — check active player against controller.
         AbilityCondition::IsYourTurn => state.active_player == ability.controller,
+        // CR 500.8 + CR 506.1 + CR 608.2c: "if it's the first combat phase
+        // of the turn" gates follow-up effects such as additional combats.
+        AbilityCondition::FirstCombatPhaseOfTurn => state.combat_phases_started_this_turn == 1,
         // CR 608.2c: "If a [noun] was [verb]ed this way" — check if any zone-changed
         // object matches the type filter. For optional-targeting parents with no targets
         // chosen, last_zone_changed_ids is empty → returns false.
@@ -5024,6 +5027,41 @@ mod tests {
             conditions: vec![AbilityCondition::IsYourTurn, AbilityCondition::IsYourTurn],
         };
         assert!(evaluate_condition(&cond, &state, &ability));
+    }
+
+    #[test]
+    fn evaluate_condition_first_combat_phase_checks_turn_counter() {
+        let mut state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
+
+        state.combat_phases_started_this_turn = 0;
+        assert!(!evaluate_condition(
+            &AbilityCondition::FirstCombatPhaseOfTurn,
+            &state,
+            &ability,
+        ));
+
+        state.combat_phases_started_this_turn = 1;
+        assert!(evaluate_condition(
+            &AbilityCondition::FirstCombatPhaseOfTurn,
+            &state,
+            &ability,
+        ));
+
+        state.combat_phases_started_this_turn = 2;
+        assert!(!evaluate_condition(
+            &AbilityCondition::FirstCombatPhaseOfTurn,
+            &state,
+            &ability,
+        ));
     }
 
     #[test]

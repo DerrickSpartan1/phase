@@ -1506,6 +1506,13 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
         return Some(AbilityCondition::DayNightIsNeither);
     }
 
+    if tag::<_, _, VerboseError<&str>>("it's the first combat phase of the turn")
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return Some(AbilityCondition::FirstCombatPhaseOfTurn);
+    }
+
     // CR 603.4: "if this is the [Nth] time this ability has resolved this turn"
     // and the abbreviated continuation form "if it's the [Nth] time" used by
     // Omnath's later sentences (the "this ability has resolved this turn" tail

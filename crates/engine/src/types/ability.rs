@@ -5991,6 +5991,9 @@ pub enum AbilityCondition {
     /// is the ability's controller. For "if it's not your turn", wrap with
     /// `AbilityCondition::Not`.
     IsYourTurn,
+    /// CR 500.8 + CR 506.1 + CR 608.2c: "if it's the first combat phase of the turn".
+    /// Gates a follow-up effect on whether this is the first combat phase started this turn.
+    FirstCombatPhaseOfTurn,
     /// CR 608.2c: "If a [noun] was [verb]ed this way" — sub_ability executes only if
     /// the parent effect produced a zone change involving an object matching the filter.
     /// Evaluated by checking `state.last_zone_changed_ids` against the filter.

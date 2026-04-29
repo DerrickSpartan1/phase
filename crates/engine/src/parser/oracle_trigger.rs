@@ -5850,8 +5850,9 @@ mod tests {
     use super::*;
     use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
     use crate::types::ability::{
-        Comparator, ControllerRef, DamageModification, Duration, Effect, FilterProp, PlayerFilter,
-        PlayerScope, PtValue, QuantityExpr, QuantityRef, TypeFilter, TypedFilter, UnlessCost,
+        AbilityCondition, Comparator, ControllerRef, DamageModification, Duration, Effect,
+        FilterProp, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, TypeFilter,
+        TypedFilter, UnlessCost,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -5933,6 +5934,24 @@ mod tests {
         assert_eq!(
             def.condition,
             Some(TriggerCondition::FirstCombatPhaseOfTurn)
+        );
+    }
+
+    #[test]
+    fn trigger_first_combat_phase_followup_condition() {
+        let def = parse_trigger_line(
+            "Whenever a Samurai or Warrior you control attacks alone, untap it. If it's the first combat phase of the turn, there is an additional combat phase after this phase.",
+            "A-Raiyuu, Storm's Edge",
+        );
+        assert!(def.condition.is_none());
+        let followup = def
+            .execute
+            .as_ref()
+            .and_then(|ability| ability.sub_ability.as_deref())
+            .expect("additional combat follow-up");
+        assert_eq!(
+            followup.condition,
+            Some(AbilityCondition::FirstCombatPhaseOfTurn)
         );
     }
 
