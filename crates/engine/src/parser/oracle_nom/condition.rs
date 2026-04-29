@@ -400,15 +400,23 @@ fn parse_typed_counter_noun(input: &str) -> OracleResult<'_, CounterMatch> {
 /// Used by leveler-style cards (Figure of Fable, Figure of Destiny) where each
 /// activation level gates on the source's current subtype.
 fn parse_source_is_type(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = alt((
-        tag("this creature is "),
-        tag("this permanent is "),
-        tag("~ is "),
+    let (rest, _) = parse_source_subject(input)?;
+    let (rest, negated) = alt((
+        value(false, tag("is ")),
+        value(true, alt((tag("isn't "), tag("is not ")))),
     ))
-    .parse(input)?;
+    .parse(rest)?;
     let (rest, _) = parse_article(rest)?;
     let (filter, remainder) = parse_type_phrase(rest);
-    Ok((remainder, StaticCondition::SourceMatchesFilter { filter }))
+    let condition = StaticCondition::SourceMatchesFilter { filter };
+    let condition = if negated {
+        StaticCondition::Not {
+            condition: Box::new(condition),
+        }
+    } else {
+        condition
+    };
+    Ok((remainder, condition))
 }
 
 /// CR 400.7: Parse "this [type] entered (the battlefield) this turn" → SourceEnteredThisTurn.
@@ -2809,6 +2817,17 @@ mod tests {
         let (rest, c) = parse_inner_condition("this permanent is a creature").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(c, StaticCondition::SourceMatchesFilter { .. }));
+    }
+
+    #[test]
+    fn test_source_is_not_a_type() {
+        let (rest, c) = parse_inner_condition("this enchantment isn't a creature").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            c,
+            StaticCondition::Not { condition }
+                if matches!(*condition, StaticCondition::SourceMatchesFilter { .. })
+        ));
     }
 
     // -- Player-state conditions --

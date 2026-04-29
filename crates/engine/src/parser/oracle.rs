@@ -2457,9 +2457,10 @@ pub(super) fn parse_activated_with_self_ref_fallback(
 mod tests {
     use super::*;
     use crate::types::ability::{
-        ContinuousModification, FilterProp, ManaSpendRestriction, ModalSelectionConstraint,
-        ObjectScope, QuantityExpr, QuantityRef, ReplacementCondition, StaticCondition,
-        TargetFilter, TypeFilter, TypedFilter,
+        AbilityCondition, Comparator, ContinuousModification, FilterProp, ManaSpendRestriction,
+        ModalSelectionConstraint, ObjectScope, PlayerFilter, PlayerScope, QuantityExpr,
+        QuantityRef, ReplacementCondition, ShieldKind, StaticCondition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind};
     use crate::types::mana::{ManaCost, ManaCostShard};
@@ -6201,6 +6202,29 @@ mod tests {
     }
 
     #[test]
+    fn each_opponent_with_no_cards_in_hand_preserves_condition() {
+        let def = parse_effect_chain(
+            "each opponent with no cards in hand loses 10 life",
+            crate::types::ability::AbilityKind::Spell,
+        );
+
+        assert_eq!(def.player_scope, Some(PlayerFilter::Opponent));
+        assert!(matches!(*def.effect, Effect::LoseLife { .. }));
+        assert!(matches!(
+            def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::Controller
+                    }
+                },
+                comparator: Comparator::EQ,
+                rhs: QuantityExpr::Fixed { value: 0 },
+            })
+        ));
+    }
+
+    #[test]
     fn each_opponent_mills_produces_player_scope() {
         use crate::parser::oracle_effect::parse_effect_chain;
         use crate::types::ability::PlayerFilter;
@@ -7473,6 +7497,34 @@ mod tests {
             "hand-zone static should reach result.statics, got statics={:?}, abilities={:?}",
             parsed.statics,
             parsed.abilities,
+        );
+    }
+
+    #[test]
+    fn prevention_followup_if_this_way_does_not_emit_condition_warning() {
+        let oracle = "Prevent the next X damage that would be dealt to target creature this turn, where X is your devotion to white. If damage is prevented this way, Acolyte's Reward deals that much damage to any target.";
+        let parsed = parse(oracle, "Acolyte's Reward", &[], &["Instant"], &[]);
+
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")),
+            "unexpected condition warning: {:?}",
+            parsed.parse_warnings
+        );
+
+        let replacement = parsed
+            .replacements
+            .first()
+            .expect("expected prevention replacement");
+        assert!(matches!(
+            replacement.shield_kind,
+            ShieldKind::Prevention { .. }
+        ));
+        assert!(
+            replacement.execute.is_some(),
+            "expected prevented-this-way follow-up execute"
         );
     }
 

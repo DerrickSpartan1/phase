@@ -1166,6 +1166,11 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
             StaticCondition::SourceIsTapped => Some(AbilityCondition::Not {
                 condition: Box::new(AbilityCondition::SourceIsTapped),
             }),
+            StaticCondition::SourceMatchesFilter { filter } => Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::SourceMatchesFilter {
+                    filter: filter.clone(),
+                }),
+            }),
             _ => None,
         },
         StaticCondition::SourceMatchesFilter { filter } => {

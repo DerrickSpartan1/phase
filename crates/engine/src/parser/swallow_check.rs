@@ -25,7 +25,7 @@ use super::oracle::ParsedAbilities;
 use super::oracle_warnings::push_warning;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, Effect, OpponentMayScope, PlayerFilter, QuantityExpr,
-    ReplacementDefinition, StaticDefinition, TargetFilter, TriggerDefinition,
+    ReplacementDefinition, ShieldKind, StaticDefinition, TargetFilter, TriggerDefinition,
 };
 use crate::types::statics::StaticMode;
 
@@ -460,6 +460,50 @@ fn any_ability_has_conditional_mana_spell_grant(parsed: &ParsedAbilities) -> boo
         })
 }
 
+fn def_tree_has_cast_from_zone_alt_ability_cost(def: &AbilityDefinition) -> bool {
+    if matches!(
+        *def.effect,
+        Effect::CastFromZone {
+            alt_ability_cost: Some(_),
+            ..
+        }
+    ) {
+        return true;
+    }
+    if let Some(ref sub) = def.sub_ability {
+        if def_tree_has_cast_from_zone_alt_ability_cost(sub) {
+            return true;
+        }
+    }
+    if let Some(ref else_ab) = def.else_ability {
+        if def_tree_has_cast_from_zone_alt_ability_cost(else_ab) {
+            return true;
+        }
+    }
+    def.mode_abilities
+        .iter()
+        .any(def_tree_has_cast_from_zone_alt_ability_cost)
+}
+
+fn any_ability_has_cast_from_zone_alt_ability_cost(parsed: &ParsedAbilities) -> bool {
+    parsed
+        .abilities
+        .iter()
+        .any(def_tree_has_cast_from_zone_alt_ability_cost)
+        || parsed.triggers.iter().any(|trigger| {
+            trigger
+                .execute
+                .as_deref()
+                .is_some_and(def_tree_has_cast_from_zone_alt_ability_cost)
+        })
+}
+
+fn any_replacement_has_prevention_followup(parsed: &ParsedAbilities) -> bool {
+    parsed.replacements.iter().any(|repl| {
+        matches!(repl.shield_kind, ShieldKind::Prevention { .. }) && repl.execute.is_some()
+    })
+}
+
 fn target_filter_has_targets_property(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(tf) => tf.properties.iter().any(|prop| {
@@ -853,6 +897,9 @@ fn detect_condition_if(cleaned: &str, original: &str, ast_json: &str, parsed: &P
     if any_ability_has_conditional_mana_spell_grant(parsed) {
         return;
     }
+    if any_ability_has_cast_from_zone_alt_ability_cost(parsed) {
+        return;
+    }
     if any_static_has_target_gated_cost_modification(parsed) {
         return;
     }
@@ -866,6 +913,16 @@ fn detect_condition_if(cleaned: &str, original: &str, ast_json: &str, parsed: &P
     //               with `ReplacementMode::Optional { decline: Tap(SelfRef) }`,
     //               i.e., the decline branch IS the "if you don't" gate.
     let stripped = strip_cr_implicit_if_phrases(cleaned);
+    // CR 615.5: "If damage is prevented this way, [effect]" is not an
+    // independent condition; prevention replacements encode it by storing the
+    // follow-up in `execute`, which the replacement pipeline only fires from
+    // the `Prevented` arm.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if stripped.contains("if damage is prevented this way")
+        && any_replacement_has_prevention_followup(parsed)
+    {
+        return;
+    }
     // CR 117.6 / 702.8: A `SpellCastingOption` with `cost: Some(_)` encodes
     // the "if you pay [cost]" surcharge gate inline (Ghitu Fire, Rout-class
     // "as though it had flash if you pay X" cycle). The "if" is a cost

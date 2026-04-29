@@ -129,6 +129,22 @@ pub(crate) fn resolve_it_pronoun(ctx: &ParseContext) -> TargetFilter {
     }
 }
 
+fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::SourceMatchesFilter { .. }
+        | AbilityCondition::SourceEnteredThisTurn
+        | AbilityCondition::SourceIsTapped => true,
+        AbilityCondition::Not { condition }
+        | AbilityCondition::ConditionInstead { inner: condition } => {
+            condition_refs_source_object(condition)
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_refs_source_object)
+        }
+        _ => false,
+    }
+}
+
 /// Parse an effect clause from Oracle text into an Effect enum.
 /// This handles the verb-based matching for spell effects, activated ability effects,
 /// and the effect portion of triggered abilities.
@@ -4520,6 +4536,29 @@ fn replace_target_with_parent(effect: &mut Effect) {
     }
 }
 
+fn replace_fight_subject_with_parent_if_anaphoric_subject(
+    lower: &str,
+    effect: &mut Effect,
+) -> bool {
+    let is_anaphoric_subject = alt((
+        tag::<_, _, VerboseError<&str>>("it fights "),
+        tag("that creature fights "),
+        tag("that permanent fights "),
+    ))
+    .parse(lower)
+    .is_ok();
+    if !is_anaphoric_subject {
+        return false;
+    }
+
+    if let Effect::Fight { subject, .. } = effect {
+        *subject = TargetFilter::ParentTarget;
+        true
+    } else {
+        false
+    }
+}
+
 /// Check if an effect has a `Typed(...)` target filter (not SelfRef/ParentTarget/Any).
 /// Used to guard anaphoric replacement scope — prevents false positives when a
 /// pronoun clause follows a conditional effect without a typed target.
@@ -6618,8 +6657,13 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             _ => None,
         }
         .or_else(|| ctx.actor.clone());
+        let chunk_subject = if condition.as_ref().is_some_and(condition_refs_source_object) {
+            Some(TargetFilter::SelfRef)
+        } else {
+            ctx.subject.clone()
+        };
         let chunk_ctx = ParseContext {
-            subject: ctx.subject.clone(),
+            subject: chunk_subject,
             card_name: ctx.card_name.clone(),
             // CR 707.9a + CR 603.1: propagate the trigger index from the parent
             // ctx — `current_trigger_index` is a property of the whole trigger
@@ -6819,7 +6863,12 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         // Kicker clauses referencing "that creature"/"it" inherit the parent's target.
         // Scoped to conditional sub-abilities only — "it"/"its" appears in possessive
         // forms on many cards and would incorrectly replace targets if applied generally.
-        if condition.is_some() && !defs.is_empty() && has_anaphoric_reference(&text.to_lowercase())
+        let text_lower = text.to_lowercase();
+        if condition.is_some()
+            && !condition.as_ref().is_some_and(condition_refs_source_object)
+            && !defs.is_empty()
+            && has_anaphoric_reference(&text_lower)
+            && !replace_fight_subject_with_parent_if_anaphoric_subject(&text_lower, &mut def.effect)
         {
             replace_target_with_parent(&mut def.effect);
         }
@@ -6830,7 +6879,8 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             && defs
                 .last()
                 .is_some_and(|prev| prev.condition.is_some() && has_typed_target(&prev.effect))
-            && has_anaphoric_reference(&text.to_lowercase())
+            && has_anaphoric_reference(&text_lower)
+            && !replace_fight_subject_with_parent_if_anaphoric_subject(&text_lower, &mut def.effect)
         {
             replace_target_with_parent(&mut def.effect);
         }
@@ -6841,7 +6891,8 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             && defs
                 .last()
                 .is_some_and(|prev| prev.condition.is_none() && has_typed_target(&prev.effect))
-            && has_anaphoric_reference(&text.to_lowercase())
+            && has_anaphoric_reference(&text_lower)
+            && !replace_fight_subject_with_parent_if_anaphoric_subject(&text_lower, &mut def.effect)
         {
             replace_target_with_parent(&mut def.effect);
         }
@@ -7709,6 +7760,17 @@ fn strip_each_player_subject(text: &str) -> (Option<PlayerFilter>, String) {
     .is_ok()
     {
         return (None, text.to_string());
+    }
+
+    let rest_condition_lower = rest.to_lowercase();
+    if let Some(((), conditioned_rest)) = nom_on_lower(rest, &rest_condition_lower, |i| {
+        value((), tag("with no cards in hand ")).parse(i)
+    }) {
+        let deconjugated = subject::deconjugate_verb(conditioned_rest);
+        return (
+            Some(scope),
+            format!("if you have no cards in hand, {deconjugated}"),
+        );
     }
 
     // Deconjugate the verb: "discards" → "discard", "draws" → "draw"
@@ -17105,6 +17167,41 @@ mod tests {
             "Expected SourceMatchesFilter condition, got {:?}",
             def.condition
         );
+    }
+
+    #[test]
+    fn source_condition_rebinds_it_pronoun_to_source_in_trigger_context() {
+        let ctx = ParseContext {
+            subject: Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You),
+            )),
+            ..ParseContext::default()
+        };
+        let def = parse_effect_chain_with_context(
+            "If this enchantment isn't a creature, it becomes a 3/3 Angel creature with flying.",
+            AbilityKind::Spell,
+            &ctx,
+        );
+
+        assert!(matches!(
+            def.condition,
+            Some(AbilityCondition::Not { condition })
+                if matches!(*condition, AbilityCondition::SourceMatchesFilter { .. })
+        ));
+        match &*def.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } => {
+                assert_eq!(target, &None);
+                assert!(matches!(
+                    static_abilities[0].affected,
+                    Some(TargetFilter::SelfRef)
+                ));
+            }
+            other => panic!("expected source animation, got {other:?}"),
+        }
     }
 
     #[test]
