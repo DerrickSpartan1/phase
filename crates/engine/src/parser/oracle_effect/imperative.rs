@@ -1,6 +1,6 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::value;
+use nom::combinator::{opt, rest, value};
 use nom::sequence::preceded;
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -1992,6 +1992,19 @@ pub(super) fn parse_utility_imperative_ast(
             return Some(UtilityImperativeAst::Attach { attachment, target });
         }
     }
+    if let Some(((attachment_text, target_text), rem)) =
+        nom_on_lower(text, lower, |input| parse_explicit_targeted_attach(input))
+    {
+        if rem.trim().is_empty() && nom_primitives::scan_contains(&attachment_text, "target ") {
+            let (attachment, attachment_rem) = parse_target(&attachment_text);
+            let (target, target_rem) = parse_attach_recipient(&target_text);
+            #[cfg(debug_assertions)]
+            super::types::assert_no_compound_remainder(attachment_rem, text);
+            #[cfg(debug_assertions)]
+            super::types::assert_no_compound_remainder(target_rem, text);
+            return Some(UtilityImperativeAst::Attach { attachment, target });
+        }
+    }
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("attach ")).parse(input))
     {
@@ -2006,6 +2019,35 @@ pub(super) fn parse_utility_imperative_ast(
         });
     }
     None
+}
+
+fn parse_explicit_targeted_attach(
+    input: &str,
+) -> nom::IResult<&str, (String, String), VerboseError<&str>> {
+    let (input, _) = tag("attach ").parse(input)?;
+    let (input, _) = opt(alt((
+        tag("up to one "),
+        tag("up to two "),
+        tag("up to three "),
+        tag("any number of "),
+    )))
+    .parse(input)?;
+    let (input, attachment) = take_until(" to ").parse(input)?;
+    let (input, _) = tag(" to ").parse(input)?;
+    let (input, target) = rest.parse(input)?;
+    Ok((input, (attachment.to_string(), target.to_string())))
+}
+
+fn parse_attach_recipient(text: &str) -> (TargetFilter, &str) {
+    let (target, rest) = parse_target(text);
+    if matches!(target, TargetFilter::ParentTarget) {
+        let trimmed = text.trim_start();
+        let lower = trimmed.to_lowercase();
+        if matches!(lower.trim(), "her" | "him") {
+            return (TargetFilter::SelfRef, &trimmed[lower.len()..]);
+        }
+    }
+    (target, rest)
 }
 
 fn parse_attach_anaphor_to_token(
@@ -5025,6 +5067,47 @@ mod tests {
         };
         assert_eq!(attachment, TargetFilter::TriggeringSource);
         assert_eq!(target, TargetFilter::LastCreated);
+    }
+
+    #[test]
+    fn parse_attach_target_equipment_to_self_pronoun() {
+        let input = "attach up to one target Equipment you control to her";
+        let lower = input.to_lowercase();
+        let result = parse_utility_imperative_ast(input, &lower);
+        let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        assert_eq!(
+            attachment,
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Equipment".to_string())
+                    .controller(ControllerRef::You)
+            )
+        );
+        assert_eq!(target, TargetFilter::SelfRef);
+    }
+
+    #[test]
+    fn parse_attach_target_equipment_to_target_creature() {
+        let input = "attach target Equipment you control to target creature you control";
+        let lower = input.to_lowercase();
+        let result = parse_utility_imperative_ast(input, &lower);
+        let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        assert_eq!(
+            attachment,
+            TargetFilter::Typed(
+                TypedFilter::default()
+                    .subtype("Equipment".to_string())
+                    .controller(ControllerRef::You)
+            )
+        );
+        assert_eq!(
+            target,
+            TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
+        );
     }
 
     #[test]
