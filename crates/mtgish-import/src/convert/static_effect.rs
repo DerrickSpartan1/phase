@@ -642,43 +642,6 @@ pub fn expiration_to_duration(exp: &Expiration) -> ConvResult<Duration> {
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::schema::types::{PermanentRule, Player};
-    use engine::types::ability::{TargetFilter, TypeFilter, TypedFilter};
-
-    #[test]
-    fn cant_attack_unless_defending_player_controls_lowers_to_negated_condition() {
-        let condition = Condition::PlayerPassesFilter(
-            Box::new(Player::DefendingPlayer),
-            Box::new(Players::ControlsA(Box::new(
-                crate::schema::types::Permanents::IsCardtype(CardType::Creature),
-            ))),
-        );
-
-        let converted = convert_permanent_rule(
-            &PermanentRule::CantAttackUnlessDefendingPlayer(condition),
-            TargetFilter::SelfRef,
-        )
-        .unwrap();
-
-        assert_eq!(converted.mode, StaticMode::CantAttack);
-        assert_eq!(converted.affected, Some(TargetFilter::SelfRef));
-
-        let Some(StaticCondition::Not { condition }) = converted.condition else {
-            panic!("expected negated defending-player condition");
-        };
-        let StaticCondition::DefendingPlayerControls {
-            filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
-        } = *condition
-        else {
-            panic!("expected DefendingPlayerControls condition");
-        };
-        assert!(type_filters.contains(&TypeFilter::Creature));
-    }
-}
-
 /// True when the `Player` reference resolves to the effect's own controller —
 /// the only `PlayerScope` (`Controller`) the `Duration::UntilNextTurnOf` /
 /// `UntilNextUntapStepOf` parameterizations bind today.
@@ -928,4 +891,41 @@ fn check_hasable_to_remove_keyword(c: &CheckHasable) -> ConvResult<Vec<Continuou
         }
     };
     Ok(vec![ContinuousModification::RemoveKeyword { keyword: kw }])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::types::{PermanentRule, Player};
+    use engine::types::ability::{TargetFilter, TypeFilter, TypedFilter};
+
+    #[test]
+    fn cant_attack_unless_defending_player_controls_lowers_to_negated_condition() {
+        let condition = Condition::PlayerPassesFilter(
+            Box::new(Player::DefendingPlayer),
+            Box::new(Players::ControlsA(Box::new(
+                crate::schema::types::Permanents::IsCardtype(CardType::Creature),
+            ))),
+        );
+
+        let converted = convert_permanent_rule(
+            &PermanentRule::CantAttackUnlessDefendingPlayer(condition),
+            TargetFilter::SelfRef,
+        )
+        .unwrap();
+
+        assert_eq!(converted.mode, StaticMode::CantAttack);
+        assert_eq!(converted.affected, Some(TargetFilter::SelfRef));
+
+        let Some(StaticCondition::Not { condition }) = converted.condition else {
+            panic!("expected negated defending-player condition");
+        };
+        let StaticCondition::DefendingPlayerControls {
+            filter: TargetFilter::Typed(TypedFilter { type_filters, .. }),
+        } = *condition
+        else {
+            panic!("expected DefendingPlayerControls condition");
+        };
+        assert!(type_filters.contains(&TypeFilter::Creature));
+    }
 }
