@@ -7,6 +7,7 @@ import { useGameStore } from "../../../stores/gameStore.ts";
 import { usePreferencesStore } from "../../../stores/preferencesStore.ts";
 import { useUiStore } from "../../../stores/uiStore.ts";
 import type { GroupedPermanent as GroupedPermanentType } from "../../../viewmodel/battlefieldProps.ts";
+import { BattlefieldRow } from "../BattlefieldRow.tsx";
 import { BoardInteractionContext } from "../BoardInteractionContext.tsx";
 import { GroupedPermanentDisplay } from "../GroupedPermanent.tsx";
 
@@ -107,8 +108,26 @@ function renderGroup(options: {
         rowType="creatures"
         manualExpanded={false}
         onExpand={vi.fn()}
-        onCollapse={vi.fn()}
       />
+    </BoardInteractionContext.Provider>,
+  );
+}
+
+function renderCreatureRow() {
+  return render(
+    <BoardInteractionContext.Provider
+      value={{
+        activatableObjectIds: new Set(),
+        committedAttackerIds: new Set(),
+        incomingAttackerCounts: new Map(),
+        manaTappableObjectIds: new Set(),
+        selectableManaCostCreatureIds: new Set(),
+        undoableTapObjectIds: new Set(),
+        validAttackerIds: new Set(),
+        validTargetObjectIds: new Set(),
+      }}
+    >
+      <BattlefieldRow groups={[makeGroup()]} rowType="creatures" />
     </BoardInteractionContext.Provider>,
   );
 }
@@ -154,6 +173,18 @@ describe("GroupedPermanentDisplay collapsed creature groups", () => {
 
     expect(container.querySelectorAll("[data-object-id]")).toHaveLength(1);
     expect(screen.getByRole("button", { name: "Expand Saproling group" })).toHaveTextContent("×5");
+  });
+
+  it("regroups manually expanded duplicate creature groups from a stable row control", () => {
+    const { container } = renderCreatureRow();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand Saproling group" }));
+
+    expect(container.querySelectorAll("[data-object-id]")).toHaveLength(5);
+
+    fireEvent.click(screen.getByRole("button", { name: "Regroup duplicate creature groups" }));
+
+    expect(container.querySelectorAll("[data-object-id]")).toHaveLength(1);
   });
 
   it("opens an attacker picker that replaces only this group's selected attackers", () => {

@@ -1,4 +1,5 @@
-import { zipSync, strToU8 } from "fflate";
+import { strFromU8, strToU8, unzipSync, zipSync } from "fflate";
+import type { ChangeEvent } from "react";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { GameState } from "../../adapter/types";
@@ -20,6 +21,42 @@ interface ConsoleEntry {
   level: ConsoleLevel;
   message: string;
   timestamp: number;
+}
+
+function gameStateFromImportText(importText: string): GameState | string {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(importText);
+  } catch {
+    return "Invalid JSON";
+  }
+
+  // Accept either a bare GameState or the full debug export format {gameState, ...}
+  const state = (
+    parsed && typeof parsed === "object" && "gameState" in parsed
+      ? (parsed as { gameState: GameState }).gameState
+      : parsed
+  ) as GameState;
+
+  if (!state || typeof state !== "object" || !("waiting_for" in state)) {
+    return "JSON does not look like a GameState (missing waiting_for)";
+  }
+
+  return state;
+}
+
+async function readImportFile(file: File): Promise<string> {
+  if (!file.name.toLowerCase().endsWith(".zip")) {
+    return file.text();
+  }
+
+  const archive = unzipSync(new Uint8Array(await file.arrayBuffer()));
+  const jsonFilename = Object.keys(archive).find((name) => name.toLowerCase().endsWith(".json"));
+  if (!jsonFilename) {
+    throw new Error("ZIP does not contain a JSON file");
+  }
+
+  return strFromU8(archive[jsonFilename]);
 }
 
 /** Ring buffer of captured console output, shared across mount/unmount cycles. */
@@ -58,6 +95,7 @@ export function DebugPanel() {
   const [importText, setImportText] = useState("");
   const [status, setStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const importFileInputRef = useRef<HTMLInputElement>(null);
   const [consoleSnapshot, setConsoleSnapshot] = useState<ConsoleEntry[]>([]);
   const [enabledLevels, setEnabledLevels] = useState<Set<ConsoleLevel>>(
     // `debug` starts off — it's the noisiest level and most viewers want it
@@ -87,23 +125,9 @@ export function DebugPanel() {
 
   const handleImport = useCallback(async () => {
     setStatus(null);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(importText);
-    } catch {
-      setStatus({ type: "error", message: "Invalid JSON" });
-      return;
-    }
-
-    // Accept either a bare GameState or the full debug export format {gameState, ...}
-    const state = (
-      parsed && typeof parsed === "object" && "gameState" in parsed
-        ? (parsed as { gameState: GameState }).gameState
-        : parsed
-    ) as GameState;
-
-    if (!state || typeof state !== "object" || !("waiting_for" in state)) {
-      setStatus({ type: "error", message: "JSON does not look like a GameState (missing waiting_for)" });
+    const state = gameStateFromImportText(importText);
+    if (typeof state === "string") {
+      setStatus({ type: "error", message: state });
       return;
     }
 
@@ -115,6 +139,36 @@ export function DebugPanel() {
       setImportText("");
     }
   }, [importText]);
+
+  const handleImportFile = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    setStatus(null);
+    let fileText: string;
+    try {
+      fileText = await readImportFile(file);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to read file";
+      setStatus({ type: "error", message });
+      return;
+    }
+
+    const state = gameStateFromImportText(fileText);
+    if (typeof state === "string") {
+      setStatus({ type: "error", message: state });
+      return;
+    }
+
+    const err = await restoreGameState(state);
+    if (err) {
+      setStatus({ type: "error", message: err });
+    } else {
+      setStatus({ type: "success", message: `State restored from ${file.name}` });
+      setImportText("");
+    }
+  }, []);
 
   const handleCopyState = useCallback(() => {
     if (!gameState) return;
@@ -298,6 +352,19 @@ export function DebugPanel() {
             >
               Restore
             </button>
+            <button
+              onClick={() => importFileInputRef.current?.click()}
+              className="mt-1 w-full rounded bg-gray-800 px-2 py-1 text-xs transition-colors hover:bg-gray-700"
+            >
+              Import from File
+            </button>
+            <input
+              ref={importFileInputRef}
+              type="file"
+              accept=".json,.txt,.zip,application/json,text/plain,application/zip"
+              onChange={handleImportFile}
+              className="hidden"
+            />
           </section>
         )}
 

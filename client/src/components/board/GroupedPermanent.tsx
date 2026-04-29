@@ -21,7 +21,6 @@ interface GroupedPermanentProps {
   rowType: BattlefieldRowType;
   manualExpanded: boolean;
   onExpand: () => void;
-  onCollapse: () => void;
 }
 
 type PickerMode = "attackers" | "blockers" | "equip" | "target" | "tap";
@@ -53,7 +52,6 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
   rowType,
   manualExpanded,
   onExpand,
-  onCollapse,
 }: GroupedPermanentProps) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const playerId = usePlayerId();
@@ -169,15 +167,6 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
         {group.ids.map((id) => (
           <PermanentCard key={id} objectId={id} />
         ))}
-        {/* Only show collapse button for manual expansion, not auto-expand */}
-        {manualExpanded && !containsAttacker && (
-          <button
-            className="rounded bg-gray-800 px-1.5 py-0.5 text-[10px] text-gray-400 hover:bg-gray-700 hover:text-gray-200"
-            onClick={onCollapse}
-          >
-            collapse
-          </button>
-        )}
       </div>
     );
   }
@@ -195,17 +184,27 @@ export const GroupedPermanentDisplay = memo(function GroupedPermanentDisplay({
           type="button"
           onClick={(event) => {
             event.stopPropagation();
-            if (canOpenPicker) {
-              setPickerOpen((open) => !open);
-            } else {
-              onExpand();
-            }
+            onExpand();
           }}
           className="absolute -left-3 -top-3 z-40 flex h-8 min-w-8 items-center justify-center rounded-full bg-black px-1.5 text-sm font-extrabold text-white ring-2 ring-white/80 shadow-[0_2px_8px_rgba(0,0,0,0.65)] transition-transform hover:scale-105"
-          aria-label={canOpenPicker ? `Choose ${group.name} token` : `Expand ${group.name} group`}
+          aria-label={`Expand ${group.name} group`}
         >
           ×{group.count}
         </button>
+        {canOpenPicker && (
+          <button
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setPickerOpen((open) => !open);
+            }}
+            className="absolute -bottom-2 left-1/2 z-40 -translate-x-1/2 rounded-full bg-amber-400 px-2 py-0.5 text-[10px] font-extrabold uppercase leading-none text-black ring-1 ring-black/40 shadow-[0_2px_8px_rgba(0,0,0,0.55)] transition-transform hover:scale-105 hover:bg-amber-300"
+            aria-label={`Choose ${group.name} token`}
+            aria-expanded={pickerOpen}
+          >
+            Pick
+          </button>
+        )}
         <CollapsedGroupBadges
           assignedBlockerCount={assignedBlockerCount}
           committedAttackerCount={committedAttackerCount}

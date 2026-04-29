@@ -208,9 +208,24 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
   return (
     <div
       ref={containerRef}
-      className={`flex ${minH} ${rowType === "creatures" ? `${creatureClass} ${creatureWrap ? "gap-x-2 gap-y-3" : "gap-2"}` : "flex-wrap items-center gap-2"} ${ROW_JUSTIFY[rowType]} ${className ?? ""}`}
+      className={`relative flex ${minH} ${rowType === "creatures" ? `${creatureClass} ${creatureWrap ? "gap-x-2 gap-y-3" : "gap-2"}` : "flex-wrap items-center gap-2"} ${ROW_JUSTIFY[rowType]} ${className ?? ""}`}
       style={rowStyle}
     >
+      {rowType === "creatures" && expandedGroupIds.size > 0 && (
+        <button
+          type="button"
+          className="absolute right-1 top-1 z-50 flex h-7 w-7 items-center justify-center rounded-full bg-black/85 text-white ring-1 ring-white/70 shadow-[0_2px_8px_rgba(0,0,0,0.7)] transition-transform hover:scale-105 hover:bg-slate-800"
+          onClick={() => setExpandedGroupIds(new Set())}
+          aria-label="Regroup duplicate creature groups"
+          title="Regroup duplicate creature groups"
+        >
+          <span aria-hidden="true" className="flex flex-col items-center gap-0.5">
+            <span className="block h-0.5 w-3 rounded bg-current" />
+            <span className="block h-0.5 w-2.5 rounded bg-current" />
+            <span className="block h-0.5 w-2 rounded bg-current" />
+          </span>
+        </button>
+      )}
       {renderedGroups.map(({ group, manualExpanded }) => (
         <GroupedPermanentDisplay
           key={group.ids[0]}
@@ -221,13 +236,6 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
             setExpandedGroupIds((previous) => {
               const next = new Set(previous);
               next.add(group.ids[0]);
-              return next;
-            });
-          }}
-          onCollapse={() => {
-            setExpandedGroupIds((previous) => {
-              const next = new Set(previous);
-              next.delete(group.ids[0]);
               return next;
             });
           }}

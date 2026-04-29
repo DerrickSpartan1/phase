@@ -519,7 +519,7 @@ export async function processRemoteUpdate(
  * Returns null on success, or an error message string on failure.
  */
 export async function restoreGameState(state: GameState): Promise<string | null> {
-  const { adapter } = useGameStore.getState();
+  const { adapter, gameId } = useGameStore.getState();
   if (!adapter) return "No adapter available";
 
   try {
@@ -528,13 +528,23 @@ export async function restoreGameState(state: GameState): Promise<string | null>
     return err instanceof Error ? err.message : "Failed to restore state";
   }
 
+  const restoredState = await adapter.getState();
   const legalResult = await adapter.getLegalActions();
   useGameStore.setState({
-    gameState: state,
-    waitingFor: state.waiting_for,
+    gameState: restoredState,
+    waitingFor: restoredState.waiting_for,
     ...legalResultState(legalResult),
     events: [],
+    eventHistory: [],
+    logHistory: [],
+    nextLogSeq: 0,
+    stateHistory: [],
+    turnCheckpoints: [],
   });
+  if (gameId) {
+    await saveGame(gameId, restoredState);
+    await saveCheckpoints(gameId, []);
+  }
 
   return null;
 }

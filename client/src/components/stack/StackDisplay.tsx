@@ -167,7 +167,7 @@ export function StackDisplay() {
         animate={{ opacity: 1, x: 0 }}
         exit={{ opacity: 0, x: 60 }}
         transition={{ type: "spring", stiffness: 300, damping: 30 }}
-        className="fixed top-1/2 z-30 -translate-y-1/2"
+        className="fixed top-1/2 z-[35] -translate-y-1/2"
         style={{
           top: topPosition,
           right: `calc(env(safe-area-inset-right) + ${rightOffsetPx}px + var(--game-right-rail-offset, 0px))`,
