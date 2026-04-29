@@ -20,7 +20,7 @@ use crate::convert::mana;
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::schema::types::{
     CardType, Cards, ColorList, Comparison, Condition, GameNumber, Permanent, Permanents, Player,
-    Players, Spells,
+    Players, Spell, Spells,
 };
 
 /// CR 608.2c + CR 700.4: Convert an mtgish `Condition` for use as an
@@ -118,6 +118,18 @@ pub fn convert_ability(c: &Condition) -> ConvResult<AbilityCondition> {
         // Non-zone predicates (`AlternateCostWasPaid`, `WasKicked`, `WasForetold`,
         // `WasBargained`, etc.) need separate engine slots and strict-fail.
         Condition::CastSpellPassesFilter(spells) => spells_to_cast_zone_ability(spells)?,
+        // CR 608.2c: "if target spell [matches predicate]" — the announced
+        // spell target is an object on the stack, so reuse the existing
+        // Spells -> TargetFilter converter and gate the sub-ability against
+        // the first object target.
+        Condition::SpellPassesFilter(spell, spells)
+            if matches!(&**spell, Spell::Ref_TargetSpell) =>
+        {
+            AbilityCondition::TargetMatchesFilter {
+                filter: crate::convert::filter::spells_to_filter(spells)?,
+                use_lki: false,
+            }
+        }
         _ => {
             return Err(ConversionGap::UnknownVariant {
                 path: String::new(),
@@ -3185,5 +3197,29 @@ mod tests {
                 minimum: 1,
             }
         );
+    }
+
+    #[test]
+    fn target_spell_condition_lowers_to_target_matches_filter() {
+        let condition = Condition::SpellPassesFilter(
+            Box::new(Spell::Ref_TargetSpell),
+            Box::new(Spells::IsColor(Color::Blue)),
+        );
+
+        let converted = convert_ability(&condition).unwrap();
+
+        match converted {
+            AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+                assert!(!use_lki);
+                assert!(matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { properties, .. })
+                        if properties.contains(&FilterProp::HasColor {
+                            color: ManaColor::Blue
+                        })
+                ));
+            }
+            other => panic!("expected TargetMatchesFilter, got {other:?}"),
+        }
     }
 }
