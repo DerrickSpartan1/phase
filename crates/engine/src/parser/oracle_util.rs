@@ -1274,6 +1274,48 @@ fn replace_all_words_case_sensitive(haystack: &str, needle: &str, replacement: &
     result
 }
 
+fn follows_subtype_status_qualifier(haystack: &str, pos: usize) -> bool {
+    let before = haystack[..pos].trim_end();
+    let last_word = before
+        .rsplit(|c: char| !c.is_ascii_alphabetic())
+        .next()
+        .unwrap_or("");
+    ["attacking", "blocking", "tapped", "untapped", "unblocked"]
+        .iter()
+        .any(|qualifier| last_word.eq_ignore_ascii_case(qualifier))
+}
+
+fn replace_all_words_case_sensitive_preserving_subtype_status_refs(
+    haystack: &str,
+    needle: &str,
+    replacement: &str,
+) -> String {
+    let needle_len = needle.len();
+    let mut result = String::with_capacity(haystack.len());
+    let mut last_end = 0;
+
+    for (pos, _) in haystack.match_indices(needle) {
+        let end = pos + needle_len;
+        let at_word_start = pos == 0 || !haystack.as_bytes()[pos - 1].is_ascii_alphanumeric();
+        let at_word_end =
+            end == haystack.len() || !haystack.as_bytes()[end].is_ascii_alphanumeric();
+        if at_word_start
+            && at_word_end
+            && pos >= last_end
+            && !follows_subtype_status_qualifier(haystack, pos)
+        {
+            result.push_str(&haystack[last_end..pos]);
+            result.push_str(replacement);
+            last_end = end;
+        }
+    }
+    if last_end == 0 {
+        return haystack.to_string();
+    }
+    result.push_str(&haystack[last_end..]);
+    result
+}
+
 /// Replace all occurrences of `needle` in `haystack` with `replacement`,
 /// case-insensitively, only at word boundaries (start/end of string, non-alphanumeric chars).
 fn replace_all_words(haystack: &str, needle: &str, replacement: &str) -> String {
@@ -1337,6 +1379,12 @@ pub fn normalize_card_name_refs(text: &str, card_name: &str) -> String {
     // matching generic English words in Oracle text (e.g., "this scheme in motion").
     result = if effective_name.contains(' ') {
         replace_all_words(&result, effective_name, "~")
+    } else if is_subtype_word(&effective_name.to_lowercase()) {
+        replace_all_words_case_sensitive_preserving_subtype_status_refs(
+            &result,
+            effective_name,
+            "~",
+        )
     } else {
         replace_all_words_case_sensitive(&result, effective_name, "~")
     };
@@ -1636,6 +1684,39 @@ mod tests {
         assert_eq!(
             normalize_card_name_refs("Slivers you control", "Sliver Gravemother"),
             "Slivers you control"
+        );
+    }
+
+    #[test]
+    fn normalize_single_word_subtype_name_preserves_attacking_subtype_reference() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "Whenever Aurochs attacks, it gets +1/+0 until end of turn for each other attacking Aurochs.",
+                "Aurochs",
+            ),
+            "Whenever ~ attacks, it gets +1/+0 until end of turn for each other attacking Aurochs."
+        );
+    }
+
+    #[test]
+    fn normalize_single_word_subtype_name_preserves_blocking_subtype_reference() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "Whenever Aurochs attacks, it gets +1/+0 until end of turn for each blocking Aurochs.",
+                "Aurochs",
+            ),
+            "Whenever ~ attacks, it gets +1/+0 until end of turn for each blocking Aurochs."
+        );
+    }
+
+    #[test]
+    fn normalize_single_word_subtype_name_preserves_tapped_subtype_reference() {
+        assert_eq!(
+            normalize_card_name_refs(
+                "Whenever Aurochs attacks, it gets +1/+0 until end of turn for each untapped Aurochs.",
+                "Aurochs",
+            ),
+            "Whenever ~ attacks, it gets +1/+0 until end of turn for each untapped Aurochs."
         );
     }
 
