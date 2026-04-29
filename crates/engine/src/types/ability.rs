@@ -6260,6 +6260,9 @@ pub enum TriggerCondition {
     /// CR 603.4: "if you attacked this turn" — true when the controller declared attackers
     /// during this turn's combat phase.
     AttackedThisTurn,
+    /// CR 500.8 + CR 506.1 + CR 603.4: "if it's the first combat phase of the turn".
+    /// True during the first combat phase started this turn, including its steps.
+    FirstCombatPhaseOfTurn,
 
     /// CR 603.4: "if you cast a [type] spell this turn" — true when the controller cast
     /// a spell matching the optional filter this turn.

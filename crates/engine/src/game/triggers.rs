@@ -1852,6 +1852,9 @@ pub(crate) fn check_trigger_condition(
         TriggerCondition::AttackedThisTurn => {
             state.players_attacked_this_turn.contains(&controller)
         }
+        // CR 500.8 + CR 506.1 + CR 603.4: Intervening-if for "if it's the
+        // first combat phase of the turn".
+        TriggerCondition::FirstCombatPhaseOfTurn => state.combat_phases_started_this_turn == 1,
         // CR 603.4: "if you cast a [type] spell this turn" — check per-player cast history.
         TriggerCondition::CastSpellThisTurn { filter } => match filter {
             None => state
@@ -2954,6 +2957,39 @@ pub mod tests {
             PlayerId(0),
             Some(source),
             Some(&event),
+        ));
+    }
+
+    #[test]
+    fn first_combat_phase_condition_checks_turn_counter() {
+        let mut state = setup();
+        let condition = TriggerCondition::FirstCombatPhaseOfTurn;
+
+        state.combat_phases_started_this_turn = 0;
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            None,
+            None,
+        ));
+
+        state.combat_phases_started_this_turn = 1;
+        assert!(check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            None,
+            None,
+        ));
+
+        state.combat_phases_started_this_turn = 2;
+        assert!(!check_trigger_condition(
+            &state,
+            &condition,
+            PlayerId(0),
+            None,
+            None,
         ));
     }
 

@@ -80,6 +80,10 @@ pub fn advance_phase(state: &mut GameState, events: &mut Vec<GameEvent>) {
     }
 
     state.phase = next;
+    if next == Phase::BeginCombat {
+        state.combat_phases_started_this_turn =
+            state.combat_phases_started_this_turn.saturating_add(1);
+    }
 
     // CR 500.5: Mana pools empty between phases/steps.
     // Firebending mana (EndOfCombat expiry) persists within combat steps.
@@ -226,6 +230,7 @@ pub fn start_next_turn(state: &mut GameState, events: &mut Vec<GameEvent>) {
     state.players_attacked_this_step.clear();
     state.players_attacked_this_turn.clear();
     state.attacking_creatures_this_turn.clear();
+    state.combat_phases_started_this_turn = 0;
     state.creatures_attacked_this_turn.clear();
     state.creatures_blocked_this_turn.clear();
     state.players_who_created_token_this_turn.clear();
@@ -1332,6 +1337,28 @@ mod tests {
                 phase: Phase::Upkeep
             }
         )));
+    }
+
+    #[test]
+    fn advance_phase_tracks_combat_phases_started_this_turn() {
+        let mut state = setup();
+        state.phase = Phase::PreCombatMain;
+        let mut events = Vec::new();
+
+        advance_phase(&mut state, &mut events);
+        assert_eq!(state.phase, Phase::BeginCombat);
+        assert_eq!(state.combat_phases_started_this_turn, 1);
+
+        state
+            .extra_phases
+            .push(crate::types::game_state::ExtraPhase {
+                anchor: Phase::EndCombat,
+                phase: Phase::BeginCombat,
+            });
+        state.phase = Phase::EndCombat;
+        advance_phase(&mut state, &mut events);
+        assert_eq!(state.phase, Phase::BeginCombat);
+        assert_eq!(state.combat_phases_started_this_turn, 2);
     }
 
     #[test]

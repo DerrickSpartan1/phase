@@ -601,6 +601,8 @@ pub enum ManaAbilityResume {
         cost: UnlessCost,
         pending_effect: Box<ResolvedAbility>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_event: Option<GameEvent>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         effect_description: Option<String>,
     },
 }
@@ -1299,6 +1301,10 @@ pub enum WaitingFor {
         cost: UnlessCost,
         /// The effect to execute if the player declines to pay.
         pending_effect: Box<ResolvedAbility>,
+        /// Trigger event context to restore if declining the payment resumes a
+        /// triggered ability effect that still references the triggering event.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger_event: Option<GameEvent>,
         /// Human-readable description for the frontend (e.g., "counter target spell", "draw a card").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         effect_description: Option<String>,
@@ -2493,6 +2499,10 @@ pub struct GameState {
     pub players_attacked_this_turn: HashSet<PlayerId>,
     #[serde(default)]
     pub attacking_creatures_this_turn: HashMap<PlayerId, u32>,
+    /// CR 500.8 + CR 506.1: Number of combat phases that have begun this turn.
+    /// Used by intervening-if triggers that only fire during the first combat phase.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub combat_phases_started_this_turn: u32,
     /// CR 508.1a: Object IDs of creatures declared as attackers this turn.
     /// Persists after combat ends for post-combat filtering.
     #[serde(default)]
@@ -2900,6 +2910,7 @@ impl GameState {
             players_attacked_this_step: HashSet::new(),
             players_attacked_this_turn: HashSet::new(),
             attacking_creatures_this_turn: HashMap::new(),
+            combat_phases_started_this_turn: 0,
             creatures_attacked_this_turn: HashSet::new(),
             creatures_blocked_this_turn: HashSet::new(),
             players_who_created_token_this_turn: HashSet::new(),
@@ -3070,6 +3081,7 @@ impl PartialEq for GameState {
             && self.players_attacked_this_step == other.players_attacked_this_step
             && self.players_attacked_this_turn == other.players_attacked_this_turn
             && self.attacking_creatures_this_turn == other.attacking_creatures_this_turn
+            && self.combat_phases_started_this_turn == other.combat_phases_started_this_turn
             && self.creatures_attacked_this_turn == other.creatures_attacked_this_turn
             && self.creatures_blocked_this_turn == other.creatures_blocked_this_turn
             && self.players_who_created_token_this_turn == other.players_who_created_token_this_turn

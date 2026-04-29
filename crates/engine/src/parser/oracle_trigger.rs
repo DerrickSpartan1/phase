@@ -1369,6 +1369,10 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
                 "if none of those creatures attacked you",
                 TriggerCondition::NoneOfAttackersTargetedYou,
             ),
+            (
+                "if it's the first combat phase of the turn",
+                TriggerCondition::FirstCombatPhaseOfTurn,
+            ),
         ],
     ) {
         return result;
@@ -5917,6 +5921,18 @@ mod tests {
                 ),
             "bare `enters` must not attach SourceIsTapped; got {:?}",
             def.condition
+        );
+    }
+
+    #[test]
+    fn trigger_first_combat_phase_condition() {
+        let def = parse_trigger_line(
+            "Whenever equipped creature attacks, if it's the first combat phase of the turn, untap it. After this phase, there is an additional combat phase.",
+            "Genji Glove",
+        );
+        assert_eq!(
+            def.condition,
+            Some(TriggerCondition::FirstCombatPhaseOfTurn)
         );
     }
 
