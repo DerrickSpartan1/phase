@@ -2959,6 +2959,33 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
         });
     }
 
+    let targeted_base_storage = subject::strip_subject_clause(base_no_duration);
+    let targeted_base = targeted_base_storage.as_deref().unwrap_or(base_no_duration);
+    let targeted_base_lower = targeted_base.to_lowercase();
+    if let Some(ast) = imperative::parse_targeted_action_ast(
+        targeted_base,
+        &targeted_base_lower,
+        &ParseContext::default(),
+    ) {
+        if matches!(
+            ast,
+            TargetedImperativeAst::Sacrifice { .. } | TargetedImperativeAst::Discard { .. }
+        ) {
+            let effect =
+                imperative::lower_targeted_action_ast(ast.with_for_each_quantity(quantity.clone()));
+            let effect = thread_for_each_subject(effect, base_no_duration);
+            return Some(ParsedEffectClause {
+                effect,
+                duration,
+                sub_ability: None,
+                distribute: None,
+                multi_target: None,
+                condition: None,
+                optional: false,
+            });
+        }
+    }
+
     // CR 120.1: "[subject] deals N damage to [target] for each X" → DealDamage.
     // Delegates to try_parse_damage, which already handles amount extraction, target parsing,
     // and damage source variants. Replace the fixed amount with the for-each quantity.
@@ -3147,7 +3174,7 @@ fn parse_energy_symbols_gain(input: &str, multiplier: QuantityExpr) -> Option<Ef
 /// default targets (Any/Controller) with the parsed subject filter.
 fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
     let lower = original.to_lowercase();
-    // Predicate verbs that parse_numeric_imperative_ast recognizes — find the earliest one.
+    // Predicate verbs that the for-each base parsers recognize — find the earliest one.
     // Note: uses str::find (not nom) because this is positional splitting on already-dispatched
     // text (base_tp from try_parse_for_each_effect), not parsing dispatch on raw Oracle text.
     // The input is short and constrained, so substring false positives are not a concern.
@@ -3165,6 +3192,8 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
         " draw ",
         " mills ",
         " mill ",
+        " discards ",
+        " discard ",
         " scries ",
         " scry ",
         " surveils ",
@@ -3227,6 +3256,19 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
             count,
             target: TargetFilter::Controller,
         } => Effect::Draw { count, target },
+        Effect::Discard {
+            count,
+            target: TargetFilter::Controller,
+            random,
+            unless_filter,
+            filter,
+        } => Effect::Discard {
+            count,
+            target,
+            random,
+            unless_filter,
+            filter,
+        },
         Effect::GainLife {
             amount,
             player: GainLifePlayer::Controller,
@@ -17394,6 +17436,27 @@ mod tests {
                     },
                 },
                 target: TargetFilter::Player,
+            },
+        );
+    }
+
+    #[test]
+    fn effect_target_player_discards_for_each_basic_land_type_you_control() {
+        let e = parse_effect(
+            "target player discards a card for each basic land type among lands you control",
+        );
+        assert_eq!(
+            e,
+            Effect::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::BasicLandTypeCount {
+                        controller: ControllerRef::You,
+                    },
+                },
+                target: TargetFilter::Player,
+                random: false,
+                unless_filter: None,
+                filter: None,
             },
         );
     }

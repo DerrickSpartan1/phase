@@ -1731,7 +1731,7 @@ fn parse_tilde_subject_with_predicate(input: &str) -> nom::IResult<&str, (), Ver
     .map(|(rest, _)| (rest, ()))
 }
 
-fn strip_subject_clause(text: &str) -> Option<String> {
+pub(super) fn strip_subject_clause(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
     if !starts_with_subject_prefix(&lower) {
         return None;

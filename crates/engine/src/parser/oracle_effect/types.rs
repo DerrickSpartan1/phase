@@ -458,6 +458,34 @@ impl NumericImperativeAst {
     }
 }
 
+impl TargetedImperativeAst {
+    /// Replace fixed counts with a dynamic for-each quantity expression.
+    /// Targeted action verbs keep their parsed target/filter data; only count
+    /// fields that represent "N objects/cards" are rewritten.
+    pub(super) fn with_for_each_quantity(self, quantity: QuantityExpr) -> Self {
+        match self {
+            Self::Sacrifice { target, count } => Self::Sacrifice {
+                target,
+                count: replace_fixed_quantity(count, quantity),
+            },
+            Self::Discard {
+                count,
+                random,
+                up_to,
+                unless_filter,
+                filter,
+            } => Self::Discard {
+                count: replace_fixed_quantity(count, quantity),
+                random,
+                up_to,
+                unless_filter,
+                filter,
+            },
+            other => other,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum TargetedImperativeAst {
     Tap {
