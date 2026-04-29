@@ -26,6 +26,14 @@ path = "src/bin/debug_deser.rs"
 name = "mtgish-diff"
 path = "src/bin/mtgish-diff.rs"
 
+[[bin]]
+name = "mtgish-clean-diff"
+path = "src/bin/mtgish-clean-diff.rs"
+
+[[bin]]
+name = "mtgish-gap-axis"
+path = "src/bin/mtgish-gap-axis.rs"
+
 [dev-dependencies]
 # Source-parse engine type files in `tests/manifest_coverage.rs` to assert
 # every `Vec<T>` field is classified by `ORDERING_MANIFEST`. `full` is
