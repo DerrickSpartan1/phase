@@ -1,6 +1,6 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::value;
+use nom::combinator::{recognize, value};
 use nom::multi::many1;
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
@@ -1302,6 +1302,12 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
         );
     }
 
+    // CR 603.4 + CR 601.2h: "if no mana was spent to cast it/that spell" —
+    // intervening-if for free-spell counter triggers (Lavinia / Vexing Bauble).
+    if let Some(result) = try_extract_no_mana_spent_condition(&lower, text) {
+        return result;
+    }
+
     // CR 603.4 + CR 601.2: "if it wasn't cast" — negation of WasCast.
     if let Some(pos) = tp.find("if it wasn't cast") {
         return (
@@ -1513,6 +1519,42 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     }
 
     (text.to_string(), None)
+}
+
+fn try_extract_no_mana_spent_condition(
+    lower: &str,
+    text: &str,
+) -> Option<(String, Option<TriggerCondition>)> {
+    let (before, clause_text, rest) = scan_preceded(lower, |i| {
+        preceded(tag("if "), parse_no_mana_spent_clause).parse(i)
+    })?;
+    let rest_trimmed = rest.trim_start();
+    if !(rest_trimmed.is_empty() || rest_trimmed.starts_with(',') || rest_trimmed.starts_with('.'))
+    {
+        return None;
+    }
+    let clause_start = before.len();
+    let clause_len = lower.len() - before.len() - rest.len();
+    Some((
+        strip_condition_clause(text, clause_start, clause_len),
+        Some(TriggerCondition::ManaSpentCondition {
+            text: clause_text.to_string(),
+        }),
+    ))
+}
+
+fn parse_no_mana_spent_clause(i: &str) -> OracleResult<'_, &str> {
+    recognize(pair(
+        tag("no mana was spent to cast "),
+        alt((
+            tag("it"),
+            tag("that spell"),
+            tag("this spell"),
+            tag("them"),
+            tag("~"),
+        )),
+    ))
+    .parse(i)
 }
 
 /// Try to extract an intervening predicate introduced by `keyword`.
@@ -11075,6 +11117,19 @@ mod tests {
                     minimum: 2,
                 }),
             }
+        );
+    }
+
+    #[test]
+    fn extract_no_mana_spent_condition() {
+        let (cleaned, cond) =
+            extract_if_condition("if no mana was spent to cast it, counter that spell");
+        assert_eq!(cleaned, "counter that spell");
+        assert_eq!(
+            cond,
+            Some(TriggerCondition::ManaSpentCondition {
+                text: "no mana was spent to cast it".to_string(),
+            })
         );
     }
 
