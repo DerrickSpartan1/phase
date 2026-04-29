@@ -675,7 +675,7 @@ pub fn expiration_to_duration(exp: &Expiration) -> ConvResult<Duration> {
 /// the only `PlayerScope` (`Controller`) the `Duration::UntilNextTurnOf` /
 /// `UntilNextUntapStepOf` parameterizations bind today.
 fn is_self_player(p: &Player) -> bool {
-    matches!(p, Player::SelfPlayer | Player::ItsController)
+    matches!(p, Player::You | Player::SelfPlayer | Player::ItsController)
 }
 
 /// True when the `Permanent` reference resolves to the source object — the
@@ -978,5 +978,16 @@ mod tests {
             panic!("expected DefendingPlayerControls condition");
         };
         assert!(type_filters.contains(&TypeFilter::Creature));
+    }
+
+    #[test]
+    fn until_your_next_turn_lowers_to_controller_next_turn_duration() {
+        assert_eq!(
+            expiration_to_duration(&Expiration::UntilPlayersNextTurn(Box::new(Player::You)))
+                .unwrap(),
+            Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller,
+            }
+        );
     }
 }
