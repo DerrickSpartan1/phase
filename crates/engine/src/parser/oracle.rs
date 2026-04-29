@@ -7529,6 +7529,28 @@ mod tests {
     }
 
     #[test]
+    fn may_cost_decline_if_you_dont_does_not_emit_condition_or_optional_warning() {
+        let oracle = "({T}: Add {B} or {R}.)\nAs this land enters, you may pay 2 life. If you don't, it enters tapped.";
+        let parsed = parse(
+            oracle,
+            "Blood Crypt",
+            &[],
+            &["Land"],
+            &["Swamp", "Mountain"],
+        );
+
+        assert!(
+            parsed.parse_warnings.iter().all(|warning| {
+                let label = warning.split_whitespace().next();
+                label != Some("Swallow:Condition_If") && label != Some("Swallow:Optional_YouMay")
+            }),
+            "unexpected replacement choice warning: {:?}",
+            parsed.parse_warnings
+        );
+        assert_eq!(parsed.replacements.len(), 1);
+    }
+
+    #[test]
     fn dynamic_mana_per_color_does_not_emit_dynamic_qty_warning() {
         let oracle =
             "Vivid — {T}: For each color among permanents you control, add one mana of that color.";

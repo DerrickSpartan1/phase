@@ -25,7 +25,8 @@ use super::oracle::ParsedAbilities;
 use super::oracle_warnings::push_warning;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, Effect, OpponentMayScope, PlayerFilter, QuantityExpr,
-    ReplacementDefinition, ShieldKind, StaticDefinition, TargetFilter, TriggerDefinition,
+    ReplacementDefinition, ReplacementMode, ShieldKind, StaticDefinition, TargetFilter,
+    TriggerDefinition,
 };
 use crate::types::statics::StaticMode;
 
@@ -504,6 +505,18 @@ fn any_replacement_has_prevention_followup(parsed: &ParsedAbilities) -> bool {
     })
 }
 
+fn any_replacement_has_may_cost_decline(parsed: &ParsedAbilities) -> bool {
+    parsed.replacements.iter().any(|repl| {
+        matches!(
+            repl.mode,
+            ReplacementMode::MayCost {
+                decline: Some(_),
+                ..
+            }
+        )
+    })
+}
+
 fn target_filter_has_targets_property(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Typed(tf) => tf.properties.iter().any(|prop| {
@@ -567,11 +580,8 @@ fn any_ability_is_optional(parsed: &ParsedAbilities) -> bool {
         || parsed.replacements.iter().any(|r| {
             matches!(
                 r.mode,
-                crate::types::ability::ReplacementMode::Optional { .. }
-            ) || r
-                .execute
-                .as_deref()
-                .is_some_and(def_tree_has_optional)
+                ReplacementMode::Optional { .. } | ReplacementMode::MayCost { .. }
+            ) || r.execute.as_deref().is_some_and(def_tree_has_optional)
         })
         // Static modes that ARE the "you may" permission — their entire
         // semantic content is granting an optional player action:
@@ -925,6 +935,13 @@ fn detect_condition_if(cleaned: &str, original: &str, ast_json: &str, parsed: &P
     if stripped.contains("if damage is prevented this way")
         && any_replacement_has_prevention_followup(parsed)
     {
+        return;
+    }
+    // CR 118.12 + CR 614.12a: "you may pay [cost]. If you don't, ..."
+    // is encoded as `ReplacementMode::MayCost { decline }`; the decline
+    // branch is the alternative instruction, not an uncaptured condition.
+    // allow-noncombinator: swallow detector marker scan on classified text
+    if stripped.contains("if you don't") && any_replacement_has_may_cost_decline(parsed) {
         return;
     }
     // CR 117.6 / 702.8: A `SpellCastingOption` with `cost: Some(_)` encodes
