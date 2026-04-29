@@ -9108,12 +9108,13 @@ mod phase_trigger_regression_tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityCondition, AbilityDefinition, AbilityKind, ControllerRef, Effect, FilterProp,
-        GainLifePlayer, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter,
-        TargetRef, TriggerConstraint, TriggerDefinition, TypedFilter, UnlessCost,
+        GainLifePlayer, ObjectScope, PlayerFilter, QuantityExpr, QuantityRef, ResolvedAbility,
+        TargetFilter, TargetRef, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        UnlessCost, UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
-    use crate::types::identifiers::CardId;
-    use crate::types::mana::ManaColor;
+    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::mana::{ManaColor, ManaCost, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
     use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
@@ -9546,6 +9547,144 @@ mod phase_trigger_regression_tests {
                 player: PlayerId(1)
             }
         ));
+    }
+
+    fn setup_esper_sentinel_unless_payment(pay_mana: bool) -> GameState {
+        let mut state = new_game(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        create_object(
+            &mut state,
+            CardId(500),
+            PlayerId(0),
+            "Drawn Card".to_string(),
+            Zone::Library,
+        );
+
+        let esper = create_object(
+            &mut state,
+            CardId(501),
+            PlayerId(0),
+            "Esper Sentinel".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&esper).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(1);
+            obj.toughness = Some(1);
+            let mut trigger = TriggerDefinition::new(TriggerMode::SpellCast)
+                .execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                ))
+                .constraint(TriggerConstraint::NthSpellThisTurn {
+                    n: 1,
+                    filter: Some(TargetFilter::Typed(
+                        TypedFilter::default()
+                            .with_type(TypeFilter::Non(Box::new(TypeFilter::Creature))),
+                    )),
+                });
+            trigger.unless_pay = Some(UnlessPayModifier {
+                cost: UnlessCost::DynamicGeneric {
+                    quantity: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Source,
+                        },
+                    },
+                },
+                payer: TargetFilter::TriggeringPlayer,
+            });
+            obj.trigger_definitions.push(trigger);
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(502),
+            PlayerId(1),
+            "Opponent Noncreature Spell".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&spell)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        if pay_mana {
+            state
+                .players
+                .iter_mut()
+                .find(|player| player.id == PlayerId(1))
+                .unwrap()
+                .mana_pool
+                .add(ManaUnit {
+                    color: ManaType::Colorless,
+                    source_id: ObjectId(0),
+                    snow: false,
+                    restrictions: Vec::new(),
+                    grants: vec![],
+                    expiry: None,
+                });
+        }
+
+        apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: spell,
+                card_id: CardId(502),
+                targets: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let mut events = Vec::new();
+        crate::game::stack::resolve_top(&mut state, &mut events);
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::UnlessPayment {
+                player: PlayerId(1),
+                cost: UnlessCost::Fixed { ref cost },
+                ..
+            } if *cost == ManaCost::generic(1)
+        ));
+
+        state
+    }
+
+    #[test]
+    fn esper_sentinel_draws_when_triggering_player_declines_x_payment() {
+        let mut state = setup_esper_sentinel_unless_payment(false);
+
+        let result =
+            apply_as_current(&mut state, GameAction::PayUnlessCost { pay: false }).unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.players[0].hand.len(), 1);
+        assert_eq!(state.players[1].hand.len(), 0);
+    }
+
+    #[test]
+    fn esper_sentinel_does_not_draw_when_triggering_player_pays_x() {
+        let mut state = setup_esper_sentinel_unless_payment(true);
+
+        let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.players[0].hand.len(), 0);
+        assert_eq!(state.players[1].hand.len(), 0);
     }
 
     #[test]
@@ -10055,6 +10194,7 @@ mod phase_trigger_regression_tests {
             player: PlayerId(0),
             cost: UnlessCost::PayLife { amount: 2 },
             pending_effect: Box::new(ability),
+            trigger_event: None,
             effect_description: None,
         };
 

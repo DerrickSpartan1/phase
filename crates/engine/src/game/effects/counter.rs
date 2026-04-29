@@ -69,6 +69,7 @@ pub fn resolve(
                     player: controller,
                     cost: resolved_cost,
                     pending_effect: Box::new(ability.clone()),
+                    trigger_event: state.current_trigger_event.clone(),
                     effect_description: Some("counter target spell".to_string()),
                 };
                 return Ok(());

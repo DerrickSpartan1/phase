@@ -1347,6 +1347,7 @@ pub fn resolve_ability_chain(
                         player: payer,
                         cost: unless_pay.cost.clone(),
                         pending_effect: Box::new(pending),
+                        trigger_event: state.current_trigger_event.clone(),
                         effect_description: ability.description.clone(),
                     };
                     return Ok(());
@@ -1380,6 +1381,7 @@ pub fn resolve_ability_chain(
                         cost: resolved_cost,
                     },
                     pending_effect: Box::new(pending),
+                    trigger_event: state.current_trigger_event.clone(),
                     effect_description: ability.description.clone(),
                 };
                 return Ok(());

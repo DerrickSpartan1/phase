@@ -196,6 +196,7 @@ pub(super) fn handle_unless_payment(
         player,
         cost,
         pending_effect,
+        trigger_event,
         ..
     } = waiting_for
     else {
@@ -298,8 +299,11 @@ pub(super) fn handle_unless_payment(
         {
             *unless_payment = None;
         }
-        effects::resolve_ability_chain(state, &ability, events, 0)
-            .map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
+        let previous_trigger_event = state.current_trigger_event.clone();
+        state.current_trigger_event = trigger_event.clone();
+        let result = effects::resolve_ability_chain(state, &ability, events, 0);
+        state.current_trigger_event = previous_trigger_event;
+        result.map_err(|e| EngineError::InvalidAction(format!("{e:?}")))?;
     }
 
     if matches!(state.waiting_for, WaitingFor::UnlessPayment { .. }) {
@@ -319,6 +323,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
         player,
         cost,
         pending_effect,
+        trigger_event,
         effect_description,
     } = waiting_for
     else {
@@ -338,6 +343,7 @@ pub(super) fn handle_unless_payment_tap_land_for_mana(
         player,
         cost,
         pending_effect,
+        trigger_event,
         effect_description,
     })
 }
@@ -352,6 +358,7 @@ pub(super) fn handle_unless_payment_untap_land_for_mana(
         player,
         cost,
         pending_effect,
+        trigger_event,
         effect_description,
     } = waiting_for
     else {
@@ -365,6 +372,7 @@ pub(super) fn handle_unless_payment_untap_land_for_mana(
         player,
         cost,
         pending_effect,
+        trigger_event,
         effect_description,
     })
 }
@@ -380,6 +388,7 @@ pub(super) fn handle_unless_payment_activate_ability(
         player,
         cost,
         pending_effect,
+        trigger_event,
         effect_description,
     } = waiting_for
     else {
@@ -411,6 +420,7 @@ pub(super) fn handle_unless_payment_activate_ability(
         crate::types::game_state::ManaAbilityResume::UnlessPayment {
             cost,
             pending_effect,
+            trigger_event,
             effect_description,
         },
         None,

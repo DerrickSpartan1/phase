@@ -1007,6 +1007,7 @@ mod tests {
                         cost: ManaCost::generic(1),
                     },
                     pending_effect: Box::new(empty_effect(ObjectId(0))),
+                    trigger_event: None,
                     effect_description: None,
                 },
                 false,
