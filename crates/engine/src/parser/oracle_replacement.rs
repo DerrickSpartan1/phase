@@ -1375,9 +1375,21 @@ fn parse_enters_with_counters(
         // CR 207.2c (Raid): "Raid — ~ enters with [counter] on it if you
         // attacked this turn." (Cruel Administrator, Goblin Boarders, etc.)
         def = def.condition(ReplacementCondition::YouAttackedThisTurn);
+    } else if let Some(condition) = extract_enters_with_only_if_suffix(work_text) {
+        // CR 614.1c + CR 700.4: Generic suffix gates for ETB-counter
+        // replacements, e.g. Morbid's "if a creature died this turn".
+        def = def.condition(condition);
     }
 
     Some(def)
+}
+
+fn extract_enters_with_only_if_suffix(text: &str) -> Option<ReplacementCondition> {
+    let (_, (_, condition_text)) = nom_primitives::split_once_on(text, " if ").ok()?;
+    let condition_text = condition_text.trim().trim_end_matches('.');
+    let (rest, condition) = parse_inner_condition(condition_text).ok()?;
+    rest.trim().is_empty().then_some(())?;
+    replacement_condition_from_static(condition)
 }
 
 fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(String, QuantityExpr)>> {
@@ -1724,6 +1736,16 @@ fn extract_you_attacked_this_turn_suffix(work_text: &str) -> bool {
 
 fn replacement_condition_from_static(condition: StaticCondition) -> Option<ReplacementCondition> {
     match condition {
+        StaticCondition::QuantityComparison {
+            lhs,
+            comparator,
+            rhs,
+        } => Some(ReplacementCondition::OnlyIfQuantity {
+            lhs,
+            comparator,
+            rhs,
+            active_player_req: None,
+        }),
         StaticCondition::SourceIsTapped => {
             Some(ReplacementCondition::SourceTappedState { tapped: true })
         }
@@ -4420,6 +4442,27 @@ mod tests {
                 count: QuantityExpr::Fixed { value: 12 },
                 ..
             } if counter_type == "P1P1"
+        ));
+    }
+
+    #[test]
+    fn enters_with_counters_if_event_condition() {
+        let def = parse_replacement_line(
+            "This creature enters with a +1/+1 counter on it if a creature died this turn.",
+            "Cackling Slasher",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            def.condition,
+            Some(ReplacementCondition::OnlyIfQuantity {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::CreaturesDiedThisTurn
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+                active_player_req: None,
+            })
         ));
     }
 

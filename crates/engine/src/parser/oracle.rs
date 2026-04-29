@@ -17,6 +17,7 @@ use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
+use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::primitives::scan_contains;
 use super::oracle_warnings::{clear_warnings, push_warning, take_warnings};
 
@@ -304,17 +305,20 @@ impl ActivatedConstraintAst {
 
 /// CR 608.2c: Pre-strip "instead if [condition]" or trailing "instead" from effect text.
 /// The "instead" keyword signals a cross-line replacement pattern. The trailing
-/// "if [condition]" (when present after "instead") is redundant with the ability word
-/// condition already extracted at the caller level (e.g., Revolt, Corrupted).
-/// Cards without ability words using this "effect instead if condition" pattern
-/// would need separate handling.
-fn strip_instead_suffix(text: &str) -> (String, bool) {
+/// "if [condition]" (when present after "instead") is parsed through the shared
+/// condition grammar and composed with any ability-word condition at the caller.
+fn strip_instead_suffix(text: &str) -> (String, Option<AbilityCondition>, bool) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
     // Pattern: " instead if [condition]" — mid-line "instead" followed by condition
-    if let Some((before, _after)) = tp.rsplit_around(" instead if ") {
-        return (before.original.trim().to_string(), true);
+    if let Some((before, after)) = tp.rsplit_around(" instead if ") {
+        let condition_text = after.lower.trim().trim_end_matches('.');
+        let condition = parse_inner_condition(condition_text)
+            .ok()
+            .and_then(|(rest, condition)| rest.trim().is_empty().then_some(condition))
+            .and_then(|condition| ability_word_to_ability_condition(&Some(condition)));
+        return (before.original.trim().to_string(), condition, true);
     }
 
     // Pattern: "[effect] instead" — trailing "instead" (with optional period)
@@ -331,12 +335,12 @@ fn strip_instead_suffix(text: &str) -> (String, bool) {
             // chain parser to produce `AdditionalCostPaidInstead` on the sub-ability.
             let before_trim = before.original.trim().trim_end_matches('.');
             if !before_trim.contains('.') {
-                return (before.original.trim().to_string(), true);
+                return (before.original.trim().to_string(), None, true);
             }
         }
     }
 
-    (text.to_string(), false)
+    (text.to_string(), None, false)
 }
 
 /// Map a known ability word name to a typed `StaticCondition`.
@@ -1528,7 +1532,8 @@ pub fn parse_oracle_text(
             // strip_mana_value_conditional inside the chain parser to handle
             // mid-position MV conditions (e.g., "if it has mana value 4 or less")
             // that precede "instead if [ability word condition]".
-            let (effect_line_clean, is_instead) = strip_instead_suffix(&effect_line);
+            let (effect_line_clean, instead_condition, is_instead) =
+                strip_instead_suffix(&effect_line);
             let parse_line = if is_instead {
                 &effect_line_clean
             } else {
@@ -1560,6 +1565,12 @@ pub fn parse_oracle_text(
                 (Some(aw), None) => Some(aw),
                 (None, chain) => chain,
             };
+            if let Some(instead_condition) = instead_condition {
+                def.condition = Some(merge_ability_condition(
+                    def.condition.take(),
+                    instead_condition,
+                ));
+            }
             i += 1;
             // CR 706: If the parsed chain ends with "roll a dN", consume
             // subsequent d20 table lines and attach them as die result branches.
@@ -7296,6 +7307,39 @@ mod tests {
                 other => panic!("expected And inside ConditionInstead, got: {other:?}"),
             },
             other => panic!("expected ConditionInstead on sub, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn instead_if_condition_composes_without_ability_word_mapping() {
+        use crate::types::ability::{AbilityCondition, QuantityRef};
+
+        let r = parse_oracle_text(
+            "Brimstone Volley deals 3 damage to any target.\nMorbid \u{2014} Brimstone Volley deals 5 damage instead if a creature died this turn.",
+            "Brimstone Volley",
+            &[],
+            &["Instant".to_string()],
+            &[],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let sub = r.abilities[0]
+            .sub_ability
+            .as_ref()
+            .expect("instead branch should be attached to base ability");
+        match &sub.condition {
+            Some(AbilityCondition::ConditionInstead { inner }) => {
+                assert!(matches!(
+                    inner.as_ref(),
+                    AbilityCondition::QuantityCheck {
+                        lhs: QuantityExpr::Ref {
+                            qty: QuantityRef::CreaturesDiedThisTurn,
+                        },
+                        comparator: Comparator::GE,
+                        rhs: QuantityExpr::Fixed { value: 1 },
+                    }
+                ));
+            }
+            other => panic!("expected ConditionInstead quantity check, got {other:?}"),
         }
     }
 
