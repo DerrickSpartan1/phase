@@ -53,6 +53,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
         return;
     }
 
+    let trigger_event_batch = state.stack_trigger_event_batches.remove(&entry.id);
+
     // CR 603.4: Intervening-if condition rechecked at resolution time.
     if let StackEntryKind::TriggeredAbility {
         condition: Some(ref condition),
@@ -83,6 +85,10 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
     } = entry.kind
     {
         state.current_trigger_event = Some(te.clone());
+        state.current_trigger_events = trigger_event_batch.unwrap_or_else(|| vec![te.clone()]);
+    } else if let Some(trigger_events) = trigger_event_batch {
+        state.current_trigger_event = trigger_events.first().cloned();
+        state.current_trigger_events = trigger_events;
     }
 
     // Extract the resolved ability from the stack entry. `KeywordAction` is
@@ -148,6 +154,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 events.push(GameEvent::StackResolved {
                     object_id: entry.id,
                 });
+                state.current_trigger_event = None;
+                state.current_trigger_events.clear();
                 return;
             }
             execute_effect(state, &validated, events);
@@ -424,6 +432,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                         object_id: entry.id,
                     });
                     state.current_trigger_event = None;
+                    state.current_trigger_events.clear();
                     return;
                 }
             }
@@ -613,6 +622,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
 
     // CR 603.7c: Clear trigger event context after resolution completes.
     state.current_trigger_event = None;
+    state.current_trigger_events.clear();
 
     events.push(GameEvent::StackResolved {
         object_id: entry.id,

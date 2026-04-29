@@ -2304,6 +2304,10 @@ pub struct GameState {
     // Triggered ability targeting
     #[serde(default)]
     pub pending_trigger: Option<crate::game::triggers::PendingTrigger>,
+    /// Sidecar for `pending_trigger`: full simultaneous event set for batched
+    /// trigger context, consumed when the pending trigger is put on the stack.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_trigger_event_batch: Vec<GameEvent>,
 
     // CR 607.2a + CR 406.5: Exile tracking for "until leaves" linked abilities.
     #[serde(default)]
@@ -2686,6 +2690,14 @@ pub struct GameState {
     /// Used by event-context TargetFilter variants to resolve trigger event data.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_trigger_event: Option<GameEvent>,
+    /// Transient plural form of `current_trigger_event` for batched triggers.
+    /// Event-context filters that can legally compare against a group read this.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub current_trigger_events: Vec<GameEvent>,
+    /// Full event batches for triggered abilities currently on the stack,
+    /// keyed by stack entry id. Single-event triggers omit an entry here.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub stack_trigger_event_batches: HashMap<ObjectId, Vec<GameEvent>>,
 
     /// CR 400.7: Last Known Information cache.
     /// Populated before zone changes for objects leaving the battlefield.
@@ -2867,6 +2879,7 @@ impl GameState {
             spells_cast_this_turn: 0,
             spells_cast_last_turn: None,
             pending_trigger: None,
+            pending_trigger_event_batch: Vec::new(),
             exile_links: Vec::new(),
             paradigm_primed: Vec::new(),
             delayed_triggers: Vec::new(),
@@ -2947,6 +2960,8 @@ impl GameState {
             restrictions: Vec::new(),
             pending_damage_replacements: Vec::new(),
             current_trigger_event: None,
+            current_trigger_events: Vec::new(),
+            stack_trigger_event_batches: HashMap::new(),
             lki_cache: HashMap::new(),
             cost_payment_failed_flag: false,
             pending_cast: None,

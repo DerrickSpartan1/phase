@@ -1,4 +1,5 @@
 use crate::types::ability::{FilterProp, ResolvedAbility, TargetFilter, TargetRef, TypedFilter};
+use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::{HexproofFilter, Keyword};
@@ -254,25 +255,71 @@ pub fn resolve_event_context_target(
     source_id: ObjectId,
 ) -> Option<TargetRef> {
     match filter {
-        TargetFilter::TriggeringSpellController => {
+        TargetFilter::DefendingPlayer
+        | TargetFilter::AttachedTo
+        | TargetFilter::PostReplacementSourceController => {
+            resolve_event_context_target_for_event_or_state(state, filter, source_id, None)
+        }
+        _ => {
             let event = state.current_trigger_event.as_ref()?;
+            resolve_event_context_target_for_event_or_state(state, filter, source_id, Some(event))
+        }
+    }
+}
+
+/// Resolve all targets supplied by the current trigger event batch.
+///
+/// Singular event-context callers should use `resolve_event_context_target`; this
+/// plural form is for filters whose semantics can compare against any object in
+/// a simultaneous trigger batch, such as `SharesQuality`.
+pub fn resolve_event_context_targets(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+) -> Vec<TargetRef> {
+    if state.current_trigger_events.is_empty() {
+        return resolve_event_context_target(state, filter, source_id)
+            .into_iter()
+            .collect();
+    }
+
+    let mut seen = HashSet::new();
+    state
+        .current_trigger_events
+        .iter()
+        .filter_map(|event| {
+            resolve_event_context_target_for_event_or_state(state, filter, source_id, Some(event))
+        })
+        .filter(|target| seen.insert(target.clone()))
+        .collect()
+}
+
+fn resolve_event_context_target_for_event_or_state(
+    state: &GameState,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    event: Option<&GameEvent>,
+) -> Option<TargetRef> {
+    match filter {
+        TargetFilter::TriggeringSpellController => {
+            let event = event?;
             let source_obj_id = extract_source_from_event(event)?;
             let controller = state.objects.get(&source_obj_id)?.controller;
             Some(TargetRef::Player(controller))
         }
         TargetFilter::TriggeringSpellOwner => {
-            let event = state.current_trigger_event.as_ref()?;
+            let event = event?;
             let source_obj_id = extract_source_from_event(event)?;
             let owner = state.objects.get(&source_obj_id)?.owner;
             Some(TargetRef::Player(owner))
         }
         TargetFilter::TriggeringPlayer => {
-            let event = state.current_trigger_event.as_ref()?;
+            let event = event?;
             let player = extract_player_from_event(event, state)?;
             Some(TargetRef::Player(player))
         }
         TargetFilter::TriggeringSource => {
-            let event = state.current_trigger_event.as_ref()?;
+            let event = event?;
             let obj_id = extract_source_from_event(event)?;
             Some(TargetRef::Object(obj_id))
         }
@@ -292,7 +339,7 @@ pub fn resolve_event_context_target(
             }
         }
         TargetFilter::ParentTargetController => {
-            let event = state.current_trigger_event.as_ref()?;
+            let event = event?;
             let source_obj_id = extract_source_from_event(event)?;
             let controller = state.objects.get(&source_obj_id)?.controller;
             Some(TargetRef::Player(controller))

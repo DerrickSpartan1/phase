@@ -1787,9 +1787,7 @@ fn swap_to_alternative_spell_face(obj: &mut crate::game::game_object::GameObject
 /// has normal creature characteristics plus an inset instant/sorcery spell
 /// face that may be chosen while casting from hand.
 fn alternative_spell_layout(obj: &crate::game::game_object::GameObject) -> Option<LayoutKind> {
-    let Some(ref back) = obj.back_face else {
-        return None;
-    };
+    let back = obj.back_face.as_ref()?;
     use crate::types::card_type::CoreType;
     let back_is_spell = back
         .card_types

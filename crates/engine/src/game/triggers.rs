@@ -101,14 +101,60 @@ fn ward_cost_to_unless_cost(ward_cost: &WardCost) -> UnlessCost {
 struct MatchedTrigger {
     trig_idx: usize,
     pending: PendingTrigger,
+    trigger_events: Vec<GameEvent>,
     batched: bool,
     constraint: Option<crate::types::ability::TriggerConstraint>,
+}
+
+#[derive(Clone)]
+struct PendingTriggerContext {
+    pending: PendingTrigger,
+    trigger_events: Vec<GameEvent>,
+}
+
+impl PendingTriggerContext {
+    fn single(pending: PendingTrigger) -> Self {
+        let trigger_events = pending.trigger_event.iter().cloned().collect();
+        Self {
+            pending,
+            trigger_events,
+        }
+    }
+
+    fn batched(pending: PendingTrigger, trigger_events: Vec<GameEvent>) -> Self {
+        Self {
+            pending,
+            trigger_events,
+        }
+    }
+}
+
+fn matching_batched_trigger_events(
+    state: &GameState,
+    event_batch: &[GameEvent],
+    trig_def: &TriggerDefinition,
+    obj_id: ObjectId,
+    controller: PlayerId,
+    matcher: TriggerMatcher,
+) -> Vec<GameEvent> {
+    event_batch
+        .iter()
+        .filter(|candidate| !event_is_suppressed_by_static_triggers(state, candidate))
+        .filter(|candidate| matcher(candidate, trig_def, obj_id, state))
+        .filter(|candidate| {
+            trig_def.condition.as_ref().is_none_or(|condition| {
+                check_trigger_condition(state, condition, controller, Some(obj_id), Some(candidate))
+            })
+        })
+        .cloned()
+        .collect()
 }
 
 #[allow(clippy::too_many_arguments)]
 fn collect_matching_triggers(
     state: &GameState,
     event: &GameEvent,
+    event_batch: &[GameEvent],
     source_obj: &GameObject,
     timestamp: u32,
     zone_filter: Option<Zone>,
@@ -161,12 +207,6 @@ fn collect_matching_triggers(
             if !matcher(event, trig_def, obj_id, state) {
                 continue;
             }
-            let trigger_events =
-                if matches!(trig_def.mode, TriggerMode::Attacks) && trig_def.condition.is_none() {
-                    super::trigger_matchers::matching_attack_events(event, trig_def, obj_id, state)
-                } else {
-                    vec![event.clone()]
-                };
             if !check_trigger_constraint(state, trig_def, obj_id, trig_idx, controller, event) {
                 continue;
             }
@@ -186,7 +226,33 @@ fn collect_matching_triggers(
                 .as_ref()
                 .map(|exec| (exec.modal.clone(), exec.mode_abilities.clone()))
                 .unwrap_or_default();
-            for trigger_event in trigger_events {
+            let trigger_event_batches = if trig_def.batched {
+                let trigger_events = matching_batched_trigger_events(
+                    state,
+                    event_batch,
+                    trig_def,
+                    obj_id,
+                    controller,
+                    matcher,
+                );
+                if trigger_events.is_empty() {
+                    continue;
+                }
+                vec![trigger_events]
+            } else if matches!(trig_def.mode, TriggerMode::Attacks) && trig_def.condition.is_none()
+            {
+                super::trigger_matchers::matching_attack_events(event, trig_def, obj_id, state)
+                    .into_iter()
+                    .map(|trigger_event| vec![trigger_event])
+                    .collect()
+            } else {
+                vec![vec![event.clone()]]
+            };
+            for trigger_events in trigger_event_batches {
+                let trigger_event = trigger_events
+                    .first()
+                    .cloned()
+                    .expect("trigger event batch is never empty");
                 pending.push(MatchedTrigger {
                     trig_idx,
                     pending: PendingTrigger {
@@ -201,6 +267,7 @@ fn collect_matching_triggers(
                         mode_abilities: mode_abilities.clone(),
                         description: trig_def.description.clone(),
                     },
+                    trigger_events,
                     batched: trig_def.batched,
                     constraint: trig_def.constraint.clone(),
                 });
@@ -330,7 +397,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
     if state.layers_dirty {
         super::layers::evaluate_layers(state);
     }
-    let mut pending: Vec<PendingTrigger> = Vec::new();
+    let mut pending: Vec<PendingTriggerContext> = Vec::new();
     // CR 603.2c: Track which batched triggers (source_id, trig_idx) have already
     // fired in this pass so "one or more" triggers fire at most once per batch.
     let mut batched_this_pass: HashSet<(ObjectId, usize)> = HashSet::new();
@@ -404,6 +471,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     collect_matching_triggers(
                         state,
                         event,
+                        events,
                         obj,
                         obj.entered_battlefield_turn.unwrap_or(0),
                         Some(Zone::Battlefield),
@@ -419,7 +487,10 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     batched_this_pass.insert((obj_id, matched.trig_idx));
                 }
                 registered_this_event.insert((obj_id, matched.trig_idx));
-                pending.push(matched.pending);
+                pending.push(PendingTriggerContext::batched(
+                    matched.pending,
+                    matched.trigger_events,
+                ));
             }
 
             // CR 702.108a: Prowess triggers when controller casts a noncreature spell.
@@ -449,7 +520,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             ResolvedAbility::new(prowess_effect, Vec::new(), obj_id, controller);
                         let prowess_trig_def = TriggerDefinition::new(TriggerMode::SpellCast)
                             .description("Prowess".to_string());
-                        pending.push(PendingTrigger {
+                        pending.push(PendingTriggerContext::single(PendingTrigger {
                             source_id: obj_id,
                             controller,
                             condition: prowess_trig_def.condition,
@@ -460,7 +531,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             modal: None,
                             mode_abilities: vec![],
                             description: None,
-                        });
+                        }));
                     }
                 }
             }
@@ -485,7 +556,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             ResolvedAbility::new(fb_effect, Vec::new(), obj_id, controller);
                         let fb_trig_def = TriggerDefinition::new(TriggerMode::Firebend)
                             .description(format!("Firebending {n}"));
-                        pending.push(PendingTrigger {
+                        pending.push(PendingTriggerContext::single(PendingTrigger {
                             source_id: obj_id,
                             controller,
                             condition: fb_trig_def.condition,
@@ -496,7 +567,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             modal: None,
                             mode_abilities: vec![],
                             description: None,
-                        });
+                        }));
                         // Track bending type for Avatar Aang's "if you've done all four"
                         if let Some(player) = state.players.iter_mut().find(|p| p.id == controller)
                         {
@@ -532,7 +603,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         ResolvedAbility::new(decayed_effect, Vec::new(), obj_id, controller);
                     let decayed_trigger = TriggerDefinition::new(TriggerMode::Attacks)
                         .description("Decayed".to_string());
-                    pending.push(PendingTrigger {
+                    pending.push(PendingTriggerContext::single(PendingTrigger {
                         source_id: obj_id,
                         controller,
                         condition: decayed_trigger.condition,
@@ -543,7 +614,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         modal: None,
                         mode_abilities: vec![],
                         description: decayed_trigger.description,
-                    });
+                    }));
                 }
             }
 
@@ -572,7 +643,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             controller,
                         );
                         exploit_ability.optional = true;
-                        pending.push(PendingTrigger {
+                        pending.push(PendingTriggerContext::single(PendingTrigger {
                             source_id: *object_id,
                             controller,
                             condition: None,
@@ -583,7 +654,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             modal: None,
                             mode_abilities: vec![],
                             description: None,
-                        });
+                        }));
                     }
                 }
             }
@@ -627,7 +698,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                                         obj_id,
                                         controller,
                                     );
-                                    pending.push(PendingTrigger {
+                                    pending.push(PendingTriggerContext::single(PendingTrigger {
                                         source_id: obj_id,
                                         controller,
                                         condition: None,
@@ -638,7 +709,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                                         modal: None,
                                         mode_abilities: vec![],
                                         description: None,
-                                    });
+                                    }));
                                 }
                             }
                         }
@@ -671,6 +742,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     collect_matching_triggers(
                         state,
                         event,
+                        events,
                         obj,
                         obj.entered_battlefield_turn.unwrap_or(0),
                         Some(Zone::Battlefield),
@@ -689,7 +761,10 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         batched_this_pass.insert((*moved_id, matched.trig_idx));
                     }
                     registered_this_event.insert((*moved_id, matched.trig_idx));
-                    pending.push(matched.pending);
+                    pending.push(PendingTriggerContext::batched(
+                        matched.pending,
+                        matched.trigger_events,
+                    ));
                 }
             }
         }
@@ -713,6 +788,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     collect_matching_triggers(
                         state,
                         event,
+                        events,
                         obj,
                         0,
                         Some(zone),
@@ -732,7 +808,10 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         batched_this_pass.insert((obj_id, matched.trig_idx));
                     }
                     registered_this_event.insert((obj_id, matched.trig_idx));
-                    pending.push(matched.pending);
+                    pending.push(PendingTriggerContext::batched(
+                        matched.pending,
+                        matched.trigger_events,
+                    ));
                 }
             }
         }
@@ -778,7 +857,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 let cascade_ability =
                     ResolvedAbility::new(Effect::Cascade, Vec::new(), *cast_obj_id, controller);
                 let timestamp = state.next_timestamp() as u32;
-                pending.push(PendingTrigger {
+                pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: *cast_obj_id,
                     controller,
                     condition: cascade_trig_def.condition,
@@ -789,7 +868,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     modal: None,
                     mode_abilities: vec![],
                     description: cascade_trig_def.description,
-                });
+                }));
             }
         }
 
@@ -806,7 +885,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         ResolvedAbility::new(draw_effect, Vec::new(), ObjectId(0), monarch_id);
                     let trig_def = TriggerDefinition::new(TriggerMode::Phase)
                         .description("Monarch draw (CR 725.2)".to_string());
-                    pending.push(PendingTrigger {
+                    pending.push(PendingTriggerContext::single(PendingTrigger {
                         source_id: ObjectId(0),
                         controller: monarch_id,
                         condition: trig_def.condition,
@@ -817,7 +896,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         modal: None,
                         mode_abilities: vec![],
                         description: None,
-                    });
+                    }));
                 }
             }
         }
@@ -837,7 +916,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         ResolvedAbility::new(venture_effect, Vec::new(), ObjectId(0), init_holder);
                     let trig_def = TriggerDefinition::new(TriggerMode::Phase)
                         .description("Initiative upkeep venture (CR 725.2)".to_string());
-                    pending.push(PendingTrigger {
+                    pending.push(PendingTriggerContext::single(PendingTrigger {
                         source_id: ObjectId(0),
                         controller: init_holder,
                         condition: trig_def.condition,
@@ -848,7 +927,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         modal: None,
                         mode_abilities: vec![],
                         description: None,
-                    });
+                    }));
                 }
             }
         }
@@ -876,7 +955,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         );
                         let trig_def = TriggerDefinition::new(TriggerMode::DamageDone)
                             .description("Monarch steal (CR 725.2)".to_string());
-                        pending.push(PendingTrigger {
+                        pending.push(PendingTriggerContext::single(PendingTrigger {
                             source_id: *source_id,
                             controller: new_monarch,
                             condition: trig_def.condition,
@@ -887,7 +966,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             modal: None,
                             mode_abilities: vec![],
                             description: None,
-                        });
+                        }));
                     }
                 }
             }
@@ -914,7 +993,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         );
                         let trig_def = TriggerDefinition::new(TriggerMode::DamageDone)
                             .description("Initiative steal (CR 725.2)".to_string());
-                        pending.push(PendingTrigger {
+                        pending.push(PendingTriggerContext::single(PendingTrigger {
                             source_id: *source_id,
                             controller: new_holder,
                             condition: trig_def.condition,
@@ -925,7 +1004,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             modal: None,
                             mode_abilities: vec![],
                             description: None,
-                        });
+                        }));
                     }
                 }
             }
@@ -953,7 +1032,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 );
                 let trig_def = TriggerDefinition::new(TriggerMode::LifeLost)
                     .description("Start your engines! (CR 702.179d)".to_string());
-                pending.push(PendingTrigger {
+                pending.push(PendingTriggerContext::single(PendingTrigger {
                     source_id: speed_key_source(),
                     controller: trigger_controller,
                     condition: trig_def.condition,
@@ -964,7 +1043,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     modal: None,
                     mode_abilities: vec![],
                     description: None,
-                });
+                }));
                 mark_speed_trigger_used(state, trigger_controller);
             }
         }
@@ -982,12 +1061,12 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
     // CR 603.3b: Active player's triggers are ordered before non-active player's triggers.
     // Within same controller, order by timestamp.
     pending.sort_by_key(|t| {
-        let is_nap = if t.controller == state.active_player {
+        let is_nap = if t.pending.controller == state.active_player {
             0
         } else {
             1
         };
-        (is_nap, t.timestamp)
+        (is_nap, t.pending.timestamp)
     });
 
     // Reverse so NAP triggers are placed first (bottom of stack), AP triggers last (top).
@@ -995,9 +1074,14 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
     pending.reverse();
 
     let mut events_out = Vec::new();
-    for trigger in pending {
+    for trigger_context in pending {
+        let PendingTriggerContext {
+            pending: mut trigger,
+            trigger_events,
+        } = trigger_context;
         // CR 700.2b: Modal triggered ability — stash for mode selection before pushing to stack.
         if trigger.modal.is_some() && !trigger.mode_abilities.is_empty() {
+            state.pending_trigger_event_batch = trigger_events;
             state.pending_trigger = Some(trigger);
             return;
         }
@@ -1024,7 +1108,12 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                 );
                 continue;
             }
-            push_pending_trigger_to_stack(state, trigger, &mut events_out);
+            push_pending_trigger_to_stack_with_event_batch(
+                state,
+                trigger,
+                trigger_events,
+                &mut events_out,
+            );
             continue;
         }
 
@@ -1035,7 +1124,6 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
             &trigger.target_constraints,
         ) {
             Ok(Some(targets)) => {
-                let mut trigger = trigger;
                 if super::ability_utils::assign_targets_in_chain(&mut trigger.ability, &targets)
                     .is_err()
                 {
@@ -1048,9 +1136,15 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     trigger.controller,
                     &mut events_out,
                 );
-                push_pending_trigger_to_stack(state, trigger, &mut events_out);
+                push_pending_trigger_to_stack_with_event_batch(
+                    state,
+                    trigger,
+                    trigger_events,
+                    &mut events_out,
+                );
             }
             Ok(None) => {
+                state.pending_trigger_event_batch = trigger_events;
                 state.pending_trigger = Some(trigger);
                 return;
             }
@@ -1081,8 +1175,39 @@ pub fn push_pending_trigger_to_stack(
     trigger: PendingTrigger,
     events: &mut Vec<GameEvent>,
 ) {
+    let trigger_events = take_pending_trigger_event_batch(state, &trigger);
+    push_pending_trigger_to_stack_with_event_batch(state, trigger, trigger_events, events);
+}
+
+fn take_pending_trigger_event_batch(
+    state: &mut GameState,
+    trigger: &PendingTrigger,
+) -> Vec<GameEvent> {
+    if state
+        .pending_trigger_event_batch
+        .first()
+        .is_some_and(|event| Some(event) == trigger.trigger_event.as_ref())
+    {
+        std::mem::take(&mut state.pending_trigger_event_batch)
+    } else {
+        state.pending_trigger_event_batch.clear();
+        trigger.trigger_event.iter().cloned().collect()
+    }
+}
+
+fn push_pending_trigger_to_stack_with_event_batch(
+    state: &mut GameState,
+    trigger: PendingTrigger,
+    trigger_events: Vec<GameEvent>,
+    events: &mut Vec<GameEvent>,
+) {
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
+    if trigger_events.len() > 1 {
+        state
+            .stack_trigger_event_batches
+            .insert(entry_id, trigger_events);
+    }
     let entry = StackEntry {
         id: entry_id,
         source_id: trigger.source_id,
@@ -1103,7 +1228,7 @@ pub fn push_pending_trigger_to_stack(
 /// static, then clones matching pending triggers an additional time. The
 /// `TriggerCause` predicate restricts which spawning events qualify
 /// (Panharmonicon: ETB; Isshin: creature attacking; Any: unrestricted).
-fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTrigger>) {
+fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTriggerContext>) {
     // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating so a
     // phased-out doubler no longer doubles triggers.
     let doublers: Vec<(PlayerId, ObjectId, TriggerCause, Option<TargetFilter>)> = state
@@ -1125,9 +1250,10 @@ fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTrigger>) 
         return;
     }
 
-    let mut extra: Vec<PendingTrigger> = Vec::new();
+    let mut extra: Vec<PendingTriggerContext> = Vec::new();
     for (doubler_controller, doubler_id, cause, ref affected) in &doublers {
-        for trigger in pending.iter() {
+        for trigger_context in pending.iter() {
+            let trigger = &trigger_context.pending;
             // Controller match: trigger source must be controlled by the doubler's controller
             if trigger.controller != *doubler_controller {
                 continue;
@@ -1152,7 +1278,7 @@ fn apply_trigger_doubling(state: &GameState, pending: &mut Vec<PendingTrigger>) 
                     continue;
                 }
             }
-            extra.push(trigger.clone());
+            extra.push(trigger_context.clone());
         }
     }
     pending.extend(extra);
@@ -2270,8 +2396,9 @@ pub mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, Comparator, ControllerRef, Effect, FilterProp,
-        GainLifePlayer, KickerVariant, MultiTargetSpec, QuantityExpr, QuantityRef, TargetFilter,
-        TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
+        GainLifePlayer, KickerVariant, MultiTargetSpec, QuantityExpr, QuantityRef, SharedQuality,
+        SharedQualityRelation, TargetFilter, TriggerCondition, TriggerConstraint,
+        TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -6672,6 +6799,130 @@ pub mod tests {
             state.stack.len(),
             1,
             "batched trigger must fire once per pass even with 2 token-creation events"
+        );
+    }
+
+    #[test]
+    fn batched_discard_trigger_context_matches_second_discarded_card_type() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Diviner".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.entered_battlefield_turn = Some(1);
+            let mut trigger =
+                TriggerDefinition::new(TriggerMode::DiscardedAll).execute(AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                ));
+            trigger.batched = true;
+            obj.trigger_definitions.push(trigger);
+        }
+
+        let discarded_creature = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Discarded Creature".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&discarded_creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        let discarded_instant = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Discarded Instant".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&discarded_instant)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+        let candidate_instant = create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Candidate Instant".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&candidate_instant)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Instant);
+
+        process_triggers(
+            &mut state,
+            &[
+                GameEvent::Discarded {
+                    player_id: PlayerId(0),
+                    object_id: discarded_creature,
+                },
+                GameEvent::Discarded {
+                    player_id: PlayerId(0),
+                    object_id: discarded_instant,
+                },
+            ],
+        );
+
+        assert_eq!(
+            state.stack.len(),
+            1,
+            "DiscardedAll trigger should fire once for the batch"
+        );
+        let entry_id = state.stack.back().unwrap().id;
+        let trigger_event = match &state.stack.back().unwrap().kind {
+            StackEntryKind::TriggeredAbility { trigger_event, .. } => trigger_event.clone(),
+            _ => panic!("Expected TriggeredAbility on stack"),
+        };
+        let trigger_events = state
+            .stack_trigger_event_batches
+            .get(&entry_id)
+            .expect("batched trigger should store full event set")
+            .clone();
+        assert_eq!(trigger_events.len(), 2);
+
+        state.current_trigger_event = trigger_event;
+        state.current_trigger_events = trigger_events;
+
+        let filter =
+            TargetFilter::Typed(
+                TypedFilter::card().properties(vec![FilterProp::SharesQuality {
+                    quality: SharedQuality::CardType,
+                    reference: Some(Box::new(TargetFilter::TriggeringSource)),
+                    relation: SharedQualityRelation::Shares,
+                }]),
+            );
+
+        assert!(
+            matches_target_filter(
+                &state,
+                candidate_instant,
+                &filter,
+                &FilterContext::from_source(&state, source),
+            ),
+            "shared-quality reference should see the second discarded card's Instant type"
         );
     }
 
