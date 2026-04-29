@@ -3,8 +3,8 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    GameState, ManaAbilityResume, ManaChoice, ManaChoicePrompt, PendingManaAbility,
-    ProductionOverride, WaitingFor,
+    GameState, ManaAbilityResume, ManaChoice, ManaChoiceContext, ManaChoicePrompt,
+    PendingManaAbility, ProductionOverride, WaitingFor,
 };
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaCost, ManaPool, ManaType, PaymentContext};
@@ -320,12 +320,15 @@ pub fn activate_mana_ability(
 /// Returns `Some(ManaChoicePrompt::SingleColor)` when the player must pick one
 /// color from a set (AnyOneColor, ChoiceAmongExiledColors) and
 /// `Some(ManaChoicePrompt::Combination)` when the player must pick one of
-/// several fixed multi-mana sequences (filter lands). Returns `None` when the
-/// production is fully determined (Fixed, Colorless, single-option AnyOneColor).
+/// several fixed multi-mana sequences (filter lands). Returns
+/// `Some(ManaChoicePrompt::AnyCombination)` when each produced mana unit has
+/// an independent color choice. Returns `None` when production is fully
+/// determined (Fixed, Colorless, single-option AnyOneColor).
 pub(crate) fn mana_choice_prompt(
     effect: &Effect,
     state: &GameState,
     source_id: ObjectId,
+    ability: Option<&ResolvedAbility>,
 ) -> Option<ManaChoicePrompt> {
     let Effect::Mana { produced, .. } = effect else {
         return None;
@@ -335,6 +338,20 @@ pub(crate) fn mana_choice_prompt(
             Some(ManaChoicePrompt::SingleColor {
                 options: color_options.iter().map(mana_color_to_type).collect(),
             })
+        }
+        ManaProduction::AnyCombination { color_options, .. } if color_options.len() > 1 => {
+            let ability = ability?;
+            let count =
+                super::effects::mana::resolve_mana_types_for_ability(produced, state, ability)
+                    .len();
+            if count > 0 {
+                Some(ManaChoicePrompt::AnyCombination {
+                    count,
+                    options: color_options.iter().map(mana_color_to_type).collect(),
+                })
+            } else {
+                None
+            }
         }
         ManaProduction::ChoiceAmongExiledColors { source } => {
             let options = super::effects::mana::exiled_color_options(state, *source, source_id);
@@ -415,6 +432,14 @@ pub fn handle_choose_mana_color(
             if !options.iter().any(|opt| opt == &combo) {
                 return Err(EngineError::InvalidAction(
                     "Chosen combination is not among the legal options".to_string(),
+                ));
+            }
+            ProductionOverride::Combination(combo)
+        }
+        (ManaChoicePrompt::AnyCombination { count, options }, ManaChoice::Combination(combo)) => {
+            if combo.len() != *count || combo.iter().any(|color| !options.contains(color)) {
+                return Err(EngineError::InvalidAction(
+                    "Chosen mana combination is not legal for this prompt".to_string(),
                 ));
             }
             ProductionOverride::Combination(combo)
@@ -691,7 +716,20 @@ fn advance_mana_ability_activation(
     }
 
     if pending.color_override.is_none() {
-        if let Some(choice) = mana_choice_prompt(&ability_def.effect, state, pending.source_id) {
+        let mut resolved_for_prompt = super::ability_utils::build_resolved_from_def(
+            &ability_def,
+            pending.source_id,
+            pending.player,
+        );
+        if let Some(mv) = pending.cost_paid_object_mana_value {
+            resolved_for_prompt.set_cost_paid_object_mana_value_recursive(mv);
+        }
+        if let Some(choice) = mana_choice_prompt(
+            &ability_def.effect,
+            state,
+            pending.source_id,
+            Some(&resolved_for_prompt),
+        ) {
             let events_before = events.len();
             pay_mana_ability_cost_with_choices(
                 state,
@@ -725,7 +763,7 @@ fn advance_mana_ability_activation(
             return Ok(WaitingFor::ChooseManaColor {
                 player: pending.player,
                 choice,
-                pending_mana_ability: Box::new(pending),
+                context: ManaChoiceContext::ManaAbility(Box::new(pending)),
             });
         }
     }
@@ -1698,6 +1736,13 @@ mod tests {
         }
     }
 
+    fn expect_mana_ability_context(context: ManaChoiceContext) -> Box<PendingManaAbility> {
+        match context {
+            ManaChoiceContext::ManaAbility(pending) => pending,
+            other => panic!("expected mana ability context, got {other:?}"),
+        }
+    }
+
     #[test]
     fn mana_api_type_detected_as_mana_ability() {
         let def = make_mana_ability(ManaProduction::Fixed {
@@ -2193,11 +2238,11 @@ mod tests {
             WaitingFor::ChooseManaColor {
                 player,
                 choice: ManaChoicePrompt::SingleColor { options },
-                pending_mana_ability,
+                context,
             } => {
                 assert_eq!(player, PlayerId(0));
                 assert_eq!(options.len(), 5);
-                *pending_mana_ability
+                *expect_mana_ability_context(context)
             }
             other => panic!("expected ChooseManaColor, got {other:?}"),
         };
@@ -3644,10 +3689,7 @@ mod tests {
         assert!(state.objects.get(&ruins).unwrap().tapped);
 
         let combo_pending = match pay_result {
-            WaitingFor::ChooseManaColor {
-                pending_mana_ability,
-                ..
-            } => pending_mana_ability,
+            WaitingFor::ChooseManaColor { context, .. } => expect_mana_ability_context(context),
             other => panic!("unexpected variant: {:?}", other),
         };
         let combo_prompt = ManaChoicePrompt::Combination {

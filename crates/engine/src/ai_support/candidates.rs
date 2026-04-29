@@ -14,6 +14,7 @@ use crate::types::card::LayoutKind;
 use crate::types::card_type::CoreType;
 use crate::types::game_state::{ConvokeMode, GameState, TargetSelectionSlot, WaitingFor};
 use crate::types::identifiers::ObjectId;
+use crate::types::mana::ManaType;
 use crate::types::match_config::DeckCardCount;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
@@ -43,6 +44,27 @@ pub struct ActionMetadata {
 pub struct CandidateAction {
     pub action: GameAction,
     pub metadata: ActionMetadata,
+}
+
+fn collect_mana_combinations(
+    count: usize,
+    options: &[ManaType],
+    current: &mut Vec<ManaType>,
+    choices: &mut Vec<Vec<ManaType>>,
+) {
+    const MAX_MANA_COMBINATION_CANDIDATES: usize = 64;
+    if choices.len() >= MAX_MANA_COMBINATION_CANDIDATES {
+        return;
+    }
+    if current.len() == count {
+        choices.push(current.clone());
+        return;
+    }
+    for &option in options {
+        current.push(option);
+        collect_mana_combinations(count, options, current, choices);
+        current.pop();
+    }
 }
 
 fn collect_evidence_candidate_combos(
@@ -434,6 +456,22 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                         )
                     })
                     .collect(),
+                ManaChoicePrompt::AnyCombination { count, options } => {
+                    let mut choices = Vec::new();
+                    collect_mana_combinations(*count, options, &mut Vec::new(), &mut choices);
+                    choices
+                        .into_iter()
+                        .map(|combo| {
+                            candidate(
+                                GameAction::ChooseManaColor {
+                                    choice: ManaChoice::Combination(combo),
+                                },
+                                TacticalClass::Mana,
+                                Some(*player),
+                            )
+                        })
+                        .collect()
+                }
             }
         }
         WaitingFor::ScryChoice { player, cards } => select_cards_variants(*player, cards, None),

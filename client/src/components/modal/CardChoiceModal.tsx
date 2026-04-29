@@ -1863,10 +1863,19 @@ function ManaColorChoiceModal({ data }: { data: ChooseManaColor["data"] }) {
   // CR 605.3b: Prompt shape is a typed union. `SingleColor` is the legacy
   // one-of-N colors shape (Treasures, City of Brass, Pit of Offerings).
   // `Combination` is the filter-land prompt (pick one complete multi-mana
-  // sequence). Both share this single modal — the engine dispatches a
+  // sequence). `AnyCombination` is a per-mana-slot spell/effect choice
+  // (Manamorphose). All share this single modal — the engine dispatches a
   // `ManaChoice` whose shape mirrors the prompt.
   if (data.choice.type === "Combination") {
     return <ManaCombinationChoiceModal options={data.choice.data.options} />;
+  }
+  if (data.choice.type === "AnyCombination") {
+    return (
+      <ManaAnyCombinationChoiceModal
+        count={data.choice.data.count}
+        options={data.choice.data.options}
+      />
+    );
   }
   return <ManaSingleColorChoiceModal options={data.choice.data.options} />;
 }
@@ -1911,6 +1920,78 @@ function ManaSingleColorChoiceModal({ options }: { options: ManaType[] }) {
             </motion.button>
           );
         })}
+      </div>
+    </ChoiceOverlay>
+  );
+}
+
+function ManaAnyCombinationChoiceModal({
+  count,
+  options,
+}: {
+  count: number;
+  options: ManaType[];
+}) {
+  const dispatch = useGameDispatch();
+  const [selected, setSelected] = useState<(ManaType | null)[]>(
+    Array.from({ length: count }, () => null),
+  );
+
+  const handleSelect = useCallback((slot: number, color: ManaType) => {
+    setSelected((current) => {
+      const next = [...current];
+      next[slot] = color;
+      return next;
+    });
+  }, []);
+
+  const handleConfirm = useCallback(() => {
+    if (selected.every((color): color is ManaType => color !== null)) {
+      dispatch({
+        type: "ChooseManaColor",
+        data: {
+          choice: { type: "Combination", data: selected },
+        },
+      });
+    }
+  }, [dispatch, selected]);
+
+  return (
+    <ChoiceOverlay
+      title="Choose Mana Combination"
+      subtitle="Select each mana color to produce"
+      widthClassName="w-fit max-w-full"
+      maxWidthClassName="max-w-lg"
+      footer={
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={selected.some((color) => color === null)}
+        />
+      }
+    >
+      <div className="mx-auto flex w-fit flex-col gap-4 px-4 py-4 sm:px-6 sm:py-6">
+        {selected.map((slotColor, slot) => (
+          <div key={slot} className="flex items-center justify-center gap-3">
+            {options.map((color) => {
+              const isSelected = slotColor === color;
+              return (
+                <motion.button
+                  key={`${slot}-${color}`}
+                  className={`flex h-12 w-12 items-center justify-center rounded-full border-2 transition sm:h-14 sm:w-14 ${
+                    isSelected ? MANA_COLOR_SELECTED[color] : MANA_COLOR_STYLES[color]
+                  }`}
+                  initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  transition={{ delay: 0.04 + slot * 0.04, duration: 0.2 }}
+                  whileHover={{ scale: 1.08 }}
+                  onClick={() => handleSelect(slot, color)}
+                >
+                  <ManaSymbol shard={MANA_COLOR_SHARDS[color]} size="md" />
+                </motion.button>
+              );
+            })}
+          </div>
+        ))}
       </div>
     </ChoiceOverlay>
   );

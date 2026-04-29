@@ -1493,18 +1493,29 @@ fn apply_action(
         )?,
         (
             WaitingFor::ChooseManaColor {
-                choice,
-                pending_mana_ability,
-                ..
+                choice, context, ..
             },
             GameAction::ChooseManaColor { choice: chosen },
-        ) => engine_casting::handle_choose_mana_color(
-            state,
-            pending_mana_ability,
-            choice,
-            chosen.clone(),
-            &mut events,
-        )?,
+        ) => match context {
+            crate::types::game_state::ManaChoiceContext::ManaAbility(pending_mana_ability) => {
+                engine_casting::handle_choose_mana_color(
+                    state,
+                    pending_mana_ability,
+                    choice,
+                    chosen.clone(),
+                    &mut events,
+                )?
+            }
+            crate::types::game_state::ManaChoiceContext::ResolvingEffect(pending_effect) => {
+                effects::mana::handle_choose_mana_effect(
+                    state,
+                    pending_effect,
+                    choice,
+                    chosen.clone(),
+                    &mut events,
+                )?
+            }
+        },
         // CR 605.3a + CR 601.2h + CR 107.4e: Player submits the per-hybrid-shard
         // color vector for a mana-ability mana sub-cost (filter lands, etc.).
         (

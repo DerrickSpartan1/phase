@@ -670,7 +670,7 @@ export type WaitingFor =
   | { type: "ReturnToHandForCost"; data: { player: PlayerId; count: number; permanents: ObjectId[]; pending_cast: PendingCast } }
   | { type: "BlightChoice"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "TapCreaturesForManaAbility"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_mana_ability: unknown } }
-  | { type: "ChooseManaColor"; data: { player: PlayerId; choice: ManaChoicePrompt; pending_mana_ability: unknown } }
+  | { type: "ChooseManaColor"; data: { player: PlayerId; choice: ManaChoicePrompt; context: unknown } }
   | { type: "TapCreaturesForSpellCost"; data: { player: PlayerId; count: number; creatures: ObjectId[]; pending_cast: PendingCast } }
   | { type: "ExileForCost"; data: { player: PlayerId; zone: ExileCostSourceZone; count: number; cards: ObjectId[]; pending_cast: PendingCast } }
   | { type: "CollectEvidenceChoice"; data: { player: PlayerId; minimum_mana_value: number; cards: ObjectId[]; resume: unknown } }
@@ -859,7 +859,8 @@ export type GameAction =
 // CR 605.3b + CR 106.1a: Shape of the prompt surfaced by WaitingFor::ChooseManaColor.
 export type ManaChoicePrompt =
   | { type: "SingleColor"; data: { options: ManaType[] } }
-  | { type: "Combination"; data: { options: ManaType[][] } };
+  | { type: "Combination"; data: { options: ManaType[][] } }
+  | { type: "AnyCombination"; data: { count: number; options: ManaType[] } };
 
 // CR 605.3b: Player's answer to a ManaChoicePrompt. Shape mirrors the prompt.
 export type ManaChoice =

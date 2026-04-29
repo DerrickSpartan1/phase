@@ -614,8 +614,8 @@ pub enum ManaAbilityResume {
 ///
 /// Typed enum (never a bool): `SingleColor` covers the one-color-repeated
 /// variants (`AnyOneColor`, `ChoiceAmongExiledColors`), while `Combination`
-/// carries the full pre-chosen multi-mana sequence for
-/// `ChoiceAmongCombinations` (Shadowmoor/Eventide filter lands).
+/// carries the full pre-chosen multi-mana sequence for fixed combinations
+/// (`ChoiceAmongCombinations`) and free per-slot choices (`AnyCombination`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ProductionOverride {
@@ -623,13 +623,13 @@ pub enum ProductionOverride {
     /// produces becomes this color (mirrors the pre-widening `Option<ManaType>`
     /// semantics).
     SingleColor(ManaType),
-    /// The caller picked one complete combination from a
-    /// `ChoiceAmongCombinations` option set; the ability produces exactly
-    /// these mana types in order.
+    /// The caller picked one complete mana sequence; the ability produces
+    /// exactly these mana types in order.
     Combination(Vec<ManaType>),
 }
 
-/// CR 605.3b: The shape of the prompt surfaced via `WaitingFor::ChooseManaColor`.
+/// CR 608.2d + CR 605.3b: The shape of the prompt surfaced via
+/// `WaitingFor::ChooseManaColor`.
 /// Typed enum rather than a bool discriminator: the continuation logic is
 /// identical (validate choice → produce mana → resume), only the option set
 /// differs.
@@ -641,15 +641,30 @@ pub enum ManaChoicePrompt {
     SingleColor { options: Vec<ManaType> },
     /// Filter-land prompt: pick one complete multi-mana combination.
     Combination { options: Vec<Vec<ManaType>> },
+    /// Spell/effect prompt: pick one mana type for each produced mana unit.
+    AnyCombination {
+        count: usize,
+        options: Vec<ManaType>,
+    },
 }
 
-/// CR 605.3b: Player's answer to a `ManaChoicePrompt`, carried by
+/// CR 608.2d + CR 605.3b: Player's answer to a `ManaChoicePrompt`, carried by
 /// `GameAction::ChooseManaColor`. Shape mirrors the prompt variant.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum ManaChoice {
     SingleColor(ManaType),
     Combination(Vec<ManaType>),
+}
+
+/// CR 106.3 + CR 608.2d + CR 605.3b: What resumes after a mana-color choice.
+/// Mana abilities and resolving spell/ability effects share the same prompt and
+/// response action, but resume through different rules paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum ManaChoiceContext {
+    ManaAbility(Box<PendingManaAbility>),
+    ResolvingEffect(Box<ResolvedAbility>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1433,15 +1448,15 @@ pub enum WaitingFor {
         options: Vec<Vec<ManaType>>,
         pending_mana_ability: Box<PendingManaAbility>,
     },
-    /// CR 605.3b: Mana ability with a choice dimension — player must answer
-    /// before mana is added to the pool. The prompt shape (`SingleColor` vs
-    /// `Combination`) depends on the `ManaProduction` variant. Both shapes
+    /// CR 106.3 + CR 608.2d + CR 605.3b: Mana production with a choice dimension
+    /// — player must answer before mana is added to the pool. The prompt shape
+    /// depends on the `ManaProduction` variant. All shapes
     /// share this single `WaitingFor` variant so AI candidate generation,
     /// multiplayer filtering, and auto-pass all follow one code path.
     ChooseManaColor {
         player: PlayerId,
         choice: ManaChoicePrompt,
-        pending_mana_ability: Box<PendingManaAbility>,
+        context: ManaChoiceContext,
     },
     /// CR 118.9a + CR 601.2b + CR 601.2h: Player must choose cards to exile from
     /// `zone` as part of an alternative or additional casting cost. Used by both

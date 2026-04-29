@@ -1,5 +1,5 @@
-use crate::game::mana_sources;
 use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
+use crate::game::{mana_payment, mana_sources};
 #[cfg(test)]
 use crate::types::ability::ManaContribution;
 use crate::types::ability::{
@@ -7,8 +7,10 @@ use crate::types::ability::{
     ManaSpendRestriction, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
-use crate::types::mana::{ManaColor, ManaRestriction, ManaType, ManaUnit};
+use crate::types::game_state::{
+    GameState, ManaChoice, ManaChoiceContext, ManaChoicePrompt, WaitingFor,
+};
+use crate::types::mana::{ManaColor, ManaRestriction, ManaType};
 
 /// Mana effect: adds mana to the controller's mana pool (CR 106.4).
 pub fn resolve(
@@ -31,8 +33,23 @@ pub fn resolve(
         } => (produced, restrictions, grants, *expiry),
         _ => return Err(EffectError::MissingParam("Produced".to_string())),
     };
-    // CR 106.3: Mana is produced by the effects of mana abilities. The source
-    // of produced mana is the source of the ability.
+    if let Some(choice) = crate::game::mana_abilities::mana_choice_prompt(
+        &ability.effect,
+        state,
+        ability.source_id,
+        Some(ability),
+    ) {
+        state.waiting_for = WaitingFor::ChooseManaColor {
+            player: ability.controller,
+            choice,
+            context: ManaChoiceContext::ResolvingEffect(Box::new(ability.clone())),
+        };
+        return Ok(());
+    }
+
+    // CR 106.3: Mana is produced by the effects of mana abilities, spells, and
+    // abilities that aren't mana abilities. The source of produced mana is the
+    // source of the ability or spell.
     // CR 107.1b: When X is part of a mana production quantity (rare — e.g., an
     // effect on the stack that resolved via `ResolvedAbility` and produces X mana),
     // `resolve_quantity_with_targets` threads `ability.chosen_x` through to the
@@ -55,31 +72,20 @@ pub fn resolve(
         _ => ability.controller,
     };
 
-    let player = state
-        .players
-        .iter_mut()
-        .find(|p| p.id == recipient)
-        .ok_or(EffectError::PlayerNotFound)?;
-
     // CR 106.4: When an effect instructs a player to add mana, that mana goes
     // into that player's mana pool.
     for mana_type in mana_types {
-        let unit = ManaUnit {
-            color: mana_type,
-            source_id: ability.source_id,
-            snow: false,
-            restrictions: concrete_restrictions.clone(),
-            grants: grants.clone(),
-            expiry,
-        };
-        player.mana_pool.add(unit);
-
-        events.push(GameEvent::ManaAdded {
-            player_id: recipient,
+        mana_payment::produce_mana_with_attributes(
+            state,
+            ability.source_id,
             mana_type,
-            source_id: ability.source_id,
-            tapped_for_mana: false,
-        });
+            recipient,
+            false,
+            &concrete_restrictions,
+            grants,
+            expiry,
+            events,
+        );
     }
 
     events.push(GameEvent::EffectResolved {
@@ -88,6 +94,95 @@ pub fn resolve(
     });
 
     Ok(())
+}
+
+/// CR 106.3 + CR 608.2d: Complete a mana-choice prompt created while a spell
+/// or non-mana ability effect is resolving.
+pub fn handle_choose_mana_effect(
+    state: &mut GameState,
+    ability: &ResolvedAbility,
+    prompt: &ManaChoicePrompt,
+    chosen: ManaChoice,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, crate::game::engine::EngineError> {
+    let Effect::Mana {
+        produced,
+        restrictions,
+        grants,
+        expiry,
+        target: _,
+    } = &ability.effect
+    else {
+        return Err(crate::game::engine::EngineError::InvalidAction(
+            "Pending mana choice is not a mana effect".to_string(),
+        ));
+    };
+
+    let mana_types = chosen_mana_types_for_prompt(state, ability, produced, prompt, chosen)?;
+    let concrete_restrictions = resolve_restrictions(restrictions, state, ability.source_id);
+    let recipient = ability.controller;
+    for mana_type in mana_types {
+        mana_payment::produce_mana_with_attributes(
+            state,
+            ability.source_id,
+            mana_type,
+            recipient,
+            false,
+            &concrete_restrictions,
+            grants,
+            *expiry,
+            events,
+        );
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&ability.effect),
+        source_id: ability.source_id,
+    });
+
+    state.waiting_for = WaitingFor::Priority { player: recipient };
+    state.priority_player = recipient;
+    super::drain_pending_continuation(state, events);
+    Ok(state.waiting_for.clone())
+}
+
+fn chosen_mana_types_for_prompt(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    produced: &ManaProduction,
+    prompt: &ManaChoicePrompt,
+    chosen: ManaChoice,
+) -> Result<Vec<ManaType>, crate::game::engine::EngineError> {
+    match (prompt, chosen) {
+        (ManaChoicePrompt::SingleColor { options }, ManaChoice::SingleColor(color)) => {
+            if !options.contains(&color) {
+                return Err(crate::game::engine::EngineError::InvalidAction(
+                    "Chosen color is not among the legal options".to_string(),
+                ));
+            }
+            let count = resolve_mana_types_for_ability(produced, state, ability).len();
+            Ok(vec![color; count])
+        }
+        (ManaChoicePrompt::Combination { options }, ManaChoice::Combination(combo)) => {
+            if !options.iter().any(|option| option == &combo) {
+                return Err(crate::game::engine::EngineError::InvalidAction(
+                    "Chosen combination is not among the legal options".to_string(),
+                ));
+            }
+            Ok(combo)
+        }
+        (ManaChoicePrompt::AnyCombination { count, options }, ManaChoice::Combination(combo)) => {
+            if combo.len() != *count || combo.iter().any(|color| !options.contains(color)) {
+                return Err(crate::game::engine::EngineError::InvalidAction(
+                    "Chosen mana combination is not legal for this prompt".to_string(),
+                ));
+            }
+            Ok(combo)
+        }
+        _ => Err(crate::game::engine::EngineError::InvalidAction(
+            "Mana choice shape does not match the active prompt".to_string(),
+        )),
+    }
 }
 
 /// Resolve parse-time restriction templates into concrete `ManaRestriction` values.
@@ -471,9 +566,13 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::types::ability::{ChoiceValue, DevotionColors, QuantityExpr, QuantityRef};
-    use crate::types::identifiers::ObjectId;
+    use crate::game::zones::create_object;
+    use crate::types::ability::{
+        ChoiceValue, DevotionColors, QuantityExpr, QuantityRef, TargetFilter,
+    };
+    use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
+    use crate::types::zones::Zone;
 
     fn make_mana_ability(produced: ManaProduction) -> ResolvedAbility {
         ResolvedAbility::new(
@@ -669,7 +768,7 @@ mod tests {
     }
 
     #[test]
-    fn produce_any_one_color_uses_first_option() {
+    fn any_one_color_effect_prompts_when_multiple_options() {
         let mut state = GameState::new_two_player(42);
         let mut events = Vec::new();
 
@@ -684,28 +783,115 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 2);
-        assert_eq!(state.players[0].mana_pool.total(), 2);
+        match &state.waiting_for {
+            WaitingFor::ChooseManaColor {
+                choice: ManaChoicePrompt::SingleColor { options },
+                context: ManaChoiceContext::ResolvingEffect(_),
+                ..
+            } => assert_eq!(options, &[ManaType::Blue, ManaType::Red]),
+            other => panic!("expected SingleColor mana choice, got {other:?}"),
+        }
+        assert_eq!(state.players[0].mana_pool.total(), 0);
     }
 
     #[test]
-    fn produce_any_combination_cycles_options() {
+    fn any_combination_effect_prompts_and_resumes_sub_ability() {
         let mut state = GameState::new_two_player(42);
+        let drawn = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Drawn Card".to_string(),
+            Zone::Library,
+        );
         let mut events = Vec::new();
 
-        resolve(
+        let mut ability = make_mana_ability(ManaProduction::AnyCombination {
+            count: QuantityExpr::Fixed { value: 2 },
+            color_options: ManaColor::ALL.to_vec(),
+        });
+        ability.sub_ability = Some(Box::new(ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )));
+
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        let (choice, pending_effect) = match state.waiting_for.clone() {
+            WaitingFor::ChooseManaColor {
+                player,
+                choice: ManaChoicePrompt::AnyCombination { count, options },
+                context: ManaChoiceContext::ResolvingEffect(pending_effect),
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(count, 2);
+                assert_eq!(
+                    options,
+                    vec![
+                        ManaType::White,
+                        ManaType::Blue,
+                        ManaType::Black,
+                        ManaType::Red,
+                        ManaType::Green,
+                    ]
+                );
+                (
+                    ManaChoicePrompt::AnyCombination { count, options },
+                    pending_effect,
+                )
+            }
+            other => panic!("expected AnyCombination mana choice, got {other:?}"),
+        };
+        assert!(state.pending_continuation.is_some());
+
+        handle_choose_mana_effect(
             &mut state,
-            &make_mana_ability(ManaProduction::AnyCombination {
-                count: QuantityExpr::Fixed { value: 3 },
-                color_options: vec![ManaColor::Black, ManaColor::Green],
-            }),
+            &pending_effect,
+            &choice,
+            ManaChoice::Combination(vec![ManaType::Red, ManaType::Green]),
             &mut events,
         )
         .unwrap();
 
-        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Black), 2);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Red), 1);
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
-        assert_eq!(state.players[0].mana_pool.total(), 3);
+        assert_eq!(state.players[0].mana_pool.total(), 2);
+        assert!(state.players[0].hand.contains(&drawn));
+        assert!(state.pending_continuation.is_none());
+    }
+
+    #[test]
+    fn any_combination_effect_rejects_wrong_choice_count() {
+        let mut state = GameState::new_two_player(42);
+        let mut events = Vec::new();
+        let ability = make_mana_ability(ManaProduction::AnyCombination {
+            count: QuantityExpr::Fixed { value: 3 },
+            color_options: vec![ManaColor::Black, ManaColor::Green],
+        });
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+        let (choice, pending_effect) = match state.waiting_for.clone() {
+            WaitingFor::ChooseManaColor {
+                choice,
+                context: ManaChoiceContext::ResolvingEffect(pending_effect),
+                ..
+            } => (choice, pending_effect),
+            other => panic!("expected ChooseManaColor, got {other:?}"),
+        };
+
+        let result = handle_choose_mana_effect(
+            &mut state,
+            &pending_effect,
+            &choice,
+            ManaChoice::Combination(vec![ManaType::Black, ManaType::Green]),
+            &mut events,
+        );
+        assert!(result.is_err());
     }
 
     #[test]
