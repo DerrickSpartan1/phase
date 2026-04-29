@@ -7421,6 +7421,75 @@ mod tests {
         assert!(state.players[0].hand.contains(&obj_id));
     }
 
+    #[test]
+    fn convoke_payment_records_creatures_that_convoked_spell() {
+        use crate::game::engine::apply_as_current;
+
+        let mut state = setup_game_at_main_phase();
+
+        let helper = create_object(
+            &mut state,
+            CardId(61),
+            PlayerId(0),
+            "Helper".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&helper).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        let obj_id = create_object(
+            &mut state,
+            CardId(62),
+            PlayerId(0),
+            "Convoke Creature".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.keywords.push(Keyword::Convoke);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![],
+                generic: 1,
+            };
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Creature".to_string(),
+                    description: None,
+                },
+            ));
+        }
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::CastSpell {
+                object_id: obj_id,
+                card_id: CardId(62),
+                targets: vec![],
+            },
+        )
+        .unwrap();
+        assert!(matches!(result.waiting_for, WaitingFor::ManaPayment { .. }));
+
+        apply_as_current(
+            &mut state,
+            GameAction::TapForConvoke {
+                object_id: helper,
+                mana_type: ManaType::Colorless,
+            },
+        )
+        .unwrap();
+        apply_as_current(&mut state, GameAction::PassPriority).unwrap();
+
+        assert_eq!(
+            state.objects.get(&obj_id).unwrap().convoked_creatures,
+            vec![helper]
+        );
+    }
+
     // --- Aura casting tests ---
     // Note: `ControllerRef` + `TargetFilter` are already imported at the test module
     // head (where the CantBeActivated tests need them). No local re-import required.

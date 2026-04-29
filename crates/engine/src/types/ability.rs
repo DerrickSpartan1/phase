@@ -2173,18 +2173,19 @@ pub enum QuantityRef {
     /// CR 500: Number of turns this player has taken so far in the game.
     /// Resolved against the controller/scope player.
     TurnsTaken,
-    /// CR 400.7: Count of permanents the controller owned that left the battlefield this turn.
-    /// Used for Revolt ability word ("if a permanent you controlled left the battlefield this turn").
-    PermanentsLeftBattlefieldThisTurn,
-    /// CR 400.7: Count of nonland permanents (any controller) that left the battlefield this turn.
-    /// Used for Elegy Acolyte Void ability word and similar cards.
-    NonlandPermanentsLeftBattlefieldThisTurn,
+    /// CR 400.7 + CR 700.4: Count this turn's zone-change records that match
+    /// an origin/destination and the object's last-known characteristics.
+    /// Used by Revolt, Morbid, and subtype-specific dies counts such as Zubera.
+    ZoneChangeCountThisTurn {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from: Option<Zone>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<Zone>,
+        filter: TargetFilter,
+    },
     /// A number chosen as the source entered the battlefield (e.g., Talion, the Kindly Lord).
     /// Resolved from the source object's `ChosenAttribute::Number`.
     ChosenNumber,
-    /// CR 700.7: Number of creatures that died this turn (Morbid).
-    /// Resolved against all players (game-wide event count).
-    CreaturesDiedThisTurn,
     /// CR 508.1a: Number of times the controller declared attackers this turn.
     /// Used for "if you attacked this turn" conditions.
     AttackedThisTurn,
@@ -2213,6 +2214,10 @@ pub enum QuantityRef {
     /// CR 702.33b + CR 702.33c: Number of kicker costs paid for the source
     /// spell. For multikicker, each repeated payment contributes one entry.
     KickerCount,
+    /// CR 702.51c: Number of creatures that convoked the source spell or the
+    /// spell that became the source permanent. Reads `GameObject::convoked_creatures`;
+    /// ETB replacement contexts resolve against the entering object.
+    ConvokedCreatureCount,
     /// CR 601.2h + CR 603.4: Total amount of mana actually spent to cast the
     /// spell that caused the current trigger event. Resolves against the
     /// spell object referenced by `trigger_event` (e.g., `SpellCast`), reading

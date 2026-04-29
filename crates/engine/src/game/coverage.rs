@@ -773,15 +773,14 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::LifeGainedThisTurn { player } => {
             format!("life gained this turn ({})", fmt_player_scope(*player))
         }
-        QuantityRef::PermanentsLeftBattlefieldThisTurn => {
-            "permanents left battlefield this turn".into()
-        }
-        QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn => {
-            "nonland permanents left battlefield this turn".into()
+        QuantityRef::ZoneChangeCountThisTurn { from, to, filter } => {
+            format!(
+                "{} zone changes this turn ({from:?}->{to:?})",
+                fmt_target(filter)
+            )
         }
         QuantityRef::TurnsTaken => "turns taken".into(),
         QuantityRef::ChosenNumber => "chosen number".into(),
-        QuantityRef::CreaturesDiedThisTurn => "creatures died this turn".into(),
         QuantityRef::AttackedThisTurn => "attacked this turn".into(),
         QuantityRef::DescendedThisTurn => "descended this turn".into(),
         QuantityRef::SpellsCastLastTurn => "spells cast last turn".into(),
@@ -791,6 +790,7 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::TargetZoneCardCount { .. } => "target zone card count".into(),
         QuantityRef::CostXPaid => "X paid for this spell".into(),
         QuantityRef::KickerCount => "kicker payments for this spell".into(),
+        QuantityRef::ConvokedCreatureCount => "creatures that convoked this spell".into(),
         QuantityRef::ManaSpentOnTriggeringSpell => "mana spent on triggering spell".into(),
         QuantityRef::ManaSpentOnSelf => "mana spent on self".into(),
         QuantityRef::ColorsSpentOnSelf => "colors of mana spent on self".into(),
@@ -4317,15 +4317,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::EnteredThisTurn { .. } => ("EnteredThisTurn", Handled),
         QuantityRef::CrimesCommittedThisTurn => ("CrimesCommittedThisTurn", Handled),
         QuantityRef::LifeGainedThisTurn { .. } => ("LifeGainedThisTurn", Handled),
-        QuantityRef::PermanentsLeftBattlefieldThisTurn => {
-            ("PermanentsLeftBattlefieldThisTurn", Unhandled)
-        }
-        QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn => {
-            ("NonlandPermanentsLeftBattlefieldThisTurn", Unhandled)
-        }
+        QuantityRef::ZoneChangeCountThisTurn { .. } => ("ZoneChangeCountThisTurn", Handled),
         QuantityRef::TurnsTaken => ("TurnsTaken", Unhandled),
         QuantityRef::ChosenNumber => ("ChosenNumber", Unhandled),
-        QuantityRef::CreaturesDiedThisTurn => ("CreaturesDiedThisTurn", Handled),
         QuantityRef::AttackedThisTurn => ("AttackedThisTurn", Unhandled),
         QuantityRef::DescendedThisTurn => ("DescendedThisTurn", Unhandled),
         QuantityRef::SpellsCastLastTurn => ("SpellsCastLastTurn", Unhandled),
@@ -4335,6 +4329,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::TargetZoneCardCount { .. } => ("TargetZoneCardCount", Unhandled),
         QuantityRef::CostXPaid => ("CostXPaid", Handled),
         QuantityRef::KickerCount => ("KickerCount", Handled),
+        QuantityRef::ConvokedCreatureCount => ("ConvokedCreatureCount", Handled),
         QuantityRef::ManaSpentOnTriggeringSpell => ("ManaSpentOnTriggeringSpell", Handled),
         QuantityRef::ManaSpentOnSelf => ("ManaSpentOnSelf", Handled),
         QuantityRef::ColorsSpentOnSelf => ("ColorsSpentOnSelf", Handled),

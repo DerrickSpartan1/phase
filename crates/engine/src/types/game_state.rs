@@ -559,6 +559,12 @@ pub struct PendingCast {
     /// declined sibling kickers.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub declined_kickers: Vec<KickerVariant>,
+    /// CR 702.51c: Creatures tapped to pay this spell's convoke cost.
+    /// Collected during `WaitingFor::ManaPayment` and copied onto the spell
+    /// object when the cast is finalized so "creatures that convoked it"
+    /// quantities can resolve later.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub convoked_creatures: Vec<ObjectId>,
 }
 
 fn default_origin_zone() -> Zone {
@@ -585,6 +591,7 @@ impl PendingCast {
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
             declined_kickers: Vec::new(),
+            convoked_creatures: Vec::new(),
         }
     }
 }
@@ -2832,6 +2839,11 @@ pub struct PendingSpellResolution {
     /// path in `stack.rs`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kickers_paid: Vec<crate::types::ability::KickerVariant>,
+    /// CR 702.51c: Carry convoked-creature data through the replacement-choice
+    /// detour so ETB triggers/replacements see the same cast history as the
+    /// direct resolution path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub convoked_creatures: Vec<ObjectId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -3303,6 +3315,7 @@ mod tests {
                 origin_zone: Zone::Hand,
                 additional_cost_flow: None,
                 declined_kickers: Vec::new(),
+                convoked_creatures: Vec::new(),
             })
         }
 
@@ -3547,6 +3560,7 @@ mod tests {
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
             declined_kickers: Vec::new(),
+            convoked_creatures: Vec::new(),
         });
         let choose_x = WaitingFor::ChooseXValue {
             player: PlayerId(0),

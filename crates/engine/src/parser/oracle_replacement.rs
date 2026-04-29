@@ -4,7 +4,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::char;
 use nom::combinator::{opt, peek, value};
-use nom::sequence::preceded;
+use nom::sequence::{pair, preceded};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
@@ -1417,8 +1417,41 @@ fn parse_enters_counter_for_each_suffix(after_counter: &str) -> Option<QuantityE
     let (rest, _) = tag::<_, _, VerboseError<&str>>(" on it for each ")
         .parse(rest)
         .ok()?;
-    let clause = rest.trim().trim_end_matches('.');
+    if let Ok((rest, qty)) = parse_for_each_convoked_creature_clause(rest) {
+        if rest.trim().is_empty() {
+            return Some(qty);
+        }
+    }
+    let clause = match nom_primitives::split_once_on(rest, ".") {
+        Ok((_, (before_period, after_period))) if after_period.trim().is_empty() => {
+            before_period.trim()
+        }
+        _ => rest.trim(),
+    };
     super::oracle_quantity::parse_for_each_clause_expr(clause)
+}
+
+fn parse_for_each_convoked_creature_clause(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, QuantityExpr> {
+    let (rest, _) =
+        pair(tag::<_, _, VerboseError<&str>>("creature"), opt(tag("s"))).parse(input)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, _) = tag("that convoked ").parse(rest)?;
+    let (rest, _) = alt((
+        tag("it"),
+        tag("this spell"),
+        tag("this permanent"),
+        tag("~"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    Ok((
+        rest,
+        QuantityExpr::Ref {
+            qty: QuantityRef::ConvokedCreatureCount,
+        },
+    ))
 }
 
 fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(String, QuantityExpr)>> {
@@ -4486,7 +4519,11 @@ mod tests {
             def.condition,
             Some(ReplacementCondition::OnlyIfQuantity {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::CreaturesDiedThisTurn
+                    qty: QuantityRef::ZoneChangeCountThisTurn {
+                        from: Some(Zone::Battlefield),
+                        to: Some(Zone::Graveyard),
+                        ..
+                    }
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -4518,6 +4555,29 @@ mod tests {
                 target: TargetFilter::SelfRef,
             } if counter_type == "P1P1"
                 && card_types.contains(&TypeFilter::Creature)
+        ));
+    }
+
+    #[test]
+    fn enters_with_counters_for_each_creature_that_convoked_it() {
+        let def = parse_replacement_line(
+            "This creature enters with two +1/+1 counters on it for each creature that convoked it.",
+            "Ancient Imperiosaur",
+        )
+        .unwrap();
+
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            *def.execute.as_ref().unwrap().effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Multiply {
+                    factor: 2,
+                    ref inner,
+                },
+                target: TargetFilter::SelfRef,
+            } if counter_type == "P1P1"
+                && matches!(**inner, QuantityExpr::Ref { qty: QuantityRef::ConvokedCreatureCount })
         ));
     }
 

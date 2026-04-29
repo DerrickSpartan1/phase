@@ -5,7 +5,7 @@
 //! "equal to" phrases, and "for each" phrases.
 
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_while1};
+use nom::bytes::complete::{tag, take_until, take_while1};
 use nom::combinator::{map, opt, value};
 use nom::sequence::preceded;
 use nom::Parser;
@@ -14,12 +14,14 @@ use super::error::OracleResult;
 use super::primitives::parse_number;
 use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::{parse_shared_quality_clause, parse_type_phrase};
+use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{
     AggregateFunction, CardTypeSetSource, ControllerRef, CountScope, DevotionColors, FilterProp,
     ObjectProperty, ObjectScope, PlayerScope, QuantityExpr, QuantityRef, RoundingMode,
     TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::player::PlayerCounterKind;
+use crate::types::zones::Zone;
 
 /// Parse a quantity expression: either a fractional expression, a dynamic reference,
 /// or a fixed number. Fractional forms ("half X, rounded up/down") compose over the
@@ -1356,11 +1358,12 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // `parse_number_of_inner`.
         parse_creature_in_party_for_each,
         parse_player_counter_ref_tail,
-        // CR 700.4 + CR 700.7: "creature that died this turn" / "creature that
+        // CR 700.4: "creature that died this turn" / "creature that
         // died under your control this turn" — event-based count of dies-events
         // tracked in `state.zone_changes_this_turn`. Must precede
         // `parse_for_each_controlled_type` since the leading "creature" token
         // would otherwise commit the simple `<type> you control` arm.
+        parse_for_each_subtype_died_this_turn,
         parse_for_each_creature_died_this_turn,
         parse_for_each_combat_creature_controlled,
         parse_for_each_combat_creature_other_than_source,
@@ -1551,14 +1554,14 @@ fn parse_for_each_commander_cast_count(input: &str) -> OracleResult<'_, Quantity
     Ok((rest, QuantityRef::CommanderCastFromCommandZoneCount))
 }
 
-/// CR 700.4 + CR 700.7: Parse "creature that died" / "creature that died
-/// under your control" → CreaturesDiedThisTurn.
+/// CR 700.4: Parse "creature that died" / "creature that died
+/// under your control" → filtered zone-change count.
 ///
 /// Engine tracking is per-turn-only (no last-turn / total counts), so the
 /// trailing "this turn" qualifier is semantically redundant — it gets stripped
 /// upstream by `strip_trailing_duration` before this arm sees the clause.
 /// Both the with-qualifier and without-qualifier forms map to the same
-/// `CreaturesDiedThisTurn` quantity ref.
+/// `ZoneChangeCountThisTurn` quantity ref.
 fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = alt((
         // "creature that died" canonical forms
@@ -1566,7 +1569,7 @@ fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, Quant
         tag("creature that died under your control"),
         tag("creature that died this turn"),
         tag("creature that died"),
-        // CR 700.7: "creature put into [a/your] graveyard from the battlefield"
+        // CR 700.4: "creature put into [a/your] graveyard from the battlefield"
         // is the long form of "died" — both reference the same battlefield→
         // graveyard transition tracked in `zone_changes_this_turn`.
         tag("creature put into your graveyard from the battlefield this turn"),
@@ -1575,7 +1578,44 @@ fn parse_for_each_creature_died_this_turn(input: &str) -> OracleResult<'_, Quant
         tag("creature put into a graveyard from the battlefield"),
     ))
     .parse(input)?;
-    Ok((rest, QuantityRef::CreaturesDiedThisTurn))
+    Ok((rest, creatures_died_this_turn_ref()))
+}
+
+fn parse_for_each_subtype_died_this_turn(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, subtype_text) = take_until(" that died").parse(input)?;
+    let (rest, _) = alt((tag(" that died this turn"), tag(" that died"))).parse(rest)?;
+    let Some((subtype, consumed)) = parse_subtype(subtype_text) else {
+        return Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Context("creature subtype"),
+            )],
+        }));
+    };
+    if consumed != subtype_text.len() {
+        return Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Context("creature subtype"),
+            )],
+        }));
+    }
+    Ok((
+        rest,
+        QuantityRef::ZoneChangeCountThisTurn {
+            from: Some(Zone::Battlefield),
+            to: Some(Zone::Graveyard),
+            filter: TargetFilter::Typed(TypedFilter::creature().subtype(subtype)),
+        },
+    ))
+}
+
+fn creatures_died_this_turn_ref() -> QuantityRef {
+    QuantityRef::ZoneChangeCountThisTurn {
+        from: Some(Zone::Battlefield),
+        to: Some(Zone::Graveyard),
+        filter: TargetFilter::Typed(TypedFilter::creature()),
+    }
 }
 
 /// CR 301.5 + CR 303.4: Parse "<type> [and <type>]* attached to ~" — counts
@@ -2672,6 +2712,24 @@ mod tests {
             _ => panic!("expected ObjectCount"),
         }
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_for_each_subtype_that_died_this_turn() {
+        let (rest, q) = parse_for_each_clause_ref("zubera that died this turn").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::ZoneChangeCountThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Graveyard),
+                filter: TargetFilter::Typed(TypedFilter {
+                    ref type_filters,
+                    ..
+                }),
+            } if type_filters.contains(&TypeFilter::Creature)
+                && type_filters.contains(&TypeFilter::Subtype("Zubera".to_string()))
+        ));
     }
 
     #[test]

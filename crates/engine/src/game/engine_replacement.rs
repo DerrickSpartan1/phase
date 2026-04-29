@@ -466,6 +466,7 @@ fn apply_pending_spell_resolution(
     if let Some(obj) = state.objects.get_mut(&ctx.object_id) {
         obj.cast_from_zone = ctx.cast_from_zone;
         obj.kickers_paid.clone_from(&ctx.kickers_paid);
+        obj.convoked_creatures.clone_from(&ctx.convoked_creatures);
     }
 
     // CR 303.4f: Aura resolving to battlefield attaches to its target.

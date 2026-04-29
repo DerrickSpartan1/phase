@@ -8,7 +8,8 @@ use std::collections::HashSet;
 
 use crate::game::arithmetic::{u32_to_i32_saturating, usize_to_i32_saturating};
 use crate::game::filter::{
-    matches_target_filter, spell_record_matches_filter, type_filter_matches, FilterContext,
+    matches_target_filter, matches_target_filter_on_zone_change_record,
+    spell_record_matches_filter, type_filter_matches, FilterContext,
 };
 use crate::game::speed::effective_speed;
 use crate::types::ability::{
@@ -22,7 +23,6 @@ use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::player::PlayerId;
-use crate::types::zones::Zone;
 
 /// Scope information for quantity resolution.
 ///
@@ -1185,22 +1185,21 @@ fn resolve_ref(
                 u32_to_i32_saturating(p.life_gained_this_turn)
             })
         }
-        // CR 400.7: Count of permanents controlled by player that left the battlefield this turn.
-        QuantityRef::PermanentsLeftBattlefieldThisTurn => usize_to_i32_saturating(
+        // CR 400.7 + CR 700.4: Count zone-change snapshots from this turn
+        // using last-known characteristics for the moved object.
+        QuantityRef::ZoneChangeCountThisTurn { from, to, filter } => usize_to_i32_saturating(
             state
                 .zone_changes_this_turn
                 .iter()
-                .filter(|r| r.from_zone == Some(Zone::Battlefield) && r.controller == controller)
-                .count(),
-        ),
-        // CR 400.7: Count of nonland permanents (any controller) that left the battlefield this turn.
-        QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn => usize_to_i32_saturating(
-            state
-                .zone_changes_this_turn
-                .iter()
-                .filter(|r| {
-                    r.from_zone == Some(Zone::Battlefield)
-                        && !r.core_types.contains(&CoreType::Land)
+                .filter(|record| {
+                    from.is_none_or(|zone| record.from_zone == Some(zone))
+                        && to.is_none_or(|zone| record.to_zone == zone)
+                        && matches_target_filter_on_zone_change_record(
+                            state,
+                            record,
+                            filter,
+                            &filter_ctx,
+                        )
                 })
                 .count(),
         ),
@@ -1217,18 +1216,6 @@ fn resolve_ref(
                 })
             })
             .unwrap_or(0),
-        // CR 700.7: Count creatures that died (battlefield → graveyard) this turn.
-        QuantityRef::CreaturesDiedThisTurn => usize_to_i32_saturating(
-            state
-                .zone_changes_this_turn
-                .iter()
-                .filter(|r| {
-                    r.core_types.contains(&CoreType::Creature)
-                        && r.from_zone == Some(Zone::Battlefield)
-                        && r.to_zone == Zone::Graveyard
-                })
-                .count(),
-        ),
         // CR 508.1a: Whether the controller declared attackers this turn.
         QuantityRef::AttackedThisTurn => {
             if state.players_attacked_this_turn.contains(&controller) {
@@ -1292,6 +1279,11 @@ fn resolve_ref(
             .objects
             .get(&ctx.self_object())
             .map(|obj| usize_to_i32_saturating(obj.kickers_paid.len()))
+            .unwrap_or(0),
+        QuantityRef::ConvokedCreatureCount => state
+            .objects
+            .get(&ctx.self_object())
+            .map(|obj| usize_to_i32_saturating(obj.convoked_creatures.len()))
             .unwrap_or(0),
         // CR 603.10a + CR 603.6e: Count attachments present on the leaving object
         // at zone-change time (look-back). Reads the `attachments` snapshot on
@@ -2379,6 +2371,64 @@ mod tests {
             qty: QuantityRef::KickerCount,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), obj_id), 3);
+    }
+
+    #[test]
+    fn resolve_quantity_convoked_creature_count_reads_source_object() {
+        let mut state = GameState::new_two_player(42);
+        let obj_id = create_object(
+            &mut state,
+            CardId(1001),
+            PlayerId(0),
+            "Convoked Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&obj_id).unwrap().convoked_creatures =
+            vec![ObjectId(10), ObjectId(11), ObjectId(12)];
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ConvokedCreatureCount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), obj_id), 3);
+    }
+
+    #[test]
+    fn resolve_zone_change_count_this_turn_filters_dies_subtype() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1000),
+            PlayerId(0),
+            "Ashen-Skin Zubera".to_string(),
+            Zone::Graveyard,
+        );
+        let zubera = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Zubera".to_string(), "Spirit".to_string()],
+            ..ZoneChangeRecord::test_minimal(ObjectId(10), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        let non_zubera = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Human".to_string()],
+            ..ZoneChangeRecord::test_minimal(ObjectId(11), Some(Zone::Battlefield), Zone::Graveyard)
+        };
+        let zubera_bounced = ZoneChangeRecord {
+            core_types: vec![CoreType::Creature],
+            subtypes: vec!["Zubera".to_string()],
+            ..ZoneChangeRecord::test_minimal(ObjectId(12), Some(Zone::Battlefield), Zone::Hand)
+        };
+        state
+            .zone_changes_this_turn
+            .extend([zubera, non_zubera, zubera_bounced]);
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeCountThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Graveyard),
+                filter: TargetFilter::Typed(TypedFilter::creature().subtype("Zubera".to_string())),
+            },
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 1);
     }
 
     // CR 603.10a + CR 603.6e: Hateful Eidolon's "for each Aura you controlled that

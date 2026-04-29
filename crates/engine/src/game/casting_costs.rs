@@ -1581,6 +1581,12 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     // permanent spells with no on-resolve ability still need this for ETB
     // replacements on X-cost cards like Astral Cornucopia, Walking Ballista, etc.
     let cost_x_paid = ability.chosen_x;
+    let convoked_creatures = state
+        .pending_cast
+        .as_ref()
+        .filter(|pending| pending.object_id == object_id)
+        .map(|pending| pending.convoked_creatures.clone())
+        .unwrap_or_default();
 
     // Determine whether this spell has a meaningful on-resolve ability.
     // Permanent spells with no Spell-kind AbilityDefinition get a placeholder
@@ -1609,6 +1615,11 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
     if let Some(x) = cost_x_paid {
         if let Some(obj) = state.objects.get_mut(&object_id) {
             obj.cost_x_paid = Some(x);
+        }
+    }
+    if !convoked_creatures.is_empty() {
+        if let Some(obj) = state.objects.get_mut(&object_id) {
+            obj.convoked_creatures = convoked_creatures;
         }
     }
 
@@ -2423,6 +2434,7 @@ pub fn finalize_mana_payment(
         );
         pending_resumed.casting_variant = pending.casting_variant;
         pending_resumed.origin_zone = pending.origin_zone;
+        pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
 
         // CR 601.2d: "divided evenly, rounded down" — EvenSplitDamage bypasses
         // interactive distribution. Remainder is intentionally lost per Oracle text.
@@ -2434,6 +2446,7 @@ pub fn finalize_mana_payment(
             state.pending_cast = Some(Box::new(pending_resumed));
 
             let pending = state.pending_cast.take().unwrap();
+            stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
             return finalize_cast(
                 state,
                 player,
@@ -2456,6 +2469,7 @@ pub fn finalize_mana_payment(
         });
     }
 
+    stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
     finalize_cast(
         state,
         player,
@@ -2467,6 +2481,19 @@ pub fn finalize_mana_payment(
         pending.origin_zone,
         events,
     )
+}
+
+fn stamp_convoked_creatures(
+    state: &mut GameState,
+    object_id: ObjectId,
+    convoked_creatures: &[ObjectId],
+) {
+    if convoked_creatures.is_empty() {
+        return;
+    }
+    if let Some(obj) = state.objects.get_mut(&object_id) {
+        obj.convoked_creatures = convoked_creatures.to_vec();
+    }
 }
 
 /// CR 107.4f + CR 601.2f: Resume cast completion after the caster submits their
@@ -2550,6 +2577,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         );
         pending_resumed.casting_variant = pending.casting_variant;
         pending_resumed.origin_zone = pending.origin_zone;
+        pending_resumed.convoked_creatures = pending.convoked_creatures.clone();
 
         if unit == DistributionUnit::EvenSplitDamage && !targets.is_empty() {
             let num = targets.len() as u32;
@@ -2559,6 +2587,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
             state.pending_cast = Some(Box::new(pending_resumed));
 
             let pending = state.pending_cast.take().unwrap();
+            stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
             return finalize_cast(
                 state,
                 player,
@@ -2581,6 +2610,7 @@ pub fn finalize_mana_payment_with_phyrexian_choices(
         });
     }
 
+    stamp_convoked_creatures(state, pending.object_id, &pending.convoked_creatures);
     finalize_cast_with_phyrexian_choices(
         state,
         player,
@@ -2750,6 +2780,7 @@ mod tests {
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
             declined_kickers: Vec::new(),
+            convoked_creatures: Vec::new(),
         }
     }
 
@@ -4672,6 +4703,7 @@ mod tests {
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
             declined_kickers: Vec::new(),
+            convoked_creatures: Vec::new(),
         };
 
         let result = pay_additional_cost(
@@ -4783,6 +4815,7 @@ mod tests {
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
             declined_kickers: Vec::new(),
+            convoked_creatures: Vec::new(),
         };
 
         let mut events = Vec::new();
@@ -4863,6 +4896,7 @@ mod tests {
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
             declined_kickers: Vec::new(),
+            convoked_creatures: Vec::new(),
         };
 
         // Exactly one card is required. Selecting two must fail.
@@ -4932,6 +4966,7 @@ mod tests {
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
             declined_kickers: Vec::new(),
+            convoked_creatures: Vec::new(),
         };
 
         // `red` is not in the legal-cards list, so the cost handler must reject
@@ -5034,6 +5069,7 @@ mod tests {
             origin_zone: Zone::Graveyard,
             additional_cost_flow: None,
             declined_kickers: Vec::new(),
+            convoked_creatures: Vec::new(),
         };
 
         let result = pay_additional_cost(

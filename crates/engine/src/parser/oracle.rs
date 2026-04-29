@@ -408,7 +408,13 @@ fn ability_word_to_condition(word: &str) -> Option<crate::types::ability::Static
             // The tracking field already exists as part of the general zone-change tracking.
             Some(StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::PermanentsLeftBattlefieldThisTurn,
+                    qty: QuantityRef::ZoneChangeCountThisTurn {
+                        from: Some(Zone::Battlefield),
+                        to: None,
+                        filter: TargetFilter::Typed(
+                            TypedFilter::permanent().controller(ControllerRef::You),
+                        ),
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -7501,7 +7507,7 @@ mod tests {
             Some(AbilityCondition::ConditionInstead { inner }) => match inner.as_ref() {
                 AbilityCondition::And { conditions } => {
                     assert_eq!(conditions.len(), 2, "And should have 2 conditions");
-                    // First: Revolt (QuantityCheck on PermanentsLeftBattlefieldThisTurn)
+                    // First: Revolt (QuantityCheck on zone-change count)
                     assert!(
                         matches!(&conditions[0], AbilityCondition::QuantityCheck { .. }),
                         "first condition should be QuantityCheck (revolt)"
@@ -7556,7 +7562,11 @@ mod tests {
                     inner.as_ref(),
                     AbilityCondition::QuantityCheck {
                         lhs: QuantityExpr::Ref {
-                            qty: QuantityRef::CreaturesDiedThisTurn,
+                            qty: QuantityRef::ZoneChangeCountThisTurn {
+                                from: Some(Zone::Battlefield),
+                                to: Some(Zone::Graveyard),
+                                ..
+                            },
                         },
                         comparator: Comparator::GE,
                         rhs: QuantityExpr::Fixed { value: 1 },

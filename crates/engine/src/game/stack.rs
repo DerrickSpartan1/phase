@@ -305,6 +305,12 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
+            let convoked_creatures = state
+                .objects
+                .get(&entry.id)
+                .map(|obj| obj.convoked_creatures.clone())
+                .unwrap_or_default();
+
             match super::replacement::replace_event(state, proposed, events) {
                 super::replacement::ReplacementResult::Execute(event) => {
                     if let crate::types::proposed_event::ProposedEvent::ZoneChange {
@@ -368,8 +374,8 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     // can evaluate conditions like "if you cast it from your hand".
                     // When ability is present, use its context; otherwise the object
                     // already has cast_from_zone set during finalize_cast_to_stack.
-                    if let Some(ref ability) = ability {
-                        if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    if let Some(obj) = state.objects.get_mut(&entry.id) {
+                        if let Some(ref ability) = ability {
                             obj.cast_from_zone = ability.context.cast_from_zone;
                             // CR 702.33d + CR 702.33f: Propagate kicker payments
                             // from the resolving spell's `SpellContext` to the
@@ -379,6 +385,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             // abilities) can evaluate.
                             obj.kickers_paid.clone_from(&ability.context.kickers_paid);
                         }
+                        obj.convoked_creatures = convoked_creatures;
                     }
                     super::room::unlock_door_designation(
                         state,
@@ -430,6 +437,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                             spell_targets: spell_targets.clone(),
                             actual_mana_spent,
                             kickers_paid,
+                            convoked_creatures,
                         });
                     state.waiting_for =
                         super::replacement::replacement_choice_waiting_for(player, state);

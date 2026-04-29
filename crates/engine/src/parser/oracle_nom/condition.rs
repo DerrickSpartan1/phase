@@ -16,9 +16,10 @@ use super::quantity as nom_quantity;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
     AggregateFunction, Comparator, ControllerRef, PlayerScope, QuantityExpr, QuantityRef,
-    StaticCondition, TargetFilter,
+    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::{CounterMatch, CounterType};
+use crate::types::zones::Zone;
 
 /// Parse a condition phrase from Oracle text.
 ///
@@ -642,6 +643,32 @@ fn make_quantity_ge(qty: QuantityRef, n: u32) -> StaticCondition {
     make_quantity_comparison(qty, Comparator::GE, n)
 }
 
+fn creatures_died_this_turn_ref() -> QuantityRef {
+    QuantityRef::ZoneChangeCountThisTurn {
+        from: Some(Zone::Battlefield),
+        to: Some(Zone::Graveyard),
+        filter: TargetFilter::Typed(TypedFilter::creature()),
+    }
+}
+
+fn nonland_permanents_left_battlefield_this_turn_ref() -> QuantityRef {
+    QuantityRef::ZoneChangeCountThisTurn {
+        from: Some(Zone::Battlefield),
+        to: None,
+        filter: TargetFilter::Typed(
+            TypedFilter::permanent().with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
+        ),
+    }
+}
+
+fn permanents_you_controlled_left_battlefield_this_turn_ref() -> QuantityRef {
+    QuantityRef::ZoneChangeCountThisTurn {
+        from: Some(Zone::Battlefield),
+        to: None,
+        filter: TargetFilter::Typed(TypedFilter::permanent().controller(ControllerRef::You)),
+    }
+}
+
 /// Parse "you control" condition patterns.
 fn parse_control_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
@@ -1045,9 +1072,9 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
         parse_compound_verb_condition,
         // Negated event patterns — must precede positive variants to catch "didn't" prefix.
         parse_you_didnt_this_turn,
-        // "a creature died this turn" (Morbid) → CreaturesDiedThisTurn >= 1
+        // "a creature died this turn" (Morbid) → zone-change count >= 1
         value(
-            make_quantity_ge(QuantityRef::CreaturesDiedThisTurn, 1),
+            make_quantity_ge(creatures_died_this_turn_ref(), 1),
             alt((
                 tag("a creature died this turn"),
                 tag("a creature died under your control this turn"),
@@ -1055,12 +1082,15 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
         ),
         // "a nonland permanent left the battlefield this turn" (Revolt variant)
         value(
-            make_quantity_ge(QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn, 1),
+            make_quantity_ge(nonland_permanents_left_battlefield_this_turn_ref(), 1),
             tag("a nonland permanent left the battlefield this turn"),
         ),
         // "a permanent you controlled left the battlefield this turn" (Revolt)
         value(
-            make_quantity_ge(QuantityRef::PermanentsLeftBattlefieldThisTurn, 1),
+            make_quantity_ge(
+                permanents_you_controlled_left_battlefield_this_turn_ref(),
+                1,
+            ),
             alt((
                 tag("a permanent you controlled left the battlefield this turn"),
                 tag("a permanent left the battlefield under your control this turn"),
@@ -3345,7 +3375,11 @@ mod tests {
                 assert!(matches!(
                     lhs,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn
+                        qty: QuantityRef::ZoneChangeCountThisTurn {
+                            from: Some(Zone::Battlefield),
+                            to: None,
+                            ..
+                        }
                     }
                 ));
                 assert_eq!(comparator, Comparator::GE);
@@ -3380,7 +3414,11 @@ mod tests {
                 assert!(matches!(
                     lhs,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::CreaturesDiedThisTurn
+                        qty: QuantityRef::ZoneChangeCountThisTurn {
+                            from: Some(Zone::Battlefield),
+                            to: Some(Zone::Graveyard),
+                            ..
+                        }
                     }
                 ));
                 assert_eq!(comparator, Comparator::GE);

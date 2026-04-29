@@ -358,6 +358,7 @@ mod tests {
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
             declined_kickers: Vec::new(),
+            convoked_creatures: Vec::new(),
         })
     }
 

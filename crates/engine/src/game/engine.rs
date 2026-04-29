@@ -1969,6 +1969,11 @@ fn apply_action(
                         .to_string(),
                 ));
             }
+            let tapped_creature_for_convoke = mode == ConvokeMode::Convoke
+                && obj
+                    .card_types
+                    .core_types
+                    .contains(&crate::types::card_type::CoreType::Creature);
             // CR 702.51a: Validate color match for Convoke.
             let resolved_mana_type = match mode {
                 ConvokeMode::Convoke => {
@@ -2009,6 +2014,12 @@ fn apply_action(
                 source_id: object_id,
                 tapped_for_mana: false,
             });
+            if tapped_creature_for_convoke {
+                let pending = state.pending_cast.as_mut().ok_or_else(|| {
+                    EngineError::InvalidAction("No pending cast for convoke".to_string())
+                })?;
+                pending.convoked_creatures.push(object_id);
+            }
             // Only emit waterbend event for Waterbend mode
             if mode == ConvokeMode::Waterbend {
                 crate::game::bending::record_bending(
@@ -6665,6 +6676,7 @@ mod tests {
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
             declined_kickers: Vec::new(),
+            convoked_creatures: Vec::new(),
         }));
         state.waiting_for = WaitingFor::ManaPayment {
             player: PlayerId(0),

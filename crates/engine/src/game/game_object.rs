@@ -357,6 +357,12 @@ pub struct GameObject {
     /// spell has left the stack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub kickers_paid: Vec<crate::types::ability::KickerVariant>,
+    /// CR 702.51c: Creatures tapped to pay the convoke cost of the spell that
+    /// produced this object. Stored as object ids so future convoke-reference
+    /// classes can inspect identity; `QuantityRef::ConvokedCreatureCount`
+    /// currently resolves the count.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub convoked_creatures: Vec<ObjectId>,
 
     // Coverage: lists unimplemented mechanics (computed for serialization, not persisted)
     #[serde(skip_deserializing, default, skip_serializing_if = "Vec::is_empty")]
@@ -703,6 +709,7 @@ impl GameObject {
             cast_variant_paid: None,
             cost_x_paid: None,
             kickers_paid: Vec::new(),
+            convoked_creatures: Vec::new(),
             unimplemented_mechanics: Vec::new(),
             has_summoning_sickness: false,
             has_mana_ability: false,
@@ -776,6 +783,10 @@ impl GameObject {
         // memory of prior kicker payments — clear before the cast resolution
         // path repopulates from the resolving spell's `SpellContext`.
         self.kickers_paid.clear();
+        // CR 400.7 + CR 702.51c: convoked-creature history is tied to the
+        // spell-resolution event that created this object. A re-entering
+        // permanent has no memory of a prior convoke payment.
+        self.convoked_creatures.clear();
         self.goaded_by.clear();
         self.detained_by.clear();
 
@@ -815,6 +826,7 @@ impl GameObject {
         // this permanent to the battlefield. When the permanent leaves, the value
         // is no longer meaningful; a re-cast will re-populate it via `finalize_cast`.
         self.cost_x_paid = None;
+        self.convoked_creatures.clear();
         self.room_unlocks = None;
     }
 
