@@ -2910,6 +2910,9 @@ fn convert_player_predicate_parsed(predicate: &Players) -> ConvResult<ParsedCond
     Ok(match predicate {
         // CR 508.1a: "if you attacked this turn".
         Players::AttackedThisTurn => ParsedCondition::YouAttackedThisTurn,
+        // CR 508.1 + CR 601.2c: "if you've been attacked this step" gates
+        // trap/ambush-style casting restrictions during declare attackers.
+        Players::IsAttacked => ParsedCondition::BeenAttackedThisStep,
         // CR 119.3: "if you gained life this turn".
         Players::GainedLifeThisTurn => ParsedCondition::YouGainedLifeThisTurn,
         // CR 402.1: "if you have exactly N cards in hand". Only the EQ /

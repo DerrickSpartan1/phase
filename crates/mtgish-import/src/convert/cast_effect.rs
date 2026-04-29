@@ -38,7 +38,7 @@ use crate::convert::filter as filter_conv;
 use crate::convert::mana as mana_conv;
 use crate::convert::quantity as quantity_conv;
 use crate::convert::result::{ConvResult, ConversionGap};
-use crate::schema::types::{CastEffect, Cost, CostReduction, GameNumber};
+use crate::schema::types::{CastEffect, Condition, Cost, CostReduction, GameNumber};
 
 use super::EngineFaceStub;
 
@@ -130,12 +130,7 @@ pub fn apply(eff: &CastEffect, stub: &mut EngineFaceStub) -> ConvResult<()> {
         // always-pass via `is_none_or` in restrictions.rs:494, so a translation
         // gap must strict-fail the entire rule rather than emitting `None`.
         E::CantBeCastUnless(condition) => {
-            let parsed = condition_conv::convert_parsed(condition)?;
-            stub.casting_restrictions
-                .push(CastingRestriction::RequiresCondition {
-                    condition: Some(parsed),
-                });
-            Ok(())
+            append_casting_condition_restrictions(condition, &mut stub.casting_restrictions)
         }
         // CR 601.2c: "This spell can't be cast if [condition]" — same shape,
         // negated condition. ParsedCondition has no general `Not` wrapper, so
@@ -250,6 +245,49 @@ pub fn apply(eff: &CastEffect, stub: &mut EngineFaceStub) -> ConvResult<()> {
             path: String::new(),
             repr: variant_tag(other),
         }),
+    }
+}
+
+fn append_casting_condition_restrictions(
+    condition: &Condition,
+    restrictions: &mut Vec<CastingRestriction>,
+) -> ConvResult<()> {
+    match condition {
+        Condition::And(parts) => {
+            for part in parts {
+                append_casting_condition_restrictions(part, restrictions)?;
+            }
+            Ok(())
+        }
+        Condition::IsDuringDeclareAttackersStep => {
+            push_unique_casting_restriction(restrictions, CastingRestriction::DeclareAttackersStep);
+            Ok(())
+        }
+        Condition::IsDuringDeclareBlockersStep => {
+            push_unique_casting_restriction(restrictions, CastingRestriction::DeclareBlockersStep);
+            Ok(())
+        }
+        _ => append_parsed_casting_condition(condition, restrictions),
+    }
+}
+
+fn append_parsed_casting_condition(
+    condition: &Condition,
+    restrictions: &mut Vec<CastingRestriction>,
+) -> ConvResult<()> {
+    let parsed = condition_conv::convert_parsed(condition)?;
+    restrictions.push(CastingRestriction::RequiresCondition {
+        condition: Some(parsed),
+    });
+    Ok(())
+}
+
+fn push_unique_casting_restriction(
+    restrictions: &mut Vec<CastingRestriction>,
+    restriction: CastingRestriction,
+) {
+    if !restrictions.contains(&restriction) {
+        restrictions.push(restriction);
     }
 }
 
@@ -406,8 +444,10 @@ const _SCOK: Option<SpellCastingOptionKind> = None;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::types::{CardType, CostReductionSymbol, Permanents};
-    use engine::types::ability::{FilterProp, TypedFilter};
+    use crate::schema::types::{
+        CardType, Condition, CostReductionSymbol, Permanents, Player, Players,
+    };
+    use engine::types::ability::{FilterProp, ParsedCondition, TypedFilter};
 
     #[test]
     fn reduce_cost_if_targets_permanent_lowers_to_target_sensitive_spell_filter() {
@@ -444,5 +484,29 @@ mod tests {
             [FilterProp::Targets { filter }]
                 if matches!(filter.as_ref(), TargetFilter::Typed(_))
         ));
+    }
+
+    #[test]
+    fn cant_be_cast_unless_declare_attackers_splits_timing_and_condition() {
+        let mut stub = EngineFaceStub::default();
+
+        apply(
+            &CastEffect::CantBeCastUnless(Condition::And(vec![
+                Condition::IsDuringDeclareAttackersStep,
+                Condition::PlayerPassesFilter(Box::new(Player::You), Box::new(Players::IsAttacked)),
+            ])),
+            &mut stub,
+        )
+        .unwrap();
+
+        assert_eq!(
+            stub.casting_restrictions,
+            vec![
+                CastingRestriction::DeclareAttackersStep,
+                CastingRestriction::RequiresCondition {
+                    condition: Some(ParsedCondition::BeenAttackedThisStep),
+                },
+            ]
+        );
     }
 }
