@@ -727,7 +727,7 @@ fn evaluate_condition(
             .get(&player)
             .is_some_and(|spells| {
                 spells.iter().any(|record| {
-                    filter.as_ref().map_or(true, |filter| {
+                    filter.as_ref().is_none_or(|filter| {
                         crate::game::filter::spell_record_matches_filter(
                             record,
                             filter,
