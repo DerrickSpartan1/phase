@@ -175,6 +175,7 @@ pub(super) enum ContinuationAst {
     },
     RevealHandFilter {
         card_filter: TargetFilter,
+        choice_optional: bool,
     },
     ManaRestriction {
         restriction: ManaSpendRestriction,
@@ -212,9 +213,7 @@ pub(super) enum ContinuationAst {
     /// "Put the rest on the bottom/into your graveyard" after Dig/RevealTop —
     /// sets `rest_destination` on the preceding Dig effect. The destination is
     /// parsed from the text (bottom of library, graveyard, hand, etc.).
-    PutRest {
-        destination: Zone,
-    },
+    PutRest { destination: Zone },
     /// CR 701.20e + CR 608.2c: "Put up to N [filter] from among them onto the battlefield/into
     /// your hand" after Dig — patches the Dig's keep_count, filter, destination, and rest_destination.
     ///
@@ -258,9 +257,7 @@ pub(super) enum ContinuationAst {
     /// `rest_destination`. Used by cards like Balustrade Spy, Consuming Aberration,
     /// and Destroy the Evidence where "those cards" refers to all cards revealed
     /// during the RevealUntil resolution, not only the non-matching ones.
-    RevealUntilAllToZone {
-        destination: Zone,
-    },
+    RevealUntilAllToZone { destination: Zone },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -698,6 +695,7 @@ pub(super) enum ChooseImperativeAst {
     },
     RevealHandFilter {
         card_filter: TargetFilter,
+        choice_optional: bool,
     },
     /// "choose N of them/those [cards]" — anaphoric reference to a previously
     /// revealed/exiled set of cards. Lowered to `Effect::ChooseFromZone`.

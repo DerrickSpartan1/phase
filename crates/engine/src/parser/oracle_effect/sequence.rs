@@ -662,16 +662,21 @@ pub(super) fn apply_clause_continuation(
             }
             defs.push(change_zone);
         }
-        ContinuationAst::RevealHandFilter { card_filter } => {
+        ContinuationAst::RevealHandFilter {
+            card_filter,
+            choice_optional,
+        } => {
             let Some(previous) = defs.last_mut() else {
                 return;
             };
             if let Effect::RevealHand {
                 card_filter: existing,
+                choice_optional: existing_choice_optional,
                 ..
             } = &mut *previous.effect
             {
                 *existing = card_filter;
+                *existing_choice_optional = choice_optional;
             }
         }
         ContinuationAst::ManaRestriction {
@@ -1231,7 +1236,16 @@ pub(super) fn parse_followup_continuation_ast(
             } else {
                 super::parse_choose_filter_from_sentence(&lower)
             };
-            Some(ContinuationAst::RevealHandFilter { card_filter })
+            let choice_optional = alt((
+                tag::<_, _, VerboseError<&str>>("you may choose "),
+                tag("may choose "),
+            ))
+            .parse(lower.as_str())
+            .is_ok();
+            Some(ContinuationAst::RevealHandFilter {
+                card_filter,
+                choice_optional,
+            })
         }
         Effect::Mana { .. } => {
             if let Some((restriction, grants)) = super::mana::parse_mana_spend_restriction(&lower) {

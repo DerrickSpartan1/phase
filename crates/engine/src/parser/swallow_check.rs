@@ -289,6 +289,10 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
             | Effect::GrantCastingPermission { .. }
             | Effect::CastFromZone { .. }
             | Effect::PayCost { .. }
+            | Effect::RevealHand {
+                choice_optional: true,
+                ..
+            }
             | Effect::RevealFromHand {
                 on_decline: Some(_),
                 ..

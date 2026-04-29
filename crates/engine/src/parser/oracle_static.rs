@@ -10409,6 +10409,57 @@ mod tests {
     }
 
     #[test]
+    fn static_enchanted_creature_for_each_its_controllers_hand_is_dynamic() {
+        let def = parse_static_line(
+            "Enchanted creature gets +1/+1 for each card in its controller's hand.",
+        )
+        .expect("Righteous Authority-style static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+        );
+
+        let dyn_pow = def
+            .modifications
+            .iter()
+            .find_map(|m| match m {
+                ContinuousModification::AddDynamicPower { value } => Some(value),
+                _ => None,
+            })
+            .expect("expected AddDynamicPower");
+        assert_eq!(
+            dyn_pow,
+            &QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::RecipientController,
+                },
+            }
+        );
+        assert!(def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddDynamicToughness {
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::RecipientController
+                    }
+                }
+            }
+        )));
+        assert!(
+            !def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddPower { .. }
+                    | ContinuousModification::AddToughness { .. }
+            )),
+            "must not emit flat P/T modifications alongside dynamic ones: {:?}",
+            def.modifications
+        );
+    }
+
+    #[test]
     fn static_self_ref_alrund_sum_for_each_emits_dynamic_pt() {
         let def = parse_static_line(
             "~ gets +1/+1 for each card in your hand and each foretold card you own in exile.",

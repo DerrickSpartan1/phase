@@ -797,6 +797,7 @@ export type GameAction =
   | { type: "PassPriority" }
   | { type: "PlayLand"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "CastSpell"; data: { object_id: ObjectId; card_id: CardId; targets: ObjectId[] } }
+  | { type: "Foretell"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "ActivateAbility"; data: { source_id: ObjectId; ability_index: number } }
   | { type: "DeclareAttackers"; data: { attacks: [ObjectId, AttackTarget][] } }
   | { type: "DeclareBlockers"; data: { assignments: [ObjectId, ObjectId][] } }

@@ -593,6 +593,7 @@ fn fmt_player_scope(scope: PlayerScope) -> String {
     match scope {
         PlayerScope::Controller => "you".to_string(),
         PlayerScope::Target => "target player".to_string(),
+        PlayerScope::RecipientController => "recipient's controller".to_string(),
         PlayerScope::Opponent { aggregate } => {
             format!("{} of opponents", fmt_aggregate_function(aggregate))
         }
@@ -1390,6 +1391,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             target,
             card_filter,
             count,
+            ..
         } => {
             d.push(("player".into(), fmt_target(target)));
             if !matches!(card_filter, TargetFilter::Any) {

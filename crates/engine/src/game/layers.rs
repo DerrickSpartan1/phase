@@ -1262,10 +1262,25 @@ fn order_by_timestamp(effects: &[&ActiveContinuousEffect]) -> Vec<ActiveContinuo
 /// the count is computed against each affected creature, not against the
 /// static's source object.
 fn quantity_expr_uses_recipient(expr: &crate::types::ability::QuantityExpr) -> bool {
-    use crate::types::ability::{CardTypeSetSource, QuantityExpr, QuantityRef};
+    use crate::types::ability::{CardTypeSetSource, PlayerScope, QuantityExpr, QuantityRef};
     match expr {
         QuantityExpr::Fixed { .. } => false,
         QuantityExpr::Ref { qty } => match qty {
+            QuantityRef::HandSize {
+                player: PlayerScope::RecipientController,
+            }
+            | QuantityRef::LifeTotal {
+                player: PlayerScope::RecipientController,
+            }
+            | QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::RecipientController,
+            }
+            | QuantityRef::LifeGainedThisTurn {
+                player: PlayerScope::RecipientController,
+            }
+            | QuantityRef::PartySize {
+                player: PlayerScope::RecipientController,
+            } => true,
             QuantityRef::ObjectCount { filter }
             | QuantityRef::ObjectCountDistinctNames { filter }
             | QuantityRef::DistinctCardTypes {
@@ -1817,9 +1832,9 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, BasicLandType, ChosenSubtypeKind, ContinuousModification,
-        ControllerRef, CountScope, Duration, Effect, FilterProp, GainLifePlayer, QuantityExpr,
-        QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
-        ZoneRef,
+        ControllerRef, CountScope, Duration, Effect, FilterProp, GainLifePlayer, PlayerScope,
+        QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter, ZoneRef,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::TransientContinuousEffect;
@@ -2590,6 +2605,82 @@ mod tests {
             "Wild Growth on a land must not contribute to the bear's boost"
         );
         assert_eq!(final_bear.toughness, Some(4));
+    }
+
+    /// CR 303.4m + CR 613.4c: Righteous Authority-style Aura statics read the
+    /// enchanted creature's controller for "its controller's hand", not the
+    /// Aura source controller.
+    #[test]
+    fn dynamic_pt_uses_recipient_controller_hand_size() {
+        let mut state = setup();
+        let bear = make_creature(&mut state, "Borrowed Bear", 2, 2, PlayerId(1));
+
+        for n in 0..1 {
+            create_object(
+                &mut state,
+                CardId(100 + n),
+                PlayerId(0),
+                format!("P0 Hand {n}"),
+                Zone::Hand,
+            );
+        }
+        for n in 0..4 {
+            create_object(
+                &mut state,
+                CardId(200 + n),
+                PlayerId(1),
+                format!("P1 Hand {n}"),
+                Zone::Hand,
+            );
+        }
+
+        let righteous_authority = create_object(
+            &mut state,
+            CardId(0),
+            PlayerId(0),
+            "Righteous Authority".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let ts = state.next_timestamp();
+            let obj = state.objects.get_mut(&righteous_authority).unwrap();
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.card_types.subtypes.push("Aura".into());
+            obj.attached_to = Some(bear.into());
+            obj.timestamp = ts;
+
+            let qty = QuantityExpr::Ref {
+                qty: QuantityRef::HandSize {
+                    player: PlayerScope::RecipientController,
+                },
+            };
+            obj.static_definitions.push(
+                StaticDefinition::continuous()
+                    .affected(TargetFilter::Typed(
+                        TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                    ))
+                    .modifications(vec![
+                        ContinuousModification::AddDynamicPower { value: qty.clone() },
+                        ContinuousModification::AddDynamicToughness { value: qty },
+                    ]),
+            );
+        }
+        state
+            .objects
+            .get_mut(&bear)
+            .unwrap()
+            .attachments
+            .push(righteous_authority);
+
+        evaluate_layers(&mut state);
+
+        let final_bear = state.objects.get(&bear).unwrap();
+        assert_eq!(
+            final_bear.power,
+            Some(6),
+            "expected 2 base + P1 hand size 4, not P0 hand size 1"
+        );
+        assert_eq!(final_bear.toughness, Some(6));
     }
 
     #[test]

@@ -4234,6 +4234,7 @@ pub mod tests {
                                         .with_type(TypeFilter::Non(Box::new(TypeFilter::Land))),
                                 ),
                                 count: None,
+                                choice_optional: false,
                             },
                         )
                         .sub_ability(

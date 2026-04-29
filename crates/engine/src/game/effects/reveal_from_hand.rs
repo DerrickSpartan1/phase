@@ -94,6 +94,7 @@ pub fn resolve(
         cards: eligible,
         filter: card_filter,
         optional: true,
+        decline_runs_continuation: true,
     };
 
     events.push(GameEvent::EffectResolved {

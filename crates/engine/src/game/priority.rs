@@ -418,6 +418,7 @@ mod tests {
                 target: TargetFilter::Any,
                 card_filter: TargetFilter::Any,
                 count: None,
+                choice_optional: false,
             },
             vec![TargetRef::Player(PlayerId(1))],
             source_id,

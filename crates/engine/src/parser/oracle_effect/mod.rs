@@ -26,7 +26,9 @@ use nom_language::error::VerboseError;
 
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
-use super::oracle_quantity::{parse_cda_quantity, parse_for_each_clause};
+use super::oracle_quantity::{
+    parse_cda_quantity, parse_for_each_clause, parse_for_each_clause_expr,
+};
 use super::oracle_target::{parse_event_context_ref, parse_target, parse_type_phrase};
 use super::oracle_util::{
     contains_possessive, has_unconsumed_conditional, parse_mana_symbols, split_around,
@@ -3052,12 +3054,11 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     let base_tp = base_tp.trim_end();
     let for_each_clause = &tp.lower[for_each_idx + "for each ".len()..];
 
-    // Parse the "for each" clause into a QuantityRef.
+    // Parse the "for each" clause into a QuantityExpr.
     // Strip duration from the for-each clause text first — handles unusual ordering
     // like "for each card in your hand until end of turn" (Ral's Staticaster).
     let (for_each_no_duration, for_each_duration) = strip_trailing_duration(for_each_clause);
-    let qty = parse_for_each_clause(for_each_no_duration.trim_end_matches('.'))?;
-    let quantity = QuantityExpr::Ref { qty };
+    let quantity = parse_for_each_clause_expr(for_each_no_duration.trim_end_matches('.'))?;
     let reference_target =
         for_each_clause_target_controller_filter(for_each_no_duration.trim_end_matches('.'));
 
@@ -3066,9 +3067,11 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     // the base effect and the "for each" clause.
     let (base_no_duration, base_duration) = strip_trailing_duration(base_tp.original);
     let duration = base_duration.or(for_each_duration);
-    let base_no_duration_lower = base_no_duration.to_lowercase();
+    let numeric_base_storage = subject::strip_subject_clause(base_no_duration);
+    let numeric_base = numeric_base_storage.as_deref().unwrap_or(base_no_duration);
+    let numeric_base_lower = numeric_base.to_lowercase();
 
-    if let Some(effect) = parse_energy_gain_base(&base_no_duration_lower, quantity.clone()) {
+    if let Some(effect) = parse_energy_gain_base(&numeric_base_lower, quantity.clone()) {
         return Some(ParsedEffectClause {
             effect,
             duration,
@@ -3083,9 +3086,7 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     // Delegate to parse_numeric_imperative_ast — it already handles draw, gain/lose life,
     // pump, scry, surveil, mill. Replace fixed counts with the for-each quantity, then
     // thread subject through for effects that carry a target.
-    if let Some(ast) =
-        imperative::parse_numeric_imperative_ast(base_no_duration, &base_no_duration_lower)
-    {
+    if let Some(ast) = imperative::parse_numeric_imperative_ast(numeric_base, &numeric_base_lower) {
         let effect = imperative::lower_numeric_imperative_ast(ast.with_for_each_quantity(quantity));
         let effect = thread_for_each_subject(effect, base_no_duration);
         return Some(parsed_for_each_quantity_effect(
@@ -15117,6 +15118,38 @@ mod tests {
     }
 
     #[test]
+    fn parse_optional_reveal_hand_choice_marks_choice_optional() {
+        let def = parse_effect_chain(
+            "Look at target player's hand. You may choose a nonland card from it. That player discards that card.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::RevealHand {
+            card_filter,
+            choice_optional,
+            ..
+        } = &*def.effect
+        else {
+            panic!("Expected RevealHand, got {:?}", def.effect);
+        };
+        assert!(
+            *choice_optional,
+            "post-reveal card choice should be optional"
+        );
+        assert!(matches!(
+            card_filter,
+            TargetFilter::Typed(tf)
+                if tf.type_filters
+                    .iter()
+                    .any(|filter| matches!(filter, TypeFilter::Non(inner) if **inner == TypeFilter::Land))
+        ));
+        assert!(
+            def.sub_ability.is_some(),
+            "discard continuation should remain attached"
+        );
+    }
+
+    #[test]
     fn target_opponent_exiles_relative_creature_and_graveyard_uses_target_only_chain() {
         let def = parse_effect_chain(
             "Target opponent exiles a creature they control and their graveyard.",
@@ -18743,6 +18776,81 @@ mod tests {
             }
             other => panic!("Expected ObjectCount draw quantity, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn effect_reveal_hand_draws_for_each_mountain_and_red_card_in_it() {
+        assert_reveal_hand_draws_for_each_type_or_color_card_in_it(
+            "Target opponent reveals their hand. You draw a card for each Mountain and red card in it.",
+            "Mountain",
+            ManaColor::Red,
+        );
+    }
+
+    #[test]
+    fn effect_reveal_hand_draws_for_each_forest_and_green_card_in_it() {
+        assert_reveal_hand_draws_for_each_type_or_color_card_in_it(
+            "Target opponent reveals their hand. You draw a card for each Forest and green card in it.",
+            "Forest",
+            ManaColor::Green,
+        );
+    }
+
+    fn assert_reveal_hand_draws_for_each_type_or_color_card_in_it(
+        text: &str,
+        subtype: &str,
+        color: ManaColor,
+    ) {
+        let def = parse_effect_chain(text, AbilityKind::Spell);
+        let Effect::RevealHand {
+            target: TargetFilter::Typed(target),
+            card_filter,
+            ..
+        } = &*def.effect
+        else {
+            panic!("Expected RevealHand root, got {:?}", def.effect);
+        };
+        assert_eq!(target.controller, Some(ControllerRef::Opponent));
+        assert_eq!(*card_filter, TargetFilter::None);
+
+        let draw = def.sub_ability.as_ref().expect("expected draw sub ability");
+        let Effect::Draw { count, target } = &*draw.effect else {
+            panic!("Expected Draw sub ability, got {:?}", draw.effect);
+        };
+        assert_eq!(*target, TargetFilter::Controller);
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Or { filters },
+                },
+        } = count
+        else {
+            panic!("Expected ObjectCount Or draw quantity, got {count:?}");
+        };
+        assert_eq!(filters.len(), 2);
+        assert!(matches!(
+            &filters[0],
+            TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
+                if type_filters == &vec![TypeFilter::Subtype(subtype.to_string())]
+                    && properties.iter().any(|prop| prop
+                        == &FilterProp::InZone { zone: Zone::Hand })
+                    && properties.iter().any(|prop| prop
+                        == &FilterProp::Owned {
+                            controller: ControllerRef::TargetPlayer,
+                        })
+        ));
+        assert!(matches!(
+            &filters[1],
+            TargetFilter::Typed(TypedFilter { type_filters, properties, .. })
+                if type_filters == &vec![TypeFilter::Card]
+                    && properties.iter().any(|prop| prop == &FilterProp::HasColor { color })
+                    && properties.iter().any(|prop| prop
+                        == &FilterProp::InZone { zone: Zone::Hand })
+                    && properties.iter().any(|prop| prop
+                        == &FilterProp::Owned {
+                            controller: ControllerRef::TargetPlayer,
+                        })
+        ));
     }
 
     #[test]

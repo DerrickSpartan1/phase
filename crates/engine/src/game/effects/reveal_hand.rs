@@ -17,11 +17,14 @@ pub fn resolve(
     ability: &ResolvedAbility,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), EffectError> {
-    let (card_filter, count) = match &ability.effect {
+    let (card_filter, count, choice_optional) = match &ability.effect {
         Effect::RevealHand {
-            card_filter, count, ..
-        } => (card_filter.clone(), count.clone()),
-        _ => (TargetFilter::Any, None),
+            card_filter,
+            count,
+            choice_optional,
+            ..
+        } => (card_filter.clone(), count.clone(), *choice_optional),
+        _ => (TargetFilter::Any, None, false),
     };
 
     // Find the target player from resolved targets
@@ -96,7 +99,8 @@ pub fn resolve(
         player: ability.controller,
         cards: eligible,
         filter: card_filter,
-        optional: false,
+        optional: choice_optional,
+        decline_runs_continuation: false,
     };
 
     events.push(GameEvent::EffectResolved {
@@ -121,6 +125,7 @@ mod tests {
                 target: TargetFilter::Any,
                 card_filter: TargetFilter::Any,
                 count: None,
+                choice_optional: false,
             },
             vec![TargetRef::Player(target_player)],
             ObjectId(100),
@@ -210,5 +215,63 @@ mod tests {
 
         // Should not set RevealChoice — no cards to choose from
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn optional_reveal_hand_choice_decline_skips_continuation() {
+        use crate::game::engine_resolution_choices::handle_resolution_choice;
+        use crate::types::ability::{AbilityKind, GainLifePlayer, QuantityExpr};
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::PendingContinuation;
+
+        let mut state = GameState::new_two_player(42);
+        let card = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Duress Target".to_string(),
+            Zone::Hand,
+        );
+        state.revealed_cards.insert(card);
+        state.waiting_for = WaitingFor::RevealChoice {
+            player: PlayerId(0),
+            cards: vec![card],
+            filter: TargetFilter::Any,
+            optional: true,
+            decline_runs_continuation: false,
+        };
+        let mut continuation = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        continuation.kind = AbilityKind::Spell;
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(continuation)));
+
+        let mut events = Vec::new();
+        handle_resolution_choice(
+            &mut state,
+            WaitingFor::RevealChoice {
+                player: PlayerId(0),
+                cards: vec![card],
+                filter: TargetFilter::Any,
+                optional: true,
+                decline_runs_continuation: false,
+            },
+            GameAction::SelectCards { cards: vec![] },
+            &mut events,
+        )
+        .expect("optional reveal-hand choice decline should succeed");
+
+        assert_eq!(state.players[0].life, 20);
+        assert!(
+            state.pending_continuation.is_none(),
+            "declining the optional card choice should skip the follow-up"
+        );
+        assert!(!state.revealed_cards.contains(&card));
     }
 }

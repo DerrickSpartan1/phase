@@ -103,6 +103,20 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
         }
     }
 
+    let hidden_foretold_exile_ids: Vec<ObjectId> = filtered
+        .exile
+        .iter()
+        .copied()
+        .filter(|obj_id| {
+            state.objects.get(obj_id).is_some_and(|obj| {
+                obj.foretold && obj.face_down && !can_view_private_for_player(obj.owner)
+            })
+        })
+        .collect();
+    for obj_id in hidden_foretold_exile_ids {
+        hide_card(&mut filtered, obj_id);
+    }
+
     if let WaitingFor::ManifestDreadChoice { player, ref cards } = state.waiting_for {
         if !can_view_private_for_player(player) {
             filtered.waiting_for = WaitingFor::ManifestDreadChoice {
@@ -303,6 +317,7 @@ fn hide_card(state: &mut GameState, obj_id: ObjectId) {
         obj.replacement_definitions.clear();
         obj.static_definitions.clear();
         obj.casting_permissions.clear();
+        obj.foretold = false;
     }
 }
 
@@ -652,5 +667,35 @@ mod tests {
             }
             other => panic!("expected ChooseFromZoneChoice, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn foretold_exile_card_identity_visible_only_to_owner() {
+        let mut state = GameState::new(FormatConfig::standard(), 2, 42);
+        let card_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Foretold Test".to_string(),
+            Zone::Exile,
+        );
+        {
+            let obj = state.objects.get_mut(&card_id).unwrap();
+            obj.foretold = true;
+            obj.face_down = true;
+        }
+
+        let owner_view = filter_state_for_viewer(&state, PlayerId(0));
+        let owner_obj = owner_view.objects.get(&card_id).unwrap();
+        assert_eq!(owner_obj.name, "Foretold Test");
+        assert!(owner_obj.foretold);
+        assert!(owner_obj.face_down);
+
+        let opponent_view = filter_state_for_viewer(&state, PlayerId(1));
+        let opponent_obj = opponent_view.objects.get(&card_id).unwrap();
+        assert_eq!(opponent_obj.name, "Hidden Card");
+        assert!(!opponent_obj.foretold);
+        assert!(opponent_obj.face_down);
+        assert!(opponent_obj.casting_permissions.is_empty());
     }
 }

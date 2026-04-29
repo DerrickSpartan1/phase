@@ -33,12 +33,21 @@ pub fn resolve(
         } => (produced, restrictions, grants, *expiry),
         _ => return Err(EffectError::MissingParam("Produced".to_string())),
     };
-    if let Some(choice) = crate::game::mana_abilities::mana_choice_prompt(
-        &ability.effect,
-        state,
-        ability.source_id,
-        Some(ability),
-    ) {
+    let is_triggered_mana_inline = crate::game::mana_abilities::is_triggered_mana_ability(
+        ability,
+        state.current_trigger_event.as_ref(),
+    );
+    let mana_choice = (!is_triggered_mana_inline)
+        .then(|| {
+            crate::game::mana_abilities::mana_choice_prompt(
+                &ability.effect,
+                state,
+                ability.source_id,
+                Some(ability),
+            )
+        })
+        .flatten();
+    if let Some(choice) = mana_choice {
         state.waiting_for = WaitingFor::ChooseManaColor {
             player: ability.controller,
             choice,

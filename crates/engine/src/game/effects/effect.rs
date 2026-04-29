@@ -184,6 +184,21 @@ fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
     match expr {
         QuantityExpr::Fixed { .. } => false,
         QuantityExpr::Ref { qty } => match qty {
+            QuantityRef::HandSize {
+                player: crate::types::ability::PlayerScope::RecipientController,
+            }
+            | QuantityRef::LifeTotal {
+                player: crate::types::ability::PlayerScope::RecipientController,
+            }
+            | QuantityRef::LifeLostThisTurn {
+                player: crate::types::ability::PlayerScope::RecipientController,
+            }
+            | QuantityRef::LifeGainedThisTurn {
+                player: crate::types::ability::PlayerScope::RecipientController,
+            }
+            | QuantityRef::PartySize {
+                player: crate::types::ability::PlayerScope::RecipientController,
+            } => true,
             QuantityRef::ObjectCount { filter }
             | QuantityRef::ObjectCountDistinctNames { filter }
             | QuantityRef::DistinctCardTypes {

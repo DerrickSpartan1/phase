@@ -563,6 +563,29 @@ fn parse_target_player_possessive_zone(input: &str) -> OracleResult<'_, Quantity
     Ok((rest, QuantityRef::TargetZoneCardCount { zone }))
 }
 
+/// CR 303.4m + CR 613.4c: Parse recipient-relative hand counts such as
+/// "card in its controller's hand". In layer-evaluated Aura/Equipment statics,
+/// "its" refers to the affected object ("enchanted creature"), not the Aura
+/// source controller.
+fn parse_recipient_controller_hand_count(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = alt((
+        tag("its controller's "),
+        tag("their controller's "),
+        tag("enchanted creature's controller's "),
+        tag("equipped creature's controller's "),
+        tag("that creature's controller's "),
+        tag("that permanent's controller's "),
+    ))
+    .parse(input)?;
+    let (rest, _) = tag("hand").parse(rest)?;
+    Ok((
+        rest,
+        QuantityRef::HandSize {
+            player: PlayerScope::RecipientController,
+        },
+    ))
+}
+
 fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, card_types) = if let Ok((typed_rest, typed_filters)) = parse_type_filter_list(input)
     {
@@ -584,6 +607,11 @@ fn parse_zone_card_count(input: &str) -> OracleResult<'_, QuantityRef> {
     // `ability.targets`. Tried before `parse_scoped_zone_ref`, which has no
     // `target opponent's` arm and would otherwise fall through to the bare
     // singular zone (`CountScope::All`) and silently misroute the count.
+    if card_types.is_empty() || card_types == vec![TypeFilter::Card] {
+        if let Ok((after_zone, q)) = parse_recipient_controller_hand_count(rest) {
+            return Ok((after_zone, q));
+        }
+    }
     if card_types.is_empty() {
         if let Ok((after_zone, q)) = parse_target_player_possessive_zone(rest) {
             return Ok((after_zone, q));
@@ -1989,6 +2017,33 @@ mod tests {
                 zone: ZoneRef::Hand,
                 card_types: Vec::new(),
                 scope: CountScope::Controller,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn parse_recipient_controller_hand_count() {
+        for phrase in [
+            "card in its controller's hand",
+            "cards in enchanted creature's controller's hand",
+        ] {
+            let (rest, q) = parse_for_each_clause_ref(phrase).unwrap();
+            assert_eq!(
+                q,
+                QuantityRef::HandSize {
+                    player: PlayerScope::RecipientController,
+                },
+                "phrase: {phrase}"
+            );
+            assert_eq!(rest, "", "phrase: {phrase}");
+        }
+
+        let (rest, q) = parse_quantity_ref("the number of cards in its controller's hand").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::HandSize {
+                player: PlayerScope::RecipientController,
             }
         );
         assert_eq!(rest, "");

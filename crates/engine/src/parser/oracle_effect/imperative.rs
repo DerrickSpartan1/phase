@@ -1537,18 +1537,21 @@ pub(super) fn lower_hand_reveal_ast(ast: HandRevealImperativeAst) -> Effect {
     match ast {
         HandRevealImperativeAst::LookAt { target } => Effect::RevealHand {
             target,
-            card_filter: TargetFilter::Any,
+            card_filter: TargetFilter::None,
             count: None,
+            choice_optional: false,
         },
         HandRevealImperativeAst::RevealAll => Effect::RevealHand {
             target: TargetFilter::Any,
-            card_filter: TargetFilter::Any,
+            card_filter: TargetFilter::None,
             count: None,
+            choice_optional: false,
         },
         HandRevealImperativeAst::RevealPartial { count } => Effect::RevealHand {
             target: TargetFilter::Any,
-            card_filter: TargetFilter::Any,
+            card_filter: TargetFilter::None,
             count: Some(count),
+            choice_optional: false,
         },
         // CR 701.20a: Back-reference reveal — distinct from RevealHand (zone-wide).
         // ParentTarget binds at runtime to the parent ability's affected IDs.
@@ -1601,8 +1604,13 @@ pub(super) fn parse_choose_ast(text: &str, lower: &str) -> Option<ChooseImperati
     if nom_on_lower(text, lower, |input| value((), tag("choose ")).parse(input)).is_some()
         && nom_primitives::scan_contains(lower, "card from it")
     {
+        let choice_optional = nom_on_lower(text, lower, |input| {
+            value((), tag("you may choose ")).parse(input)
+        })
+        .is_some();
         return Some(ChooseImperativeAst::RevealHandFilter {
             card_filter: super::parse_choose_filter(lower),
+            choice_optional,
         });
     }
 
@@ -1886,10 +1894,14 @@ pub(super) fn lower_choose_ast(ast: ChooseImperativeAst) -> Effect {
             persist: matches!(choice_type, ChoiceType::CardName | ChoiceType::CreatureType),
             choice_type,
         },
-        ChooseImperativeAst::RevealHandFilter { card_filter } => Effect::RevealHand {
+        ChooseImperativeAst::RevealHandFilter {
+            card_filter,
+            choice_optional,
+        } => Effect::RevealHand {
             target: TargetFilter::Any,
             card_filter,
             count: None,
+            choice_optional,
         },
         // CR 700.2: Anaphoric "choose N of them/those" → select from the tracked set
         // populated by the preceding effect (RevealTop, RevealHand, ExileTop, etc.).

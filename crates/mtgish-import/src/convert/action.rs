@@ -2142,6 +2142,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     target: TargetFilter::Controller,
                     card_filter: filter_mod::cards_to_filter(cards)?,
                     count: None,
+                    choice_optional: false,
                 },
                 Effect::DiscardCard {
                     count: 1,
@@ -2169,6 +2170,7 @@ fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvRe
                     target: TargetFilter::Controller,
                     card_filter: filter_mod::cards_to_filter(cards)?,
                     count: None,
+                    choice_optional: false,
                 },
                 Effect::ChangeZone {
                     origin: Some(Zone::Hand),
@@ -3306,6 +3308,7 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
             target: TargetFilter::Controller,
             card_filter: TargetFilter::Any,
             count: None,
+            choice_optional: false,
         },
 
         // CR 701.20a: "Reveal the top N cards of your library." Engine
@@ -5141,11 +5144,15 @@ fn apply_player_target(effect: Effect, target_filter: TargetFilter) -> ConvResul
         // Re-bind the `target` slot to the announced player; preserve
         // `card_filter` and `count` (entire-hand vs filtered subset).
         Effect::RevealHand {
-            card_filter, count, ..
+            card_filter,
+            count,
+            choice_optional,
+            ..
         } => Effect::RevealHand {
             target: target_filter,
             card_filter,
             count,
+            choice_optional,
         },
         // CR 701.10 + CR 115.2: "Target player exiles the top N cards
         // of their library."

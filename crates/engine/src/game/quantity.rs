@@ -386,13 +386,13 @@ fn resolve_ref(
     match qty {
         // CR 402: hand size for the scoped player(s).
         QuantityRef::HandSize { player: scope } => {
-            resolve_per_player_scalar(state, *scope, controller, targets, |p| {
+            resolve_per_player_scalar(state, *scope, controller, ctx, targets, |p| {
                 usize_to_i32_saturating(p.hand.len())
             })
         }
         // CR 119: life total for the scoped player(s).
         QuantityRef::LifeTotal { player: scope } => {
-            resolve_per_player_scalar(state, *scope, controller, targets, |p| p.life)
+            resolve_per_player_scalar(state, *scope, controller, ctx, targets, |p| p.life)
         }
         // CR 122.1: Counter-kind lookup summed across scope players. Controller
         // scope resolves to a single player; Opponents/All may span multiple.
@@ -414,7 +414,7 @@ fn resolve_ref(
         QuantityRef::StartingLifeTotal => state.format_config.starting_life,
         // CR 118.4 + CR 119.3: Life lost this turn, scoped via PlayerScope (Π-3).
         QuantityRef::LifeLostThisTurn { player } => {
-            resolve_per_player_scalar(state, *player, controller, targets, |p| {
+            resolve_per_player_scalar(state, *player, controller, ctx, targets, |p| {
                 u32_to_i32_saturating(p.life_lost_this_turn)
             })
         }
@@ -423,7 +423,7 @@ fn resolve_ref(
         // Warrior/Wizard) is computed per CR 700.8b for creatures with
         // multiple party-relevant types. Bounded to `0..=4`.
         QuantityRef::PartySize { player: scope } => {
-            resolve_per_player_scalar(state, *scope, controller, targets, |p| {
+            resolve_per_player_scalar(state, *scope, controller, ctx, targets, |p| {
                 compute_party_size(state, p.id)
             })
         }
@@ -1078,7 +1078,7 @@ fn resolve_ref(
         }
         // CR 119.4: Life gained this turn, scoped via PlayerScope (Π-4).
         QuantityRef::LifeGainedThisTurn { player } => {
-            resolve_per_player_scalar(state, *player, controller, targets, |p| {
+            resolve_per_player_scalar(state, *player, controller, ctx, targets, |p| {
                 u32_to_i32_saturating(p.life_gained_this_turn)
             })
         }
@@ -1461,12 +1461,16 @@ fn resolve_object_mana_value(
 ///
 /// - `Controller`: returns the controller's value, or 0 if not found.
 /// - `Target`: returns the first player target's value (CR 115.1), or 0.
+/// - `RecipientController`: returns the controller of the per-recipient object
+///   supplied by layer evaluation; outside layer scope it falls back to the
+///   first object target, then the source object.
 /// - `Opponent { aggregate }`: aggregates over `p.id != controller` (CR 102.2).
 /// - `AllPlayers { aggregate }`: aggregates over every player (CR 102.1).
 fn resolve_per_player_scalar<F>(
     state: &GameState,
     scope: PlayerScope,
     controller: PlayerId,
+    ctx: QuantityContext,
     targets: &[TargetRef],
     mut extract: F,
 ) -> i32
@@ -1486,6 +1490,21 @@ where
                 _ => None,
             })
             .map_or(0, &mut extract),
+        PlayerScope::RecipientController => {
+            let object_id = ctx.recipient.or_else(|| {
+                targets.iter().find_map(|target| match target {
+                    TargetRef::Object(id) => Some(*id),
+                    _ => None,
+                })
+            });
+            let recipient_controller = object_id
+                .or(Some(ctx.source))
+                .and_then(|id| state.objects.get(&id))
+                .map(|obj| obj.controller);
+            recipient_controller
+                .and_then(|pid| state.players.iter().find(|p| p.id == pid))
+                .map_or(0, &mut extract)
+        }
         PlayerScope::Opponent { aggregate } => aggregate_over_players(
             state.players.iter().filter(|p| p.id != controller),
             aggregate,

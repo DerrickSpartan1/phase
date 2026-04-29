@@ -2852,6 +2852,7 @@ mod tests {
                 target: TargetFilter::Player,
                 card_filter: TargetFilter::Any,
                 count: None,
+                choice_optional: false,
             },
             vec![],
             ObjectId(10),

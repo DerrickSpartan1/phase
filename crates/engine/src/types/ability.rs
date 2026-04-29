@@ -1865,6 +1865,11 @@ pub enum PlayerScope {
     /// "the highest life total among players" or similar cross-player
     /// extrema that include the controller.
     AllPlayers { aggregate: AggregateFunction },
+    /// CR 303.4m + CR 613.4c: The controller of the object currently
+    /// receiving a layer effect. Used for Aura/Equipment statics such as
+    /// "enchanted creature gets +1/+1 for each card in its controller's
+    /// hand", where "its" refers to the enchanted creature, not the Aura.
+    RecipientController,
 }
 
 /// Scope selector for object-axis quantities (Round Π-5). Picks WHICH object
@@ -2880,6 +2885,13 @@ pub enum PaymentCost {
     /// Distinct from `AbilityCost::PayEnergy` (activation cost before the colon).
     Energy {
         amount: QuantityExpr,
+    },
+    /// CR 118.1 + CR 118.12: Non-resource cost instructions paid while a spell or
+    /// ability resolves. Reuses the engine's existing `AbilityCost` taxonomy so
+    /// resolution-time costs such as "discard a card" do not grow a parallel
+    /// payment hierarchy.
+    AbilityCost {
+        cost: AbilityCost,
     },
 }
 
@@ -4000,6 +4012,10 @@ pub enum Effect {
         /// None = reveal entire hand. Some = reveal this many cards. CR 701.20a.
         #[serde(default)]
         count: Option<QuantityExpr>,
+        /// CR 608.2d: "You may choose a [card] from it" makes the post-reveal
+        /// card selection optional while the hand reveal itself remains mandatory.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        choice_optional: bool,
     },
     /// CR 701.20a: "You may reveal a [FILTER] card from your hand" — optional self-reveal
     /// from the controller's own hand. Distinct from `RevealHand` (target player, used for

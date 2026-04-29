@@ -17,14 +17,17 @@ use nom_language::error::VerboseError;
 
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
+use super::oracle_nom::target as nom_target;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    AggregateFunction, ControllerRef, CountScope, DevotionColors, ObjectProperty, ObjectScope,
-    PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, TargetFilter, ZoneRef,
+    AggregateFunction, ControllerRef, CountScope, DevotionColors, FilterProp, ObjectProperty,
+    ObjectScope, PlayerFilter, PlayerRelation, PlayerScope, QuantityExpr, QuantityRef,
+    TargetFilter, TypeFilter, TypedFilter, ZoneRef,
 };
 use crate::types::events::PlayerActionKind;
 use crate::types::mana::ManaColor;
+use crate::types::zones::Zone;
 
 /// Map a quantity phrase to a dynamic QuantityRef.
 ///
@@ -614,6 +617,12 @@ pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
 
     let clause = clause.trim().trim_end_matches('.');
 
+    if let Ok((rest, expr)) = parse_target_hand_type_or_color_clause(clause) {
+        if rest.is_empty() {
+            return Some(expr);
+        }
+    }
+
     fn segment(i: &str) -> nom::IResult<&str, &str, VerboseError<&str>> {
         alt((take_until(" and each "), rest)).parse(i)
     }
@@ -635,6 +644,53 @@ pub(crate) fn parse_for_each_clause_expr(clause: &str) -> Option<QuantityExpr> {
         return exprs.pop();
     }
     Some(QuantityExpr::Sum { exprs })
+}
+
+/// CR 109.4 + CR 400.1 + CR 608.2c: Parse an anaphoric hand-card union like
+/// "Mountain and red card in it" after "target opponent reveals their hand".
+/// The pronoun "it" refers to the targeted player's hand; the two filter atoms
+/// are a disjunction, so a red Mountain is counted once.
+fn parse_target_hand_type_or_color_clause(
+    input: &str,
+) -> nom::IResult<&str, QuantityExpr, VerboseError<&str>> {
+    let (input, type_filter) = nom_target::parse_type_filter_word(input)?;
+    let (input, _) = tag(" and ").parse(input)?;
+    let (input, color) = nom_primitives::parse_color(input)?;
+    let (input, _) = tag(" card").parse(input)?;
+    let (input, _) = nom::combinator::opt(tag("s")).parse(input)?;
+    let (input, _) = tag(" in it").parse(input)?;
+
+    Ok((
+        input,
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Or {
+                    filters: vec![
+                        target_hand_card_filter(vec![type_filter], Vec::new()),
+                        target_hand_card_filter(
+                            vec![TypeFilter::Card],
+                            vec![FilterProp::HasColor { color }],
+                        ),
+                    ],
+                },
+            },
+        },
+    ))
+}
+
+fn target_hand_card_filter(
+    type_filters: Vec<TypeFilter>,
+    mut properties: Vec<FilterProp>,
+) -> TargetFilter {
+    properties.push(FilterProp::InZone { zone: Zone::Hand });
+    properties.push(FilterProp::Owned {
+        controller: ControllerRef::TargetPlayer,
+    });
+    TargetFilter::Typed(TypedFilter {
+        type_filters,
+        controller: None,
+        properties,
+    })
 }
 
 /// CR 608.2c + CR 109.5: Recognize "opponent who searched their library this
@@ -1950,6 +2006,73 @@ mod tests {
             },
             other => panic!("expected ObjectCount ref, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn for_each_mountain_and_red_card_in_it_counts_target_hand_union() {
+        let result = parse_for_each_clause_expr("mountain and red card in it");
+        let Some(QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter: TargetFilter::Or { filters },
+                },
+        }) = result
+        else {
+            panic!("expected ObjectCount Or quantity, got {result:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        match &filters[0] {
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                properties,
+                ..
+            }) => {
+                assert_eq!(
+                    type_filters,
+                    &vec![TypeFilter::Subtype("Mountain".to_string())]
+                );
+                assert!(properties
+                    .iter()
+                    .any(|prop| prop == &FilterProp::InZone { zone: Zone::Hand }));
+                assert!(properties.iter().any(|prop| prop
+                    == &FilterProp::Owned {
+                        controller: ControllerRef::TargetPlayer,
+                    }));
+            }
+            other => panic!("expected typed Mountain filter, got {other:?}"),
+        }
+        match &filters[1] {
+            TargetFilter::Typed(TypedFilter {
+                type_filters,
+                properties,
+                ..
+            }) => {
+                assert_eq!(type_filters, &vec![TypeFilter::Card]);
+                assert!(properties.iter().any(|prop| prop
+                    == &FilterProp::HasColor {
+                        color: ManaColor::Red,
+                    }));
+                assert!(properties
+                    .iter()
+                    .any(|prop| prop == &FilterProp::InZone { zone: Zone::Hand }));
+                assert!(properties.iter().any(|prop| prop
+                    == &FilterProp::Owned {
+                        controller: ControllerRef::TargetPlayer,
+                    }));
+            }
+            other => panic!("expected typed red-card filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn for_each_forest_and_green_cards_in_it_accepts_plural_card() {
+        assert!(matches!(
+            parse_for_each_clause_expr("forest and green cards in it"),
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { .. },
+            })
+        ));
     }
 
     #[test]

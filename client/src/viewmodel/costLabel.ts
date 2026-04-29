@@ -243,6 +243,20 @@ export function abilityChoiceLabel(
   if (action.type === "CastSpell") {
     return { label: `Cast ${object.name}` };
   }
+  if (action.type === "Foretell") {
+    const foretellKeyword = object.keywords.find(
+      (k): k is { Foretell: ManaCost } => typeof k === "object" && "Foretell" in k,
+    );
+    const costSymbols = foretellKeyword
+      ? manaCostToShards(foretellKeyword.Foretell).map((s) => `{${s}}`).join("")
+      : "";
+    return {
+      label: "Foretell {2}",
+      description: costSymbols
+        ? `Pay {2} and exile this card. Cast it on a later turn for ${costSymbols}.`
+        : "Pay {2} and exile this card. Cast it on a later turn for its foretell cost.",
+    };
+  }
   if (action.type === "PlayLand") {
     const landFaceName = object.card_types.core_types.includes("Land")
       ? object.name

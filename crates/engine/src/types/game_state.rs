@@ -1009,6 +1009,11 @@ pub enum WaitingFor {
         /// resolved via `pending_continuation` when the empty pick arrives.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         optional: bool,
+        /// CR 701.20a: Optional reveal-from-hand effects use an empty selection
+        /// to run an explicit decline branch. Optional post-reveal hand choices
+        /// use an empty selection to skip their follow-up instead.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        decline_runs_continuation: bool,
     },
     /// Player is choosing card(s) from a filtered library search.
     SearchChoice {

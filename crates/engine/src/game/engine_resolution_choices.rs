@@ -533,6 +533,7 @@ pub(super) fn handle_resolution_choice(
                 cards,
                 filter,
                 optional,
+                decline_runs_continuation,
             },
             GameAction::SelectCards { cards: chosen },
         ) => {
@@ -545,7 +546,11 @@ pub(super) fn handle_resolution_choice(
                     state.revealed_cards.remove(&card_id);
                 }
                 set_priority(state, player);
-                effects::drain_pending_continuation(state, events);
+                if decline_runs_continuation {
+                    effects::drain_pending_continuation(state, events);
+                } else {
+                    state.pending_continuation = None;
+                }
                 return Ok(ResolutionChoiceOutcome::WaitingFor(
                     state.waiting_for.clone(),
                 ));
@@ -585,10 +590,13 @@ pub(super) fn handle_resolution_choice(
             // so decline must NOT run — drop the continuation. Non-optional reveals
             // chain targets into the continuation so the follow-up effect operates
             // on the revealed card (e.g., Thoughtseize's exile).
-            if optional {
+            if optional && decline_runs_continuation {
                 state.pending_continuation = None;
             } else if let Some(cont) = state.pending_continuation.as_mut() {
                 cont.chain.targets = vec![TargetRef::Object(chosen_id)];
+                if optional {
+                    cont.chain.context.optional_effect_performed = true;
+                }
             }
             effects::drain_pending_continuation(state, events);
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
