@@ -5140,6 +5140,23 @@ fn lower_subject_predicate_ast(
             // CR 608.2c: Inject the subject's target into targeted effects that were
             // parsed via the imperative path (connive, phase out, force block, suspect).
             inject_subject_target(&mut clause.effect, &subject);
+            if let Effect::PayCost { payer, .. } = &mut clause.effect {
+                if matches!(
+                    subject.affected,
+                    TargetFilter::Controller
+                        | TargetFilter::Player
+                        | TargetFilter::ParentTargetController
+                        | TargetFilter::TriggeringPlayer
+                        | TargetFilter::TriggeringSpellController
+                        | TargetFilter::TriggeringSpellOwner
+                        | TargetFilter::DefendingPlayer
+                        | TargetFilter::PostReplacementSourceController
+                        | TargetFilter::Owner
+                        | TargetFilter::SpecificPlayer { .. }
+                ) {
+                    *payer = subject.affected.clone();
+                }
+            }
             // CR 113.10 + CR 702.16j: When the subject is a player-scope filter
             // ("you" → Controller) and the predicate produced a keyword grant
             // whose keywords are all player-applicable (currently only
@@ -14002,6 +14019,39 @@ mod tests {
             },
             other => panic!("expected TrackedSetFiltered, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn look_at_top_cards_put_them_back_reorders_all_cards() {
+        let def = parse_effect_chain(
+            "Look at the top three cards of your library. Put them back in any order.",
+            AbilityKind::Spell,
+        );
+
+        let Effect::Dig {
+            count,
+            keep_count,
+            up_to,
+            filter,
+            destination,
+            rest_destination,
+            reveal,
+        } = &*def.effect
+        else {
+            panic!("expected Effect::Dig at top level, got {:?}", def.effect);
+        };
+
+        assert_eq!(*count, QuantityExpr::Fixed { value: 3 });
+        assert_eq!(*keep_count, None);
+        assert!(!*up_to);
+        assert_eq!(*filter, TargetFilter::Any);
+        assert_eq!(*destination, Some(Zone::Library));
+        assert_eq!(*rest_destination, Some(Zone::Library));
+        assert!(!*reveal);
+        assert!(
+            def.sub_ability.is_none(),
+            "put-them-back clause must be absorbed into Dig"
+        );
     }
 
     #[test]

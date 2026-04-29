@@ -475,6 +475,37 @@ pub(super) fn handle_resolution_choice(
                 .copied()
                 .collect();
             let kept_zone = kept_destination.unwrap_or(Zone::Hand);
+            if kept_zone == Zone::Library {
+                let move_unkept_to = {
+                    let player_state = state
+                        .players
+                        .iter_mut()
+                        .find(|candidate| candidate.id == player)
+                        .expect("player exists");
+                    player_state.library.retain(|id| !cards.contains(id));
+                    for (index, &card_id) in kept.iter().enumerate() {
+                        player_state.library.insert(index, card_id);
+                    }
+                    match rest_destination {
+                        Some(Zone::Library) => {
+                            for &obj_id in &unkept {
+                                player_state.library.push_back(obj_id);
+                            }
+                            None
+                        }
+                        Some(zone) => Some(zone),
+                        None => Some(Zone::Graveyard),
+                    }
+                };
+                if let Some(zone) = move_unkept_to {
+                    for &obj_id in &unkept {
+                        zones::move_to_zone(state, obj_id, zone, events);
+                    }
+                }
+                return Ok(ResolutionChoiceOutcome::WaitingFor(
+                    finish_with_continuation(state, player, events),
+                ));
+            }
             for &obj_id in &kept {
                 zones::move_to_zone(state, obj_id, kept_zone, events);
             }

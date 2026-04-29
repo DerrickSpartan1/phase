@@ -3,6 +3,7 @@ use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{Effect, EffectError, EffectKind, ResolvedAbility, TargetFilter};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::zones::Zone;
 
 /// CR 701.20e + CR 608.2c: Look at top N cards (shown only to the looking player),
 /// select some to keep per the effect's instructions, rest go elsewhere.
@@ -24,9 +25,16 @@ pub fn resolve(
             } => {
                 let resolved_count =
                     resolve_quantity_with_targets(state, count, ability).max(0) as usize;
+                let keep_all_for_reorder = destination == &Some(Zone::Library)
+                    && rest_destination == &Some(Zone::Library)
+                    && keep_count.is_none();
                 (
                     resolved_count,
-                    keep_count.unwrap_or(1) as usize,
+                    if keep_all_for_reorder {
+                        resolved_count
+                    } else {
+                        keep_count.unwrap_or(1) as usize
+                    },
                     *up_to,
                     filter.clone(),
                     *destination,
@@ -204,6 +212,47 @@ mod tests {
         assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
     }
 
+    #[test]
+    fn dig_reorder_mode_sets_keep_count_to_all_seen_cards() {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+        let ability = ResolvedAbility::new(
+            Effect::Dig {
+                count: QuantityExpr::Fixed { value: 3 },
+                destination: Some(Zone::Library),
+                keep_count: None,
+                up_to: false,
+                filter: TargetFilter::Any,
+                rest_destination: Some(Zone::Library),
+                reveal: false,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::DigChoice {
+                cards, keep_count, ..
+            } => {
+                assert_eq!(cards.len(), 3);
+                assert_eq!(*keep_count, 3);
+            }
+            other => panic!("Expected DigChoice, got {:?}", other),
+        }
+    }
+
     /// CR 701.33 + CR 701.18: After the player's `SelectCards` resolves a
     /// `DigChoice`, the kept (revealed) cards must be published to
     /// `state.tracked_object_sets` so downstream sub_abilities can route
@@ -276,6 +325,87 @@ mod tests {
             state.next_tracked_set_id,
             next_id_before + 1,
             "next_tracked_set_id must have advanced"
+        );
+    }
+
+    #[test]
+    fn dig_choice_reorders_all_looked_at_cards_on_top_before_continuation() {
+        use crate::game::engine_resolution_choices::{
+            handle_resolution_choice, ResolutionChoiceOutcome,
+        };
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::PendingContinuation;
+
+        let mut state = GameState::new_two_player(42);
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(i + 1),
+                PlayerId(0),
+                format!("Card {}", i),
+                Zone::Library,
+            );
+        }
+        let cards_on_top: Vec<_> = state.players[0]
+            .library
+            .iter()
+            .take(3)
+            .copied()
+            .collect::<Vec<_>>();
+        let remaining_library: Vec<_> = state.players[0]
+            .library
+            .iter()
+            .skip(3)
+            .copied()
+            .collect::<Vec<_>>();
+        let selected_order = vec![cards_on_top[2], cards_on_top[0], cards_on_top[1]];
+
+        let waiting = WaitingFor::DigChoice {
+            player: PlayerId(0),
+            selectable_cards: cards_on_top.clone(),
+            cards: cards_on_top,
+            keep_count: 3,
+            up_to: false,
+            kept_destination: Some(Zone::Library),
+            rest_destination: Some(Zone::Library),
+            source_id: Some(ObjectId(100)),
+        };
+        state.pending_continuation =
+            Some(PendingContinuation::new(Box::new(ResolvedAbility::new(
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+                vec![],
+                ObjectId(100),
+                PlayerId(0),
+            ))));
+
+        let mut events = Vec::new();
+        let outcome = handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards {
+                cards: selected_order.clone(),
+            },
+            &mut events,
+        )
+        .expect("DigChoice resolution must succeed");
+
+        assert!(matches!(outcome, ResolutionChoiceOutcome::WaitingFor(_)));
+        assert!(
+            state.players[0].hand.contains(&selected_order[0]),
+            "draw continuation must draw the first card in the selected order"
+        );
+        let expected_library: Vec<_> = selected_order[1..]
+            .iter()
+            .chain(remaining_library.iter())
+            .copied()
+            .collect();
+        assert_eq!(
+            state.players[0].library.iter().copied().collect::<Vec<_>>(),
+            expected_library,
+            "selected order must become top-of-library order before drawing"
         );
     }
 

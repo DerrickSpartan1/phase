@@ -325,24 +325,44 @@ function DigModal({ data }: { data: DigChoice["data"] }) {
 
   if (!objects) return null;
 
+  const isReorderOnly =
+    data.kept_destination === "Library" &&
+    data.rest_destination === "Library" &&
+    data.keep_count === data.cards.length;
+
   const isReady = isUpTo
     ? selected.size <= data.keep_count
     : selected.size === data.keep_count;
 
   const destLabel =
-    data.kept_destination === "Battlefield"
+    isReorderOnly
+      ? "on top of your library"
+      : data.kept_destination === "Battlefield"
       ? "onto the battlefield"
       : "into your hand";
 
   const countLabel = isUpTo
     ? `up to ${data.keep_count}`
     : `${data.keep_count}`;
+  const title = isReorderOnly ? "Reorder Cards" : "Choose Cards";
+  const subtitle = isReorderOnly
+    ? `Select all ${data.cards.length} cards in top-to-bottom order`
+    : `Select ${countLabel} card${data.keep_count > 1 ? "s" : ""} to put ${destLabel}`;
+  const confirmLabel = isReorderOnly
+    ? `Confirm Order (${selected.size}/${data.keep_count})`
+    : `Confirm (${selected.size}/${data.keep_count})`;
 
   return (
     <ChoiceOverlay
-      title="Choose Cards"
-      subtitle={`Select ${countLabel} card${data.keep_count > 1 ? "s" : ""} to put ${destLabel}`}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Confirm (${selected.size}/${data.keep_count})`} />}
+      title={title}
+      subtitle={subtitle}
+      footer={
+        <ConfirmButton
+          onClick={handleConfirm}
+          disabled={!isReady}
+          label={confirmLabel}
+        />
+      }
     >
       <ScrollableCardStrip>
         {data.cards.map((id, index) => {
@@ -350,6 +370,7 @@ function DigModal({ data }: { data: DigChoice["data"] }) {
           if (!obj) return null;
           const isSelected = selected.has(id);
           const isSelectable = selectableSet.has(id);
+          const selectedOrder = Array.from(selected).indexOf(id) + 1;
           return (
             <motion.button
               key={id}
@@ -379,7 +400,7 @@ function DigModal({ data }: { data: DigChoice["data"] }) {
               {isSelected && (
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-emerald-500/20">
                   <span className="rounded-full bg-emerald-500/90 px-3 py-1 text-xs font-bold text-white">
-                    Keep
+                    {isReorderOnly ? selectedOrder : "Keep"}
                   </span>
                 </div>
               )}

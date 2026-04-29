@@ -213,7 +213,13 @@ pub(super) enum ContinuationAst {
     /// "Put the rest on the bottom/into your graveyard" after Dig/RevealTop —
     /// sets `rest_destination` on the preceding Dig effect. The destination is
     /// parsed from the text (bottom of library, graveyard, hand, etc.).
-    PutRest { destination: Zone },
+    ///
+    /// `reorder_all` covers "put them back in any order": all looked-at cards
+    /// stay in the library, and the submitted selection order becomes top order.
+    PutRest {
+        destination: Zone,
+        reorder_all: bool,
+    },
     /// CR 701.20e + CR 608.2c: "Put up to N [filter] from among them onto the battlefield/into
     /// your hand" after Dig — patches the Dig's keep_count, filter, destination, and rest_destination.
     ///

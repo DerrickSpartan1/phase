@@ -11481,6 +11481,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn smothering_tithe_that_player_pays_as_triggering_player() {
+        let def = parse_trigger_line(
+            "Whenever an opponent draws a card, that player may pay {2}. If the player doesn't, you create a Treasure token.",
+            "Smothering Tithe",
+        );
+
+        assert_eq!(def.mode, TriggerMode::Drawn);
+        let execute = def.execute.as_ref().expect("should have execute");
+        match &*execute.effect {
+            Effect::PayCost {
+                payer,
+                cost: crate::types::ability::PaymentCost::Mana { cost },
+            } => {
+                assert_eq!(payer, &TargetFilter::TriggeringPlayer);
+                assert_eq!(cost, &crate::types::mana::ManaCost::generic(2));
+            }
+            other => panic!("expected PayCost, got: {other:?}"),
+        }
+        assert!(execute.optional, "that player may pay should be optional");
+
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("Treasure creation should remain chained");
+        assert_eq!(
+            sub.condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::IfYouDo)
+            })
+        );
+        match &*sub.effect {
+            Effect::Token { name, owner, .. } => {
+                assert_eq!(name, "Treasure");
+                assert_eq!(owner, &TargetFilter::Controller);
+            }
+            other => panic!("expected Treasure Token sub_ability, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_you_may_pay_remains_controller() {
+        let def = parse_trigger_line(
+            "Whenever you attack, you may pay {2}. If you do, draw a card.",
+            "Test Card",
+        );
+
+        assert_eq!(def.mode, TriggerMode::YouAttack);
+        let execute = def.execute.as_ref().expect("should have execute");
+        match &*execute.effect {
+            Effect::PayCost {
+                payer,
+                cost: crate::types::ability::PaymentCost::Mana { cost },
+            } => {
+                assert_eq!(payer, &TargetFilter::Controller);
+                assert_eq!(cost, &crate::types::mana::ManaCost::generic(2));
+            }
+            other => panic!("expected PayCost, got: {other:?}"),
+        }
+        assert!(execute.optional, "you may pay should remain optional");
+    }
+
     // -----------------------------------------------------------------------
     // Parts A–E: Station / Saddle / Crew triggers + OnlyDuringYourMainPhase
     // + condition-scoped OncePerTurn sweep.

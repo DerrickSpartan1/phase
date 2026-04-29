@@ -503,7 +503,8 @@ pub(super) fn parse_subject_application(
             is_optional: false,
         });
     }
-    // CR 608.2k: "that player" / "the player" as subject.
+    // CR 608.2k + CR 117.3a: "that player" / "the player" as subject,
+    // optionally carrying a "may" modal ("that player may pay {2}").
     // In trigger context (`ctx.subject` is Some — set exclusively by
     // `oracle_trigger.rs::parse_trigger_line` via
     // `extract_trigger_subject_for_context`; non-trigger parse entry points
@@ -520,7 +521,21 @@ pub(super) fn parse_subject_application(
     // "the player" as TriggeringPlayer. `all_consuming` restricts the match
     // to standalone subject phrases (no trailing text) and restricts the
     // TriggeringPlayer branch here to the two player-referencing forms.
-    if let Ok((_, ctx_filter)) = all_consuming(parse_event_context_ref).parse(lower.as_str()) {
+    let player_subject = all_consuming(alt((
+        value(
+            ("that player", true),
+            tag::<_, _, VerboseError<&str>>("that player may"),
+        ),
+        value(("the player", true), tag("the player may")),
+        value(("that player", false), tag("that player")),
+        value(("the player", false), tag("the player")),
+    )))
+    .parse(lower.as_str());
+    if let Ok((_, (subject_lower, is_optional))) = player_subject {
+        let Ok((_, ctx_filter)) = all_consuming(parse_event_context_ref).parse(subject_lower)
+        else {
+            return None;
+        };
         if matches!(ctx_filter, TargetFilter::TriggeringPlayer) {
             let affected = if ctx.subject.is_some() {
                 ctx_filter
@@ -532,7 +547,7 @@ pub(super) fn parse_subject_application(
                 target: None,
                 multi_target: None,
                 inherits_parent: false,
-                is_optional: false,
+                is_optional,
             });
         }
     }

@@ -1,6 +1,6 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::value;
+use nom::combinator::{eof, opt, value};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
@@ -68,6 +68,23 @@ fn parse_choose_count_from_text(lower: &str) -> u32 {
         .parse(rest)
         .map(|(_, n)| n)
         .unwrap_or(1)
+}
+
+fn parse_put_all_back_in_any_order(lower: &str) -> bool {
+    (
+        tag::<_, _, VerboseError<&str>>("put "),
+        alt((tag("them"), tag("those cards"), tag("the cards"))),
+        tag(" back"),
+        alt((
+            tag(" in any order"),
+            tag(" on top of your library in any order"),
+            tag(" on top in any order"),
+        )),
+        opt(tag(".")),
+        eof,
+    )
+        .parse(lower.trim())
+        .is_ok()
 }
 
 pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
@@ -741,7 +758,10 @@ pub(super) fn apply_clause_continuation(
                 _ => {}
             }
         }
-        ContinuationAst::PutRest { destination } => {
+        ContinuationAst::PutRest {
+            destination,
+            reorder_all,
+        } => {
             // Absorbed into preceding Dig or RevealUntil — sets rest_destination
             // for unchosen/non-matching cards. CR 608.2c: When the preceding def is
             // a conditional "instead" alternative (new def with `else_ability =
@@ -750,7 +770,7 @@ pub(super) fn apply_clause_continuation(
             let Some(previous) = defs.last_mut() else {
                 return;
             };
-            patch_rest_destination_recursively(previous, destination);
+            patch_rest_destination_recursively(previous, destination, reorder_all);
         }
         ContinuationAst::DigFromAmong {
             count,
@@ -943,13 +963,23 @@ pub(super) fn apply_clause_continuation(
 /// "instead" wrapper (new_def with `else_ability = base_def`), a trailing
 /// "Put the rest on the bottom..." clause applies to both the alternative and
 /// base branches — neither branch is selected until resolution.
-fn patch_rest_destination_recursively(def: &mut AbilityDefinition, destination: Zone) {
+fn patch_rest_destination_recursively(
+    def: &mut AbilityDefinition,
+    destination: Zone,
+    reorder_all: bool,
+) {
     match &mut *def.effect {
         Effect::Dig {
-            rest_destination: rest @ None,
+            destination: kept_destination,
+            rest_destination,
             ..
         } => {
-            *rest = Some(destination);
+            if reorder_all {
+                *kept_destination = Some(Zone::Library);
+                *rest_destination = Some(Zone::Library);
+            } else if rest_destination.is_none() {
+                *rest_destination = Some(destination);
+            }
         }
         Effect::RevealUntil {
             rest_destination, ..
@@ -959,7 +989,7 @@ fn patch_rest_destination_recursively(def: &mut AbilityDefinition, destination: 
         _ => {}
     }
     if let Some(else_def) = def.else_ability.as_deref_mut() {
-        patch_rest_destination_recursively(else_def, destination);
+        patch_rest_destination_recursively(else_def, destination, reorder_all);
     }
 }
 
@@ -1312,7 +1342,16 @@ pub(super) fn parse_followup_continuation_ast(
                 rest_destination: None,
             })
         }
-        // "put the rest on the bottom" / "put them back" / "put those cards into your graveyard"
+        // "put them back in any order" after Dig means all looked-at cards
+        // stay in the library and the player's submitted order becomes the
+        // new top order. Leave keep_count unset so runtime resolves dynamic N.
+        Effect::Dig { .. } if parse_put_all_back_in_any_order(&lower) => {
+            Some(ContinuationAst::PutRest {
+                destination: Zone::Library,
+                reorder_all: true,
+            })
+        }
+        // "put the rest on the bottom" / "put those cards into your graveyard"
         // after Dig — sets rest_destination on the preceding Dig effect.
         Effect::Dig { .. }
             if nom_primitives::scan_contains(&lower, "put them back")
@@ -1331,7 +1370,10 @@ pub(super) fn parse_followup_continuation_ast(
                 // Default: bottom of library (covers "on the bottom", "back in any order", etc.)
                 Zone::Library
             };
-            Some(ContinuationAst::PutRest { destination })
+            Some(ContinuationAst::PutRest {
+                destination,
+                reorder_all: false,
+            })
         }
         // CR 701.20a: "put that card into your hand / onto the battlefield" after RevealUntil
         // — overrides kept_destination. Also extracts rest_destination when the compound
@@ -1424,7 +1466,10 @@ pub(super) fn parse_followup_continuation_ast(
                 // "on the bottom", and the no-zone "put the rest" variant)
                 Zone::Library
             };
-            Some(ContinuationAst::PutRest { destination })
+            Some(ContinuationAst::PutRest {
+                destination,
+                reorder_all: false,
+            })
         }
         // "create a ... token and suspect it" → chain suspect on last created token
         Effect::Token { .. }
@@ -2083,7 +2128,8 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
-                destination: Zone::Library
+                destination: Zone::Library,
+                reorder_all: false,
             })
         );
     }
@@ -2096,7 +2142,8 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
-                destination: Zone::Library
+                destination: Zone::Library,
+                reorder_all: false,
             })
         );
     }
@@ -2108,7 +2155,8 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
-                destination: Zone::Graveyard
+                destination: Zone::Graveyard,
+                reorder_all: false,
             })
         );
     }
@@ -2123,7 +2171,8 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
-                destination: Zone::Library
+                destination: Zone::Library,
+                reorder_all: false,
             })
         );
     }
@@ -2135,7 +2184,8 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
-                destination: Zone::Library
+                destination: Zone::Library,
+                reorder_all: true,
             })
         );
     }
@@ -2147,7 +2197,8 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
-                destination: Zone::Hand
+                destination: Zone::Hand,
+                reorder_all: false,
             })
         );
     }
@@ -2162,7 +2213,8 @@ mod tests {
         assert_eq!(
             result,
             Some(ContinuationAst::PutRest {
-                destination: Zone::Library
+                destination: Zone::Library,
+                reorder_all: false,
             })
         );
     }
