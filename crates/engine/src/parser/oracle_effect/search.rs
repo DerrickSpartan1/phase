@@ -913,6 +913,9 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
             || tag::<_, _, VerboseError<&str>>("put ")
                 .parse(remaining)
                 .is_ok()
+            || tag::<_, _, VerboseError<&str>>("puts ")
+                .parse(remaining)
+                .is_ok()
             || tag::<_, _, VerboseError<&str>>("instead")
                 .parse(remaining)
                 .is_ok()
@@ -1191,6 +1194,7 @@ mod tests {
             "creature card, put it onto the battlefield, then shuffle",
             "land card, reveal it, put it into your hand, then shuffle",
             "card, put it onto the battlefield tapped",
+            "basic land or desert cards and puts them onto the battlefield tapped",
             "creature card. exile it",
             "Vampire cards instead",
         ] {
