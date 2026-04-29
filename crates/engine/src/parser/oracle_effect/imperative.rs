@@ -1,7 +1,7 @@
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{opt, rest, value};
-use nom::sequence::preceded;
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
@@ -637,6 +637,34 @@ fn apply_actor_default(filter: &mut TargetFilter, ctx: &ParseContext) {
     }
 }
 
+/// CR 701.21a/b: "of their choice" / "of your choice" confirms who chooses
+/// what to sacrifice; it is not part of the sacrificed-object filter. Preserve
+/// trailing relative clauses so `parse_target` can consume predicates like
+/// "that shares a card type with it".
+fn strip_sacrifice_choice_marker(target_text: &str) -> String {
+    let lower = target_text.to_lowercase();
+
+    if let Some((_, rest)) = nom_on_lower(target_text, &lower, |input| {
+        value((), alt((tag("of their choice"), tag("of your choice")))).parse(input)
+    }) {
+        return rest.trim_start().to_string();
+    }
+
+    if let Some((before_len, rest)) = nom_on_lower(target_text, &lower, |input| {
+        let (rest, before) = alt((
+            terminated(take_until(" of their choice"), tag(" of their choice")),
+            terminated(take_until(" of your choice"), tag(" of your choice")),
+        ))
+        .parse(input)?;
+        Ok((rest, before.len()))
+    }) {
+        let before = &target_text[..before_len];
+        return format!("{before}{rest}");
+    }
+
+    target_text.to_string()
+}
+
 /// NOTE: Shares verb prefixes with `try_parse_verb_and_target` in `mod.rs`.
 /// When adding a new targeted verb here, check if it also needs to be added there
 /// (for compound action splitting like "tap target creature and put a counter on it").
@@ -682,17 +710,7 @@ pub(super) fn parse_targeted_action_ast(
         // they control of their choice" — split at the leading space), and
         // (2) the count subsumes the filter and only the phrase is left
         // ("of their choice" — treat the entire remainder as the phrase).
-        let target_text_lower = target_text.to_lowercase();
-        let target_text = if target_text_lower.starts_with("of their choice")
-            || target_text_lower.starts_with("of your choice")
-        {
-            ""
-        } else {
-            nom_primitives::split_once_on(&target_text_lower, " of their choice")
-                .or_else(|_| nom_primitives::split_once_on(&target_text_lower, " of your choice"))
-                .map(|(_, (before, _))| &target_text[..before.len()])
-                .unwrap_or(target_text)
-        };
+        let target_text = strip_sacrifice_choice_marker(target_text);
         // CR 107.2: Skip `parse_target` on an empty remainder — the count
         // subsumed the filter ("sacrifice half the permanents they control
         // of their choice"), so there is nothing left to classify. Avoids
@@ -714,7 +732,7 @@ pub(super) fn parse_targeted_action_ast(
         } else if ctx.subject.is_some() && is_bare_object_pronoun(target_text.trim()) {
             resolve_it_pronoun(ctx)
         } else {
-            let (target, _rem) = parse_target(target_text);
+            let (target, _rem) = parse_target(&target_text);
             #[cfg(debug_assertions)]
             super::types::assert_no_compound_remainder(_rem, text);
             target
@@ -5197,6 +5215,73 @@ mod tests {
                 other => panic!("expected Typed target, got {other:?}"),
             },
             other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sacrifice_preserves_choice_relative_clause() {
+        let text = "sacrifice a permanent of their choice that shares a card type with it";
+        let lower = text.to_lowercase();
+        let ctx = ParseContext {
+            actor: Some(ControllerRef::Opponent),
+            ..Default::default()
+        };
+        let result = parse_targeted_action_ast(text, &lower, &ctx).expect("sacrifice should parse");
+        match lower_targeted_action_ast(result) {
+            Effect::Sacrifice { target, .. } => match target {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                    assert!(tf.type_filters.iter().any(|type_filter| matches!(
+                        type_filter,
+                        crate::types::ability::TypeFilter::Permanent
+                    )));
+                    assert!(tf.properties.iter().any(|prop| matches!(
+                        prop,
+                        crate::types::ability::FilterProp::SharesQuality {
+                            quality: crate::types::ability::SharedQuality::CardType,
+                            reference: Some(reference),
+                            relation: crate::types::ability::SharedQualityRelation::Shares,
+                        } if matches!(reference.as_ref(), TargetFilter::ParentTarget)
+                    )));
+                }
+                other => panic!("expected Typed target, got {other:?}"),
+            },
+            other => panic!("expected Effect::Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_each_opponent_may_sacrifice_preserves_choice_relative_clause() {
+        let def = super::super::parse_effect_chain(
+            "each opponent may sacrifice a permanent of their choice that shares a card type with it",
+            AbilityKind::Spell,
+        );
+
+        assert!(def.optional, "expected optional sacrifice");
+        assert_eq!(
+            def.player_scope,
+            Some(crate::types::ability::PlayerFilter::Opponent)
+        );
+        match &*def.effect {
+            Effect::Sacrifice { target, .. } => match target {
+                TargetFilter::Typed(tf) => {
+                    assert_eq!(tf.controller, Some(ControllerRef::Opponent));
+                    assert!(tf.type_filters.iter().any(|type_filter| matches!(
+                        type_filter,
+                        crate::types::ability::TypeFilter::Permanent
+                    )));
+                    assert!(tf.properties.iter().any(|prop| matches!(
+                        prop,
+                        crate::types::ability::FilterProp::SharesQuality {
+                            quality: crate::types::ability::SharedQuality::CardType,
+                            reference: Some(reference),
+                            relation: crate::types::ability::SharedQualityRelation::Shares,
+                        } if matches!(reference.as_ref(), TargetFilter::ParentTarget)
+                    )));
+                }
+                other => panic!("expected Typed target, got {other:?}"),
+            },
+            other => panic!("expected Sacrifice effect, got {other:?}"),
         }
     }
 
