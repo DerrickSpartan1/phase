@@ -18916,6 +18916,57 @@ mod tests {
     }
 
     #[test]
+    fn strip_mv_conditional_past_tense_uses_lki() {
+        let (cond, text) = strip_mana_value_conditional("Scry 1 if its mana value was 3 or less.");
+        assert!(cond.is_some(), "should extract past-tense MV condition");
+        assert_eq!(text, "Scry 1");
+        match cond.unwrap() {
+            AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+                assert!(use_lki);
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 3 }
+                        }
+                    )));
+                } else {
+                    panic!("expected Typed filter");
+                }
+            }
+            other => panic!("expected TargetMatchesFilter, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strip_mv_conditional_leading_past_tense_uses_lki() {
+        let (cond, text) = strip_mana_value_conditional("If its mana value was 3 or less, scry 1.");
+        assert!(
+            cond.is_some(),
+            "should extract leading past-tense MV condition"
+        );
+        assert_eq!(text, "scry 1.");
+        match cond.unwrap() {
+            AbilityCondition::TargetMatchesFilter { filter, use_lki } => {
+                assert!(use_lki);
+                if let TargetFilter::Typed(tf) = filter {
+                    assert!(tf.properties.iter().any(|p| matches!(
+                        p,
+                        FilterProp::Cmc {
+                            comparator: Comparator::LE,
+                            value: QuantityExpr::Fixed { value: 3 }
+                        }
+                    )));
+                } else {
+                    panic!("expected Typed filter");
+                }
+            }
+            other => panic!("expected TargetMatchesFilter, got: {other:?}"),
+        }
+    }
+
+    #[test]
     fn strip_mv_conditional_no_match() {
         let (cond, text) = strip_mana_value_conditional("Destroy target creature");
         assert!(cond.is_none());

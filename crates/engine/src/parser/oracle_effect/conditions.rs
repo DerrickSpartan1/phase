@@ -742,6 +742,34 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
+    // Leading position: "If its mana value was N or less/greater, [effect]."
+    if let Ok((rest, _)) =
+        tag::<_, _, VerboseError<&str>>("if its mana value was ").parse(lower.as_str())
+    {
+        if let Some((condition, body)) = parse_past_mana_value_condition_body(text, rest) {
+            return (Some(condition), body);
+        }
+    }
+
+    // Suffix position: "[effect] if its mana value was N or less/greater."
+    if let Some((before, after)) = tp.rsplit_around(" if its mana value was ") {
+        if let Some((comparator, threshold)) = parse_mana_value_threshold(after.lower) {
+            let condition = AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::Cmc {
+                        comparator,
+                        value: QuantityExpr::Fixed { value: threshold },
+                    },
+                ])),
+                use_lki: true,
+            };
+            return (
+                Some(condition),
+                before.original.trim_end_matches('.').trim().to_string(),
+            );
+        }
+    }
+
     // Suffix position: "[effect] if its mana value is less than or equal to [quantity]."
     if let Some((before, after)) = tp.rsplit_around(" if its mana value is ") {
         if let Some((comparator, value)) = parse_dynamic_mana_value_threshold(after.lower) {
@@ -784,6 +812,34 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
     }
 
     (None, text.to_string())
+}
+
+fn parse_past_mana_value_condition_body(
+    original: &str,
+    condition_and_body: &str,
+) -> Option<(AbilityCondition, String)> {
+    let (rest, threshold) = nom_primitives::parse_number(condition_and_body).ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" or ").parse(rest).ok()?;
+    let (rest, comparator) = alt((
+        value(Comparator::LE, tag::<_, _, VerboseError<&str>>("less")),
+        value(Comparator::GE, tag("greater")),
+    ))
+    .parse(rest)
+    .ok()?;
+    let rest = rest.trim_start();
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(",").parse(rest).ok()?;
+    let rest = rest.trim_start();
+    let body_start = original.len() - rest.len();
+    let condition = AbilityCondition::TargetMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Cmc {
+            comparator,
+            value: QuantityExpr::Fixed {
+                value: threshold as i32,
+            },
+        }])),
+        use_lki: true,
+    };
+    Some((condition, original[body_start..].to_string()))
 }
 
 fn parse_dynamic_mana_value_threshold(text: &str) -> Option<(Comparator, QuantityExpr)> {
