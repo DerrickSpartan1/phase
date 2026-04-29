@@ -438,13 +438,15 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             qty: any_counters_on_permanent_ref(perm)?,
         },
 
-        // CR 700.7 + CR 603.4: "the number of creatures that died this turn"
-        // — game-wide event count → CreaturesDiedThisTurn (ability.rs:1949).
-        // The filter shape is preserved by the engine resolver as "all
-        // creatures, any controller"; the schema's filter argument is only
-        // used to confirm we're counting creatures. Strict-fail otherwise.
-        GameNumber::NumCreaturesOrPlaneswalkersThatDiedThisTurn(_filter) => QuantityExpr::Ref {
-            qty: QuantityRef::CreaturesDiedThisTurn,
+        // CR 700.4 + CR 400.7: "the number of creatures that died this turn"
+        // counts this turn's battlefield-to-graveyard zone-change snapshots
+        // using last-known characteristics.
+        GameNumber::NumCreaturesOrPlaneswalkersThatDiedThisTurn(filter) => QuantityExpr::Ref {
+            qty: QuantityRef::ZoneChangeCountThisTurn {
+                from: Some(Zone::Battlefield),
+                to: Some(Zone::Graveyard),
+                filter: convert_permanents(filter)?,
+            },
         },
 
         // CR 603.7c: "the value of X of that spell" — reads

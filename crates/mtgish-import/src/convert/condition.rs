@@ -16,7 +16,7 @@ use engine::types::counter::CounterMatch;
 use engine::types::mana::ManaColor;
 use engine::types::zones::Zone;
 
-use crate::convert::filter::concrete_color;
+use crate::convert::filter::{concrete_color, convert as convert_permanents};
 use crate::convert::mana;
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::schema::types::{
@@ -129,13 +129,7 @@ pub fn convert_ability(c: &Condition) -> ConvResult<AbilityCondition> {
         // `WasBargained`, etc.) need separate engine slots and strict-fail.
         Condition::CastSpellPassesFilter(spells) => spells_to_cast_zone_ability(spells)?,
         // CR 700.4 + CR 603.4: Morbid-style "if a creature died this turn".
-        // mtgish's variant name includes planeswalkers, but the existing engine
-        // primitive is explicitly creature-scoped, so only lower the broad
-        // creature filter and strict-fail narrower predicates.
-        Condition::ACreatureOrPlaneswalkerDiedThisTurn(filter) => {
-            require_broad_creature_died_filter(filter)?;
-            morbid_ability_condition()
-        }
+        Condition::ACreatureOrPlaneswalkerDiedThisTurn(filter) => morbid_ability_condition(filter)?,
         Condition::APermanentLeftTheBattlefieldThisTurn(filter) => {
             left_battlefield_ability_condition(filter)?
         }
@@ -311,10 +305,7 @@ pub fn convert_trigger(c: &Condition) -> ConvResult<TriggerCondition> {
             "Condition::DeadPermanentPassesFilter/predicate",
         )?,
         // CR 700.4 + CR 603.4: Morbid-style intervening-if condition.
-        Condition::ACreatureOrPlaneswalkerDiedThisTurn(filter) => {
-            require_broad_creature_died_filter(filter)?;
-            morbid_trigger_condition()
-        }
+        Condition::ACreatureOrPlaneswalkerDiedThisTurn(filter) => morbid_trigger_condition(filter)?,
         Condition::APermanentLeftTheBattlefieldThisTurn(filter) => {
             left_battlefield_trigger_condition(filter)?
         }
@@ -390,10 +381,7 @@ pub fn convert_static(c: &Condition) -> ConvResult<StaticCondition> {
         }
         // CR 700.4 + CR 613: Continuous effects can use the same event-state
         // quantity primitive as the native Oracle parser's static condition path.
-        Condition::ACreatureOrPlaneswalkerDiedThisTurn(filter) => {
-            require_broad_creature_died_filter(filter)?;
-            morbid_static_condition()
-        }
+        Condition::ACreatureOrPlaneswalkerDiedThisTurn(filter) => morbid_static_condition(filter)?,
         Condition::APermanentLeftTheBattlefieldThisTurn(filter) => {
             left_battlefield_static_condition(filter)?
         }
@@ -406,19 +394,23 @@ pub fn convert_static(c: &Condition) -> ConvResult<StaticCondition> {
     })
 }
 
-fn require_broad_creature_died_filter(filter: &Permanents) -> ConvResult<()> {
+fn morbid_quantity_lhs(filter: &Permanents) -> ConvResult<QuantityExpr> {
+    Ok(QuantityExpr::Ref {
+        qty: QuantityRef::ZoneChangeCountThisTurn {
+            from: Some(Zone::Battlefield),
+            to: Some(Zone::Graveyard),
+            filter: convert_permanents(filter)?,
+        },
+    })
+}
+
+fn require_broad_creature_died_filter_for_parsed(filter: &Permanents) -> ConvResult<()> {
     match filter {
         Permanents::IsCardtype(CardType::Creature) => Ok(()),
         other => Err(ConversionGap::EnginePrerequisiteMissing {
-            engine_type: "QuantityRef::CreaturesDiedThisTurn",
+            engine_type: "ParsedCondition::CreatureDiedThisTurn",
             needed_variant: format!("filtered creature-died predicate: {other:?}"),
         }),
-    }
-}
-
-fn morbid_quantity_lhs() -> QuantityExpr {
-    QuantityExpr::Ref {
-        qty: QuantityRef::CreaturesDiedThisTurn,
     }
 }
 
@@ -426,28 +418,28 @@ fn morbid_quantity_rhs() -> QuantityExpr {
     QuantityExpr::Fixed { value: 1 }
 }
 
-fn morbid_ability_condition() -> AbilityCondition {
-    AbilityCondition::QuantityCheck {
-        lhs: morbid_quantity_lhs(),
+fn morbid_ability_condition(filter: &Permanents) -> ConvResult<AbilityCondition> {
+    Ok(AbilityCondition::QuantityCheck {
+        lhs: morbid_quantity_lhs(filter)?,
         comparator: Comparator::GE,
         rhs: morbid_quantity_rhs(),
-    }
+    })
 }
 
-fn morbid_trigger_condition() -> TriggerCondition {
-    TriggerCondition::QuantityComparison {
-        lhs: morbid_quantity_lhs(),
+fn morbid_trigger_condition(filter: &Permanents) -> ConvResult<TriggerCondition> {
+    Ok(TriggerCondition::QuantityComparison {
+        lhs: morbid_quantity_lhs(filter)?,
         comparator: Comparator::GE,
         rhs: morbid_quantity_rhs(),
-    }
+    })
 }
 
-fn morbid_static_condition() -> StaticCondition {
-    StaticCondition::QuantityComparison {
-        lhs: morbid_quantity_lhs(),
+fn morbid_static_condition(filter: &Permanents) -> ConvResult<StaticCondition> {
+    Ok(StaticCondition::QuantityComparison {
+        lhs: morbid_quantity_lhs(filter)?,
         comparator: Comparator::GE,
         rhs: morbid_quantity_rhs(),
-    }
+    })
 }
 
 fn player_set_turn_to_ability(players: &Players) -> ConvResult<AbilityCondition> {
@@ -498,24 +490,13 @@ fn player_set_turn_to_static(players: &Players) -> ConvResult<StaticCondition> {
     }
 }
 
-fn left_battlefield_quantity_ref(filter: &Permanents) -> ConvResult<QuantityRef> {
-    match filter {
-        Permanents::ControlledByAPlayer(players) if matches!(&**players, Players::SinglePlayer(player) if matches!(**player, Player::You)) => {
-            Ok(QuantityRef::PermanentsLeftBattlefieldThisTurn)
-        }
-        Permanents::IsNonCardtype(CardType::Land) => {
-            Ok(QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn)
-        }
-        other => Err(ConversionGap::EnginePrerequisiteMissing {
-            engine_type: "QuantityRef::PermanentsLeftBattlefieldThisTurn",
-            needed_variant: format!("filtered left-battlefield predicate: {other:?}"),
-        }),
-    }
-}
-
 fn left_battlefield_lhs(filter: &Permanents) -> ConvResult<QuantityExpr> {
     Ok(QuantityExpr::Ref {
-        qty: left_battlefield_quantity_ref(filter)?,
+        qty: QuantityRef::ZoneChangeCountThisTurn {
+            from: Some(Zone::Battlefield),
+            to: None,
+            filter: convert_permanents(filter)?,
+        },
     })
 }
 
@@ -2982,7 +2963,7 @@ pub fn convert_parsed(c: &Condition) -> ConvResult<ParsedCondition> {
         // condition variants). `ParsedCondition::Not` is reachable only via
         // those upstream paths, not from a direct `Condition::Not`.
         Condition::ACreatureOrPlaneswalkerDiedThisTurn(filter) => {
-            require_broad_creature_died_filter(filter)?;
+            require_broad_creature_died_filter_for_parsed(filter)?;
             Ok(ParsedCondition::CreatureDiedThisTurn)
         }
         // No general-purpose timing or arbitrary-event form exists in
@@ -3338,7 +3319,11 @@ mod tests {
             converted,
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::CreaturesDiedThisTurn,
+                    qty: QuantityRef::ZoneChangeCountThisTurn {
+                        from: Some(Zone::Battlefield),
+                        to: Some(Zone::Graveyard),
+                        filter: TargetFilter::Typed(TypedFilter::creature()),
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -3358,7 +3343,11 @@ mod tests {
             converted,
             AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::CreaturesDiedThisTurn,
+                    qty: QuantityRef::ZoneChangeCountThisTurn {
+                        from: Some(Zone::Battlefield),
+                        to: Some(Zone::Graveyard),
+                        filter: TargetFilter::Typed(TypedFilter::creature()),
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -3378,20 +3367,38 @@ mod tests {
     }
 
     #[test]
-    fn filtered_creature_died_this_turn_stays_strict() {
+    fn filtered_creature_died_this_turn_lowers_to_zone_change_count() {
         let condition =
             Condition::ACreatureOrPlaneswalkerDiedThisTurn(Box::new(Permanents::And(vec![
                 Permanents::IsCardtype(CardType::Creature),
                 Permanents::IsNonCreatureType(CreatureType::Zombie),
             ])));
 
-        let err = convert_trigger(&condition).unwrap_err();
+        let converted = convert_trigger(&condition).unwrap();
 
-        assert!(matches!(
-            err,
-            ConversionGap::EnginePrerequisiteMissing { engine_type, .. }
-                if engine_type == "QuantityRef::CreaturesDiedThisTurn"
-        ));
+        assert_eq!(
+            converted,
+            TriggerCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::ZoneChangeCountThisTurn {
+                        from: Some(Zone::Battlefield),
+                        to: Some(Zone::Graveyard),
+                        filter: TargetFilter::And {
+                            filters: vec![
+                                TargetFilter::Typed(TypedFilter::creature()),
+                                TargetFilter::Typed(TypedFilter::creature().with_type(
+                                    TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                                        "Zombie".to_string()
+                                    )))
+                                )),
+                            ],
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            }
+        );
     }
 
     #[test]
@@ -3434,7 +3441,13 @@ mod tests {
             converted,
             TriggerCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::PermanentsLeftBattlefieldThisTurn,
+                    qty: QuantityRef::ZoneChangeCountThisTurn {
+                        from: Some(Zone::Battlefield),
+                        to: None,
+                        filter: TargetFilter::Typed(
+                            TypedFilter::permanent().controller(ControllerRef::You),
+                        ),
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
@@ -3454,7 +3467,13 @@ mod tests {
             converted,
             AbilityCondition::QuantityCheck {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::NonlandPermanentsLeftBattlefieldThisTurn,
+                    qty: QuantityRef::ZoneChangeCountThisTurn {
+                        from: Some(Zone::Battlefield),
+                        to: None,
+                        filter: TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(Box::new(
+                            TypeFilter::Land,
+                        )))),
+                    },
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 1 },
