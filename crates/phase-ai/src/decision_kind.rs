@@ -66,6 +66,7 @@ pub fn classify(waiting_for: &WaitingFor, action: &GameAction) -> DecisionKind {
         | WaitingFor::DigChoice { .. }
         | WaitingFor::SurveilChoice { .. }
         | WaitingFor::RevealChoice { .. }
+        | WaitingFor::DamageSourceChoice { .. }
         | WaitingFor::SearchChoice { .. }
         | WaitingFor::ChooseFromZoneChoice { .. }
         | WaitingFor::ConniveDiscard { .. }

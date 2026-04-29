@@ -266,6 +266,7 @@ fn redundancy_delta(
         | Effect::ExileTop { .. }
         | Effect::TargetOnly { .. }
         | Effect::Choose { .. }
+        | Effect::ChooseDamageSource { .. }
         | Effect::Suspect { .. }
         | Effect::Connive { .. }
         | Effect::PhaseOut { .. }
