@@ -955,15 +955,28 @@ fn resolve_ref(
             }
             usize_to_i32_saturating(seen.len())
         }
-        // CR 305.6: Count distinct basic land types among lands the controller controls.
-        QuantityRef::BasicLandTypeCount => {
+        // CR 305.6: Count distinct basic land types among lands controlled by
+        // the referenced player. Domain counts distinct land subtypes, not
+        // lands, so multiple Forests still contribute one.
+        QuantityRef::BasicLandTypeCount {
+            controller: land_controller,
+        } => {
+            let target_player = ability.and_then(|a| {
+                a.targets.iter().find_map(|target| match target {
+                    TargetRef::Player(player) => Some(*player),
+                    TargetRef::Object(_) => None,
+                })
+            });
             let basic_subtypes = ["Plains", "Island", "Swamp", "Mountain", "Forest"];
             let mut found = HashSet::new();
             for &id in state.battlefield.iter() {
                 if let Some(obj) = state.objects.get(&id) {
-                    if obj.controller == controller
-                        && obj.card_types.core_types.contains(&CoreType::Land)
-                    {
+                    let controller_matches = match land_controller {
+                        ControllerRef::You => obj.controller == controller,
+                        ControllerRef::Opponent => obj.controller != controller,
+                        ControllerRef::TargetPlayer => target_player == Some(obj.controller),
+                    };
+                    if controller_matches && obj.card_types.core_types.contains(&CoreType::Land) {
                         for subtype in &basic_subtypes {
                             if obj.card_types.subtypes.iter().any(|s| s == subtype) {
                                 found.insert(*subtype);

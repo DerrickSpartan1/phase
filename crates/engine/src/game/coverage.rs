@@ -680,7 +680,12 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
                 fmt_zone_ref(zone)
             )
         }
-        QuantityRef::BasicLandTypeCount => "basic land types".into(),
+        QuantityRef::BasicLandTypeCount { controller } => {
+            format!(
+                "basic land types among lands {}",
+                fmt_controller(controller)
+            )
+        }
         QuantityRef::DistinctColorsAmongPermanents { filter } => {
             format!("# of colors among {}", fmt_target(filter))
         }
@@ -4194,7 +4199,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         }
         QuantityRef::CardsExiledBySource => ("CardsExiledBySource", Handled),
         QuantityRef::ZoneCardCount { .. } => ("ZoneCardCount", Handled),
-        QuantityRef::BasicLandTypeCount => ("BasicLandTypeCount", Handled),
+        QuantityRef::BasicLandTypeCount { .. } => ("BasicLandTypeCount", Handled),
         QuantityRef::DistinctColorsAmongPermanents { .. } => {
             ("DistinctColorsAmongPermanents", Handled)
         }

@@ -2637,7 +2637,10 @@ mod tests {
             StaticCondition::QuantityComparison {
                 lhs:
                     QuantityExpr::Ref {
-                        qty: QuantityRef::BasicLandTypeCount,
+                        qty:
+                            QuantityRef::BasicLandTypeCount {
+                                controller: ControllerRef::You,
+                            },
                     },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 5 },

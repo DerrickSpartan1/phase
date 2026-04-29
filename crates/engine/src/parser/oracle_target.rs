@@ -3833,7 +3833,9 @@ mod tests {
                 FilterProp::ToughnessLE {
                     value: QuantityExpr::Offset {
                         inner: Box::new(QuantityExpr::Ref {
-                            qty: QuantityRef::BasicLandTypeCount,
+                            qty: QuantityRef::BasicLandTypeCount {
+                                controller: ControllerRef::You,
+                            },
                         }),
                         offset: -1,
                     },

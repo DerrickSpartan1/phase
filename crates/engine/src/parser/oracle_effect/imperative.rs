@@ -239,6 +239,16 @@ pub(super) fn parse_numeric_imperative_ast(
     lower: &str,
 ) -> Option<NumericImperativeAst> {
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| value((), tag("draw ")).parse(input))
+        .or_else(|| {
+            nom_on_lower(text, lower, |input| {
+                let (rest, _) = (
+                    take_until::<_, _, VerboseError<&str>>(" draws "),
+                    tag(" draws "),
+                )
+                    .parse(input)?;
+                Ok((rest, ()))
+            })
+        })
     {
         // CR 608.2d + CR 121.1: "draw up to N cards" — opt-choice draw,
         // mirrors the up_to pattern on Discard / Sacrifice. Strip the prefix

@@ -3223,6 +3223,10 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
             target,
             destination,
         },
+        Effect::Draw {
+            count,
+            target: TargetFilter::Controller,
+        } => Effect::Draw { count, target },
         Effect::GainLife {
             amount,
             player: GainLifePlayer::Controller,
@@ -17372,6 +17376,24 @@ mod tests {
                     }),
                 },
                 player: GainLifePlayer::TargetPlayer,
+            },
+        );
+    }
+
+    #[test]
+    fn effect_target_player_draws_for_each_basic_land_type_they_control() {
+        let e = parse_effect(
+            "target player draws a card for each basic land type among lands they control",
+        );
+        assert_eq!(
+            e,
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::BasicLandTypeCount {
+                        controller: ControllerRef::TargetPlayer,
+                    },
+                },
+                target: TargetFilter::Player,
             },
         );
     }

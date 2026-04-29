@@ -1924,8 +1924,8 @@ pub enum QuantityRef {
         scope: CountScope,
     },
     /// CR 305.6: Count distinct basic land types (Plains/Island/Swamp/Mountain/Forest)
-    /// among lands the controller controls. Used by Domain.
-    BasicLandTypeCount,
+    /// among lands controlled by the referenced player. Used by Domain.
+    BasicLandTypeCount { controller: ControllerRef },
     /// CR 609.3: Count of objects moved by the preceding effect in the sub_ability chain.
     /// Only valid during sub-ability chain resolution; returns 0 outside that context.
     /// The caller (token resolver) is responsible for consuming the tracked set after use.

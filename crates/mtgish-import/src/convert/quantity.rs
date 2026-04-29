@@ -901,7 +901,9 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         GameNumber::NumberOfBasicLandTypesAmongPermanents(filter) => {
             if is_lands_you_control(filter) {
                 QuantityExpr::Ref {
-                    qty: QuantityRef::BasicLandTypeCount,
+                    qty: QuantityRef::BasicLandTypeCount {
+                        controller: engine::types::ability::ControllerRef::You,
+                    },
                 }
             } else {
                 return Err(ConversionGap::EnginePrerequisiteMissing {

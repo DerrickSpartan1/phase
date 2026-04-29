@@ -374,7 +374,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_basic_land_type_count,
         // Bare suffix form — reachable when a parent combinator has already
         // consumed "there are N " (see `parse_there_are_conditions`).
-        parse_basic_land_types_among_lands_you_control,
+        parse_basic_land_types_among_lands_controlled_by_ref,
         parse_devotion_ref,
         parse_counters_among_ref,
     )))
@@ -1177,29 +1177,31 @@ fn parse_target_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
-/// Parse the bare domain suffix: "basic land type[s] among lands you control".
+/// Parse the bare domain suffix: "basic land type[s] among lands <controller> controls".
 ///
 /// Factored out so both the full "the number of ..." form (Domain quantity) and
 /// the "there are N ..." condition form (see `parse_there_are_conditions` in
 /// `oracle_nom/condition.rs`) share a single tag authority. The singular form
 /// appears after "for each"; the plural form appears after "the number of".
-fn parse_basic_land_types_among_lands_you_control(input: &str) -> OracleResult<'_, QuantityRef> {
-    value(
-        QuantityRef::BasicLandTypeCount,
-        (
-            tag("basic land type"),
-            opt(tag("s")),
-            tag(" among lands you control"),
-        ),
-    )
-    .parse(input)
+fn parse_basic_land_types_among_lands_controlled_by_ref(
+    input: &str,
+) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("basic land type").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" among lands ").parse(rest)?;
+    let (rest, controller) = alt((
+        value(ControllerRef::You, tag("you control")),
+        value(ControllerRef::TargetPlayer, tag("they control")),
+    ))
+    .parse(rest)?;
+    Ok((rest, QuantityRef::BasicLandTypeCount { controller }))
 }
 
 /// Parse "the number of basic land types among lands you control" (Domain).
 fn parse_basic_land_type_count(input: &str) -> OracleResult<'_, QuantityRef> {
     preceded(
         tag("the number of "),
-        parse_basic_land_types_among_lands_you_control,
+        parse_basic_land_types_among_lands_controlled_by_ref,
     )
     .parse(input)
 }
@@ -2073,14 +2075,36 @@ mod tests {
     fn test_parse_basic_land_type_count() {
         let (rest, q) =
             parse_quantity_ref("the number of basic land types among lands you control").unwrap();
-        assert_eq!(q, QuantityRef::BasicLandTypeCount);
+        assert_eq!(
+            q,
+            QuantityRef::BasicLandTypeCount {
+                controller: ControllerRef::You,
+            }
+        );
         assert_eq!(rest, "");
     }
 
     #[test]
     fn test_parse_basic_land_type_count_singular_for_each_suffix() {
         let (rest, q) = parse_quantity_ref("basic land type among lands you control").unwrap();
-        assert_eq!(q, QuantityRef::BasicLandTypeCount);
+        assert_eq!(
+            q,
+            QuantityRef::BasicLandTypeCount {
+                controller: ControllerRef::You,
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_basic_land_type_count_target_player_suffix() {
+        let (rest, q) = parse_quantity_ref("basic land type among lands they control").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::BasicLandTypeCount {
+                controller: ControllerRef::TargetPlayer,
+            }
+        );
         assert_eq!(rest, "");
     }
 
