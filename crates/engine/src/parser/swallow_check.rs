@@ -1042,6 +1042,7 @@ fn detect_condition_if(cleaned: &str, original: &str, ast_json: &str, parsed: &P
         // are encoded as static-mode constraints or as `ForceBlock`/`ForceAttack`
         // effects, not conditional gates.
         "\"mode\":\"MustAttack\"",
+        "\"mode\":\"MustBlock\"",
         "\"mode\":\"MustBeBlocked\"",
         "\"type\":\"ForceBlock\"",
         "\"type\":\"ForceAttack\"",

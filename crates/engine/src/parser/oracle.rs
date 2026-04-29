@@ -7993,6 +7993,55 @@ mod tests {
     }
 
     #[test]
+    fn must_block_if_able_static_does_not_emit_condition_warning() {
+        let oracle = "Defender\nThis creature blocks each combat if able.";
+        let parsed = parse(
+            oracle,
+            "Razorgrass Screen",
+            &[Keyword::Defender],
+            &["Artifact", "Creature"],
+            &["Wall"],
+        );
+
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")),
+            "unexpected condition warning: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(parsed
+            .statics
+            .iter()
+            .any(|static_def| static_def.mode == StaticMode::MustBlock));
+    }
+
+    #[test]
+    fn temporary_comma_grant_must_attack_if_able_does_not_emit_condition_warning() {
+        let oracle = "Damage can't be prevented this turn.\nCreatures you control have double strike, trample, and must attack if able until end of turn.";
+        let parsed = parse(oracle, "Math is for Blockers", &[], &["Sorcery"], &[]);
+
+        assert!(
+            parsed
+                .parse_warnings
+                .iter()
+                .all(|warning| warning.split_whitespace().next() != Some("Swallow:Condition_If")),
+            "unexpected condition warning: {:?}",
+            parsed.parse_warnings
+        );
+        assert!(parsed.abilities.iter().any(|ability| {
+            matches!(
+                &*ability.effect,
+                Effect::GenericEffect { static_abilities, .. }
+                    if static_abilities
+                        .iter()
+                        .any(|static_def| static_def.mode == StaticMode::MustAttack)
+            )
+        }));
+    }
+
+    #[test]
     fn city_blessing_activation_restriction_does_not_emit_condition_warning() {
         let oracle = "Ascend (If you control ten or more permanents, you get the city's blessing for the rest of the game.)\n{T}: Add {C}.\n{5}, {T}: Draw a card. Activate only if you have the city's blessing.";
         let parsed = parse(oracle, "Arch of Orazca", &[], &["Land"], &[]);

@@ -18,7 +18,7 @@ use crate::types::statics::StaticMode;
 
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::target::parse_event_context_ref;
-use super::super::oracle_static::parse_continuous_modifications;
+use super::super::oracle_static::{parse_continuous_modifications, parse_static_line_multi};
 use super::super::oracle_target::{parse_target, parse_type_phrase};
 use super::super::oracle_util::{
     parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
@@ -1025,12 +1025,32 @@ fn build_continuous_clause(
     }
 
     let affected = static_affected_for_application(&application);
-    Some(ParsedEffectClause {
-        effect: Effect::GenericEffect {
-            static_abilities: vec![StaticDefinition::continuous()
+    let static_abilities =
+        if nom_primitives::scan_contains(&predicate_text.to_lowercase(), "if able") {
+            let synthetic_line = format!("Creatures {}.", predicate_text.trim_end_matches('.'));
+            let mut split_defs = parse_static_line_multi(&synthetic_line);
+            if split_defs.len() > 1 {
+                for def in &mut split_defs {
+                    def.affected = Some(affected.clone());
+                    def.description = Some(predicate_text.to_string());
+                }
+                split_defs
+            } else {
+                vec![StaticDefinition::continuous()
+                    .affected(affected)
+                    .modifications(modifications)
+                    .description(predicate_text.to_string())]
+            }
+        } else {
+            vec![StaticDefinition::continuous()
                 .affected(affected)
                 .modifications(modifications)
-                .description(predicate_text.to_string())],
+                .description(predicate_text.to_string())]
+        };
+
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities,
             duration: duration.clone(),
             target: application.target,
         },

@@ -2031,47 +2031,54 @@ fn try_split_and_must_attack_block(text: &str) -> Option<Vec<StaticDefinition>> 
     let lower = text.to_lowercase();
 
     let (before, modes, rest) = nom_primitives::scan_preceded(&lower, |i: &str| {
-        preceded(
-            tag::<_, _, VE>("and "),
-            alt((
-                value(
-                    vec![StaticMode::MustAttack, StaticMode::MustBlock],
-                    alt((
-                        tag::<_, _, VE>("attacks or blocks each combat if able"),
-                        tag("attack or block each combat if able"),
-                    )),
-                ),
-                value(
-                    vec![StaticMode::MustAttack],
-                    alt((
-                        tag::<_, _, VE>("attacks each combat if able"),
-                        tag("attack each combat if able"),
-                        tag("attacks each turn if able"),
-                        tag("attack each turn if able"),
-                        tag("must attack each combat if able"),
-                        tag("must attack if able"),
-                    )),
-                ),
-                value(
-                    vec![StaticMode::MustBlock],
-                    alt((
-                        tag::<_, _, VE>("blocks each combat if able"),
-                        tag("block each combat if able"),
-                        tag("blocks each turn if able"),
-                        tag("block each turn if able"),
-                        tag("must block each combat if able"),
-                        tag("must block if able"),
-                    )),
-                ),
-            )),
-        )
+        let (i, _) = opt(tag::<_, _, VE>("and ")).parse(i)?;
+        alt((
+            value(
+                vec![StaticMode::MustAttack, StaticMode::MustBlock],
+                alt((
+                    tag::<_, _, VE>("attacks or blocks each combat if able"),
+                    tag("attack or block each combat if able"),
+                )),
+            ),
+            value(
+                vec![StaticMode::MustAttack],
+                alt((
+                    tag::<_, _, VE>("attacks each combat if able"),
+                    tag("attack each combat if able"),
+                    tag("attacks each turn if able"),
+                    tag("attack each turn if able"),
+                    tag("must attack each combat if able"),
+                    tag("must attack if able"),
+                )),
+            ),
+            value(
+                vec![StaticMode::MustBlock],
+                alt((
+                    tag::<_, _, VE>("blocks each combat if able"),
+                    tag("block each combat if able"),
+                    tag("blocks each turn if able"),
+                    tag("block each turn if able"),
+                    tag("must block each combat if able"),
+                    tag("must block if able"),
+                )),
+            ),
+            value(
+                vec![StaticMode::MustBeBlocked],
+                alt((
+                    tag::<_, _, VE>("must be blocked each combat if able"),
+                    tag("must be blocked if able"),
+                )),
+            ),
+        ))
         .parse(i)
     })?;
     if !rest.trim().trim_end_matches('.').is_empty() {
         return None;
     }
 
-    let cut_end = before.trim_end().len();
+    let cut_end = before
+        .trim_end_matches(|ch: char| ch == ',' || ch.is_whitespace())
+        .len();
     let line_a = format!("{}.", text[..cut_end].trim_end_matches('.'));
     let mut defs = parse_static_line_multi(&line_a);
     if defs.is_empty() {
@@ -9009,6 +9016,43 @@ mod tests {
         assert_eq!(defs[2].mode, StaticMode::MustBlock);
         assert_eq!(defs[1].affected, defs[0].affected);
         assert_eq!(defs[2].affected, defs[0].affected);
+    }
+
+    #[test]
+    fn static_comma_keyword_grant_and_attack_if_able_emits_both_defs() {
+        let defs = parse_static_line_multi(
+            "Creatures you control have double strike, trample, and must attack if able.",
+        );
+        assert_eq!(defs.len(), 2);
+        assert_eq!(defs[0].mode, StaticMode::Continuous);
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::DoubleStrike,
+            }));
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::Trample,
+            }));
+        assert_eq!(defs[1].mode, StaticMode::MustAttack);
+        assert_eq!(defs[1].affected, defs[0].affected);
+    }
+
+    #[test]
+    fn static_pump_and_must_be_blocked_if_able_emits_both_defs() {
+        let defs =
+            parse_static_line_multi("Enchanted creature gets +3/+3 and must be blocked if able.");
+        assert_eq!(defs.len(), 2);
+        assert_eq!(defs[0].mode, StaticMode::Continuous);
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 3 }));
+        assert!(defs[0]
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 3 }));
+        assert_eq!(defs[1].mode, StaticMode::MustBeBlocked);
+        assert_eq!(defs[1].affected, defs[0].affected);
     }
 
     #[test]
