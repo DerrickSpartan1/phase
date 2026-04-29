@@ -1733,9 +1733,10 @@ fn try_extract_adamant_condition(
 /// syntax differs. Per CR 400.7d, a permanent's ability can reference "what mana
 /// was spent to pay [its casting] costs."
 ///
-/// Accepts runs of one or more identical pure-color symbols (`{W}`, `{U}`,
-/// `{B}`, `{R}`, `{G}`). Hybrid, phyrexian, colorless, snow, generic (`{2}`),
-/// and `{X}` symbols are rejected — they correspond to different rules-level
+/// Accepts runs of one or more pure-color symbols (`{W}`, `{U}`, `{B}`,
+/// `{R}`, `{G}`), including mixed-color runs that require each listed color to
+/// have been spent. Hybrid, phyrexian, colorless, snow, generic (`{2}`), and
+/// `{X}` symbols are rejected — they correspond to different rules-level
 /// conditions and must not be conflated here.
 fn try_extract_symbolic_mana_spent_condition(
     _tp: &TextPair<'_>,
@@ -1768,8 +1769,19 @@ impl SymbolicManaSpentIntro {
         }
     }
 
-    fn condition(self, color: ManaColor, minimum: u32) -> TriggerCondition {
-        let condition = TriggerCondition::ManaColorSpent { color, minimum };
+    fn condition(self, color_counts: Vec<(ManaColor, u32)>) -> TriggerCondition {
+        let condition = match color_counts.as_slice() {
+            [(color, minimum)] => TriggerCondition::ManaColorSpent {
+                color: *color,
+                minimum: *minimum,
+            },
+            _ => TriggerCondition::And {
+                conditions: color_counts
+                    .into_iter()
+                    .map(|(color, minimum)| TriggerCondition::ManaColorSpent { color, minimum })
+                    .collect(),
+            },
+        };
         match self {
             SymbolicManaSpentIntro::If => condition,
             SymbolicManaSpentIntro::Unless => TriggerCondition::Not {
@@ -1799,18 +1811,21 @@ fn try_extract_symbolic_mana_spent_clause(
     {
         return None;
     }
-    let first_color = colors.first().copied()?;
-    if !colors.iter().all(|c| *c == first_color) {
-        return None;
+    let mut color_counts: Vec<(ManaColor, u32)> = Vec::new();
+    for color in colors {
+        if let Some((_, count)) = color_counts.iter_mut().find(|(seen, _)| *seen == color) {
+            *count += 1;
+        } else {
+            color_counts.push((color, 1));
+        }
     }
-    let count = u32::try_from(colors.len()).ok()?;
 
     let clause_start = before.len();
     let clause_len = text.len() - before.len() - tail_rest.len();
 
     Some((
         strip_condition_clause(text, clause_start, clause_len),
-        Some(intro.condition(first_color, count)),
+        Some(intro.condition(color_counts)),
     ))
 }
 
@@ -11102,13 +11117,28 @@ mod tests {
         );
     }
 
-    // Mixed-color runs must be rejected — `{G}{U}` is not a color-count condition,
-    // it's a different semantic (both colors must have been spent). No existing
-    // card uses this shape; we fall through rather than misclassify.
     #[test]
-    fn extract_symbolic_mana_spent_rejects_mixed_colors() {
-        let (_cleaned, cond) = extract_if_condition("do something if {G}{U} was spent to cast it");
-        assert!(cond.is_none(), "mixed-color run should not match");
+    fn extract_symbolic_mana_spent_mixed_colors() {
+        let (cleaned, cond) = extract_if_condition("do something if {G}{U} was spent to cast it");
+        assert_eq!(cleaned, "do something");
+        let TriggerCondition::And { conditions } =
+            cond.expect("mixed color run should produce an And condition")
+        else {
+            panic!("expected And condition");
+        };
+        assert_eq!(
+            conditions,
+            vec![
+                TriggerCondition::ManaColorSpent {
+                    color: crate::types::mana::ManaColor::Green,
+                    minimum: 1,
+                },
+                TriggerCondition::ManaColorSpent {
+                    color: crate::types::mana::ManaColor::Blue,
+                    minimum: 1,
+                },
+            ]
+        );
     }
 
     // Hybrid pips should not match — CR 601.2h tracks the color actually paid,
