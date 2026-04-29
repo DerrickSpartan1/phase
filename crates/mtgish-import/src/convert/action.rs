@@ -2708,6 +2708,11 @@ pub fn convert(a: &Action) -> ConvResult<Effect> {
                 event, actions, expiration,
             )?
         }
+        Action::CreateReplaceWouldPutIntoGraveyardUntil(event, actions, expiration) => {
+            crate::convert::replacement::convert_create_replace_would_put_into_graveyard_until(
+                event, actions, expiration,
+            )?
+        }
 
         // CR 615.1 + CR 514.2: Future ("next time / next N damage") damage
         // prevention replacement. Same primitive as the Until variant but

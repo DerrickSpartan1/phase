@@ -681,6 +681,113 @@ pub fn convert_replace_would_put_into_graveyard(
     Ok(out)
 }
 
+/// CR 614.1a + CR 514.2: Build a resolution-time graveyard redirect rider
+/// from `Action::CreateReplaceWouldPutIntoGraveyardUntil`.
+///
+/// This covers the targeted burn/removal class: "If that creature would die
+/// this turn, exile it instead." The replacement is attached to the selected
+/// target object via `Effect::AddTargetReplacement`, so its internal
+/// `valid_card` is narrowed to `SelfRef` on the carrying object.
+///
+/// Non-targeted "creatures dealt damage this way" variants need a game-level
+/// temporary moved-replacement registry keyed by damage history and remain
+/// strict-failures.
+pub fn convert_create_replace_would_put_into_graveyard_until(
+    event: &ReplacableEventWouldPutIntoGraveyard,
+    actions: &[ReplacementActionWouldPutIntoGraveyard],
+    expiration: &Expiration,
+) -> ConvResult<Effect> {
+    if !matches!(expiration, Expiration::UntilEndOfTurn) {
+        return Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "Effect",
+            needed_variant: format!(
+                "AddTargetReplacement with non-EOT expiration ({})",
+                expiration_tag(expiration)
+            ),
+        });
+    }
+
+    let target = graveyard_event_to_replacement_target(event)?;
+    let mut replacements = convert_replace_would_put_into_graveyard(event, actions)?;
+    if replacements.len() != 1 {
+        return Err(ConversionGap::MalformedIdiom {
+            idiom: "Action::CreateReplaceWouldPutIntoGraveyardUntil",
+            path: String::new(),
+            detail: format!(
+                "expected one replacement action, got {}",
+                replacements.len()
+            ),
+        });
+    }
+
+    let mut replacement = replacements.remove(0);
+    replacement.valid_card = Some(TargetFilter::SelfRef);
+    replacement.expires_at_eot = true;
+
+    Ok(Effect::AddTargetReplacement {
+        replacement: Box::new(replacement),
+        target,
+    })
+}
+
+fn graveyard_event_to_replacement_target(
+    event: &ReplacableEventWouldPutIntoGraveyard,
+) -> ConvResult<TargetFilter> {
+    use ReplacableEventWouldPutIntoGraveyard as E;
+    let perms = match event {
+        E::APermanentWouldDie(perms) | E::APermanentWouldBePutIntoAGraveyard(perms) => perms,
+        other => {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "Effect::AddTargetReplacement",
+                needed_variant: format!(
+                    "graveyard-until event target for {}",
+                    serde_json::to_value(other)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("_ReplacableEventWouldPutIntoGraveyard")
+                                .and_then(|t| t.as_str())
+                                .map(String::from)
+                        })
+                        .unwrap_or_else(|| "<unknown>".to_string())
+                ),
+            });
+        }
+    };
+
+    match &**perms {
+        Permanents::SinglePermanent(perm) => {
+            let target = convert_permanent(perm)?;
+            match target {
+                TargetFilter::Any | TargetFilter::ParentTarget | TargetFilter::TriggeringSource => {
+                    Ok(target)
+                }
+                other => Err(ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "Effect::AddTargetReplacement",
+                    needed_variant: format!("target attachment for {other:?}"),
+                }),
+            }
+        }
+        other => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "Effect::AddTargetReplacement",
+            needed_variant: format!(
+                "non-single graveyard-until filter: {}",
+                permanents_variant_tag(other)
+            ),
+        }),
+    }
+}
+
+fn permanents_variant_tag(permanents: &Permanents) -> String {
+    serde_json::to_value(permanents)
+        .ok()
+        .and_then(|v| {
+            v.get("_Permanents")
+                .and_then(|t| t.as_str())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
 /// CR 614.6: Decompose a `ReplacableEventWouldPutIntoGraveyard` event
 /// into a `valid_card` filter scoping which permanents the replacement
 /// applies to. Only the `APermanentWouldDie(Permanents)` shape is
@@ -2551,5 +2658,30 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn graveyard_until_targeted_death_redirect_lowers_to_target_replacement() {
+        let effect = convert_create_replace_would_put_into_graveyard_until(
+            &ReplacableEventWouldPutIntoGraveyard::APermanentWouldDie(Box::new(
+                Permanents::SinglePermanent(Box::new(Permanent::Ref_TargetPermanent)),
+            )),
+            &[ReplacementActionWouldPutIntoGraveyard::ExileItInstead],
+            &Expiration::UntilEndOfTurn,
+        )
+        .unwrap();
+
+        match effect {
+            Effect::AddTargetReplacement {
+                replacement,
+                target,
+            } => {
+                assert_eq!(target, TargetFilter::Any);
+                assert_eq!(replacement.valid_card, Some(TargetFilter::SelfRef));
+                assert_eq!(replacement.destination_zone, Some(Zone::Graveyard));
+                assert!(replacement.expires_at_eot);
+            }
+            other => panic!("expected AddTargetReplacement, got {other:?}"),
+        }
     }
 }
