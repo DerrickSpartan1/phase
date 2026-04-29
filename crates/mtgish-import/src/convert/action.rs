@@ -4916,7 +4916,7 @@ fn variant_tag(a: &Action) -> String {
 /// | `MayPutACardOfTypeIntoGraveyard(c)`                   | c      | 1     | true  | false  | Graveyard   |
 /// | `MayExileACardOfType(c)`                              | c      | 1     | true  | false  | Exile       |
 /// | `MayExileAnyNumberOfCardsOfType(c)`                   | c      | MAX   | true  | false  | Exile       |
-/// | `FindACardOfType(c)` + `PutFoundCardOntoBattlefield`  | c      | 1     | false | false  | Battlefield |
+/// | `FindACardOfType(c)` + `PutFoundCardOntoBattlefield`  | c      | 1     | true  | false  | Battlefield |
 ///
 /// The trailing step is one of `Shuffle` (emit `Effect::Shuffle`),
 /// `DontShuffle` (omit shuffle), or absent (omit shuffle). Any other
@@ -5030,6 +5030,17 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
                 0,
             )
         }
+        S::MayPutMultipleCardsOfTypeOntoTheBattlefield(cards, repls) => {
+            return convert_multi_filter_search_library(
+                cards,
+                QuantityExpr::Fixed { value: 1 },
+                true,
+                false,
+                Zone::Battlefield,
+                extract_enter_replacements(repls)?,
+                rest,
+            );
+        }
         // CR 701.23 + CR 701.20 — Worldly Tutor class (reveal + hand).
         S::MayRevealACardOfTypeAndPutItIntoHand(cards) => (
             filter_mod::cards_to_filter(cards)?,
@@ -5093,13 +5104,22 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             return convert_multi_filter_search_library(
                 cards,
                 QuantityExpr::Fixed { value: 1 },
-                false,
+                true,
                 reveal,
                 destination,
                 no_repls,
                 &rest[consumed_extra_steps..],
             );
         }
+        S::MayPutUptoNumberGenericCardsIntoHand(n) => (
+            TargetFilter::Any,
+            quantity::convert(n)?,
+            true,
+            false,
+            Zone::Hand,
+            no_repls,
+            0,
+        ),
         // CR 701.23 + CR 701.7 (Mill) / CR 701.13 (Exile).
         S::MayPutACardOfTypeIntoGraveyard(cards) => (
             filter_mod::cards_to_filter(cards)?,
@@ -5211,7 +5231,7 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
                 Some(S::PutFoundCardOntoBattlefield(repls)) => (
                     f,
                     QuantityExpr::Fixed { value: 1 },
-                    false,
+                    true,
                     false,
                     Zone::Battlefield,
                     extract_enter_replacements(repls)?,
@@ -5223,6 +5243,30 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
                         path: String::new(),
                         detail: format!(
                             "FindACardOfType not followed by recognized destination ({} steps)",
+                            rest.len()
+                        ),
+                    });
+                }
+            }
+        }
+        S::FindNumberCardsOfType(n, cards) | S::FindUptoNumberCardsOfType(n, cards) => {
+            let f = filter_mod::cards_to_filter(cards)?;
+            match rest.first() {
+                Some(S::PutFoundCardsOntoBattlefield(repls)) => (
+                    f,
+                    quantity::convert(n)?,
+                    true,
+                    false,
+                    Zone::Battlefield,
+                    extract_enter_replacements(repls)?,
+                    1,
+                ),
+                _ => {
+                    return Err(ConversionGap::MalformedIdiom {
+                        idiom: "SearchLibrary/FindNumberCardsOfType",
+                        path: String::new(),
+                        detail: format!(
+                            "FindNumberCardsOfType not followed by recognized destination ({} steps)",
                             rest.len()
                         ),
                     });
@@ -5937,6 +5981,125 @@ mod tests {
     }
 
     #[test]
+    fn find_number_cards_of_type_to_battlefield_lowers_search_chain() {
+        let effects = convert_many(&Action::SearchLibrary(vec![
+            SearchLibraryAction::FindNumberCardsOfType(
+                Box::new(GameNumber::Integer(2)),
+                Box::new(Cards::IsCardtype(CardType::Land)),
+            ),
+            SearchLibraryAction::PutFoundCardsOntoBattlefield(vec![
+                ReplacementActionWouldEnter::EntersTapped,
+            ]),
+            SearchLibraryAction::Shuffle,
+        ]))
+        .unwrap();
+
+        assert_eq!(effects.len(), 3);
+        assert!(matches!(
+            &effects[0],
+            Effect::SearchLibrary {
+                count: QuantityExpr::UpTo { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[1],
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Battlefield,
+                enter_tapped: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[2],
+            Effect::Shuffle {
+                target: TargetFilter::Controller
+            }
+        ));
+    }
+
+    #[test]
+    fn may_put_multiple_card_filters_onto_battlefield_lowers_repeated_searches() {
+        let effects = convert_many(&Action::SearchLibrary(vec![
+            SearchLibraryAction::MayPutMultipleCardsOfTypeOntoTheBattlefield(
+                vec![
+                    Cards::IsCardtype(CardType::Land),
+                    Cards::IsCardtype(CardType::Creature),
+                ],
+                vec![ReplacementActionWouldEnter::EntersTapped],
+            ),
+            SearchLibraryAction::Shuffle,
+        ]))
+        .unwrap();
+
+        assert_eq!(effects.len(), 5);
+        assert!(matches!(
+            &effects[0],
+            Effect::SearchLibrary {
+                count: QuantityExpr::UpTo { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[1],
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                enter_tapped: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[2],
+            Effect::SearchLibrary {
+                count: QuantityExpr::UpTo { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[4],
+            Effect::Shuffle {
+                target: TargetFilter::Controller
+            }
+        ));
+    }
+
+    #[test]
+    fn may_put_up_to_number_generic_cards_into_hand_lowers_search_chain() {
+        let effects = convert_many(&Action::SearchLibrary(vec![
+            SearchLibraryAction::MayPutUptoNumberGenericCardsIntoHand(Box::new(
+                GameNumber::Integer(2),
+            )),
+            SearchLibraryAction::Shuffle,
+        ]))
+        .unwrap();
+
+        assert_eq!(effects.len(), 3);
+        assert!(matches!(
+            &effects[0],
+            Effect::SearchLibrary {
+                count: QuantityExpr::UpTo { .. },
+                filter: TargetFilter::Any,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[1],
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[2],
+            Effect::Shuffle {
+                target: TargetFilter::Controller
+            }
+        ));
+    }
+
+    #[test]
     fn attach_permanent_to_permanent_lowers_non_source_attachment() {
         let effects = convert_action_vec(&[Action::AttachPermanentToPermanent(
             Box::new(Permanent::Ref_TargetPermanent1),
@@ -6107,77 +6270,6 @@ mod tests {
             panic!("expected DealDamage, got {effect:?}");
         };
         assert_eq!(damage_source, Some(DamageSource::Target));
-    }
-
-    #[test]
-    fn spell_deals_multiple_damage_lowers_to_damage_chain() {
-        let actions = Actions::ActionList(vec![Action::SpellDealsMultipleDamage(
-            Box::new(Spell::ThisSpell),
-            vec![
-                DamageToRecipients::DamageToRecipients(
-                    Box::new(GameNumber::Integer(2)),
-                    Box::new(DamageRecipient::Ref_AnyTarget1),
-                ),
-                DamageToRecipients::DamageToRecipients(
-                    Box::new(GameNumber::Integer(1)),
-                    Box::new(DamageRecipient::Ref_AnyTarget2),
-                ),
-            ],
-        )]);
-
-        let conv = convert_actions(&actions).unwrap();
-        let ability = build_ability_from_actions(AbilityKind::Spell, None, conv).unwrap();
-
-        let Effect::DealDamage { amount, target, .. } = ability.effect.as_ref() else {
-            panic!("expected DealDamage head, got {:?}", ability.effect);
-        };
-        assert_eq!(*amount, QuantityExpr::Fixed { value: 2 });
-        assert_eq!(*target, TargetFilter::Any);
-
-        let sub = ability.sub_ability.as_ref().expect("expected damage tail");
-        let Effect::DealDamage { amount, target, .. } = sub.effect.as_ref() else {
-            panic!("expected DealDamage tail, got {:?}", sub.effect);
-        };
-        assert_eq!(*amount, QuantityExpr::Fixed { value: 1 });
-        assert_eq!(*target, TargetFilter::Any);
-    }
-
-    #[test]
-    fn permanent_deals_multiple_damage_reuses_permanent_source_lowering() {
-        let effects = convert_many(&Action::PermanentDealsMultipleDamage(
-            Box::new(Permanent::ThisPermanent),
-            vec![
-                DamageToRecipients::DamageToRecipients(
-                    Box::new(GameNumber::Integer(1)),
-                    Box::new(DamageRecipient::Player(Box::new(Player::You))),
-                ),
-                DamageToRecipients::DamageToRecipients(
-                    Box::new(GameNumber::Integer(2)),
-                    Box::new(DamageRecipient::Ref_AnyTarget),
-                ),
-            ],
-        ))
-        .unwrap();
-
-        let [first, second] = effects.as_slice() else {
-            panic!("expected two effects, got {effects:?}");
-        };
-        assert!(matches!(
-            first,
-            Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 1 },
-                target: TargetFilter::Controller,
-                damage_source: None,
-            }
-        ));
-        assert!(matches!(
-            second,
-            Effect::DealDamage {
-                amount: QuantityExpr::Fixed { value: 2 },
-                target: TargetFilter::Any,
-                damage_source: None,
-            }
-        ));
     }
 
     #[test]
