@@ -38,10 +38,10 @@ use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, ConjureCard, ContinuousModification, ControllerRef, DamageSource,
-    DelayedTriggerCondition, Duration, Effect, FilterProp, GameRestriction, MultiTargetSpec,
-    PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef, RestrictionExpiry,
-    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, TargetFilter,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
+    DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer, GameRestriction,
+    MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
+    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{DistributionUnit, NextSpellModifier, RetargetScope};
@@ -3222,6 +3222,13 @@ fn thread_for_each_subject(effect: Effect, original: &str) -> Effect {
             count,
             target,
             destination,
+        },
+        Effect::GainLife {
+            amount,
+            player: GainLifePlayer::Controller,
+        } if is_targeted && matches!(target, TargetFilter::Player) => Effect::GainLife {
+            amount,
+            player: GainLifePlayer::TargetPlayer,
         },
         other => other,
     }
@@ -17346,6 +17353,25 @@ mod tests {
                     },
                 },
                 player: GainLifePlayer::Controller,
+            },
+        );
+    }
+
+    #[test]
+    fn effect_target_player_gains_life_for_each_creature_on_the_battlefield() {
+        let e = parse_effect("target player gains 2 life for each creature on the battlefield");
+        assert_eq!(
+            e,
+            Effect::GainLife {
+                amount: QuantityExpr::Multiply {
+                    factor: 2,
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter::creature()),
+                        },
+                    }),
+                },
+                player: GainLifePlayer::TargetPlayer,
             },
         );
     }

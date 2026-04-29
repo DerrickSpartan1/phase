@@ -287,6 +287,17 @@ pub(super) fn parse_numeric_imperative_ast(
             value((), alt((tag("you gain "), tag("gain ")))).parse(input)
         })
         .map(|(_, rest)| rest)
+        .or_else(|| {
+            nom_on_lower(text, lower, |input| {
+                let (rest, _) = (
+                    take_until::<_, _, VerboseError<&str>>(" gains "),
+                    tag(" gains "),
+                )
+                    .parse(input)?;
+                Ok((rest, ()))
+            })
+            .map(|(_, rest)| rest)
+        })
         .unwrap_or("");
         if !after_gain.is_empty() {
             // CR 603.7c + CR 119.1: "gain that much life" / "gain that many life" —
