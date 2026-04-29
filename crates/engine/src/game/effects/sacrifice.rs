@@ -48,6 +48,11 @@ fn resolve_sacrifice_scope(
             })
             .map(|pid| vec![pid])
             .unwrap_or_default(),
+        Some(ControllerRef::DefendingPlayer) => {
+            crate::game::combat::defending_player_for_attacker(state, ability.source_id)
+                .map(|pid| vec![pid])
+                .unwrap_or_default()
+        }
     }
 }
 

@@ -373,6 +373,12 @@ fn filter_inner_for_object(
                             _ => return false,
                         }
                     }
+                    ControllerRef::DefendingPlayer => {
+                        match crate::game::combat::defending_player_for_attacker(state, source_id) {
+                            Some(pid) if pid == obj.controller => {}
+                            _ => return false,
+                        }
+                    }
                 }
             }
             // All properties must match
@@ -838,6 +844,7 @@ pub fn spell_record_matches_filter(
                     // target). Fail closed — this combination should not be
                     // produced by the parser.
                     ControllerRef::TargetPlayer => return false,
+                    ControllerRef::DefendingPlayer => return false,
                 }
             }
 
@@ -966,6 +973,7 @@ fn spell_object_matches_filter_inner(
                     // CR 109.4: Target-player scope is undefined for spell-cast
                     // history (no ability context). Fail closed.
                     ControllerRef::TargetPlayer => return false,
+                    ControllerRef::DefendingPlayer => return false,
                     _ => {}
                 }
             }
@@ -1356,6 +1364,9 @@ fn matches_filter_prop(
                         TargetRef::Object(_) => None,
                     })
                 }),
+                ControllerRef::DefendingPlayer => {
+                    crate::game::combat::defending_player_for_attacker(state, source.id)
+                }
             });
             state.objects.values().any(|perm| {
                 if perm.zone != crate::types::zones::Zone::Battlefield {
@@ -1367,6 +1378,7 @@ fn matches_filter_prop(
                         source.controller.is_some() && Some(perm.controller) != source.controller
                     }
                     (Some(ControllerRef::TargetPlayer), Some(pid)) => perm.controller == pid,
+                    (Some(ControllerRef::DefendingPlayer), Some(pid)) => perm.controller == pid,
                     (Some(_), None) => false,
                     (None, _) => true,
                 };
@@ -1390,6 +1402,10 @@ fn matches_filter_prop(
                     })
                 })
                 .is_some_and(|pid| pid == obj.owner),
+            ControllerRef::DefendingPlayer => {
+                crate::game::combat::defending_player_for_attacker(state, source.id)
+                    .is_some_and(|pid| pid == obj.owner)
+            }
         },
         // CR 303.4: `EnchantedBy` is source-relative when the source is an Aura
         // ("enchanted creature gets +1/+1" on Gift of Estates). When the source is
@@ -1492,6 +1508,10 @@ fn matches_filter_prop(
                         })
                     })
                     .is_some_and(|pid| pid == att.controller),
+                Some(ControllerRef::DefendingPlayer) => {
+                    crate::game::combat::defending_player_for_attacker(state, source.id)
+                        .is_some_and(|pid| pid == att.controller)
+                }
             }
         }),
         // CR 303.4 + CR 301.5: Disjunctive attachment predicate — matches when the
@@ -1529,6 +1549,10 @@ fn matches_filter_prop(
                             })
                         })
                         .is_some_and(|pid| pid == att.controller),
+                    Some(ControllerRef::DefendingPlayer) => {
+                        crate::game::combat::defending_player_for_attacker(state, source.id)
+                            .is_some_and(|pid| pid == att.controller)
+                    }
                 }
             })
         }
@@ -1802,6 +1826,10 @@ fn zone_change_record_matches_property(
                     })
                 })
                 .is_some_and(|pid| pid == record.owner),
+            ControllerRef::DefendingPlayer => {
+                crate::game::combat::defending_player_for_attacker(state, source.id)
+                    .is_some_and(|pid| pid == record.owner)
+            }
         },
         // CR 701.12: Source's chosen creature type applied to the snapshot subtypes.
         FilterProp::IsChosenCreatureType => source.chosen_creature_type.is_some_and(|chosen| {
@@ -2079,6 +2107,7 @@ pub fn player_matches_target_filter(
             // a filter without ability context. Fail closed (mirrors the pattern
             // established at filter.rs:526–569 for spell-record filters).
             Some(ControllerRef::TargetPlayer) => false,
+            Some(ControllerRef::DefendingPlayer) => false,
             None => true,
         },
         // Typed filters with type_filters don't match players

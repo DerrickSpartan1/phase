@@ -27,7 +27,7 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use super::ordering::{lookup_ordering, OrderingClass};
+use super::ordering::{lookup_ordering, lookup_ordering_by_field, OrderingClass};
 
 /// Classification of a single divergence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -148,8 +148,9 @@ fn walk_array(
     // Last `.<field>` segment of the path is the field name; pair it
     // with the carrier hint to look up ordering class.
     let field_name = path.rsplit('.').next().unwrap_or("");
-    let class =
-        lookup_ordering(carrier_hint, field_name).unwrap_or(OrderingClass::OrderSignificant);
+    let class = lookup_ordering(carrier_hint, field_name)
+        .or_else(|| lookup_ordering_by_field(field_name))
+        .unwrap_or(OrderingClass::OrderSignificant);
 
     match class {
         OrderingClass::OrderSignificant | OrderingClass::ConditionallySignificant => {
@@ -271,6 +272,20 @@ mod tests {
         assert!(
             divs.is_empty(),
             "set-equivalent reorder should produce no divergences, got {divs:?}"
+        );
+    }
+
+    #[test]
+    fn struct_field_set_equivalent_array_reorder_is_clean() {
+        // AbilityDefinition is a plain struct in JSON, so there is no
+        // discriminant-derived carrier hint. The field-only manifest fallback
+        // should still recognize independent restrictions as a set.
+        let n = json!({"activation_restrictions": [{"type": "A"}, {"type": "B"}]});
+        let m = json!({"activation_restrictions": [{"type": "B"}, {"type": "A"}]});
+        let divs = classify_value(&n, &m);
+        assert!(
+            divs.is_empty(),
+            "struct-field set-equivalent reorder should produce no divergences, got {divs:?}"
         );
     }
 

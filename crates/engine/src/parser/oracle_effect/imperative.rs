@@ -1985,6 +1985,13 @@ pub(super) fn parse_utility_imperative_ast(
             return Some(UtilityImperativeAst::SwitchPT { target });
         }
     }
+    if let Some(((attachment, target), rem)) = nom_on_lower(text, lower, |input| {
+        preceded(tag("attach "), parse_attach_anaphor_to_token).parse(input)
+    }) {
+        if rem.trim().is_empty() {
+            return Some(UtilityImperativeAst::Attach { attachment, target });
+        }
+    }
     if let Some((_, rest)) =
         nom_on_lower(text, lower, |input| value((), tag("attach ")).parse(input))
     {
@@ -1993,9 +2000,43 @@ pub(super) fn parse_utility_imperative_ast(
         let (target, _rem) = parse_target(after_to);
         #[cfg(debug_assertions)]
         super::types::assert_no_compound_remainder(_rem, text);
-        return Some(UtilityImperativeAst::Attach { target });
+        return Some(UtilityImperativeAst::Attach {
+            attachment: TargetFilter::SelfRef,
+            target,
+        });
     }
     None
+}
+
+fn parse_attach_anaphor_to_token(
+    input: &str,
+) -> nom::IResult<&str, (TargetFilter, TargetFilter), VerboseError<&str>> {
+    let (input, attachment) = alt((
+        value(
+            TargetFilter::TriggeringSource,
+            alt((
+                tag("it"),
+                tag("that aura"),
+                tag("that enchantment"),
+                tag("that equipment"),
+                tag("that permanent"),
+            )),
+        ),
+        value(TargetFilter::SelfRef, tag("~")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" to ").parse(input)?;
+    let (input, target) = value(
+        TargetFilter::LastCreated,
+        alt((
+            tag("the token created this way"),
+            tag("that token created this way"),
+            tag("the token"),
+            tag("that token"),
+        )),
+    )
+    .parse(input)?;
+    Ok((input, (attachment, target)))
 }
 
 pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect {
@@ -2012,10 +2053,9 @@ pub(super) fn lower_utility_imperative_ast(ast: UtilityImperativeAst) -> Effect 
         }
         UtilityImperativeAst::Copy { target } => Effect::CopySpell { target },
         UtilityImperativeAst::Transform { target } => Effect::Transform { target },
-        UtilityImperativeAst::Attach { target } => Effect::Attach {
-            attachment: TargetFilter::SelfRef,
-            target,
-        },
+        UtilityImperativeAst::Attach { attachment, target } => {
+            Effect::Attach { attachment, target }
+        }
         // CR 613.4d: Switch power and toughness.
         UtilityImperativeAst::SwitchPT { target } => Effect::SwitchPT { target },
     }
@@ -4974,6 +5014,17 @@ mod tests {
                 "{input}: target SelfRef, got {target:?}"
             );
         }
+    }
+
+    #[test]
+    fn parse_attach_triggering_object_to_last_created_token() {
+        let input = "attach it to the token";
+        let result = parse_utility_imperative_ast(input, input);
+        let Some(UtilityImperativeAst::Attach { attachment, target }) = result else {
+            panic!("{input}: expected Attach, got {result:?}");
+        };
+        assert_eq!(attachment, TargetFilter::TriggeringSource);
+        assert_eq!(target, TargetFilter::LastCreated);
     }
 
     #[test]

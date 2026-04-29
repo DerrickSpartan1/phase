@@ -261,6 +261,7 @@ fn static_affects_player(
             // CR 109.4: TargetPlayer has no meaning for static-ability scoping
             // against a player. Fail closed.
             Some(ControllerRef::TargetPlayer) => false,
+            Some(ControllerRef::DefendingPlayer) => false,
             None => true,
         },
         Some(TargetFilter::Player) => true,

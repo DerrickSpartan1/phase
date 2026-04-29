@@ -300,6 +300,25 @@ pub fn lookup_ordering(carrier: &str, field: &str) -> Option<OrderingClass> {
         .map(|(_, class)| *class)
 }
 
+/// Look up an ordering class by field name only when every manifest entry
+/// for that field agrees. This is a conservative fallback for JSON structs
+/// that do not carry a serde `type` discriminator, such as top-level
+/// `CardFace` and nested `AbilityDefinition` objects.
+pub fn lookup_ordering_by_field(field: &str) -> Option<OrderingClass> {
+    let mut class = None;
+    for ((_, candidate_field), candidate_class) in ORDERING_MANIFEST {
+        if *candidate_field != field {
+            continue;
+        }
+        match class {
+            None => class = Some(*candidate_class),
+            Some(existing) if existing == *candidate_class => {}
+            Some(_) => return None,
+        }
+    }
+    class
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,6 +338,15 @@ mod tests {
     #[test]
     fn lookup_unknown_returns_none() {
         assert_eq!(lookup_ordering("NoSuchType", "no_field"), None);
+    }
+
+    #[test]
+    fn lookup_by_field_only_requires_unambiguous_class() {
+        assert_eq!(
+            lookup_ordering_by_field("activation_restrictions"),
+            Some(OrderingClass::SetEquivalent)
+        );
+        assert_eq!(lookup_ordering_by_field("options"), None);
     }
 
     #[test]

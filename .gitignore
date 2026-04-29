@@ -90,6 +90,7 @@ replay_dtypes.py
 # Scratch planning files
 parser-batch-plan.md
 parser-fallback-plan.md
+tmp/
 
 # External reference / scratch
 mtgish/

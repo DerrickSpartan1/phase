@@ -15,8 +15,8 @@ use crate::convert::quantity::convert as convert_quantity;
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::schema::types::{
     ArtifactType, CardType, CardtypeVariable, CheckHasable, Color, Comparison, CounterType,
-    CreatureType, CreatureTypeVariable, EnchantmentType, GameNumber, LandType, NameFilter,
-    Permanent, Permanents, PlaneswalkerType, Player, Players, SuperType,
+    CreatureType, CreatureTypeVariable, EnchantmentType, LandType, NameFilter, Permanent,
+    Permanents, PlaneswalkerType, Player, Players, SuperType,
 };
 
 /// Translate a `Permanents` filter to an engine `TargetFilter`. Returns
@@ -129,13 +129,14 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
             }
         },
 
-        // CR 109.4: Owner-scoped filter. We model owner as the controller
-        // axis since for permanents owner == controller in the absence of
-        // GainControl effects; engine `TargetFilter` does not yet have a
-        // distinct owner axis.
+        // CR 109.4: Owner-scoped filter. The engine models owner as a
+        // distinct filter property; do not collapse it to controller,
+        // because control-changing effects make those axes diverge.
         Permanents::OwnedByAPlayer(players) => {
             let ctrl = players_to_controller(players)?;
-            TargetFilter::Typed(TypedFilter::permanent().controller(ctrl))
+            TargetFilter::Typed(
+                TypedFilter::permanent().properties(vec![FilterProp::Owned { controller: ctrl }]),
+            )
         }
 
         Permanents::ControlledByAPlayer(players) => {
@@ -862,7 +863,9 @@ pub(crate) fn spells_to_filter(s: &crate::schema::types::Spells) -> ConvResult<T
         }
         S::OwnedByAPlayer(players) => {
             let ctrl = players_to_controller(players)?;
-            TargetFilter::Typed(TypedFilter::default().controller(ctrl))
+            TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::Owned { controller: ctrl }]),
+            )
         }
 
         // CR 115.9c: "spell that targets only ~" — the inner Permanent /
@@ -1254,7 +1257,9 @@ pub(crate) fn cards_to_filter(c: &crate::schema::types::Cards) -> ConvResult<Tar
         // mtgish's Players enum maps consistently across Permanents and Cards.
         C::OwnedByAPlayer(players) => {
             let ctrl = players_to_controller(players)?;
-            TargetFilter::Typed(TypedFilter::default().controller(ctrl))
+            TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::Owned { controller: ctrl }]),
+            )
         }
         C::ControlledByAPlayer(players) => {
             let ctrl = players_to_controller(players)?;
@@ -1753,6 +1758,61 @@ fn name_filter_to_filter(nf: &NameFilter) -> ConvResult<TargetFilter> {
     })
 }
 
-// `GameNumber` import retained in case we extend the comparison helpers.
-#[allow(dead_code)]
-fn _gamenumber_marker(_g: &GameNumber) {}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn owned_by_you(prop: &FilterProp) -> bool {
+        matches!(
+            prop,
+            FilterProp::Owned {
+                controller: ControllerRef::You
+            }
+        )
+    }
+
+    fn assert_owned_by_you(filter: TargetFilter) {
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed filter, got {filter:?}");
+        };
+        assert!(
+            tf.properties.iter().any(owned_by_you),
+            "expected Owned {{ controller: You }} property, got {:?}",
+            tf.properties
+        );
+        assert_eq!(
+            tf.controller, None,
+            "owner-scoped filters must not collapse to controller"
+        );
+    }
+
+    #[test]
+    fn permanent_owned_by_player_uses_owner_axis() {
+        assert_owned_by_you(
+            convert(&Permanents::OwnedByAPlayer(Box::new(
+                Players::SinglePlayer(Box::new(Player::You)),
+            )))
+            .expect("convert owner-scoped permanent filter"),
+        );
+    }
+
+    #[test]
+    fn spell_owned_by_player_uses_owner_axis() {
+        assert_owned_by_you(
+            spells_to_filter(&crate::schema::types::Spells::OwnedByAPlayer(Box::new(
+                Players::SinglePlayer(Box::new(Player::You)),
+            )))
+            .expect("convert owner-scoped spell filter"),
+        );
+    }
+
+    #[test]
+    fn card_owned_by_player_uses_owner_axis() {
+        assert_owned_by_you(
+            cards_to_filter(&crate::schema::types::Cards::OwnedByAPlayer(Box::new(
+                Players::SinglePlayer(Box::new(Player::You)),
+            )))
+            .expect("convert owner-scoped card filter"),
+        );
+    }
+}

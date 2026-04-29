@@ -415,6 +415,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 ControllerRef::You => "you",
                 ControllerRef::Opponent => "opponent",
                 ControllerRef::TargetPlayer => "target player",
+                ControllerRef::DefendingPlayer => "defending player",
             };
             parts.push(label.into());
         } else {
@@ -477,6 +478,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
         ControllerRef::You => "you control",
         ControllerRef::Opponent => "opponent controls",
         ControllerRef::TargetPlayer => "target player controls",
+        ControllerRef::DefendingPlayer => "defending player controls",
     }
     .into()
 }
@@ -645,10 +647,13 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
             };
             format!("{func} {prop} of {}", fmt_target(filter))
         }
-        QuantityRef::Devotion { colors } => {
-            let c: Vec<_> = colors.iter().map(fmt_mana_color_full).collect();
-            format!("devotion to {}", c.join("/"))
-        }
+        QuantityRef::Devotion { colors } => match colors {
+            crate::types::ability::DevotionColors::Fixed(colors) => {
+                let c: Vec<_> = colors.iter().map(fmt_mana_color_full).collect();
+                format!("devotion to {}", c.join("/"))
+            }
+            crate::types::ability::DevotionColors::ChosenColor => "devotion to chosen color".into(),
+        },
         QuantityRef::DistinctCardTypesInZone { zone, scope } => {
             format!(
                 "card types in {} {}",

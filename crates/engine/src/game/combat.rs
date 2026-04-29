@@ -1733,6 +1733,16 @@ pub fn first_defending_player_in_turn_order(state: &GameState) -> Option<PlayerI
     defending_players_in_turn_order(state).into_iter().next()
 }
 
+pub fn defending_player_for_attacker(state: &GameState, attacker: ObjectId) -> Option<PlayerId> {
+    state.combat.as_ref()?.attackers.iter().find_map(|info| {
+        if info.object_id == attacker {
+            Some(info.defending_player)
+        } else {
+            None
+        }
+    })
+}
+
 /// Return the next defending player who still needs to declare blockers.
 pub fn next_defending_player_to_declare_blockers(state: &GameState) -> Option<PlayerId> {
     let declared: HashSet<PlayerId> = state

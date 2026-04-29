@@ -14,7 +14,10 @@
 //! require recursing through `Vec<Rule>` for the granted abilities, which is a
 //! larger sub-system change.
 
-use engine::types::ability::{Effect, PtValue, QuantityExpr, StaticDefinition};
+use engine::types::ability::{
+    ContinuousModification, Effect, PtValue, QuantityExpr, StaticDefinition,
+};
+use engine::types::card_type::CoreType;
 use engine::types::keywords::Keyword;
 use engine::types::mana::ManaColor;
 use engine::types::TargetFilter;
@@ -24,8 +27,9 @@ use crate::convert::keyword as keyword_convert;
 use crate::convert::quantity;
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::schema::types::{
-    Color, ColorList, CreatableToken, CreatureTokenSubtypes, CreatureTokenType, GameNumber,
-    PTXValue, Rule, TokenCopyEffects, PT,
+    CardType, Color, ColorList, CreatableToken, CreatureTokenSubtypes, CreatureTokenType,
+    GameNumber, PTXValue, Permanents, Rule, SettableColor, SimpleColor, SubType, SuperType,
+    TokenCopyEffect, TokenCopyEffects, PT,
 };
 
 /// Convert a single `CreatableToken` into an `Effect::Token`.
@@ -111,25 +115,97 @@ pub fn convert(t: &CreatableToken) -> ConvResult<Effect> {
             )?
         }
 
+        // CR 111.1 + CR 205.3g: Generic artifact tokens with arbitrary
+        // artifact subtypes and printed keyword/static rules. Equipment
+        // tokens, Vehicle tokens, and named artifact tokens all reuse the
+        // same `Effect::Token` building block.
+        CreatableToken::ArtifactToken(name, supertypes, subtypes, colors, rules) => {
+            let (keywords, statics) = absorb_token_rules(rules)?;
+            build_artifact_token(
+                Some(name.as_str()),
+                supertypes,
+                subtypes,
+                colors,
+                keywords,
+                statics,
+                None,
+            )?
+        }
+        CreatableToken::ArtifactTokenWithNoRules(name, supertypes, subtypes, colors) => {
+            build_artifact_token(
+                Some(name.as_str()),
+                supertypes,
+                subtypes,
+                colors,
+                Vec::new(),
+                Vec::new(),
+                None,
+            )?
+        }
+        CreatableToken::NamedArtifactVehicleToken(
+            name,
+            supertypes,
+            subtypes,
+            colors,
+            rules,
+            pt,
+        ) => {
+            let (keywords, statics) = absorb_token_rules(rules)?;
+            build_artifact_token(
+                Some(name.as_str()),
+                supertypes,
+                subtypes,
+                colors,
+                keywords,
+                statics,
+                Some(pt),
+            )?
+        }
+        CreatableToken::ArtifactVehicleToken(supertypes, subtypes, colors, rules, pt) => {
+            let (keywords, statics) = absorb_token_rules(rules)?;
+            build_artifact_token(
+                None,
+                supertypes,
+                subtypes,
+                colors,
+                keywords,
+                statics,
+                Some(pt),
+            )?
+        }
+
+        // CR 111.1 + CR 303.4: Generic enchantment tokens, usually Aura
+        // tokens created attached to another permanent by a surrounding
+        // `TokenFlag`. Printed keyword/static rules fit the same token-spec
+        // slots used by creature/artifact tokens.
+        CreatableToken::EnchantmentToken(name, supertypes, subtypes, colors, rules) => {
+            let (keywords, statics) = absorb_token_rules(rules)?;
+            build_enchantment_token(
+                Some(name.as_str()),
+                supertypes,
+                subtypes,
+                colors,
+                keywords,
+                statics,
+            )?
+        }
+
         // CR 707.2 / CR 707.5: "Create a token that's a copy of <permanent>".
         // The engine's `Effect::CopyTokenOf` carries the target filter,
         // count, and post-copy modifications. mtgish's `TokenCopyEffects` is
         // a list of "and the copy has X" / "and the copy is named Y" /
-        // "the copy gains <ability>" overrides — only the empty form
-        // (`NoTokenCopyEffects`) maps cleanly today; any non-empty list
-        // requires translating the inner overrides to
-        // `ContinuousModification` (and ability-additions to a slot
-        // `CopyTokenOf` does not yet have), so we strict-fail with an
-        // explicit gap when present.
+        // "the copy gains <ability>" overrides. `convert_copy_effects`
+        // accepts only the subset the engine can stamp onto copy tokens
+        // today: keyword grants plus type/name/color/P/T exceptions.
         CreatableToken::TokenCopyOfPermanent(perm, copy_effects) => {
-            require_no_copy_effects(copy_effects)?;
+            let (extra_keywords, additional_modifications) = convert_copy_effects(copy_effects)?;
             Effect::CopyTokenOf {
                 target: filter::convert_permanent(perm)?,
                 enters_attacking: false,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
-                extra_keywords: Vec::new(),
-                additional_modifications: Vec::new(),
+                extra_keywords,
+                additional_modifications,
             }
         }
         // CR 707.2 + CR 115.1: "Create a token that's a copy of target
@@ -137,14 +213,33 @@ pub fn convert(t: &CreatableToken) -> ConvResult<Effect> {
         // the `Permanents` (set) selector rather than a specific
         // permanent-context reference.
         CreatableToken::TokenCopyOfAPermanent(perms, copy_effects) => {
-            require_no_copy_effects(copy_effects)?;
+            let (extra_keywords, additional_modifications) = convert_copy_effects(copy_effects)?;
             Effect::CopyTokenOf {
                 target: filter::convert(perms)?,
                 enters_attacking: false,
                 tapped: false,
                 count: QuantityExpr::Fixed { value: 1 },
-                extra_keywords: Vec::new(),
-                additional_modifications: Vec::new(),
+                extra_keywords,
+                additional_modifications,
+            }
+        }
+        // CR 707.10 + CR 115.1d: "create a token copy of each of those
+        // permanents" is executable by the current resolver only when the
+        // source list is the outer selected object-target list (Twinflame
+        // class). Board-filter enumeration ("each creature target player
+        // controls") needs a resolver-side source query and remains an engine
+        // prerequisite.
+        CreatableToken::TokenCopyOfEachPermanent(perms, copy_effects)
+            if is_outer_permanent_target_ref(perms) =>
+        {
+            let (extra_keywords, additional_modifications) = convert_copy_effects(copy_effects)?;
+            Effect::CopyTokenOf {
+                target: TargetFilter::Any,
+                enters_attacking: false,
+                tapped: false,
+                count: QuantityExpr::Fixed { value: 1 },
+                extra_keywords,
+                additional_modifications,
             }
         }
 
@@ -272,6 +367,103 @@ fn predefined_artifact_token(name: &str) -> Effect {
     }
 }
 
+fn build_artifact_token(
+    name: Option<&str>,
+    supertypes: &[SuperType],
+    subtypes: &[SubType],
+    colors: &ColorList,
+    keywords: Vec<Keyword>,
+    static_abilities: Vec<StaticDefinition>,
+    pt: Option<&PT>,
+) -> ConvResult<Effect> {
+    let types = artifact_token_types(subtypes);
+    let resolved_name = name
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| subtypes.last().map(subtype_name))
+        .unwrap_or_else(|| "Artifact".to_string());
+    let (power, toughness) = match pt {
+        Some(pt) => pt_to_values(pt)?,
+        None => (PtValue::Fixed(0), PtValue::Fixed(0)),
+    };
+
+    Ok(Effect::Token {
+        name: resolved_name,
+        power,
+        toughness,
+        types,
+        colors: color_list_to_colors(colors)?,
+        keywords,
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        owner: TargetFilter::Controller,
+        attach_to: None,
+        enters_attacking: false,
+        supertypes: supertypes.iter().map(supertype_to_engine).collect(),
+        static_abilities,
+        enter_with_counters: Vec::new(),
+    })
+}
+
+fn build_enchantment_token(
+    name: Option<&str>,
+    supertypes: &[SuperType],
+    subtypes: &[SubType],
+    colors: &ColorList,
+    keywords: Vec<Keyword>,
+    static_abilities: Vec<StaticDefinition>,
+) -> ConvResult<Effect> {
+    let types = typed_token_types("Enchantment", subtypes);
+    let resolved_name = name
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .or_else(|| subtypes.last().map(subtype_name))
+        .unwrap_or_else(|| "Enchantment".to_string());
+
+    Ok(Effect::Token {
+        name: resolved_name,
+        power: PtValue::Fixed(0),
+        toughness: PtValue::Fixed(0),
+        types,
+        colors: color_list_to_colors(colors)?,
+        keywords,
+        tapped: false,
+        count: QuantityExpr::Fixed { value: 1 },
+        owner: TargetFilter::Controller,
+        attach_to: None,
+        enters_attacking: false,
+        supertypes: supertypes.iter().map(supertype_to_engine).collect(),
+        static_abilities,
+        enter_with_counters: Vec::new(),
+    })
+}
+
+fn artifact_token_types(subtypes: &[SubType]) -> Vec<String> {
+    typed_token_types("Artifact", subtypes)
+}
+
+fn typed_token_types(core_type: &str, subtypes: &[SubType]) -> Vec<String> {
+    let mut types = vec![core_type.to_string()];
+    for subtype in subtypes {
+        push_unique(&mut types, subtype_name(subtype));
+    }
+    types
+}
+
+fn subtype_name(subtype: &SubType) -> String {
+    format!("{subtype:?}")
+}
+
+fn supertype_to_engine(st: &SuperType) -> engine::types::card_type::Supertype {
+    match st {
+        SuperType::Basic => engine::types::card_type::Supertype::Basic,
+        SuperType::Legendary => engine::types::card_type::Supertype::Legendary,
+        SuperType::Ongoing => engine::types::card_type::Supertype::Ongoing,
+        SuperType::Snow => engine::types::card_type::Supertype::Snow,
+        SuperType::World => engine::types::card_type::Supertype::World,
+    }
+}
+
 /// CR 303.7: Build a Role token (Enchantment -- Aura Role). Mirrors the
 /// native parser's `known_role_token_identity` shape (`["Enchantment",
 /// "Aura", "Role"]` types, no power/toughness, no colors). Granted
@@ -348,20 +540,159 @@ fn variant_tag_rule(rule: &Rule) -> Option<String> {
         .and_then(|v| v.get("_Rule").and_then(|t| t.as_str()).map(String::from))
 }
 
-/// CR 707.2: Token-copy override list. Only the empty form is a clean
-/// reuse of the engine's `Effect::CopyTokenOf` — every non-empty list
-/// requires translating per-override semantics (set name, set P/T, add
-/// abilities, etc.) into the engine's `extra_keywords` /
-/// `additional_modifications` slots, which don't yet cover ability-grants
-/// or `SetName`. Strict-fail until that translation lands.
-fn require_no_copy_effects(effects: &TokenCopyEffects) -> ConvResult<()> {
-    match effects {
-        TokenCopyEffects::NoTokenCopyEffects => Ok(()),
-        TokenCopyEffects::TokenCopyEffects(list) if list.is_empty() => Ok(()),
-        TokenCopyEffects::TokenCopyEffects(_) => Err(ConversionGap::EnginePrerequisiteMissing {
-            engine_type: "Effect::CopyTokenOf",
-            needed_variant: "token-copy-overrides".into(),
+fn is_outer_permanent_target_ref(perms: &Permanents) -> bool {
+    matches!(
+        perms,
+        Permanents::Ref_TargetPermanents
+            | Permanents::Ref_TargetPermanents1
+            | Permanents::Ref_TargetPermanents2
+    )
+}
+
+/// CR 707.2 + CR 707.9: Lower token-copy exception clauses onto the existing
+/// `Effect::CopyTokenOf` channels. Keyword grants use `extra_keywords`;
+/// type/name/color/P/T exceptions use the resolver-stamped
+/// `additional_modifications` path. Shapes that would grant activated or
+/// triggered abilities remain explicit engine prerequisites because
+/// `CopyTokenOf` has no ability-definition override slot.
+fn convert_copy_effects(
+    effects: &TokenCopyEffects,
+) -> ConvResult<(Vec<Keyword>, Vec<ContinuousModification>)> {
+    let list = match effects {
+        TokenCopyEffects::NoTokenCopyEffects => return Ok((Vec::new(), Vec::new())),
+        TokenCopyEffects::TokenCopyEffects(list) if list.is_empty() => {
+            return Ok((Vec::new(), Vec::new()));
+        }
+        TokenCopyEffects::TokenCopyEffects(list) => list,
+    };
+
+    let mut keywords = Vec::new();
+    let mut modifications = Vec::new();
+    for effect in list {
+        match effect {
+            TokenCopyEffect::AddAbility(rules) => {
+                for rule in rules {
+                    let Some(keyword) =
+                        keyword_convert::try_convert(rule, "CreatableToken/copy-effect")?
+                    else {
+                        return Err(ConversionGap::EnginePrerequisiteMissing {
+                            engine_type: "Effect::CopyTokenOf",
+                            needed_variant: format!(
+                                "ability-copy-override:{}",
+                                variant_tag_rule(rule).unwrap_or_else(|| "<untagged>".to_string())
+                            ),
+                        });
+                    };
+                    keywords.push(keyword);
+                }
+            }
+            TokenCopyEffect::AddSupertypes(supertypes) => {
+                modifications.extend(supertypes.iter().map(|supertype| {
+                    ContinuousModification::AddSupertype {
+                        supertype: supertype_to_engine(supertype),
+                    }
+                }));
+            }
+            TokenCopyEffect::RemoveSupertypes(supertypes) => {
+                modifications.extend(supertypes.iter().map(|supertype| {
+                    ContinuousModification::RemoveSupertype {
+                        supertype: supertype_to_engine(supertype),
+                    }
+                }));
+            }
+            TokenCopyEffect::AddCardtypes(card_types) => {
+                for card_type in card_types {
+                    modifications.push(ContinuousModification::AddType {
+                        core_type: core_type_to_engine(card_type)?,
+                    });
+                }
+            }
+            TokenCopyEffect::AddCreatureTypes(creature_types) => {
+                modifications.extend(creature_types.iter().map(|creature_type| {
+                    ContinuousModification::AddSubtype {
+                        subtype: format!("{creature_type:?}"),
+                    }
+                }));
+            }
+            TokenCopyEffect::SetName(name) => {
+                modifications.push(ContinuousModification::SetName { name: name.clone() });
+            }
+            TokenCopyEffect::SetPT(pt) => {
+                let (power, toughness) = pt_to_values(pt)?;
+                let (PtValue::Fixed(power), PtValue::Fixed(toughness)) = (power, toughness) else {
+                    return Err(ConversionGap::EnginePrerequisiteMissing {
+                        engine_type: "Effect::CopyTokenOf",
+                        needed_variant: "dynamic SetPT token-copy override".into(),
+                    });
+                };
+                modifications.push(ContinuousModification::SetPower { value: power });
+                modifications.push(ContinuousModification::SetToughness { value: toughness });
+            }
+            TokenCopyEffect::SetColor(color) => {
+                modifications.push(ContinuousModification::SetColor {
+                    colors: settable_colors(color)?,
+                });
+            }
+            TokenCopyEffect::AddColor(color) => {
+                modifications.extend(
+                    settable_colors(color)?
+                        .into_iter()
+                        .map(|color| ContinuousModification::AddColor { color }),
+                );
+            }
+            other => {
+                return Err(ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "Effect::CopyTokenOf",
+                    needed_variant: format!("token-copy-override:{other:?}"),
+                });
+            }
+        }
+    }
+    Ok((keywords, modifications))
+}
+
+fn core_type_to_engine(card_type: &CardType) -> ConvResult<CoreType> {
+    use CardType as C;
+    Ok(match card_type {
+        C::Artifact => CoreType::Artifact,
+        C::Battle => CoreType::Battle,
+        C::Creature => CoreType::Creature,
+        C::Dungeon => CoreType::Dungeon,
+        C::Enchantment => CoreType::Enchantment,
+        C::Instant => CoreType::Instant,
+        C::Kindred => CoreType::Kindred,
+        C::Land => CoreType::Land,
+        C::Planeswalker => CoreType::Planeswalker,
+        C::Sorcery => CoreType::Sorcery,
+        C::Conspiracy | C::Phenomenon | C::Plane | C::Scheme | C::Vanguard => {
+            return Err(ConversionGap::EnginePrerequisiteMissing {
+                engine_type: "CoreType",
+                needed_variant: format!("token-copy card type: {card_type:?}"),
+            });
+        }
+    })
+}
+
+fn settable_colors(color: &SettableColor) -> ConvResult<Vec<ManaColor>> {
+    match color {
+        SettableColor::SimpleColorList(colors) => {
+            Ok(colors.iter().map(simple_mana_color).collect())
+        }
+        SettableColor::Colorless => Ok(Vec::new()),
+        other => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ContinuousModification",
+            needed_variant: format!("token-copy color override: {other:?}"),
         }),
+    }
+}
+
+fn simple_mana_color(color: &SimpleColor) -> ManaColor {
+    match color {
+        SimpleColor::White => ManaColor::White,
+        SimpleColor::Blue => ManaColor::Blue,
+        SimpleColor::Black => ManaColor::Black,
+        SimpleColor::Red => ManaColor::Red,
+        SimpleColor::Green => ManaColor::Green,
     }
 }
 
@@ -507,4 +838,103 @@ fn token_tag(t: &CreatableToken) -> String {
                 .map(String::from)
         })
         .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_token_with_no_rules_preserves_type_line() {
+        let effect = convert(&CreatableToken::ArtifactTokenWithNoRules(
+            "Sword".to_string(),
+            Vec::new(),
+            vec![SubType::Equipment],
+            ColorList::Colorless,
+        ))
+        .expect("convert artifact token");
+
+        let Effect::Token {
+            name,
+            types,
+            colors,
+            ..
+        } = effect
+        else {
+            panic!("expected token effect, got {effect:?}");
+        };
+        assert_eq!(name, "Sword");
+        assert_eq!(types, vec!["Artifact", "Equipment"]);
+        assert!(colors.is_empty());
+    }
+
+    #[test]
+    fn artifact_vehicle_token_preserves_pt() {
+        let effect = convert(&CreatableToken::NamedArtifactVehicleToken(
+            "Racer".to_string(),
+            vec![SuperType::Legendary],
+            vec![SubType::Vehicle],
+            ColorList::Colorless,
+            Vec::new(),
+            PT::PT(3, 2),
+        ))
+        .expect("convert artifact vehicle token");
+
+        let Effect::Token {
+            name,
+            power,
+            toughness,
+            types,
+            supertypes,
+            ..
+        } = effect
+        else {
+            panic!("expected token effect, got {effect:?}");
+        };
+        assert_eq!(name, "Racer");
+        assert_eq!(power, PtValue::Fixed(3));
+        assert_eq!(toughness, PtValue::Fixed(2));
+        assert_eq!(types, vec!["Artifact", "Vehicle"]);
+        assert_eq!(
+            supertypes,
+            vec![engine::types::card_type::Supertype::Legendary]
+        );
+    }
+
+    #[test]
+    fn enchantment_token_absorbs_keyword_rules() {
+        let effect = convert(&CreatableToken::EnchantmentToken(
+            "Mask".to_string(),
+            Vec::new(),
+            vec![SubType::Aura],
+            ColorList::Colors(vec![Color::White]),
+            vec![
+                Rule::EnchantPermanent(Box::new(crate::schema::types::Permanents::AnyPermanent)),
+                Rule::UmbraArmor,
+            ],
+        ))
+        .expect("convert enchantment token");
+
+        let Effect::Token {
+            name,
+            types,
+            colors,
+            keywords,
+            ..
+        } = effect
+        else {
+            panic!("expected token effect, got {effect:?}");
+        };
+        assert_eq!(name, "Mask");
+        assert_eq!(types, vec!["Enchantment", "Aura"]);
+        assert_eq!(colors, vec![ManaColor::White]);
+        assert_eq!(keywords.len(), 2);
+        assert_eq!(
+            keywords[0],
+            Keyword::Enchant(engine::types::ability::TargetFilter::Typed(
+                engine::types::ability::TypedFilter::permanent()
+            ))
+        );
+        assert_eq!(keywords[1], Keyword::TotemArmor);
+    }
 }

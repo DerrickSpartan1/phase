@@ -139,6 +139,7 @@ fn collect_player_targets(
                 // CR 109.4: TargetPlayer is ambiguous here (phase_out targets are
                 // resolved from ability.targets directly); fail closed.
                 Some(ControllerRef::TargetPlayer) => false,
+                Some(ControllerRef::DefendingPlayer) => false,
                 None => true,
             })
             .map(|p| p.id)

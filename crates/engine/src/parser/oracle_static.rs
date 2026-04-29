@@ -7071,6 +7071,7 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
             // static scoping). Fall back to an untyped filter; the parser should not
             // emit this variant for cost statics.
             Some(ControllerRef::TargetPlayer) => TargetFilter::Typed(TypedFilter::card()),
+            Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
             None => TargetFilter::Typed(TypedFilter::card()),
         }
     };
@@ -8732,6 +8733,33 @@ mod tests {
                     offset: 1,
                 },
             }));
+    }
+
+    #[test]
+    fn static_unlicensed_hearse_counts_cards_exiled_with_it() {
+        let def = parse_static_line(
+            "Unlicensed Hearse's power and toughness are each equal to the number of cards exiled with it.",
+        )
+        .unwrap();
+
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(def.affected, Some(TargetFilter::SelfRef));
+        assert!(def.characteristic_defining);
+        assert_eq!(
+            def.modifications,
+            vec![
+                ContinuousModification::SetDynamicPower {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                },
+                ContinuousModification::SetDynamicToughness {
+                    value: QuantityExpr::Ref {
+                        qty: QuantityRef::CardsExiledBySource,
+                    },
+                },
+            ]
+        );
     }
 
     #[test]

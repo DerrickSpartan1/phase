@@ -8,7 +8,8 @@ use nom_language::error::VerboseError;
 
 use super::super::oracle_nom::bridge::nom_on_lower;
 use super::super::oracle_nom::primitives as nom_primitives;
-use super::super::oracle_quantity::parse_cda_quantity;
+use super::super::oracle_nom::quantity as nom_quantity;
+use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
 use super::super::oracle_target::parse_type_phrase;
 use super::super::oracle_util::{parse_comparison_suffix, TextPair};
 use super::counter::normalize_counter_type;
@@ -19,7 +20,7 @@ use crate::types::ability::{
     Duration, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef, StaticCondition,
     TargetFilter, TypeFilter, TypedFilter,
 };
-use crate::types::card_type::CoreType;
+use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
 use crate::types::mana::ManaCost;
 use crate::types::zones::Zone;
@@ -741,6 +742,22 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
+    // Suffix position: "[effect] if its mana value is less than or equal to [quantity]."
+    if let Some((before, after)) = tp.rsplit_around(" if its mana value is ") {
+        if let Some((comparator, value)) = parse_dynamic_mana_value_threshold(after.lower) {
+            let condition = AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::Cmc { comparator, value }]),
+                ),
+                use_lki: false,
+            };
+            return (
+                Some(condition),
+                before.original.trim_end_matches('.').trim().to_string(),
+            );
+        }
+    }
+
     // Suffix position: "[effect] if it has mana value N or less/greater."
     if let Some((before, after)) = tp.rsplit_around(" if it has mana value ") {
         if let Some((comparator, threshold)) = parse_mana_value_threshold(after.lower) {
@@ -761,6 +778,70 @@ pub(super) fn strip_mana_value_conditional(text: &str) -> (Option<AbilityConditi
             };
             return (
                 Some(condition),
+                before.original.trim_end_matches('.').trim().to_string(),
+            );
+        }
+    }
+
+    (None, text.to_string())
+}
+
+fn parse_dynamic_mana_value_threshold(text: &str) -> Option<(Comparator, QuantityExpr)> {
+    let text = text.trim().trim_end_matches('.');
+    let (rest, comparator) = alt((
+        value(
+            Comparator::LE,
+            tag::<_, _, VerboseError<&str>>("less than or equal to "),
+        ),
+        value(Comparator::LT, tag("less than ")),
+        value(Comparator::GE, tag("greater than or equal to ")),
+        value(Comparator::GT, tag("greater than ")),
+        value(Comparator::EQ, tag("equal to ")),
+    ))
+    .parse(text)
+    .ok()?;
+    let (rest, qty) = nom_quantity::parse_quantity_ref.parse(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some((
+        comparator,
+        QuantityExpr::Ref {
+            qty: canonicalize_quantity_ref(qty),
+        },
+    ))
+}
+
+pub(super) fn strip_target_supertype_conditional(text: &str) -> (Option<AbilityCondition>, String) {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+
+    for (pattern, negated) in &[
+        (" if it's ", false),
+        (" if it is ", false),
+        (" if it isn't ", true),
+        (" if it's not ", true),
+        (" if it is not ", true),
+    ] {
+        if let Some((before, after)) = tp.rsplit_around(pattern) {
+            let supertype_text = after.lower.trim_end_matches('.').trim();
+            let parsed = parse_supertype_word(supertype_text);
+            let Ok((rest, supertype)) = parsed else {
+                continue;
+            };
+            if !rest.trim().is_empty() {
+                continue;
+            }
+
+            let condition = AbilityCondition::TargetMatchesFilter {
+                filter: TargetFilter::Typed(
+                    TypedFilter::default()
+                        .properties(vec![FilterProp::HasSupertype { value: supertype }]),
+                ),
+                use_lki: false,
+            };
+            return (
+                Some(maybe_negate(condition, *negated)),
                 before.original.trim_end_matches('.').trim().to_string(),
             );
         }
@@ -1238,6 +1319,14 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
 
     let lower = text.to_lowercase();
 
+    if let Some(condition) = parse_zone_change_object_matches_filter_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
+    if let Some(condition) = parse_target_supertype_condition_text(lower.as_str()) {
+        return Some(condition);
+    }
+
     // CR 730.2a: "it's neither day nor night" — Daybound/Nightbound ETB initialization.
     if tag::<_, _, VerboseError<&str>>("it's neither day nor night")
         .parse(lower.as_str())
@@ -1263,8 +1352,28 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
         || tag::<_, _, VerboseError<&str>>("you won the clash")
             .parse(lower.as_str())
             .is_ok()
+        || tag::<_, _, VerboseError<&str>>("you win")
+            .parse(lower.as_str())
+            .is_ok()
+        || tag::<_, _, VerboseError<&str>>("you won")
+            .parse(lower.as_str())
+            .is_ok()
     {
         return Some(AbilityCondition::IfYouDo);
+    }
+
+    if alt((
+        tag::<_, _, VerboseError<&str>>("you don't"),
+        tag("you do not"),
+        tag("you didn't"),
+        tag("you did not"),
+    ))
+    .parse(lower.as_str())
+    .is_ok()
+    {
+        return Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::IfYouDo),
+        });
     }
 
     if let Ok((rest, _)) =
@@ -1383,6 +1492,100 @@ pub(super) fn try_nom_condition_as_ability_condition(text: &str) -> Option<Abili
         return None;
     }
     static_condition_to_ability_condition(&condition)
+}
+
+fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<AbilityCondition> {
+    let (type_text, negated) = parse_zone_change_object_type_text(lower).ok()?.1;
+    let (filter, leftover) = parse_type_phrase(type_text);
+    if matches!(filter, TargetFilter::Any) || !leftover.trim().is_empty() {
+        return None;
+    }
+
+    Some(maybe_negate(
+        AbilityCondition::ZoneChangeObjectMatchesFilter {
+            origin: None,
+            destination: Zone::Battlefield,
+            filter,
+        },
+        negated,
+    ))
+}
+
+fn parse_zone_change_object_type_text(
+    input: &str,
+) -> nom::IResult<&str, (&str, bool), VerboseError<&str>> {
+    let (input, _) = tag("that ").parse(input)?;
+    let (input, _) = alt((
+        tag("permanent"),
+        tag("enchantment"),
+        tag("artifact"),
+        tag("creature"),
+        tag("equipment"),
+        tag("aura"),
+        tag("land"),
+        tag("token"),
+        tag("card"),
+    ))
+    .parse(input)?;
+    let (input, negated) = alt((
+        value(
+            true,
+            alt((
+                tag(" is not an "),
+                tag(" is not a "),
+                tag(" is not "),
+                tag(" isn't an "),
+                tag(" isn't a "),
+                tag(" isn't "),
+            )),
+        ),
+        value(false, alt((tag(" is an "), tag(" is a "), tag(" is ")))),
+    ))
+    .parse(input)?;
+    Ok(("", (input, negated)))
+}
+
+fn parse_target_supertype_condition_text(lower: &str) -> Option<AbilityCondition> {
+    let (rest, negated) = alt((
+        value(
+            true,
+            alt((
+                tag::<_, _, VerboseError<&str>>("it is not "),
+                tag("it's not "),
+                tag("it isn't "),
+            )),
+        ),
+        value(false, alt((tag("it is "), tag("it's ")))),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (rest, supertype) = parse_supertype_word(rest).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(maybe_negate(
+        AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(
+                TypedFilter::default()
+                    .properties(vec![FilterProp::HasSupertype { value: supertype }]),
+            ),
+            use_lki: false,
+        },
+        negated,
+    ))
+}
+
+fn parse_supertype_word(input: &str) -> nom::IResult<&str, Supertype, VerboseError<&str>> {
+    alt((
+        value(
+            Supertype::Legendary,
+            tag::<_, _, VerboseError<&str>>("legendary"),
+        ),
+        value(Supertype::Basic, tag("basic")),
+        value(Supertype::Snow, tag("snow")),
+    ))
+    .parse(input)
 }
 
 /// CR 400.7 + CR 608.2c: Parse "a[n] [type] was [verb]'d this way".
@@ -1515,6 +1718,156 @@ mod tests {
     use super::*;
     use crate::parser::oracle_nom::condition::parse_inner_condition;
     use crate::types::counter::{CounterMatch, CounterType};
+
+    #[test]
+    fn leading_that_enchantment_is_aura_checks_zone_change_object() {
+        let (condition, body) = strip_leading_general_conditional(
+            "If that enchantment is an Aura, you may attach it to the token.",
+        );
+        assert_eq!(body, "you may attach it to the token.");
+
+        let Some(AbilityCondition::ZoneChangeObjectMatchesFilter {
+            origin: None,
+            destination: Zone::Battlefield,
+            filter,
+        }) = condition
+        else {
+            panic!("expected zone-change object filter condition, got {condition:?}");
+        };
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected typed Aura filter");
+        };
+        assert!(
+            filter
+                .type_filters
+                .iter()
+                .any(|ty| matches!(ty, TypeFilter::Subtype(subtype) if subtype == "Aura")),
+            "expected Aura subtype filter, got {:?}",
+            filter.type_filters
+        );
+    }
+
+    #[test]
+    fn token_then_conditional_aura_attach_targets_created_token() {
+        let def = parse_effect_chain(
+            "Create a 2/2 white Cat creature token. If that enchantment is an Aura, you may attach it to the token.",
+            AbilityKind::Spell,
+        );
+        let Effect::Token { .. } = *def.effect else {
+            panic!("expected token root, got {:?}", def.effect);
+        };
+        let attach = def
+            .sub_ability
+            .expect("expected conditional attach sub-ability");
+        let Effect::Attach { attachment, target } = &*attach.effect else {
+            panic!("expected attach sub-ability, got {:?}", attach.effect);
+        };
+        assert_eq!(*attachment, TargetFilter::TriggeringSource);
+        assert_eq!(*target, TargetFilter::LastCreated);
+        assert!(attach.optional);
+        assert!(
+            matches!(
+                attach.condition,
+                Some(AbilityCondition::ZoneChangeObjectMatchesFilter {
+                    destination: Zone::Battlefield,
+                    ..
+                })
+            ),
+            "expected zone-change object condition, got {:?}",
+            attach.condition
+        );
+    }
+
+    #[test]
+    fn leading_its_legendary_checks_parent_target_supertype() {
+        let (condition, body) =
+            strip_leading_general_conditional("If it's legendary, gain 3 life.");
+        assert_eq!(body, "gain 3 life.");
+        let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = condition else {
+            panic!("expected TargetMatchesFilter, got {condition:?}");
+        };
+        assert!(!use_lki);
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected typed supertype filter");
+        };
+        assert!(
+            filter.properties.iter().any(|prop| matches!(
+                prop,
+                FilterProp::HasSupertype {
+                    value: Supertype::Legendary
+                }
+            )),
+            "expected Legendary supertype filter, got {:?}",
+            filter.properties
+        );
+    }
+
+    #[test]
+    fn leading_this_enchantment_isnt_creature_checks_source_type() {
+        let (condition, body) = strip_leading_general_conditional(
+            "If this enchantment isn't a creature, it becomes a 3/3 Angel creature with flying.",
+        );
+        assert_eq!(body, "it becomes a 3/3 Angel creature with flying.");
+        assert!(matches!(
+            condition,
+            Some(AbilityCondition::Not { condition })
+                if matches!(*condition, AbilityCondition::SourceMatchesFilter { .. })
+        ));
+    }
+
+    #[test]
+    fn leading_you_win_maps_to_if_you_do_for_clash() {
+        let (condition, body) =
+            strip_leading_general_conditional("If you win, put a +1/+1 counter on this creature.");
+        assert_eq!(body, "put a +1/+1 counter on this creature.");
+        assert_eq!(condition, Some(AbilityCondition::IfYouDo));
+    }
+
+    #[test]
+    fn leading_you_dont_maps_to_not_if_you_do() {
+        let (condition, body) = strip_leading_general_conditional(
+            "If you didn't put a card into your hand this way, draw a card.",
+        );
+        assert_eq!(body, "draw a card.");
+        assert_eq!(
+            condition,
+            Some(AbilityCondition::Not {
+                condition: Box::new(AbilityCondition::IfYouDo)
+            })
+        );
+    }
+
+    #[test]
+    fn dynamic_target_mana_value_suffix_uses_object_count_quantity() {
+        let (condition, body) = strip_mana_value_conditional(
+            "Put target creature card from an opponent's graveyard onto the battlefield under your control if its mana value is less than or equal to the number of Allies you control.",
+        );
+        assert_eq!(
+            body,
+            "Put target creature card from an opponent's graveyard onto the battlefield under your control"
+        );
+        let Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) = condition else {
+            panic!("expected TargetMatchesFilter, got {condition:?}");
+        };
+        assert!(!use_lki);
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected typed filter");
+        };
+        let [FilterProp::Cmc { comparator, value }] = filter.properties.as_slice() else {
+            panic!("expected Cmc property, got {:?}", filter.properties);
+        };
+        assert_eq!(*comparator, Comparator::LE);
+        let QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount { filter },
+        } = value
+        else {
+            panic!("expected ObjectCount quantity, got {value:?}");
+        };
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected typed object-count filter");
+        };
+        assert_eq!(filter.controller, Some(ControllerRef::You));
+    }
 
     /// CR 122.1 + CR 608.2c: "there are no counters on ~" round-trips through
     /// the bridge to a `QuantityCheck` against `AnyCountersOnSelf`. Previously

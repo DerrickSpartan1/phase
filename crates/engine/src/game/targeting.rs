@@ -88,6 +88,7 @@ pub fn find_legal_targets(
                     // candidates (the "target player" is what's being chosen here).
                     // Fail closed.
                     Some(ControllerRef::TargetPlayer) => false,
+                    Some(ControllerRef::DefendingPlayer) => false,
                     None => true,
                 };
                 if include {

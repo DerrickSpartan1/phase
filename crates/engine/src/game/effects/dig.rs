@@ -125,7 +125,10 @@ pub fn resolve(
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
-    use crate::types::ability::QuantityExpr;
+    use crate::types::ability::{
+        AbilityCondition, AbilityKind, FilterProp, GainLifePlayer, QuantityExpr, TypedFilter,
+    };
+    use crate::types::card_type::Supertype;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
@@ -273,6 +276,211 @@ mod tests {
             state.next_tracked_set_id,
             next_id_before + 1,
             "next_tracked_set_id must have advanced"
+        );
+    }
+
+    #[test]
+    fn dig_choice_forwards_kept_cards_to_conditional_continuation() {
+        use crate::game::engine_resolution_choices::{
+            handle_resolution_choice, ResolutionChoiceOutcome,
+        };
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::PendingContinuation;
+
+        let mut state = GameState::new_two_player(42);
+        let kept = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Legendary Creature".to_string(),
+            Zone::Library,
+        );
+        state
+            .objects
+            .get_mut(&kept)
+            .unwrap()
+            .card_types
+            .supertypes
+            .push(Supertype::Legendary);
+
+        let other = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Other Creature".to_string(),
+            Zone::Library,
+        );
+        let waiting = WaitingFor::DigChoice {
+            player: PlayerId(0),
+            selectable_cards: vec![kept, other],
+            cards: vec![kept, other],
+            keep_count: 1,
+            up_to: true,
+            kept_destination: Some(Zone::Hand),
+            rest_destination: Some(Zone::Library),
+            source_id: Some(ObjectId(100)),
+        };
+        let mut gain_life = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        gain_life.kind = AbilityKind::Spell;
+        gain_life.condition = Some(AbilityCondition::TargetMatchesFilter {
+            filter: TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::HasSupertype {
+                    value: Supertype::Legendary,
+                },
+            ])),
+            use_lki: false,
+        });
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(gain_life)));
+
+        let mut events = Vec::new();
+        let outcome = handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards { cards: vec![kept] },
+            &mut events,
+        )
+        .expect("DigChoice resolution must succeed");
+
+        assert!(matches!(outcome, ResolutionChoiceOutcome::WaitingFor(_)));
+        assert_eq!(
+            state.players[0].life, 23,
+            "conditional continuation must evaluate against the selected card"
+        );
+    }
+
+    #[test]
+    fn dig_choice_marks_optional_context_from_kept_selection() {
+        use crate::game::engine_resolution_choices::{
+            handle_resolution_choice, ResolutionChoiceOutcome,
+        };
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::PendingContinuation;
+
+        let mut state = GameState::new_two_player(42);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Spell".to_string(),
+            Zone::Library,
+        );
+        let waiting = WaitingFor::DigChoice {
+            player: PlayerId(0),
+            selectable_cards: vec![first],
+            cards: vec![first, second],
+            keep_count: 1,
+            up_to: true,
+            kept_destination: Some(Zone::Hand),
+            rest_destination: Some(Zone::Library),
+            source_id: Some(ObjectId(100)),
+        };
+        let mut gain_life = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        gain_life.kind = AbilityKind::Spell;
+        gain_life.condition = Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::IfYouDo),
+        });
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(gain_life)));
+
+        let mut events = Vec::new();
+        let outcome = handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards { cards: vec![] },
+            &mut events,
+        )
+        .expect("DigChoice resolution must succeed");
+
+        assert!(matches!(outcome, ResolutionChoiceOutcome::WaitingFor(_)));
+        assert_eq!(
+            state.players[0].life, 23,
+            "declining an up-to Dig selection must satisfy Not(IfYouDo)"
+        );
+    }
+
+    #[test]
+    fn dig_choice_marks_optional_context_from_nonempty_selection() {
+        use crate::game::engine_resolution_choices::{
+            handle_resolution_choice, ResolutionChoiceOutcome,
+        };
+        use crate::types::actions::GameAction;
+        use crate::types::game_state::PendingContinuation;
+
+        let mut state = GameState::new_two_player(42);
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Spell".to_string(),
+            Zone::Library,
+        );
+        let waiting = WaitingFor::DigChoice {
+            player: PlayerId(0),
+            selectable_cards: vec![first],
+            cards: vec![first, second],
+            keep_count: 1,
+            up_to: true,
+            kept_destination: Some(Zone::Hand),
+            rest_destination: Some(Zone::Library),
+            source_id: Some(ObjectId(100)),
+        };
+        let mut gain_life = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 3 },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        gain_life.kind = AbilityKind::Spell;
+        gain_life.condition = Some(AbilityCondition::Not {
+            condition: Box::new(AbilityCondition::IfYouDo),
+        });
+        state.pending_continuation = Some(PendingContinuation::new(Box::new(gain_life)));
+
+        let mut events = Vec::new();
+        let outcome = handle_resolution_choice(
+            &mut state,
+            waiting,
+            GameAction::SelectCards { cards: vec![first] },
+            &mut events,
+        )
+        .expect("DigChoice resolution must succeed");
+
+        assert!(matches!(outcome, ResolutionChoiceOutcome::WaitingFor(_)));
+        assert_eq!(
+            state.players[0].life, 20,
+            "keeping a card must make Not(IfYouDo) false"
         );
     }
 

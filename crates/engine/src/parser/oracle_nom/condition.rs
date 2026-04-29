@@ -44,6 +44,7 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_you_have_conditions,
         parse_control_conditions,
         parse_opponent_poison_conditions,
+        parse_defending_player_comparison_conditions,
         parse_opponent_comparison_conditions,
         parse_life_conditions,
         parse_zone_conditions,
@@ -1041,6 +1042,7 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
                 tag("that player lost life this turn"),
             )),
         ),
+        parse_opponent_lost_life_this_turn,
         // CR 119.4 + CR 603.4: "an opponent gained life this turn" — sum across
         // opponents, mirroring the lost-life sibling. Unlocks Needlebite Trap
         // alt-cost gate and any future opponent-gain-gated trap/condition.
@@ -1391,6 +1393,23 @@ fn parse_player_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondi
     ))
 }
 
+fn parse_opponent_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("an opponent lost "), tag("that player lost "))).parse(input)?;
+    let (rest, n) = parse_ge_threshold(rest)?;
+    let (rest, _) = tag("life this turn").parse(rest)?;
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::LifeLostThisTurn {
+                player: PlayerScope::Opponent {
+                    aggregate: AggregateFunction::Max,
+                },
+            },
+            n,
+        ),
+    ))
+}
+
 /// Parse "you cast another spell this turn" / "you cast a [type] spell this turn".
 fn parse_you_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = alt((tag("you cast "), tag("you've cast "))).parse(input)?;
@@ -1672,6 +1691,46 @@ fn parse_there_exists_condition(input: &str) -> OracleResult<'_, StaticCondition
             crate::parser::oracle_quantity::canonicalize_quantity_ref(qty),
             1,
         ),
+    ))
+}
+
+/// Parse "defending player controls more [type] than you" → QuantityComparison.
+///
+/// CR 508.1b + CR 603.4: Attack triggers can carry intervening-if clauses
+/// comparing the defending player's permanents to the trigger controller's.
+/// The object-count machinery already handles `ControllerRef::You`; this arm
+/// adds the combat-context controller axis for the LHS.
+fn parse_defending_player_comparison_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("defending player controls more ").parse(input)?;
+    let (rest, type_text) =
+        take_until::<_, _, nom_language::error::VerboseError<&str>>(" than you").parse(rest)?;
+    let (rest, _) = tag(" than you").parse(rest)?;
+
+    let (filter, _) = parse_type_phrase(type_text.trim());
+    let defending_filter = match filter {
+        TargetFilter::Typed(tf) => {
+            TargetFilter::Typed(tf.controller(ControllerRef::DefendingPlayer))
+        }
+        other => other,
+    };
+    let you_filter = match parse_type_phrase(type_text.trim()) {
+        (TargetFilter::Typed(tf), _) => TargetFilter::Typed(tf.controller(ControllerRef::You)),
+        (other, _) => other,
+    };
+
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: defending_filter,
+                },
+            },
+            comparator: Comparator::GT,
+            rhs: QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount { filter: you_filter },
+            },
+        },
     ))
 }
 
@@ -2898,6 +2957,36 @@ mod tests {
     // -- Opponent comparison conditions --
 
     #[test]
+    fn test_defending_player_controls_more_lands() {
+        let (rest, c) =
+            parse_inner_condition("defending player controls more lands than you").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter: lhs },
+                    },
+                comparator: Comparator::GT,
+                rhs:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount { filter: rhs },
+                    },
+            } => {
+                let TargetFilter::Typed(lhs) = lhs else {
+                    panic!("expected typed lhs filter");
+                };
+                assert_eq!(lhs.controller, Some(ControllerRef::DefendingPlayer));
+                let TargetFilter::Typed(rhs) = rhs else {
+                    panic!("expected typed rhs filter");
+                };
+                assert_eq!(rhs.controller, Some(ControllerRef::You));
+            }
+            other => panic!("expected ObjectCount GT ObjectCount, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_opponent_controls_more_creatures() {
         let (rest, c) =
             parse_inner_condition("an opponent controls more creatures than you").unwrap();
@@ -3721,6 +3810,26 @@ mod tests {
                 },
                 comparator: Comparator::GE,
                 rhs: QuantityExpr::Fixed { value: 4 },
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_condition_an_opponent_lost_two_or_more_life() {
+        let (rest, c) = parse_inner_condition("an opponent lost 2 or more life this turn").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeLostThisTurn {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
             }
         );
     }

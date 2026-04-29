@@ -15,8 +15,9 @@ use super::primitives::parse_number;
 use super::target::parse_type_filter_word;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    AggregateFunction, ControllerRef, CountScope, FilterProp, ObjectProperty, PlayerScope,
-    QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter, ZoneRef,
+    AggregateFunction, ControllerRef, CountScope, DevotionColors, FilterProp, ObjectProperty,
+    PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypeFilter, TypedFilter,
+    ZoneRef,
 };
 use crate::types::player::PlayerCounterKind;
 
@@ -467,6 +468,7 @@ fn parse_number_of_inner(input: &str) -> OracleResult<'_, QuantityRef> {
         // distinguishes party-size from a controlled-creature count.
         parse_creatures_in_your_party_tail,
         parse_number_of_controlled_type,
+        parse_cards_exiled_with_source,
         // CR 109.4 + CR 115.7: "cards in their <zone>" / "cards in that player's <zone>"
         // must be tried BEFORE the scoped-zone combinator so the target-referring
         // possessive routes to `TargetZoneCardCount` (resolves against the player
@@ -598,6 +600,7 @@ fn parse_distinct_card_types_exiled_with_source(input: &str) -> OracleResult<'_,
     let (rest, _) = tag(" among cards exiled with ").parse(rest)?;
     let (rest, _) = alt((
         tag("~"),
+        tag("it"),
         preceded(
             tag("this "),
             take_while1(|c: char| c.is_ascii_alphabetic() || c == '-'),
@@ -618,6 +621,7 @@ fn parse_cards_exiled_with_source(input: &str) -> OracleResult<'_, QuantityRef> 
     let (rest, _) = tag("cards exiled with ").parse(input)?;
     let (rest, _) = alt((
         tag("~"),
+        tag("it"),
         preceded(
             tag("this "),
             take_while1(|c: char| c.is_ascii_alphabetic() || c == '-'),
@@ -1209,6 +1213,16 @@ fn parse_basic_land_type_count(input: &str) -> OracleResult<'_, QuantityRef> {
 /// Parse devotion references.
 fn parse_devotion_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("your devotion to ").parse(input)?;
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("that color").parse(rest)
+    {
+        return Ok((
+            rest,
+            QuantityRef::Devotion {
+                colors: DevotionColors::ChosenColor,
+            },
+        ));
+    }
     let (rest, color) = super::primitives::parse_color(rest)?;
     // Check for " and [color]" for multi-color devotion
     if let Ok((rest2, _)) =
@@ -1218,7 +1232,7 @@ fn parse_devotion_ref(input: &str) -> OracleResult<'_, QuantityRef> {
             return Ok((
                 rest3,
                 QuantityRef::Devotion {
-                    colors: vec![color, color2],
+                    colors: DevotionColors::Fixed(vec![color, color2]),
                 },
             ));
         }
@@ -1226,7 +1240,7 @@ fn parse_devotion_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     Ok((
         rest,
         QuantityRef::Devotion {
-            colors: vec![color],
+            colors: DevotionColors::Fixed(vec![color]),
         },
     ))
 }
@@ -1915,6 +1929,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_number_of_cards_exiled_with_it() {
+        let (rest, q) = parse_quantity_ref("the number of cards exiled with it").unwrap();
+        assert_eq!(q, QuantityRef::CardsExiledBySource);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
     fn test_parse_quantity_ref_life_lost() {
         let (rest, q) = parse_quantity_ref("the life you've lost this turn").unwrap();
         assert_eq!(
@@ -2101,7 +2122,19 @@ mod tests {
         assert_eq!(
             q,
             QuantityRef::Devotion {
-                colors: vec![ManaColor::Red]
+                colors: DevotionColors::Fixed(vec![ManaColor::Red])
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_devotion_chosen_color() {
+        let (rest, q) = parse_quantity_ref("your devotion to that color").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::Devotion {
+                colors: DevotionColors::ChosenColor
             }
         );
         assert_eq!(rest, "");
@@ -2113,7 +2146,7 @@ mod tests {
         assert_eq!(
             q,
             QuantityRef::Devotion {
-                colors: vec![ManaColor::White, ManaColor::Black]
+                colors: DevotionColors::Fixed(vec![ManaColor::White, ManaColor::Black])
             }
         );
         assert_eq!(rest, "");

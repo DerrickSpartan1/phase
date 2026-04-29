@@ -665,9 +665,32 @@ fn resolve_ref(
                 })
                 .sum()
         }
-        QuantityRef::Devotion { colors } => u32_to_i32_saturating(
-            crate::game::devotion::count_devotion(state, controller, colors),
-        ),
+        QuantityRef::Devotion { colors } => match colors {
+            crate::types::ability::DevotionColors::Fixed(colors) => u32_to_i32_saturating(
+                crate::game::devotion::count_devotion(state, controller, colors),
+            ),
+            crate::types::ability::DevotionColors::ChosenColor => state
+                .objects
+                .get(&ctx.source)
+                .and_then(|obj| obj.chosen_color())
+                .or_else(|| {
+                    state
+                        .last_named_choice
+                        .as_ref()
+                        .and_then(|choice| match choice {
+                            crate::types::ability::ChoiceValue::Color(color) => Some(*color),
+                            _ => None,
+                        })
+                })
+                .map(|color| {
+                    u32_to_i32_saturating(crate::game::devotion::count_devotion(
+                        state,
+                        controller,
+                        &[color],
+                    ))
+                })
+                .unwrap_or(0),
+        },
         QuantityRef::TargetZoneCardCount { zone } => {
             let target_player = targets.iter().find_map(|t| {
                 if let TargetRef::Player(pid) = t {
@@ -978,6 +1001,10 @@ fn resolve_ref(
                         ControllerRef::You => obj.controller == controller,
                         ControllerRef::Opponent => obj.controller != controller,
                         ControllerRef::TargetPlayer => target_player == Some(obj.controller),
+                        ControllerRef::DefendingPlayer => {
+                            crate::game::combat::defending_player_for_attacker(state, ctx.source)
+                                .is_some_and(|pid| pid == obj.controller)
+                        }
                     };
                     if controller_matches && obj.card_types.core_types.contains(&CoreType::Land) {
                         for subtype in &basic_subtypes {
@@ -1170,6 +1197,10 @@ fn resolve_ref(
                                 })
                             })
                             .is_some_and(|pid| pid == snap.controller),
+                        Some(ControllerRef::DefendingPlayer) => {
+                            crate::game::combat::defending_player_for_attacker(state, ctx.source)
+                                .is_some_and(|pid| pid == snap.controller)
+                        }
                     })
                     .count(),
             )
@@ -1488,15 +1519,15 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AggregateFunction, ControllerRef, Effect, FilterProp, ObjectProperty, TargetFilter,
-        TypeFilter, TypedFilter,
+        AggregateFunction, ChoiceValue, ControllerRef, DevotionColors, Effect, FilterProp,
+        ObjectProperty, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::counter::CounterType;
     use crate::types::game_state::{ExileLink, ExileLinkKind, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
-    use crate::types::mana::ManaColor;
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::zones::Zone;
     use crate::types::SpellCastRecord;
 
@@ -1716,6 +1747,38 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(0)), 1);
     }
 
+    #[test]
+    fn devotion_to_chosen_color_uses_current_named_choice() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Nyx Lotus".to_string(),
+            Zone::Battlefield,
+        );
+        let permanent = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Green Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&permanent).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+            generic: 1,
+        };
+        state.last_named_choice = Some(ChoiceValue::Color(ManaColor::Green));
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::Devotion {
+                colors: DevotionColors::ChosenColor,
+            },
+        };
+
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), source), 2);
+    }
+
     /// CR 201.2 + CR 603.4: distinct-name count for Field of the Dead.
     /// Two lands sharing a name count once; overall = # of unique names.
     #[test]
@@ -1760,6 +1823,59 @@ mod tests {
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 3);
         // P1's POV: only the one opponent Plains would be theirs, so 1.
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(0)), 1);
+    }
+
+    #[test]
+    fn object_count_controller_ref_defending_player_uses_combat_attacker() {
+        let mut state = GameState::new_two_player(42);
+        let attacker = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Attacker".to_string(),
+            Zone::Battlefield,
+        );
+
+        let your_land = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Plains".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&your_land)
+            .unwrap()
+            .card_types
+            .core_types = vec![CoreType::Land];
+        for i in 0..2 {
+            let land = create_object(
+                &mut state,
+                CardId(3 + i),
+                PlayerId(1),
+                format!("Island {i}"),
+                Zone::Battlefield,
+            );
+            state.objects.get_mut(&land).unwrap().card_types.core_types = vec![CoreType::Land];
+        }
+        state.combat = Some(crate::game::combat::CombatState {
+            attackers: vec![crate::game::combat::AttackerInfo::attacking_player(
+                attacker,
+                PlayerId(1),
+            )],
+            ..Default::default()
+        });
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(
+                    TypedFilter::land().controller(ControllerRef::DefendingPlayer),
+                ),
+            },
+        };
+
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), attacker), 2);
     }
 
     #[test]

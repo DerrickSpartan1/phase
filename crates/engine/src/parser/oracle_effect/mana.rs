@@ -1159,6 +1159,31 @@ fn try_parse_amount_equal_to(clause: &str, contribution: ManaContribution) -> Op
     })?;
     let rest = rest.trim_start();
 
+    if let Some((_, quantity_text)) = nom_on_lower(rest, &rest.to_lowercase(), |i| {
+        value(
+            (),
+            alt((
+                tag("mana of that color equal to "),
+                tag("mana of the chosen color equal to "),
+            )),
+        )
+        .parse(i)
+    }) {
+        let quantity_text = quantity_text.trim().trim_end_matches(['.', '"']);
+        let count = parse_event_context_quantity(quantity_text)
+            .or_else(|| parse_cda_quantity(quantity_text))?;
+        return Some(Effect::Mana {
+            produced: ManaProduction::ChosenColor {
+                count,
+                contribution,
+            },
+            restrictions: vec![],
+            grants: vec![],
+            expiry: None,
+            target: None,
+        });
+    }
+
     // CR 106.1: Colorless-mana production ({C}). `parse_mana_production`
     // only recognizes the five colored symbols (W/U/B/R/G) and returns
     // `None` for `{C}`, so route colorless separately to
@@ -1405,6 +1430,30 @@ mod tests {
                 );
             }
             other => panic!("expected Colorless mana production, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn amount_of_that_color_equal_to_devotion_to_that_color() {
+        let effect = try_parse_add_mana_effect(
+            "Add an amount of mana of that color equal to your devotion to that color.",
+        )
+        .expect("chosen-color devotion mana must parse");
+        let Effect::Mana { produced, .. } = effect else {
+            panic!("expected Effect::Mana");
+        };
+        match produced {
+            ManaProduction::ChosenColor { count, .. } => {
+                assert_eq!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Devotion {
+                            colors: crate::types::ability::DevotionColors::ChosenColor
+                        }
+                    }
+                );
+            }
+            other => panic!("expected ChosenColor mana production, got {other:?}"),
         }
     }
 

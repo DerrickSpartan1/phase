@@ -1612,6 +1612,7 @@ fn evaluate_replacement_condition(
                 // CR 109.4: TargetPlayer active-player gate is nonsensical at
                 // replacement-check time (no ability context). Fail closed.
                 Some(ControllerRef::TargetPlayer) => false,
+                Some(ControllerRef::DefendingPlayer) => false,
                 None => true,
             };
             if !turn_ok {
@@ -1635,6 +1636,7 @@ fn evaluate_replacement_condition(
                 // CR 109.4: TargetPlayer active-player gate is nonsensical at
                 // replacement-check time (no ability context). Fail closed.
                 Some(ControllerRef::TargetPlayer) => false,
+                Some(ControllerRef::DefendingPlayer) => false,
                 None => true,
             };
             if !turn_ok {
@@ -1712,6 +1714,7 @@ fn evaluate_replacement_condition(
                 // Fall back to the replacement controller; parser never emits
                 // this variant in replacement conditions.
                 ControllerRef::TargetPlayer => controller,
+                ControllerRef::DefendingPlayer => controller,
             };
             // Check if the affected object was dealt damage this turn by a source
             // controlled by the required controller.
@@ -1949,6 +1952,7 @@ pub fn find_applicable_replacements(
                                 // for static token-creation replacements. Fail
                                 // closed — parser never emits this variant here.
                                 crate::types::ability::ControllerRef::TargetPlayer => false,
+                                crate::types::ability::ControllerRef::DefendingPlayer => false,
                             };
                             if !matches {
                                 continue;
@@ -1971,6 +1975,7 @@ pub fn find_applicable_replacements(
                             // CR 109.4: Target-player scope has no meaning at
                             // replacement-application time. Fail closed.
                             Some(crate::types::ability::ControllerRef::TargetPlayer) => false,
+                            Some(crate::types::ability::ControllerRef::DefendingPlayer) => false,
                             None => {
                                 // Default: controller-only (backward compatible)
                                 *player_id == obj.controller
@@ -2098,7 +2103,7 @@ fn extract_etb_counters(
         Some(e) => e,
         None => return Vec::new(),
     };
-    match &*exec.effect {
+    let mut counters = match &*exec.effect {
         Effect::PutCounter {
             counter_type,
             count,
@@ -2142,7 +2147,14 @@ fn extract_etb_counters(
             vec![(counter_type.clone(), n)]
         }
         _ => Vec::new(),
-    }
+    };
+    counters.extend(extract_etb_counters(
+        exec.sub_ability.as_deref(),
+        state,
+        source_id,
+        event,
+    ));
+    counters
 }
 
 /// CR 614.1c + CR 614.12: ProposedEvent modifications that a replacement ability would
@@ -2658,8 +2670,8 @@ mod tests {
     use crate::game::effects::token::apply_create_token_after_replacement;
     use crate::game::game_object::GameObject;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, GainLifePlayer, ReplacementDefinition,
-        TargetFilter, TargetRef,
+        AbilityCost, AbilityDefinition, AbilityKind, Effect, GainLifePlayer, QuantityExpr,
+        ReplacementDefinition, TargetFilter, TargetRef,
     };
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::player::PlayerId;
@@ -2676,6 +2688,33 @@ mod tests {
     /// natural-turn BeginTurn is inert against all state-based conditions.
     fn dummy_begin_turn_event() -> ProposedEvent {
         ProposedEvent::begin_turn(PlayerId(0), false)
+    }
+
+    #[test]
+    fn extract_etb_counters_walks_sub_ability_chain() {
+        let state = GameState::new_two_player(42);
+        let mut first = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: "P1P1".to_string(),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+        );
+        first.sub_ability = Some(Box::new(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::PutCounter {
+                counter_type: "shield".to_string(),
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::SelfRef,
+            },
+        )));
+        let event = ProposedEvent::zone_change(ObjectId(1), Zone::Stack, Zone::Battlefield, None);
+
+        assert_eq!(
+            extract_etb_counters(Some(&first), &state, ObjectId(1), &event),
+            vec![("P1P1".to_string(), 1), ("shield".to_string(), 1)]
+        );
     }
 
     fn test_state_with_object(

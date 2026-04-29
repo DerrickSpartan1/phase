@@ -505,6 +505,10 @@ pub(super) fn handle_resolution_choice(
                     }
                 }
             }
+            if let Some(cont) = state.pending_continuation.as_mut() {
+                cont.chain.targets = kept.iter().map(|&id| TargetRef::Object(id)).collect();
+                cont.chain.context.optional_effect_performed = !kept.is_empty();
+            }
             ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
         }
         (

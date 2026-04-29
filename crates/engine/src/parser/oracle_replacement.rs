@@ -1265,6 +1265,8 @@ fn parse_enters_with_counters(
     ))
     .parse(after_with)
     .map_or(after_with, |(rest, _)| rest);
+
+    let counter_entries = parse_enters_counter_entries(after_additional);
     // Detect dynamic count: "a number of [type] counters ... equal to [qty]"
     let (dynamic_remainder, after_prefix) =
         match tag::<_, _, VerboseError<&str>>("a number of ").parse(after_additional) {
@@ -1299,13 +1301,8 @@ fn parse_enters_with_counters(
         }
     }
 
-    let put_counter = AbilityDefinition::new(
-        AbilityKind::Spell,
-        Effect::PutCounter {
-            counter_type,
-            count: count_expr,
-            target: TargetFilter::SelfRef,
-        },
+    let put_counter = build_enters_counter_ability(
+        counter_entries.unwrap_or_else(|| vec![(counter_type, count_expr)]),
     );
 
     // Determine valid_card filter: self vs other creatures
@@ -1381,6 +1378,94 @@ fn parse_enters_with_counters(
     }
 
     Some(def)
+}
+
+fn parse_enters_counter_entries(after_with: &str) -> Option<Vec<(String, QuantityExpr)>> {
+    let mut remaining = after_with;
+    let mut entries = Vec::new();
+
+    loop {
+        let (mut count_expr, rest) = parse_count_expr(remaining)?;
+        rewrite_variable_x_to_cost_x_paid(&mut count_expr);
+
+        let (at_counter, counter_type_raw) = take_until::<_, _, VerboseError<&str>>(" counter")
+            .parse(rest)
+            .ok()?;
+        if counter_type_raw.trim().is_empty() {
+            return None;
+        }
+        let counter_type =
+            crate::parser::oracle_effect::counter::normalize_counter_type(counter_type_raw);
+        let (after_space, _) = tag::<_, _, VerboseError<&str>>(" ")
+            .parse(at_counter)
+            .ok()?;
+        let (after_counter_word, _) =
+            alt((tag::<_, _, VerboseError<&str>>("counters"), tag("counter")))
+                .parse(after_space)
+                .ok()?;
+
+        entries.push((counter_type, count_expr));
+
+        if let Some(next) = parse_enters_counter_separator(after_counter_word) {
+            remaining = next;
+            continue;
+        }
+
+        tag::<_, _, VerboseError<&str>>(" on it")
+            .parse(after_counter_word)
+            .ok()?;
+        break;
+    }
+
+    (entries.len() >= 2).then_some(entries)
+}
+
+fn parse_enters_counter_separator(input: &str) -> Option<&str> {
+    let (after_sep, _) = alt((
+        tag::<_, _, VerboseError<&str>>(", and "),
+        tag(" and "),
+        tag(", "),
+    ))
+    .parse(input)
+    .ok()?;
+
+    let (_, rest) = parse_count_expr(after_sep)?;
+    let (at_counter, counter_type_raw) = take_until::<_, _, VerboseError<&str>>(" counter")
+        .parse(rest)
+        .ok()?;
+    if counter_type_raw.trim().is_empty() {
+        return None;
+    }
+    let (after_space, _) = tag::<_, _, VerboseError<&str>>(" ")
+        .parse(at_counter)
+        .ok()?;
+    alt((tag::<_, _, VerboseError<&str>>("counters"), tag("counter")))
+        .parse(after_space)
+        .ok()?;
+
+    Some(after_sep)
+}
+
+fn build_enters_counter_ability(entries: Vec<(String, QuantityExpr)>) -> AbilityDefinition {
+    let mut chain = entries
+        .into_iter()
+        .rev()
+        .fold(None, |tail, (counter_type, count)| {
+            let mut ability = AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::PutCounter {
+                    counter_type,
+                    count,
+                    target: TargetFilter::SelfRef,
+                },
+            );
+            ability.sub_ability = tail;
+            Some(Box::new(ability))
+        });
+
+    *chain
+        .take()
+        .expect("enters counter ability requires at least one counter entry")
 }
 
 /// CR 614.1c + CR 601.2: Parse "Whenever you cast a [spell], that [subject]
@@ -4323,6 +4408,33 @@ mod tests {
                 ..
             } if counter_type == "P1P1"
         ));
+    }
+
+    #[test]
+    fn self_enters_with_multiple_counter_types() {
+        let def = parse_replacement_line(
+            "This artifact enters with a +1/+1 counter, a flying counter, a deathtouch counter, and a shield counter on it.",
+            "Agent's Toolkit",
+        )
+        .unwrap();
+
+        let mut cursor = def.execute.as_deref().expect("execute ability");
+        let expected = ["P1P1", "flying", "deathtouch", "shield"];
+        for counter in expected {
+            assert!(matches!(
+                *cursor.effect,
+                Effect::PutCounter {
+                    ref counter_type,
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::SelfRef,
+                } if counter_type == counter
+            ));
+            if counter == "shield" {
+                assert!(cursor.sub_ability.is_none());
+            } else {
+                cursor = cursor.sub_ability.as_deref().expect("next counter");
+            }
+        }
     }
 
     #[test]

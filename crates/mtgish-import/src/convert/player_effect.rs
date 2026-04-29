@@ -137,7 +137,7 @@ fn player_effect_to_static(
         // bail out of the player-axis-affected-filter pattern.
         PlayerEffect::CantDrawCards => {
             return Ok(StaticDefinition::new(StaticMode::CantDraw {
-                who: controller_to_scope(controller),
+                who: controller_to_scope(controller)?,
             }));
         }
         // CR 104.3: "[Player] can't lose the game." (Platinum Angel side A)
@@ -171,7 +171,7 @@ fn player_effect_to_static(
         // becomes `affected`.
         PlayerEffect::CantCastSpells(spells) => {
             return Ok(StaticDefinition::new(StaticMode::CantBeCast {
-                who: controller_to_scope(controller),
+                who: controller_to_scope(controller)?,
             })
             .affected(spells_to_filter(spells)?));
         }
@@ -182,7 +182,7 @@ fn player_effect_to_static(
         // but the variant dispatch lands here regardless.
         PlayerEffect::CantCastSpellsFromGraveyards(spells) => {
             return Ok(StaticDefinition::new(StaticMode::CantBeCast {
-                who: controller_to_scope(controller),
+                who: controller_to_scope(controller)?,
             })
             .affected(spells_to_filter(spells)?));
         }
@@ -191,7 +191,7 @@ fn player_effect_to_static(
         // mode (not on `affected`).
         PlayerEffect::CantCastMoreThanNumberSpellsEachTurn(count, spells) => {
             return Ok(StaticDefinition::new(StaticMode::PerTurnCastLimit {
-                who: controller_to_scope(controller),
+                who: controller_to_scope(controller)?,
                 max: u32_from_fixed(count)?,
                 spell_filter: Some(spells_to_filter(spells)?),
             }));
@@ -251,11 +251,15 @@ fn require_pure_mana_cost(cost: &Cost, idiom: &'static str) -> ConvResult<engine
 /// `ControllerRef::TargetPlayer` arrives from `Players::AnyPlayer`
 /// ("each player can't ...") which the rules treat as an
 /// all-players prohibition.
-fn controller_to_scope(c: &ControllerRef) -> ProhibitionScope {
+fn controller_to_scope(c: &ControllerRef) -> ConvResult<ProhibitionScope> {
     match c {
-        ControllerRef::You => ProhibitionScope::Controller,
-        ControllerRef::Opponent => ProhibitionScope::Opponents,
-        ControllerRef::TargetPlayer => ProhibitionScope::AllPlayers,
+        ControllerRef::You => Ok(ProhibitionScope::Controller),
+        ControllerRef::Opponent => Ok(ProhibitionScope::Opponents),
+        ControllerRef::TargetPlayer => Ok(ProhibitionScope::AllPlayers),
+        ControllerRef::DefendingPlayer => Err(ConversionGap::EnginePrerequisiteMissing {
+            engine_type: "ProhibitionScope",
+            needed_variant: "DefendingPlayer".into(),
+        }),
     }
 }
 

@@ -4510,12 +4510,14 @@ fn replace_target_with_parent(effect: &mut Effect) {
         | Effect::Bounce { target, .. }
         | Effect::DealDamage { target, .. }
         | Effect::Pump { target, .. }
-        | Effect::Attach { target, .. }
         | Effect::Counter { target, .. }
         | Effect::Transform { target, .. }
         | Effect::Connive { target, .. }
         | Effect::PhaseOut { target }
         | Effect::ForceBlock { target } => {
+            *target = TargetFilter::ParentTarget;
+        }
+        Effect::Attach { target, .. } if !matches!(target, TargetFilter::LastCreated) => {
             *target = TargetFilter::ParentTarget;
         }
         Effect::PutCounter { target, .. }
@@ -6435,10 +6437,12 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         let (counter_cond, text) = strip_counter_conditional(&text);
         // CR 202.3 + CR 608.2c: Mana value threshold condition — same priority as counter_cond.
         let (mv_cond, text) = strip_mana_value_conditional(&text);
+        let (target_supertype_cond, text) = strip_target_supertype_conditional(&text);
         let (cast_from_zone, text) = if condition.is_none()
             && if_you_do.is_none()
             && counter_cond.is_none()
             && mv_cond.is_none()
+            && target_supertype_cond.is_none()
         {
             strip_cast_from_zone_conditional(&text)
         } else {
@@ -6448,6 +6452,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             && if_you_do.is_none()
             && counter_cond.is_none()
             && mv_cond.is_none()
+            && target_supertype_cond.is_none()
             && cast_from_zone.is_none()
         {
             strip_card_type_conditional(&text)
@@ -6458,6 +6463,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             && if_you_do.is_none()
             && counter_cond.is_none()
             && mv_cond.is_none()
+            && target_supertype_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
         {
@@ -6470,6 +6476,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             && if_you_do.is_none()
             && counter_cond.is_none()
             && mv_cond.is_none()
+            && target_supertype_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
@@ -6483,6 +6490,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             && if_you_do.is_none()
             && counter_cond.is_none()
             && mv_cond.is_none()
+            && target_supertype_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
@@ -6499,6 +6507,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             && if_you_do.is_none()
             && counter_cond.is_none()
             && mv_cond.is_none()
+            && target_supertype_cond.is_none()
             && cast_from_zone.is_none()
             && card_type_cond.is_none()
             && property_cond.is_none()
@@ -6512,6 +6521,7 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         let condition = condition
             .or(counter_cond)
             .or(mv_cond)
+            .or(target_supertype_cond)
             .or(if_you_do)
             .or(cast_from_zone)
             .or(card_type_cond)
@@ -10902,7 +10912,9 @@ mod tests {
                 Some(UnlessCost::DynamicGeneric {
                     quantity: QuantityExpr::Ref {
                         qty: QuantityRef::Devotion {
-                            colors: vec![ManaColor::Blue],
+                            colors: crate::types::ability::DevotionColors::Fixed(vec![
+                                ManaColor::Blue,
+                            ]),
                         },
                     },
                 }),
@@ -17791,6 +17803,53 @@ mod tests {
                     "anaphor must not thread through a non-targeted prior effect, got ParentTarget on sub_ability"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn suffix_legendary_condition_gates_counter_and_anaphoric_fight_subject() {
+        let def = parse_effect_chain(
+            "Put a +1/+1 counter on target creature you control if it's legendary. Then it fights target creature an opponent controls.",
+            AbilityKind::Spell,
+        );
+
+        match def.condition {
+            Some(AbilityCondition::TargetMatchesFilter { filter, use_lki }) => {
+                assert!(!use_lki);
+                let TargetFilter::Typed(tf) = filter else {
+                    panic!("expected typed condition filter");
+                };
+                assert!(tf.properties.iter().any(|prop| matches!(
+                    prop,
+                    FilterProp::HasSupertype {
+                        value: Supertype::Legendary
+                    }
+                )));
+            }
+            other => panic!("expected TargetMatchesFilter condition, got {other:?}"),
+        }
+
+        assert!(matches!(
+            def.effect.as_ref(),
+            Effect::PutCounter {
+                target: TargetFilter::Typed(_),
+                ..
+            }
+        ));
+
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected fight sub-ability");
+        match sub.effect.as_ref() {
+            Effect::Fight { target, subject } => {
+                assert_eq!(subject, &TargetFilter::ParentTarget);
+                assert!(
+                    matches!(target, TargetFilter::Typed(_)),
+                    "fight opponent target should remain typed, got {target:?}"
+                );
+            }
+            other => panic!("expected Fight sub-ability, got {other:?}"),
         }
     }
 

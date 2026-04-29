@@ -19,8 +19,8 @@ use super::oracle_nom::quantity as nom_quantity;
 use crate::parser::oracle_effect::counter::normalize_counter_type;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    AggregateFunction, CountScope, ObjectProperty, ObjectScope, PlayerFilter, PlayerRelation,
-    PlayerScope, QuantityExpr, QuantityRef, TargetFilter, ZoneRef,
+    AggregateFunction, CountScope, DevotionColors, ObjectProperty, ObjectScope, PlayerFilter,
+    PlayerRelation, PlayerScope, QuantityExpr, QuantityRef, TargetFilter, ZoneRef,
 };
 use crate::types::events::PlayerActionKind;
 use crate::types::mana::ManaColor;
@@ -161,11 +161,22 @@ pub(crate) fn parse_quantity_ref(text: &str) -> Option<QuantityRef> {
             return Some(QuantityRef::ObjectCount { filter });
         }
     }
-    // "your devotion to {color}" / "your devotion to {color} and {color}"
+    // "your devotion to that color" / "your devotion to {color}" /
+    // "your devotion to {color} and {color}"
     if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("your devotion to ").parse(trimmed) {
+        if tag::<_, _, VerboseError<&str>>("that color")
+            .parse(rest)
+            .is_ok()
+        {
+            return Some(QuantityRef::Devotion {
+                colors: DevotionColors::ChosenColor,
+            });
+        }
         let colors = parse_devotion_colors(rest);
         if !colors.is_empty() {
-            return Some(QuantityRef::Devotion { colors });
+            return Some(QuantityRef::Devotion {
+                colors: DevotionColors::Fixed(colors),
+            });
         }
     }
     None
@@ -1038,10 +1049,21 @@ mod tests {
         let qty = parse_quantity_ref("your devotion to black").unwrap();
         match qty {
             QuantityRef::Devotion { colors } => {
-                assert_eq!(colors, vec![ManaColor::Black]);
+                assert_eq!(colors, DevotionColors::Fixed(vec![ManaColor::Black]));
             }
             other => panic!("Expected Devotion, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_quantity_ref_devotion_chosen_color() {
+        let qty = parse_quantity_ref("your devotion to that color").unwrap();
+        assert_eq!(
+            qty,
+            QuantityRef::Devotion {
+                colors: DevotionColors::ChosenColor
+            }
+        );
     }
 
     #[test]
@@ -1049,6 +1071,9 @@ mod tests {
         let qty = parse_quantity_ref("your devotion to black and red").unwrap();
         match qty {
             QuantityRef::Devotion { colors } => {
+                let DevotionColors::Fixed(colors) = colors else {
+                    panic!("expected fixed devotion colors");
+                };
                 assert_eq!(colors.len(), 2);
                 assert!(colors.contains(&ManaColor::Black));
                 assert!(colors.contains(&ManaColor::Red));

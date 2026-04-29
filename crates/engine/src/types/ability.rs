@@ -540,6 +540,50 @@ fn is_default_mana_contribution(c: &ManaContribution) -> bool {
     matches!(c, ManaContribution::Base)
 }
 
+/// CR 700.5: Which color set a devotion quantity counts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type", content = "value")]
+pub enum DevotionColors {
+    /// Count devotion to one or more fixed colors.
+    Fixed(Vec<ManaColor>),
+    /// Count devotion to the color chosen by the source's current choice effect
+    /// or persisted chosen-color attribute.
+    ChosenColor,
+}
+
+impl<'de> serde::Deserialize<'de> for DevotionColors {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match &value {
+            serde_json::Value::Array(_) => {
+                let colors: Vec<ManaColor> =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                Ok(DevotionColors::Fixed(colors))
+            }
+            serde_json::Value::Object(_) => {
+                #[derive(serde::Deserialize)]
+                #[serde(tag = "type", content = "value")]
+                enum DevotionColorsHelper {
+                    Fixed(Vec<ManaColor>),
+                    ChosenColor,
+                }
+                let helper: DevotionColorsHelper =
+                    serde_json::from_value(value).map_err(serde::de::Error::custom)?;
+                match helper {
+                    DevotionColorsHelper::Fixed(colors) => Ok(DevotionColors::Fixed(colors)),
+                    DevotionColorsHelper::ChosenColor => Ok(DevotionColors::ChosenColor),
+                }
+            }
+            _ => Err(serde::de::Error::custom(
+                "expected array or object for DevotionColors",
+            )),
+        }
+    }
+}
+
 /// Mana production descriptor for `Effect::Mana`.
 ///
 /// Custom Deserialize: accepts both the tagged format `{"type":"Fixed","colors":["White"]}` (new)
@@ -1206,6 +1250,10 @@ pub enum ControllerRef {
     /// surfaces a companion `TargetFilter::Player` slot so the player is chosen
     /// as part of CR 601.2c / CR 603.3d target declaration.
     TargetPlayer,
+    /// CR 508.1b + CR 603.4: Filter controller is the defending player for the
+    /// source attacking creature in the current combat. Used by intervening-if
+    /// quantity checks such as "defending player controls more lands than you."
+    DefendingPlayer,
 }
 
 /// CR 301 / CR 303: Kinds of attachments to permanents.
@@ -1906,7 +1954,7 @@ pub enum QuantityRef {
     /// Used for "half of target player's library" and similar patterns.
     TargetZoneCardCount { zone: ZoneRef },
     /// CR 700.5: Devotion to one or more colors.
-    Devotion { colors: Vec<ManaColor> },
+    Devotion { colors: DevotionColors },
     /// CR 604.3: Count distinct card types (CoreType) across cards in a zone.
     /// Scope controls which players' zones are counted.
     DistinctCardTypesInZone { zone: ZoneRef, scope: CountScope },

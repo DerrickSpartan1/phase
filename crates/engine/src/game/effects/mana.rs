@@ -3,8 +3,8 @@ use crate::game::quantity::{resolve_quantity, resolve_quantity_with_targets};
 #[cfg(test)]
 use crate::types::ability::ManaContribution;
 use crate::types::ability::{
-    Effect, EffectError, EffectKind, LinkedExileScope, ManaProduction, ManaSpendRestriction,
-    ResolvedAbility,
+    ChoiceValue, Effect, EffectError, EffectKind, LinkedExileScope, ManaProduction,
+    ManaSpendRestriction, ResolvedAbility,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -38,18 +38,7 @@ pub fn resolve(
     // `resolve_quantity_with_targets` threads `ability.chosen_x` through to the
     // `Variable { name: "X" }` branch of `resolve_ref`. Non-X mana production
     // (Fixed, ObjectCount, etc.) is unaffected.
-    let mana_types = match produced {
-        ManaProduction::ChosenColor { count, .. } => {
-            let amount = resolve_quantity_with_targets(&*state, count, ability).max(0) as usize;
-            state
-                .objects
-                .get(&ability.source_id)
-                .and_then(|obj| obj.chosen_color())
-                .map(|color| vec![mana_color_to_type(&color); amount])
-                .unwrap_or_default()
-        }
-        other => resolve_mana_types_with_ability(other, &*state, ability),
-    };
+    let mana_types = resolve_mana_types_with_ability(produced, &*state, ability);
 
     // Resolve restriction templates into concrete restrictions
     let concrete_restrictions = resolve_restrictions(restrictions, state, ability.source_id);
@@ -223,7 +212,12 @@ fn resolve_mana_types_impl(
                 .map(|index| mana_color_to_type(&color_options[index % color_options.len()]))
                 .collect()
         }
-        ManaProduction::ChosenColor { .. } => Vec::new(),
+        ManaProduction::ChosenColor { count, .. } => {
+            let amount = resolve_count(count, state, ability, controller, source_id);
+            chosen_color_for_mana(state, source_id)
+                .map(|color| vec![mana_color_to_type(&color); amount])
+                .unwrap_or_default()
+        }
         // CR 106.7: Produce mana of any color that a land an opponent controls could produce.
         // Delegates to mana_sources::opponent_land_color_options for the shared computation.
         ManaProduction::OpponentLandColors { count } => {
@@ -428,6 +422,25 @@ pub(crate) fn exiled_color_options(
     options
 }
 
+fn chosen_color_for_mana(
+    state: &GameState,
+    source_id: crate::types::identifiers::ObjectId,
+) -> Option<ManaColor> {
+    state
+        .objects
+        .get(&source_id)
+        .and_then(|obj| obj.chosen_color())
+        .or_else(|| {
+            state
+                .last_named_choice
+                .as_ref()
+                .and_then(|choice| match choice {
+                    ChoiceValue::Color(color) => Some(*color),
+                    _ => None,
+                })
+        })
+}
+
 /// Convert a ManaColor to the runtime ManaType.
 /// CR 106.1a: There are five colors of mana: white, blue, black, red, and green.
 /// CR 106.1b: There are six types of mana: white, blue, black, red, green, and colorless.
@@ -446,7 +459,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::types::ability::QuantityExpr;
+    use crate::types::ability::{ChoiceValue, DevotionColors, QuantityExpr, QuantityRef};
     use crate::types::identifiers::ObjectId;
     use crate::types::player::PlayerId;
 
@@ -717,6 +730,52 @@ mod tests {
 
         let player = state.players.iter().find(|p| p.id == PlayerId(0)).unwrap();
         assert_eq!(player.mana_pool.count_color(ManaType::Green), 1);
+    }
+
+    #[test]
+    fn chosen_color_dynamic_count_reads_current_named_choice() {
+        use crate::game::zones::create_object;
+        use crate::types::identifiers::CardId;
+        use crate::types::mana::{ManaCost, ManaCostShard};
+        use crate::types::zones::Zone;
+
+        let mut state = GameState::new_two_player(42);
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Nyx Lotus".to_string(),
+            Zone::Battlefield,
+        );
+        let permanent = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Green Permanent".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&permanent).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Green, ManaCostShard::Green],
+            generic: 1,
+        };
+        state.last_named_choice = Some(ChoiceValue::Color(ManaColor::Green));
+
+        let mut events = Vec::new();
+        let ability = ResolvedAbility {
+            source_id,
+            ..make_mana_ability(ManaProduction::ChosenColor {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Devotion {
+                        colors: DevotionColors::ChosenColor,
+                    },
+                },
+                contribution: ManaContribution::Base,
+            })
+        };
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 2);
     }
 
     #[test]
