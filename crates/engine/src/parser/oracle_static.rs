@@ -5,6 +5,7 @@ use nom::branch::alt;
 use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::{alpha1, space1};
 use nom::combinator::{opt, rest, value};
+use nom::multi::many0;
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 use nom_language::error::VerboseError;
@@ -281,8 +282,10 @@ enum RuleStaticPredicate {
     CantAttack,
     CantBlock,
     CantAttackOrBlock,
+    CantBeSacrificed,
     MustAttack,
     MustBlock,
+    MustBeBlocked,
     BlockOnlyCreaturesWithFlying,
     Shroud,
     Hexproof,
@@ -1950,23 +1953,42 @@ fn parse_static_line_multi_inner(text: &str) -> Vec<StaticDefinition> {
 }
 
 fn parse_compound_subject_rule_static(text: &str, lower: &str) -> Option<Vec<StaticDefinition>> {
-    let (subject_lower, left, after_left) =
+    let (subject_lower, first, after_first) =
         nom_primitives::scan_preceded(lower, parse_rule_static_predicate_nom)?;
-    let (rest, right) = preceded(
-        tag::<_, _, VerboseError<&str>>(" and "),
+    let (rest, mut predicates) = many0(preceded(
+        parse_rule_static_separator_nom,
         parse_rule_static_predicate_nom,
-    )
-    .parse(after_left)
+    ))
+    .parse(after_first)
     .ok()?;
+    let (rest, _) = opt(tag::<_, _, VerboseError<&str>>(".")).parse(rest).ok()?;
     if !rest.trim().is_empty() {
+        return None;
+    }
+    if predicates.is_empty() {
         return None;
     }
     let subject = text[..subject_lower.len()].trim();
     let affected = parse_rule_static_subject_filter(subject)?;
-    Some(vec![
-        lower_rule_static(left, affected.clone(), text),
-        lower_rule_static(right, affected, text),
-    ])
+    predicates.insert(0, first);
+    Some(
+        predicates
+            .into_iter()
+            .map(|predicate| lower_rule_static(predicate, affected.clone(), text))
+            .collect(),
+    )
+}
+
+fn parse_rule_static_separator_nom(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, VerboseError<&str>>(", and "),
+            tag(", "),
+            tag(" and "),
+        )),
+    )
+    .parse(input)
 }
 
 /// CR 702.3b + CR 611.3a + CR 613: Decompose `"<predicate_1> and can attack
@@ -4166,6 +4188,10 @@ fn parse_rule_static_predicate_nom(input: &str) -> OracleResult<'_, RuleStaticPr
     let (rest, predicate) = alt((
         parse_combat_rule_static_predicate_nom,
         value(
+            RuleStaticPredicate::CantBeSacrificed,
+            tag("can't be sacrificed"),
+        ),
+        value(
             RuleStaticPredicate::LoseAllAbilities,
             alt((tag("loses all abilities"), tag("lose all abilities"))),
         ),
@@ -4181,10 +4207,47 @@ fn parse_combat_rule_static_predicate_nom(input: &str) -> OracleResult<'_, RuleS
             RuleStaticPredicate::CantAttackOrBlock,
             tag("can't attack or block"),
         ),
-        value(RuleStaticPredicate::CantAttack, tag("can't attack")),
+        parse_cant_attack_rule_static_predicate_nom,
         value(RuleStaticPredicate::CantBlock, tag("can't block")),
+        value(
+            RuleStaticPredicate::MustAttack,
+            alt((
+                tag("attacks each combat if able"),
+                tag("attack each combat if able"),
+                tag("attacks each turn if able"),
+                tag("attack each turn if able"),
+                tag("must attack each combat if able"),
+                tag("must attack if able"),
+            )),
+        ),
+        value(
+            RuleStaticPredicate::MustBlock,
+            alt((
+                tag("blocks each combat if able"),
+                tag("block each combat if able"),
+                tag("blocks each turn if able"),
+                tag("block each turn if able"),
+                tag("must block each combat if able"),
+                tag("must block if able"),
+            )),
+        ),
+        value(
+            RuleStaticPredicate::MustBeBlocked,
+            alt((
+                tag("must be blocked each combat if able"),
+                tag("must be blocked if able"),
+            )),
+        ),
     ))
     .parse(input)
+}
+
+fn parse_cant_attack_rule_static_predicate_nom(
+    input: &str,
+) -> OracleResult<'_, RuleStaticPredicate> {
+    let (rest, _) = tag("can't attack").parse(input)?;
+    let (rest, _) = opt(preceded(space1, tag("its owner"))).parse(rest)?;
+    Ok((rest, RuleStaticPredicate::CantAttack))
 }
 
 fn lower_rule_static(
@@ -4207,10 +4270,18 @@ fn lower_rule_static(
                 .affected(affected)
                 .description(description.to_string())
         }
+        RuleStaticPredicate::CantBeSacrificed => {
+            StaticDefinition::new(StaticMode::Other("CantBeSacrificed".to_string()))
+                .affected(affected)
+                .description(description.to_string())
+        }
         RuleStaticPredicate::MustAttack => StaticDefinition::new(StaticMode::MustAttack)
             .affected(affected)
             .description(description.to_string()),
         RuleStaticPredicate::MustBlock => StaticDefinition::new(StaticMode::MustBlock)
+            .affected(affected)
+            .description(description.to_string()),
+        RuleStaticPredicate::MustBeBlocked => StaticDefinition::new(StaticMode::MustBeBlocked)
             .affected(affected)
             .description(description.to_string()),
         RuleStaticPredicate::BlockOnlyCreaturesWithFlying => {
@@ -9058,6 +9129,23 @@ mod tests {
             }));
         assert_eq!(defs[1].mode, StaticMode::MustAttack);
         assert_eq!(defs[1].affected, defs[0].affected);
+    }
+
+    #[test]
+    fn static_comma_rule_statics_share_subject() {
+        let defs = parse_static_line_multi(
+            "This creature attacks each combat if able, can't be sacrificed, and can't attack its owner.",
+        );
+        assert_eq!(defs.len(), 3);
+        assert_eq!(defs[0].mode, StaticMode::MustAttack);
+        assert_eq!(
+            defs[1].mode,
+            StaticMode::Other("CantBeSacrificed".to_string())
+        );
+        assert_eq!(defs[2].mode, StaticMode::CantAttack);
+        assert!(defs
+            .iter()
+            .all(|def| def.affected == Some(TargetFilter::SelfRef)));
     }
 
     #[test]
