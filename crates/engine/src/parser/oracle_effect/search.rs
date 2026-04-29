@@ -489,23 +489,37 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
         OrA,
         OrAn,
         OrBasic,
+        AndOrA,
+        AndOrAn,
         BareOr,
     }
 
     let mut segments = Vec::new();
     let mut remaining = filter_region;
     loop {
-        let mut scan = (
-            take_until::<_, _, VerboseError<&str>>(" or "),
+        let mut and_or_scan = (
+            take_until::<_, _, VerboseError<&str>>(" and/or "),
             alt((
-                value(Disjunction::OrA, tag(" or a ")),
-                value(Disjunction::OrAn, tag(" or an ")),
-                value(Disjunction::OrBasic, tag(" or basic ")),
-                value(Disjunction::BareOr, tag(" or ")),
+                value(Disjunction::AndOrA, tag(" and/or a ")),
+                value(Disjunction::AndOrAn, tag(" and/or an ")),
             )),
         );
+        let parsed = if let Ok(found) = and_or_scan.parse(remaining) {
+            Some(found)
+        } else {
+            let mut or_scan = (
+                take_until::<_, _, VerboseError<&str>>(" or "),
+                alt((
+                    value(Disjunction::OrA, tag(" or a ")),
+                    value(Disjunction::OrAn, tag(" or an ")),
+                    value(Disjunction::OrBasic, tag(" or basic ")),
+                    value(Disjunction::BareOr, tag(" or ")),
+                )),
+            );
+            or_scan.parse(remaining).ok()
+        };
 
-        let Ok((rest, (before, disjunction))) = scan.parse(remaining) else {
+        let Some((rest, (before, disjunction))) = parsed else {
             segments.push(remaining.trim());
             break;
         };
@@ -522,7 +536,11 @@ fn split_filter_disjunctions(filter_region: &str) -> Vec<&str> {
 
         segments.push(before.trim());
         remaining = match disjunction {
-            Disjunction::OrA | Disjunction::OrAn | Disjunction::BareOr => rest,
+            Disjunction::OrA
+            | Disjunction::OrAn
+            | Disjunction::AndOrA
+            | Disjunction::AndOrAn
+            | Disjunction::BareOr => rest,
             Disjunction::OrBasic => {
                 let start = filter_region.len() - rest.len() - "basic ".len();
                 &filter_region[start..]
@@ -1349,6 +1367,27 @@ mod tests {
             panic!("expected typed Artifact branch, got {:?}", filters[1]);
         };
         assert!(artifact.type_filters.contains(&TypeFilter::Artifact));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_and_or_article_variant() {
+        let filter = parse_search_filter("aura card and/or an equipment card, reveal them");
+        let TargetFilter::Or { filters } = filter else {
+            panic!("expected Or filter, got {filter:?}");
+        };
+        assert_eq!(filters.len(), 2);
+
+        let TargetFilter::Typed(aura) = &filters[0] else {
+            panic!("expected typed Aura branch, got {:?}", filters[0]);
+        };
+        assert!(aura.type_filters.contains(&TypeFilter::Enchantment));
+        assert_eq!(aura.get_subtype(), Some("Aura"));
+
+        let TargetFilter::Typed(equipment) = &filters[1] else {
+            panic!("expected typed Equipment branch, got {:?}", filters[1]);
+        };
+        assert!(equipment.type_filters.contains(&TypeFilter::Artifact));
+        assert_eq!(equipment.get_subtype(), Some("Equipment"));
     }
 
     #[test]
