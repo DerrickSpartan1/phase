@@ -598,7 +598,7 @@ mod auto_pass_decision_tests {
         .unwrap();
 
         assert!(state.stack.is_empty());
-        assert!(state.auto_pass.get(&PlayerId(0)).is_none());
+        assert!(!state.auto_pass.contains_key(&PlayerId(0)));
         assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
         assert_eq!(
             result
@@ -759,7 +759,7 @@ mod auto_pass_decision_tests {
         .unwrap();
 
         assert_eq!(state.stack.len(), 2);
-        assert!(state.auto_pass.get(&PlayerId(0)).is_none());
+        assert!(!state.auto_pass.contains_key(&PlayerId(0)));
         assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
     }
 
