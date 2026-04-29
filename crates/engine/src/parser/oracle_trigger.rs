@@ -1399,6 +1399,9 @@ fn extract_if_condition(text: &str) -> (String, Option<TriggerCondition>) {
     if let Some(result) = try_extract_symbolic_mana_spent_condition(&tp, &lower, text) {
         return result;
     }
+    if let Some(result) = try_extract_symbolic_unless_mana_spent_condition(text) {
+        return result;
+    }
 
     // CR 702.49 + CR 603.4: "if [possessive] sneak/ninjutsu cost was paid [this turn]"
     // Guard: "instead" means conditional override, not intervening-if.
@@ -1739,17 +1742,63 @@ fn try_extract_symbolic_mana_spent_condition(
     _lower: &str,
     text: &str,
 ) -> Option<(String, Option<TriggerCondition>)> {
+    try_extract_symbolic_mana_spent_clause(text, SymbolicManaSpentIntro::If)
+}
+
+/// Extract trailing symbolic-form unless clauses like
+/// `"sacrifice it unless {U} was spent to cast it"` as the negation of the
+/// existing mana-color-spent trigger condition.
+fn try_extract_symbolic_unless_mana_spent_condition(
+    text: &str,
+) -> Option<(String, Option<TriggerCondition>)> {
+    try_extract_symbolic_mana_spent_clause(text, SymbolicManaSpentIntro::Unless)
+}
+
+#[derive(Clone, Copy)]
+enum SymbolicManaSpentIntro {
+    If,
+    Unless,
+}
+
+impl SymbolicManaSpentIntro {
+    fn tag(self) -> &'static str {
+        match self {
+            SymbolicManaSpentIntro::If => "if ",
+            SymbolicManaSpentIntro::Unless => "unless ",
+        }
+    }
+
+    fn condition(self, color: ManaColor, minimum: u32) -> TriggerCondition {
+        let condition = TriggerCondition::ManaColorSpent { color, minimum };
+        match self {
+            SymbolicManaSpentIntro::If => condition,
+            SymbolicManaSpentIntro::Unless => TriggerCondition::Not {
+                condition: Box::new(condition),
+            },
+        }
+    }
+}
+
+fn try_extract_symbolic_mana_spent_clause(
+    text: &str,
+    intro: SymbolicManaSpentIntro,
+) -> Option<(String, Option<TriggerCondition>)> {
     // Scan for the clause at any word boundary using a composed combinator:
-    //   "if " → many1(pure_color_symbol) → " was spent to cast <ref>".
+    //   ("if " | "unless ") → many1(pure_color_symbol) → " was spent to cast <ref>".
     // `scan_preceded` threads (before, value, rest) in one pass — no re-parse.
     let (before, (colors, _), tail_rest) = nom_primitives::scan_preceded(text, |i| {
         preceded(
-            tag("if "),
+            tag(intro.tag()),
             pair(many1(parse_pure_color_symbol_ci), parse_spent_to_cast_tail),
         )
         .parse(i)
     })?;
 
+    let tail_trimmed = tail_rest.trim_start();
+    if !(tail_trimmed.is_empty() || tail_trimmed.starts_with('.') || tail_trimmed.starts_with(','))
+    {
+        return None;
+    }
     let first_color = colors.first().copied()?;
     if !colors.iter().all(|c| *c == first_color) {
         return None;
@@ -1761,10 +1810,7 @@ fn try_extract_symbolic_mana_spent_condition(
 
     Some((
         strip_condition_clause(text, clause_start, clause_len),
-        Some(TriggerCondition::ManaColorSpent {
-            color: first_color,
-            minimum: count,
-        }),
+        Some(intro.condition(first_color, count)),
     ))
 }
 
@@ -10982,6 +11028,37 @@ mod tests {
             TriggerCondition::ManaColorSpent {
                 color: crate::types::mana::ManaColor::Red,
                 minimum: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn extract_symbolic_unless_mana_spent_single_blue() {
+        let (cleaned, cond) = extract_if_condition("sacrifice it unless {U} was spent to cast it");
+        assert_eq!(cleaned, "sacrifice it");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::ManaColorSpent {
+                    color: crate::types::mana::ManaColor::Blue,
+                    minimum: 1,
+                }),
+            }
+        );
+    }
+
+    #[test]
+    fn extract_symbolic_unless_mana_spent_two_black() {
+        let (cleaned, cond) =
+            extract_if_condition("sacrifice it unless {B}{B} was spent to cast it");
+        assert_eq!(cleaned, "sacrifice it");
+        assert_eq!(
+            cond.unwrap(),
+            TriggerCondition::Not {
+                condition: Box::new(TriggerCondition::ManaColorSpent {
+                    color: crate::types::mana::ManaColor::Black,
+                    minimum: 2,
+                }),
             }
         );
     }
