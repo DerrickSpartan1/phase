@@ -9,9 +9,10 @@
 use engine::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ChoiceType,
     ContinuousModification, ControllerRef, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    GainLifePlayer, LibraryPosition, ManaSpendRestriction, ModalSelectionConstraint,
-    MultiTargetSpec, PlayerFilter, PlayerScope, QuantityExpr, SearchSelectionConstraint,
-    StaticDefinition, TargetFilter, TriggerDefinition, TypedFilter,
+    GainLifePlayer, LibraryPosition, ManaProduction, ManaSpendRestriction,
+    ModalSelectionConstraint, MultiTargetSpec, PaymentCost, PlayerFilter, PlayerScope, PtValue,
+    QuantityExpr, QuantityRef, SearchSelectionConstraint, StaticDefinition, TargetFilter,
+    TriggerDefinition, TypedFilter,
 };
 use engine::types::game_state::DistributionUnit;
 use engine::types::mana::ManaCost;
@@ -204,6 +205,293 @@ pub enum ActionsConversion {
         player_scope: PlayerFilter,
         condition: AbilityCondition,
     },
+}
+
+#[derive(Debug, Clone, Default)]
+struct VariableBindings {
+    x: Option<QuantityExpr>,
+}
+
+impl VariableBindings {
+    fn bind_x(&mut self, value: &GameNumber) -> ConvResult<()> {
+        let mut expr = quantity::convert(value)?;
+        if let Some(binding) = &self.x {
+            rewrite_bound_x_in_quantity_expr(&mut expr, binding);
+        }
+        self.x = Some(expr);
+        Ok(())
+    }
+
+    fn rewrite_effects(&self, effects: &mut [Effect]) -> usize {
+        let Some(binding) = &self.x else {
+            return 0;
+        };
+        effects
+            .iter_mut()
+            .map(|effect| rewrite_bound_x_in_effect(effect, binding))
+            .sum()
+    }
+}
+
+fn rewrite_bound_x_in_quantity_expr(expr: &mut QuantityExpr, binding: &QuantityExpr) -> usize {
+    match expr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name },
+        } if name == "X" => {
+            *expr = binding.clone();
+            1
+        }
+        QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => 0,
+        QuantityExpr::HalfRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::UpTo { max: inner } => rewrite_bound_x_in_quantity_expr(inner, binding),
+        QuantityExpr::Sum { exprs } => exprs
+            .iter_mut()
+            .map(|inner| rewrite_bound_x_in_quantity_expr(inner, binding))
+            .sum(),
+    }
+}
+
+fn rewrite_bound_x_in_pt_value(value: &mut PtValue, binding: &QuantityExpr) -> usize {
+    match value {
+        PtValue::Variable(name) if name == "X" => {
+            *value = PtValue::Quantity(binding.clone());
+            1
+        }
+        PtValue::Variable(name) if name == "-X" => {
+            *value = PtValue::Quantity(QuantityExpr::Multiply {
+                factor: -1,
+                inner: Box::new(binding.clone()),
+            });
+            1
+        }
+        PtValue::Quantity(expr) => rewrite_bound_x_in_quantity_expr(expr, binding),
+        PtValue::Fixed(_) | PtValue::Variable(_) => 0,
+    }
+}
+
+fn rewrite_bound_x_in_mana_production(
+    production: &mut ManaProduction,
+    binding: &QuantityExpr,
+) -> usize {
+    match production {
+        ManaProduction::Colorless { count }
+        | ManaProduction::AnyOneColor { count, .. }
+        | ManaProduction::AnyCombination { count, .. }
+        | ManaProduction::ChosenColor { count, .. }
+        | ManaProduction::OpponentLandColors { count }
+        | ManaProduction::AnyTypeProduceableBy { count, .. }
+        | ManaProduction::AnyInCommandersColorIdentity { count, .. } => {
+            rewrite_bound_x_in_quantity_expr(count, binding)
+        }
+        ManaProduction::Fixed { .. }
+        | ManaProduction::Mixed { .. }
+        | ManaProduction::ChoiceAmongExiledColors { .. }
+        | ManaProduction::ChoiceAmongCombinations { .. }
+        | ManaProduction::DistinctColorsAmongPermanents { .. }
+        | ManaProduction::TriggerEventManaType => 0,
+    }
+}
+
+fn rewrite_bound_x_in_payment_cost(cost: &mut PaymentCost, binding: &QuantityExpr) -> usize {
+    match cost {
+        PaymentCost::Life { amount }
+        | PaymentCost::Speed { amount }
+        | PaymentCost::Energy { amount } => rewrite_bound_x_in_quantity_expr(amount, binding),
+        PaymentCost::Mana { .. } => 0,
+    }
+}
+
+fn rewrite_bound_x_in_static_definition(
+    definition: &mut StaticDefinition,
+    binding: &QuantityExpr,
+) -> usize {
+    definition
+        .modifications
+        .iter_mut()
+        .map(|modification| rewrite_bound_x_in_continuous_modification(modification, binding))
+        .sum()
+}
+
+fn rewrite_bound_x_in_continuous_modification(
+    modification: &mut ContinuousModification,
+    binding: &QuantityExpr,
+) -> usize {
+    match modification {
+        ContinuousModification::GrantAbility { definition } => {
+            rewrite_bound_x_in_ability_definition(definition, binding)
+        }
+        ContinuousModification::SetDynamicPower { value }
+        | ContinuousModification::SetDynamicToughness { value }
+        | ContinuousModification::SetPowerDynamic { value }
+        | ContinuousModification::SetToughnessDynamic { value }
+        | ContinuousModification::AddDynamicPower { value }
+        | ContinuousModification::AddDynamicToughness { value }
+        | ContinuousModification::AddDynamicKeyword { value, .. }
+        | ContinuousModification::AddCounterOnEnter { count: value, .. } => {
+            rewrite_bound_x_in_quantity_expr(value, binding)
+        }
+        _ => 0,
+    }
+}
+
+fn rewrite_bound_x_in_ability_definition(
+    definition: &mut AbilityDefinition,
+    binding: &QuantityExpr,
+) -> usize {
+    let mut count = rewrite_bound_x_in_effect(definition.effect.as_mut(), binding);
+    if let Some(sub) = definition.sub_ability.as_mut() {
+        count += rewrite_bound_x_in_ability_definition(sub, binding);
+    }
+    if let Some(else_ability) = definition.else_ability.as_mut() {
+        count += rewrite_bound_x_in_ability_definition(else_ability, binding);
+    }
+    for mode_ability in &mut definition.mode_abilities {
+        count += rewrite_bound_x_in_ability_definition(mode_ability, binding);
+    }
+    count
+}
+
+#[allow(clippy::too_many_lines)]
+fn rewrite_bound_x_in_effect(effect: &mut Effect, binding: &QuantityExpr) -> usize {
+    match effect {
+        Effect::IncreaseSpeed { amount, .. }
+        | Effect::DealDamage { amount, .. }
+        | Effect::Draw { count: amount, .. }
+        | Effect::GainLife { amount, .. }
+        | Effect::LoseLife { amount, .. }
+        | Effect::Sacrifice { count: amount, .. }
+        | Effect::Mill { count: amount, .. }
+        | Effect::Scry { count: amount, .. }
+        | Effect::DamageAll { amount, .. }
+        | Effect::DamageEachPlayer { amount, .. }
+        | Effect::Dig { count: amount, .. }
+        | Effect::Surveil { count: amount, .. }
+        | Effect::Discard { count: amount, .. }
+        | Effect::SearchLibrary { count: amount, .. }
+        | Effect::RevealHand {
+            count: Some(amount),
+            ..
+        }
+        | Effect::ExileTop { count: amount, .. }
+        | Effect::GainEnergy { amount }
+        | Effect::GivePlayerCounter { count: amount, .. }
+        | Effect::PutAtLibraryPosition { count: amount, .. }
+        | Effect::Manifest { count: amount, .. }
+        | Effect::SkipNextTurn { count: amount, .. }
+        | Effect::Incubate { count: amount }
+        | Effect::Amass { count: amount, .. }
+        | Effect::Monstrosity { count: amount }
+        | Effect::Bolster { count: amount }
+        | Effect::Adapt { count: amount }
+        | Effect::Seek { count: amount, .. }
+        | Effect::SetLifeTotal { amount, .. }
+        | Effect::AddPendingETBCounters { count: amount, .. } => {
+            rewrite_bound_x_in_quantity_expr(amount, binding)
+        }
+        Effect::AddCounter { count, .. } | Effect::PutCounter { count, .. } => {
+            rewrite_bound_x_in_quantity_expr(count, binding)
+        }
+        Effect::Pump {
+            power, toughness, ..
+        }
+        | Effect::PumpAll {
+            power, toughness, ..
+        } => {
+            rewrite_bound_x_in_pt_value(power, binding)
+                + rewrite_bound_x_in_pt_value(toughness, binding)
+        }
+        Effect::Token {
+            power,
+            toughness,
+            count,
+            enter_with_counters,
+            ..
+        } => {
+            rewrite_bound_x_in_pt_value(power, binding)
+                + rewrite_bound_x_in_pt_value(toughness, binding)
+                + rewrite_bound_x_in_quantity_expr(count, binding)
+                + enter_with_counters
+                    .iter_mut()
+                    .map(|(_, count)| rewrite_bound_x_in_quantity_expr(count, binding))
+                    .sum::<usize>()
+        }
+        Effect::ChangeZone {
+            enter_with_counters,
+            ..
+        } => enter_with_counters
+            .iter_mut()
+            .map(|(_, count)| rewrite_bound_x_in_quantity_expr(count, binding))
+            .sum(),
+        Effect::GenericEffect {
+            static_abilities, ..
+        } => static_abilities
+            .iter_mut()
+            .map(|definition| rewrite_bound_x_in_static_definition(definition, binding))
+            .sum(),
+        Effect::Mana { produced, .. } => rewrite_bound_x_in_mana_production(produced, binding),
+        Effect::RevealFromHand {
+            on_decline: Some(on_decline),
+            ..
+        } => rewrite_bound_x_in_ability_definition(on_decline, binding),
+        Effect::CreateDelayedTrigger { effect, .. } => {
+            rewrite_bound_x_in_ability_definition(effect, binding)
+        }
+        Effect::CreateEmblem { statics, triggers } => {
+            let static_count: usize = statics
+                .iter_mut()
+                .map(|definition| rewrite_bound_x_in_static_definition(definition, binding))
+                .sum();
+            let trigger_count: usize = triggers
+                .iter_mut()
+                .filter_map(|trigger| trigger.execute.as_mut())
+                .map(|execute| rewrite_bound_x_in_ability_definition(execute, binding))
+                .sum();
+            static_count + trigger_count
+        }
+        Effect::PayCost { cost, .. } => rewrite_bound_x_in_payment_cost(cost, binding),
+        Effect::CastFromZone {
+            alt_ability_cost: Some(_),
+            ..
+        } => 0,
+        Effect::RollDie { results, .. } => results
+            .iter_mut()
+            .map(|branch| rewrite_bound_x_in_ability_definition(&mut branch.effect, binding))
+            .sum(),
+        Effect::FlipCoin {
+            win_effect,
+            lose_effect,
+        } => win_effect
+            .iter_mut()
+            .chain(lose_effect.iter_mut())
+            .map(|effect| rewrite_bound_x_in_ability_definition(effect, binding))
+            .sum(),
+        Effect::FlipCoins {
+            count,
+            win_effect,
+            lose_effect,
+        } => {
+            win_effect
+                .iter_mut()
+                .chain(lose_effect.iter_mut())
+                .map(|effect| rewrite_bound_x_in_ability_definition(effect, binding))
+                .sum::<usize>()
+                + rewrite_bound_x_in_quantity_expr(count, binding)
+        }
+        Effect::FlipCoinUntilLose { win_effect } => {
+            rewrite_bound_x_in_ability_definition(win_effect, binding)
+        }
+        Effect::Conjure { cards, .. } => cards
+            .iter_mut()
+            .map(|card| rewrite_bound_x_in_quantity_expr(&mut card.count, binding))
+            .sum(),
+        Effect::ChooseOneOf { branches } => branches
+            .iter_mut()
+            .map(|branch| rewrite_bound_x_in_ability_definition(branch, binding))
+            .sum(),
+        _ => 0,
+    }
 }
 
 /// Top-level entry point: convert an `Actions` body into a typed
@@ -955,6 +1243,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
 
     let mut segments: Vec<ChainSegment> = Vec::new();
     let mut current: Vec<Effect> = Vec::new();
+    let mut bindings = VariableBindings::default();
 
     let flush_unconditional = |current: &mut Vec<Effect>, segments: &mut Vec<ChainSegment>| {
         if !current.is_empty() {
@@ -972,6 +1261,9 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
     while i < actions_vec.len() {
         let a = &actions_vec[i];
         match a {
+            Action::CreateValueX(value) => {
+                bindings.bind_x(value)?;
+            }
             // CR 117.6 + CR 605.1c: Mid-list speculative-payment idiom —
             // `[MayCost(cost), If(CostWasPaid, body)]` (positive form) or
             // `[MayCost(cost), Unless(CostWasPaid, body)]` (negative form,
@@ -992,7 +1284,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                 if let Some(Action::If(cond, body)) = next {
                     if is_cost_was_paid(cond) {
                         let cost = crate::convert::cost::convert(cost_box)?;
-                        let body_effects = convert_action_vec(body)?;
+                        let body_effects = convert_action_vec_with_bindings(body, &bindings)?;
                         flush_unconditional(&mut current, &mut segments);
                         segments.push(ChainSegment {
                             condition: None,
@@ -1016,8 +1308,8 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                 if let Some(Action::IfElse(cond, then_body, else_body)) = next {
                     if is_cost_was_paid(cond) {
                         let cost = crate::convert::cost::convert(cost_box)?;
-                        let then_effects = convert_action_vec(then_body)?;
-                        let else_effects = convert_action_vec(else_body)?;
+                        let then_effects = convert_action_vec_with_bindings(then_body, &bindings)?;
+                        let else_effects = convert_action_vec_with_bindings(else_body, &bindings)?;
                         flush_unconditional(&mut current, &mut segments);
                         segments.push(ChainSegment {
                             condition: None,
@@ -1047,7 +1339,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                 if let Some(Action::Unless(cond, body)) = next {
                     if is_cost_was_paid(cond) {
                         let cost = crate::convert::cost::convert(cost_box)?;
-                        let body_effects = convert_action_vec(body)?;
+                        let body_effects = convert_action_vec_with_bindings(body, &bindings)?;
                         flush_unconditional(&mut current, &mut segments);
                         segments.push(ChainSegment {
                             condition: Some(engine::types::ability::AbilityCondition::Not {
@@ -1103,7 +1395,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                 if let Some(Action::If(cond, body)) = next {
                     if is_cost_was_paid(cond) {
                         let cost = crate::convert::cost::convert(cost_box)?;
-                        let body_effects = convert_action_vec(body)?;
+                        let body_effects = convert_action_vec_with_bindings(body, &bindings)?;
                         flush_unconditional(&mut current, &mut segments);
                         segments.push(ChainSegment {
                             condition: None,
@@ -1121,8 +1413,8 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                 if let Some(Action::IfElse(cond, then_body, else_body)) = next {
                     if is_cost_was_paid(cond) {
                         let cost = crate::convert::cost::convert(cost_box)?;
-                        let then_effects = convert_action_vec(then_body)?;
-                        let else_effects = convert_action_vec(else_body)?;
+                        let then_effects = convert_action_vec_with_bindings(then_body, &bindings)?;
+                        let else_effects = convert_action_vec_with_bindings(else_body, &bindings)?;
                         flush_unconditional(&mut current, &mut segments);
                         segments.push(ChainSegment {
                             condition: None,
@@ -1143,7 +1435,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                 if let Some(Action::Unless(cond, body)) = next {
                     if is_cost_was_paid(cond) {
                         let cost = crate::convert::cost::convert(cost_box)?;
-                        let body_effects = convert_action_vec(body)?;
+                        let body_effects = convert_action_vec_with_bindings(body, &bindings)?;
                         flush_unconditional(&mut current, &mut segments);
                         segments.push(ChainSegment {
                             condition: Some(engine::types::ability::AbilityCondition::Not {
@@ -1174,7 +1466,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
             // no extra cost. Multi-emit inner shapes (e.g., SearchLibrary)
             // propagate via `convert_many`.
             Action::MayAction(inner) => {
-                let body_effects = convert_many(inner)?;
+                let body_effects = convert_many_with_bindings(inner, &bindings)?;
                 flush_unconditional(&mut current, &mut segments);
                 segments.push(ChainSegment {
                     condition: None,
@@ -1204,7 +1496,10 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                 // chosen target needs per-resolution binding). Non-target
                 // scopes (Opponent, EachablePlayer) route via `player_scope`.
                 if let Some(filter) = player_to_target_filter(player) {
-                    let body_effects = apply_player_target_chain(convert_many(inner)?, filter)?;
+                    let body_effects = apply_player_target_chain(
+                        convert_many_with_bindings(inner, &bindings)?,
+                        filter,
+                    )?;
                     flush_unconditional(&mut current, &mut segments);
                     segments.push(ChainSegment {
                         condition: None,
@@ -1221,7 +1516,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             detail: format!("non-scopable player: {player:?}"),
                         }
                     })?;
-                    let body_effects = convert_many(inner)?;
+                    let body_effects = convert_many_with_bindings(inner, &bindings)?;
                     flush_unconditional(&mut current, &mut segments);
                     segments.push(ChainSegment {
                         condition: None,
@@ -1241,7 +1536,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             detail: format!("non-scopable players: {players:?}"),
                         }
                     })?;
-                let body_effects = convert_many(inner)?;
+                let body_effects = convert_many_with_bindings(inner, &bindings)?;
                 flush_unconditional(&mut current, &mut segments);
                 segments.push(ChainSegment {
                     condition,
@@ -1260,7 +1555,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             detail: format!("non-scopable players: {players:?}"),
                         }
                     })?;
-                let body_effects = convert_action_vec(body)?;
+                let body_effects = convert_action_vec_with_bindings(body, &bindings)?;
                 flush_unconditional(&mut current, &mut segments);
                 segments.push(ChainSegment {
                     condition,
@@ -1278,8 +1573,10 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
             // `convert_many` provides the transparent passthrough).
             Action::PlayerActions(player, body) if !matches!(**player, Player::You) => {
                 if let Some(filter) = player_to_target_filter(player) {
-                    let body_effects =
-                        apply_player_target_chain(convert_action_vec(body)?, filter)?;
+                    let body_effects = apply_player_target_chain(
+                        convert_action_vec_with_bindings(body, &bindings)?,
+                        filter,
+                    )?;
                     flush_unconditional(&mut current, &mut segments);
                     segments.push(ChainSegment {
                         condition: None,
@@ -1296,7 +1593,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             detail: format!("non-scopable player: {player:?}"),
                         }
                     })?;
-                    let body_effects = convert_action_vec(body)?;
+                    let body_effects = convert_action_vec_with_bindings(body, &bindings)?;
                     flush_unconditional(&mut current, &mut segments);
                     segments.push(ChainSegment {
                         condition: None,
@@ -1317,7 +1614,10 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
             // optional with no scope (controller default).
             Action::PlayerMayAction(player, inner) => {
                 if let Some(filter) = player_to_target_filter(player) {
-                    let body_effects = apply_player_target_chain(convert_many(inner)?, filter)?;
+                    let body_effects = apply_player_target_chain(
+                        convert_many_with_bindings(inner, &bindings)?,
+                        filter,
+                    )?;
                     flush_unconditional(&mut current, &mut segments);
                     segments.push(ChainSegment {
                         condition: None,
@@ -1328,7 +1628,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                     });
                 } else {
                     let scope_opt = player_to_scope_opt(player)?;
-                    let body_effects = convert_many(inner)?;
+                    let body_effects = convert_many_with_bindings(inner, &bindings)?;
                     flush_unconditional(&mut current, &mut segments);
                     segments.push(ChainSegment {
                         condition: None,
@@ -1350,7 +1650,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             detail: format!("non-scopable players: {players:?}"),
                         }
                     })?;
-                let body_effects = convert_many(inner)?;
+                let body_effects = convert_many_with_bindings(inner, &bindings)?;
                 flush_unconditional(&mut current, &mut segments);
                 segments.push(ChainSegment {
                     condition,
@@ -1369,7 +1669,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             detail: format!("non-scopable players: {players:?}"),
                         }
                     })?;
-                let body_effects = convert_many(inner)?;
+                let body_effects = convert_many_with_bindings(inner, &bindings)?;
                 flush_unconditional(&mut current, &mut segments);
                 segments.push(ChainSegment {
                     condition,
@@ -1388,7 +1688,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                             detail: format!("non-scopable players: {players:?}"),
                         }
                     })?;
-                let body_effects = convert_action_vec(body)?;
+                let body_effects = convert_action_vec_with_bindings(body, &bindings)?;
                 flush_unconditional(&mut current, &mut segments);
                 segments.push(ChainSegment {
                     condition,
@@ -1402,7 +1702,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
             // multi-action optional. Equivalent to `MayAction` with a
             // composite body.
             Action::MayActions(body) => {
-                let body_effects = convert_action_vec(body)?;
+                let body_effects = convert_action_vec_with_bindings(body, &bindings)?;
                 flush_unconditional(&mut current, &mut segments);
                 segments.push(ChainSegment {
                     condition: None,
@@ -1420,7 +1720,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
             // intervening-if checks).
             Action::If(cond, body) => {
                 let outer = condition::convert_ability(cond)?;
-                let (compound, body_effects) = compound_nested_if(outer, body)?;
+                let (compound, body_effects) = compound_nested_if(outer, body, &bindings)?;
                 flush_unconditional(&mut current, &mut segments);
                 segments.push(ChainSegment {
                     condition: Some(compound),
@@ -1436,7 +1736,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
             // If inside an Unless body compounds via `And` the same way.
             Action::Unless(cond, body) => {
                 let outer = condition::convert_ability_negated(cond)?;
-                let (compound, body_effects) = compound_nested_if(outer, body)?;
+                let (compound, body_effects) = compound_nested_if(outer, body, &bindings)?;
                 flush_unconditional(&mut current, &mut segments);
                 segments.push(ChainSegment {
                     condition: Some(compound),
@@ -1451,8 +1751,8 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
             // wear `condition` + `else_ability`.
             Action::IfElse(cond, then_body, else_body) => {
                 let condition = condition::convert_ability(cond)?;
-                let then_effects = convert_action_vec(then_body)?;
-                let else_effects = convert_action_vec(else_body)?;
+                let then_effects = convert_action_vec_with_bindings(then_body, &bindings)?;
+                let else_effects = convert_action_vec_with_bindings(else_body, &bindings)?;
                 flush_unconditional(&mut current, &mut segments);
                 segments.push(ChainSegment {
                     condition: Some(condition),
@@ -1483,7 +1783,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                                 .into(),
                     });
                 }
-                let body_effects = convert_list(body)?;
+                let body_effects = convert_list_with_bindings(body, &bindings)?;
                 segments.push(ChainSegment {
                     condition: Some(AbilityCondition::WhenYouDo),
                     effects: body_effects,
@@ -1509,7 +1809,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                 }
                 let inner = condition::convert_ability(cond)?;
                 let compound = combine_and(AbilityCondition::WhenYouDo, inner);
-                let body_effects = convert_list(body)?;
+                let body_effects = convert_list_with_bindings(body, &bindings)?;
                 segments.push(ChainSegment {
                     condition: Some(compound),
                     effects: body_effects,
@@ -1548,7 +1848,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                                 .into(),
                     });
                 }
-                let body_effects = convert_list(body)?;
+                let body_effects = convert_list_with_bindings(body, &bindings)?;
                 for _ in 0..count {
                     segments.push(ChainSegment {
                         condition: Some(AbilityCondition::WhenYouDo),
@@ -1582,7 +1882,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                     (true, true) => {}
                     (false, true) => segments.push(ChainSegment {
                         condition: Some(AbilityCondition::IfYouDo),
-                        effects: convert_action_vec(win_body)?,
+                        effects: convert_action_vec_with_bindings(win_body, &bindings)?,
                         else_effects: None,
                         optional: SegmentOptional::Mandatory,
                         player_scope: None,
@@ -1591,15 +1891,15 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
                         condition: Some(AbilityCondition::Not {
                             condition: Box::new(AbilityCondition::IfYouDo),
                         }),
-                        effects: convert_action_vec(lose_body)?,
+                        effects: convert_action_vec_with_bindings(lose_body, &bindings)?,
                         else_effects: None,
                         optional: SegmentOptional::Mandatory,
                         player_scope: None,
                     }),
                     (false, false) => segments.push(ChainSegment {
                         condition: Some(AbilityCondition::IfYouDo),
-                        effects: convert_action_vec(win_body)?,
-                        else_effects: Some(convert_action_vec(lose_body)?),
+                        effects: convert_action_vec_with_bindings(win_body, &bindings)?,
+                        else_effects: Some(convert_action_vec_with_bindings(lose_body, &bindings)?),
                         optional: SegmentOptional::Mandatory,
                         player_scope: None,
                     }),
@@ -1609,7 +1909,7 @@ pub fn convert_chain_segments(list: &Actions) -> ConvResult<Vec<ChainSegment>> {
             // multi-emit lowering (preserves SearchLibrary's chain
             // expansion).
             other => {
-                current.extend(convert_many(other)?);
+                current.extend(convert_many_with_bindings(other, &bindings)?);
             }
         }
         i += 1;
@@ -1681,23 +1981,24 @@ fn convert_modal_with(
 fn compound_nested_if(
     outer: AbilityCondition,
     body: &[Action],
+    bindings: &VariableBindings,
 ) -> ConvResult<(AbilityCondition, Vec<Effect>)> {
     if let [head] = body {
         match head {
             Action::If(inner_cond, inner_body) => {
                 let inner = condition::convert_ability(inner_cond)?;
                 let combined = combine_and(outer, inner);
-                return compound_nested_if(combined, inner_body);
+                return compound_nested_if(combined, inner_body, bindings);
             }
             Action::Unless(inner_cond, inner_body) => {
                 let inner = condition::convert_ability_negated(inner_cond)?;
                 let combined = combine_and(outer, inner);
-                return compound_nested_if(combined, inner_body);
+                return compound_nested_if(combined, inner_body, bindings);
             }
             _ => {}
         }
     }
-    let effects = convert_action_vec(body)?;
+    let effects = convert_action_vec_with_bindings(body, bindings)?;
     Ok((outer, effects))
 }
 
@@ -1720,9 +2021,26 @@ fn combine_and(left: AbilityCondition, right: AbilityCondition) -> AbilityCondit
 /// `Action::Unless` bodies) into an effect chain. Mid-list head-wrappers are
 /// not re-recognized — those bodies are pure leaf actions per the schema.
 fn convert_action_vec(actions: &[Action]) -> ConvResult<Vec<Effect>> {
+    convert_action_vec_with_bindings(actions, &VariableBindings::default())
+}
+
+fn convert_action_vec_with_bindings(
+    actions: &[Action],
+    inherited: &VariableBindings,
+) -> ConvResult<Vec<Effect>> {
     let mut out = Vec::with_capacity(actions.len());
+    let mut bindings = inherited.clone();
     for a in actions {
-        out.extend(convert_many(a)?);
+        match a {
+            Action::CreateValueX(value) => {
+                bindings.bind_x(value)?;
+            }
+            other => {
+                let mut effects = convert_many_with_bindings(other, &bindings)?;
+                bindings.rewrite_effects(&mut effects);
+                out.extend(effects);
+            }
+        }
     }
     Ok(out)
 }
@@ -1750,7 +2068,12 @@ fn require_clash_opponent_axis(players: &Players) -> ConvResult<()> {
 /// principal multi-emit shape: a tutor expands into the engine's
 /// `SearchLibrary → ChangeZone → [Shuffle]` chain (CR 701.23 + CR 701.24).
 fn convert_many(a: &Action) -> ConvResult<Vec<Effect>> {
+    convert_many_with_bindings(a, &VariableBindings::default())
+}
+
+fn convert_many_with_bindings(a: &Action, bindings: &VariableBindings) -> ConvResult<Vec<Effect>> {
     match a {
+        Action::CreateValueX(_) => Ok(Vec::new()),
         Action::SearchLibrary(actions) => convert_search_library(actions),
         // CR 120.1 + CR 608.2c: mtgish packs "deal A damage to X and B
         // damage to Y" into one action. The engine represents that as an
@@ -1880,19 +2203,21 @@ fn convert_many(a: &Action) -> ConvResult<Vec<Effect>> {
         // transparent passthrough at the multi-emit layer too — propagate
         // multi-effect inner shapes (notably SearchLibrary) instead of
         // collapsing through the single-Effect `convert`.
-        Action::PlayerAction(p, inner) if matches!(**p, Player::You) => convert_many(inner),
+        Action::PlayerAction(p, inner) if matches!(**p, Player::You) => {
+            convert_many_with_bindings(inner, bindings)
+        }
         // CR 119.1 + CR 119.3: Plural-body sibling passthrough for
         // `Action::PlayerActions(You, body)` — flatten via the multi-emit
         // path so SearchLibrary expansion and other multi-effect shapes
         // inside the body propagate correctly.
         Action::PlayerActions(p, body) if matches!(**p, Player::You) => {
-            let mut out = Vec::new();
-            for inner in body {
-                out.extend(convert_many(inner)?);
-            }
-            Ok(out)
+            convert_action_vec_with_bindings(body, bindings)
         }
-        _ => Ok(vec![convert(a)?]),
+        _ => {
+            let mut effects = vec![convert(a)?];
+            bindings.rewrite_effects(&mut effects);
+            Ok(effects)
+        }
     }
 }
 
@@ -4038,14 +4363,15 @@ fn disposition_tag_list(dispositions: &[crate::schema::types::LookAtTopOfLibrary
 /// caller's responsibility (it knows the surrounding `AbilityDefinition`
 /// shape).
 pub fn convert_list(list: &Actions) -> ConvResult<Vec<Effect>> {
+    convert_list_with_bindings(list, &VariableBindings::default())
+}
+
+fn convert_list_with_bindings(
+    list: &Actions,
+    bindings: &VariableBindings,
+) -> ConvResult<Vec<Effect>> {
     match list {
-        Actions::ActionList(actions) => {
-            let mut out = Vec::with_capacity(actions.len());
-            for a in actions {
-                out.extend(convert_many(a)?);
-            }
-            Ok(out)
-        }
+        Actions::ActionList(actions) => convert_action_vec_with_bindings(actions, bindings),
 
         // CR 115.1: Targeted spell wrapper. The outer Targeted slot declares
         // the target descriptors; inner actions reference them via
@@ -4059,14 +4385,16 @@ pub fn convert_list(list: &Actions) -> ConvResult<Vec<Effect>> {
         // surfaced when the engine prompts for targets. Today the inner
         // refs collapse to `TargetFilter::Any`, which loses the typed
         // constraint but preserves resolution semantics.
-        Actions::Targeted(_targets, inner) => convert_list(inner),
+        Actions::Targeted(_targets, inner) => convert_list_with_bindings(inner, bindings),
 
         // CR 601.2c + CR 115.1: Distributed-damage / distributed-counters
         // wrapper (e.g. "Distribute three +1/+1 counters among any number
         // of target creatures"). Inner actions reference the targets the
         // same way as `Targeted`; the distribution mechanic is a runtime
         // concern handled by the engine's target-prompting machinery.
-        Actions::TargetedDistributed(_targets, _distribution, inner) => convert_list(inner),
+        Actions::TargetedDistributed(_targets, _distribution, inner) => {
+            convert_list_with_bindings(inner, bindings)
+        }
 
         _ => Err(ConversionGap::MalformedIdiom {
             idiom: "Actions/convert_list",
@@ -5084,6 +5412,18 @@ fn convert_search_library(actions: &[SearchLibraryAction]) -> ConvResult<Vec<Eff
             no_repls,
             0,
         ),
+        S::MayRevealUptoNumberGroupCardsAndPutIntoHand(n, cards, group) => {
+            selection_constraint = group_filter_to_search_constraint(group)?;
+            (
+                filter_mod::cards_to_filter(cards)?,
+                quantity::convert(n)?,
+                true,
+                true,
+                Zone::Hand,
+                no_repls,
+                0,
+            )
+        }
         S::MayRevealAnyNumberOfCardsOfTypeAndPutThemIntoHand(cards) => (
             filter_mod::cards_to_filter(cards)?,
             any_count(),
@@ -5922,9 +6262,10 @@ mod tests {
     use super::*;
     use crate::convert::build_ability_from_actions;
     use crate::schema::types::{
-        CardInGraveyard, Cards, Color, Comparison, Condition, Cost, CounterType, CreatableToken,
-        DamageSources, ManaSymbol, Permanent, Permanents, ReplacementActionWouldEnter,
-        TokenCopyEffects, TokenFlag,
+        CardInGraveyard, Cards, Color, ColorList, Comparison, Condition, Cost, CounterType,
+        CreatableToken, CreatureTokenSubtypes, CreatureTokenType, DamageSources, ManaSymbol,
+        PTXValue, Permanent, Permanents, ReplacementActionWouldEnter, SubType, TokenCopyEffects,
+        TokenFlag, PT,
     };
     use engine::types::ability::{
         AbilityKind, Comparator, Effect, FilterProp, QuantityRef, TargetFilter, TypeFilter,
@@ -5972,6 +6313,97 @@ mod tests {
                 ]),),
             }
         );
+    }
+
+    #[test]
+    fn create_value_x_rewrites_following_damage_and_life_gain() {
+        let effects = convert_list(&Actions::ActionList(vec![
+            Action::CreateValueX(Box::new(GameNumber::Integer(4))),
+            Action::SpellDealsDamage(
+                Box::new(Spell::ThisSpell),
+                Box::new(GameNumber::ValueX),
+                Box::new(DamageRecipient::Ref_AnyTarget),
+            ),
+            Action::GainLife(Box::new(GameNumber::ValueX)),
+        ]))
+        .unwrap();
+
+        assert_eq!(effects.len(), 2);
+        assert!(matches!(
+            &effects[0],
+            Effect::DealDamage {
+                amount: QuantityExpr::Fixed { value: 4 },
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[1],
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: 4 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn create_value_x_rewrites_cost_gated_body() {
+        let actions = Actions::ActionList(vec![
+            Action::MayCost(Box::new(Cost::PayMana(vec![ManaSymbol::ManaCostGeneric(
+                1,
+            )]))),
+            Action::If(
+                Condition::CostWasPaid,
+                vec![
+                    Action::CreateValueX(Box::new(GameNumber::Integer(2))),
+                    Action::DrawNumberCards(Box::new(GameNumber::ValueX)),
+                ],
+            ),
+        ]);
+
+        let conv = convert_actions(&actions).unwrap();
+        let ability = build_ability_from_actions(AbilityKind::Spell, None, conv).unwrap();
+        let sub = ability.sub_ability.as_ref().expect("expected paid body");
+
+        assert!(matches!(
+            sub.effect.as_ref(),
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn create_value_x_rewrites_token_ptx_and_count() {
+        let effects = convert_list(&Actions::ActionList(vec![
+            Action::CreateValueX(Box::new(GameNumber::Integer(5))),
+            Action::CreateTokens(vec![CreatableToken::NumberTokens(
+                Box::new(GameNumber::ValueX),
+                Box::new(CreatableToken::CreatureToken(
+                    PT::PTX(PTXValue::X, PTXValue::X, Box::new(GameNumber::ValueX)),
+                    CreatureTokenType::CreatureToken,
+                    ColorList::Colors(vec![Color::Green]),
+                    CreatureTokenSubtypes::CreatureTokenSubtypesList(vec![SubType::Wurm]),
+                )),
+            )]),
+        ]))
+        .unwrap();
+
+        let Effect::Token {
+            power,
+            toughness,
+            count,
+            ..
+        } = &effects[0]
+        else {
+            panic!("expected Token, got {:?}", effects[0]);
+        };
+        assert_eq!(power, &PtValue::Quantity(QuantityExpr::Fixed { value: 5 }));
+        assert_eq!(
+            toughness,
+            &PtValue::Quantity(QuantityExpr::Fixed { value: 5 })
+        );
+        assert_eq!(count, &QuantityExpr::Fixed { value: 5 });
     }
 
     #[test]
@@ -6043,6 +6475,44 @@ mod tests {
         ));
         assert!(matches!(
             &effects[4],
+            Effect::Shuffle {
+                target: TargetFilter::Controller
+            }
+        ));
+    }
+
+    #[test]
+    fn grouped_reveal_search_to_hand_preserves_selection_constraint() {
+        let effects = convert_many(&Action::SearchLibrary(vec![
+            SearchLibraryAction::MayRevealUptoNumberGroupCardsAndPutIntoHand(
+                Box::new(GameNumber::Integer(2)),
+                Box::new(Cards::IsCardtype(CardType::Creature)),
+                GroupFilter::DifferentNames,
+            ),
+            SearchLibraryAction::Shuffle,
+        ]))
+        .unwrap();
+
+        assert_eq!(effects.len(), 3);
+        assert!(matches!(
+            &effects[0],
+            Effect::SearchLibrary {
+                count: QuantityExpr::UpTo { .. },
+                reveal: true,
+                selection_constraint: SearchSelectionConstraint::DistinctNames,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[1],
+            Effect::ChangeZone {
+                origin: Some(Zone::Library),
+                destination: Zone::Hand,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &effects[2],
             Effect::Shuffle {
                 target: TargetFilter::Controller
             }
