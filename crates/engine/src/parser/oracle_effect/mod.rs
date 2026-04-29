@@ -19356,6 +19356,72 @@ mod tests {
         );
     }
 
+    #[test]
+    fn combat_class_pump_all_for_each_other_than_source_is_dynamic() {
+        // CR 611.2c: Márton Stromgald's resolving triggered ability creates a
+        // continuous effect whose affected set and P/T amount are both combat
+        // class counts excluding the source object.
+        let clause = parse_effect_clause(
+            "other attacking creatures get +1/+1 until end of turn for each attacking creature other than ~.",
+            &ParseContext::default(),
+        );
+        match &clause.effect {
+            Effect::PumpAll {
+                target,
+                power,
+                toughness,
+            } => {
+                assert_eq!(clause.duration, Some(Duration::UntilEndOfTurn));
+                assert!(matches!(
+                    target,
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        properties,
+                        ..
+                    }) if type_filters.contains(&TypeFilter::Creature)
+                        && properties.contains(&FilterProp::Attacking)
+                        && properties.contains(&FilterProp::Another)
+                ));
+                assert!(matches!(
+                    power,
+                    PtValue::Quantity(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectCount {
+                            filter: TargetFilter::Typed(TypedFilter {
+                                type_filters,
+                                properties,
+                                ..
+                            })
+                        }
+                    }) if type_filters == &vec![TypeFilter::Creature]
+                        && properties == &vec![FilterProp::Attacking, FilterProp::Another]
+                ));
+                assert_eq!(power, toughness);
+            }
+            other => panic!("expected PumpAll, got: {other:?}"),
+        }
+
+        let clause = parse_effect_clause(
+            "other blocking creatures get +1/+1 until end of turn for each blocking creature other than ~.",
+            &ParseContext::default(),
+        );
+        assert!(matches!(
+            clause.effect,
+            Effect::PumpAll {
+                power: PtValue::Quantity(QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            type_filters,
+                            properties,
+                            ..
+                        })
+                    }
+                }),
+                ..
+            } if type_filters == vec![TypeFilter::Creature]
+                && properties == vec![FilterProp::Blocking, FilterProp::Another]
+        ));
+    }
+
     // ── Conjure tests ──────────────────────────────────────────────────
 
     #[test]

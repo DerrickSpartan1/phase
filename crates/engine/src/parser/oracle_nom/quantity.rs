@@ -1331,6 +1331,7 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // `parse_for_each_controlled_type` since the leading "creature" token
         // would otherwise commit the simple `<type> you control` arm.
         parse_for_each_creature_died_this_turn,
+        parse_for_each_combat_creature_other_than_source,
         parse_for_each_attacking_controller_type,
         parse_for_each_blocking_source_type,
         parse_for_each_battlefield_type,
@@ -1360,6 +1361,31 @@ fn parse_number_of_object_colors_tail(input: &str) -> OracleResult<'_, QuantityR
     let (rest, _) = tag("colors of ").parse(input)?;
     let (rest, scope) = parse_object_color_of_scope(rest)?;
     Ok((rest, QuantityRef::ObjectColorCount { scope }))
+}
+
+/// Parse source-excluding combat-class counts:
+/// "for each attacking/blocking creature other than ~".
+fn parse_for_each_combat_creature_other_than_source(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, combat_property) = alt((
+        value(FilterProp::Attacking, tag("attacking ")),
+        value(FilterProp::Blocking, tag("blocking ")),
+    ))
+    .parse(input)?;
+    let (rest, _) = tag("creature").parse(rest)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" other than ").parse(rest)?;
+    let (rest, _) = alt((tag("~"), tag("this creature"))).parse(rest)?;
+
+    Ok((
+        rest,
+        QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Creature],
+                controller: None,
+                properties: vec![combat_property, FilterProp::Another],
+            }),
+        },
+    ))
 }
 
 fn parse_object_color_scope(input: &str) -> OracleResult<'_, ObjectScope> {
@@ -2426,6 +2452,43 @@ mod tests {
                     ..
                 })
             } if properties == vec![FilterProp::BlockingSource]
+        ));
+    }
+
+    #[test]
+    fn test_parse_for_each_attacking_creature_other_than_source() {
+        let (rest, q) = parse_for_each("for each attacking creature other than ~").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: None,
+                    properties,
+                    ..
+                })
+            } if type_filters == vec![TypeFilter::Creature]
+                && properties == vec![FilterProp::Attacking, FilterProp::Another]
+        ));
+    }
+
+    #[test]
+    fn test_parse_for_each_blocking_creatures_other_than_this_creature() {
+        let (rest, q) =
+            parse_for_each("for each blocking creatures other than this creature").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: None,
+                    properties,
+                    ..
+                })
+            } if type_filters == vec![TypeFilter::Creature]
+                && properties == vec![FilterProp::Blocking, FilterProp::Another]
         ));
     }
 
