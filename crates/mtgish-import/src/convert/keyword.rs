@@ -102,6 +102,7 @@ pub fn try_convert(rule: &Rule, path: &str) -> ConvResult<Option<Keyword>> {
         Rule::Enlist => Keyword::Enlist,
         Rule::JumpStart => Keyword::JumpStart,
         Rule::Assist => Keyword::Assist,
+        Rule::Aftermath => Keyword::Aftermath,
         Rule::ReadAhead => Keyword::ReadAhead,
         Rule::Ravenous => Keyword::Ravenous,
 
@@ -820,5 +821,22 @@ fn int_or_gap(g: &GameNumber, idiom: &'static str, path: &str) -> ConvResult<u32
             path: path.to_string(),
             detail: format!("non-literal GameNumber: {other:?}"),
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use engine::types::Keyword;
+
+    use super::*;
+
+    #[test]
+    fn aftermath_lowers_to_keyword() {
+        assert_eq!(
+            try_convert(&Rule::Aftermath, "test")
+                .expect("conversion should succeed")
+                .expect("rule should be recognized as a keyword"),
+            Keyword::Aftermath
+        );
     }
 }

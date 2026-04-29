@@ -131,11 +131,13 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             if targeting::check_fizzle(&original_targets, &legal_targets) {
                 // CR 608.2b: Fizzle — all targets illegal, spell is countered on resolution.
                 if is_spell {
-                    // CR 702.34a / CR 702.180a: Flashback and Harmonize exile when leaving
-                    // the stack for any reason, including fizzle. Escape is included for consistency.
+                    // CR 702.34a / CR 702.127a / CR 702.180a: Flashback,
+                    // Aftermath, and Harmonize exile when leaving the stack
+                    // for any reason, including fizzle. Escape is included for consistency.
                     let dest = if matches!(
                         casting_variant,
                         CastingVariant::Flashback
+                            | CastingVariant::Aftermath
                             | CastingVariant::Harmonize
                             | CastingVariant::Escape
                     ) {
@@ -212,6 +214,11 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
             // CR 702.34a: If the flashback cost was paid, exile this card
             // instead of putting it anywhere else any time it would leave the stack.
             // Flashback only appears on instants/sorceries — unconditional exile is correct.
+            Zone::Exile
+        } else if casting_variant == CastingVariant::Aftermath {
+            // CR 702.127a: If an aftermath spell was cast from a graveyard,
+            // exile it instead of putting it anywhere else any time it would
+            // leave the stack.
             Zone::Exile
         } else if is_permanent_type(state, entry.id) {
             // CR 608.3: Permanent spells enter the battlefield.

@@ -256,7 +256,8 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
             .is_some_and(|obj| obj.owner != player && has_alt_cost_permission(obj))
     }));
 
-    // CR 702.34 / CR 702.138 / CR 702.180: Cards in graveyard with graveyard-cast keywords.
+    // CR 702.34 / CR 702.127 / CR 702.138 / CR 702.180: Cards in graveyard with
+    // graveyard-cast keywords.
     // Escape requires enough other graveyard cards to exile; Flashback and Harmonize have no such restriction.
     objects.extend(player_data.graveyard.iter().copied().filter(|&obj_id| {
         state.objects.get(&obj_id).is_some_and(|obj| {
@@ -264,6 +265,7 @@ pub fn spell_objects_available_to_cast(state: &GameState, player: PlayerId) -> V
                 && has_effective_graveyard_cast_keyword(state, obj_id, obj)
                 && (has_harmonize_keyword(obj)
                     || has_flashback_keyword(state, obj_id)
+                    || has_aftermath_keyword(state, obj_id)
                     || graveyard_has_enough_for_escape(state, player, obj_id))
         })
     }));
@@ -354,7 +356,12 @@ fn has_flashback_keyword(state: &GameState, object_id: ObjectId) -> bool {
     super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Flashback)
 }
 
-// CR 702.34 (Flashback) / CR 702.138 (Escape) / CR 702.180 (Harmonize):
+/// CR 702.127: Check if an object has the Aftermath keyword.
+fn has_aftermath_keyword(state: &GameState, object_id: ObjectId) -> bool {
+    super::keywords::object_has_effective_keyword_kind(state, object_id, KeywordKind::Aftermath)
+}
+
+// CR 702.34 (Flashback) / CR 702.127 (Aftermath) / CR 702.138 (Escape) / CR 702.180 (Harmonize):
 // graveyard-cast alternative costs. Sneak (CR 702.190a) is a HAND-cast
 // alt-cost and is deliberately NOT listed here — including it would
 // misclassify graveyard objects with a granted Sneak as castable from the
@@ -370,6 +377,7 @@ fn has_effective_graveyard_cast_keyword(
             .iter()
             .any(|k| matches!(k, crate::types::keywords::Keyword::Harmonize(_)))
         || has_flashback_keyword(state, object_id)
+        || has_aftermath_keyword(state, object_id)
 }
 
 fn upsert_keyword_by_kind(keywords: &mut Vec<Keyword>, keyword: Keyword) {
@@ -1053,7 +1061,7 @@ fn prepare_spell_cast_with_variant_override(
     let (flashback_mana_cost, flashback_non_mana_cost) =
         split_flashback_cost_components(flashback_cost.as_ref());
 
-    // Precedence: Escape > Harmonize > Flashback > GraveyardPermission > Warp > Normal.
+    // Precedence: Escape > Harmonize > Flashback > Aftermath > GraveyardPermission > Warp > Normal.
     // No standard card has multiple graveyard-cast keywords; if one did, the card's own
     // keyword overrides an external source's grant (GraveyardPermission).
     //
@@ -1099,6 +1107,14 @@ fn prepare_spell_cast_with_variant_override(
             CastingVariant::Harmonize
         } else if flashback_cost.is_some() {
             CastingVariant::Flashback
+        } else if obj.zone == Zone::Graveyard
+            && super::keywords::object_has_effective_keyword_kind(
+                state,
+                object_id,
+                KeywordKind::Aftermath,
+            )
+        {
+            CastingVariant::Aftermath
         } else if let Some((source, frequency)) = graveyard_permission_src {
             CastingVariant::GraveyardPermission { source, frequency }
         } else if warp_cost.is_some() {

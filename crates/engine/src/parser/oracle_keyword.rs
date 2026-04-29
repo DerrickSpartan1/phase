@@ -905,6 +905,7 @@ pub fn keyword_display_name(keyword: &Keyword) -> String {
         Keyword::Champion(_) => "champion".to_string(),
         Keyword::Training => "training".to_string(),
         Keyword::Assist => "assist".to_string(),
+        Keyword::Aftermath => "aftermath".to_string(),
         Keyword::JumpStart => "jump-start".to_string(),
         Keyword::Cipher => "cipher".to_string(),
         Keyword::Transmute(_) => "transmute".to_string(),

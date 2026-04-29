@@ -153,6 +153,8 @@ pub enum KeywordKind {
     Champion,
     Training,
     Assist,
+    /// CR 702.127: Aftermath — see `Keyword::Aftermath`.
+    Aftermath,
     JumpStart,
     Cipher,
     Transmute,
@@ -631,6 +633,10 @@ pub enum Keyword {
     Training,
     /// CR 702.132a: Assist — another player can help pay the generic mana cost of this spell.
     Assist,
+    /// CR 702.127a: Aftermath allows casting this half of a split card only
+    /// from a graveyard, and exiles the spell any time it leaves the stack if
+    /// it was cast from a graveyard.
+    Aftermath,
     /// CR 702.133a: Jump-start — cast from graveyard by discarding a card, then exile.
     JumpStart,
     /// CR 702.98a: Cipher — exile this spell encoded on a creature you control;
@@ -888,6 +894,7 @@ impl Keyword {
             Keyword::Champion(_) => KeywordKind::Champion,
             Keyword::Training => KeywordKind::Training,
             Keyword::Assist => KeywordKind::Assist,
+            Keyword::Aftermath => KeywordKind::Aftermath,
             Keyword::JumpStart => KeywordKind::JumpStart,
             Keyword::Cipher => KeywordKind::Cipher,
             Keyword::Transmute(_) => KeywordKind::Transmute,
@@ -1502,6 +1509,7 @@ impl FromStr for Keyword {
             "sunburst" => Ok(Keyword::Sunburst),
             "training" => Ok(Keyword::Training),
             "assist" => Ok(Keyword::Assist),
+            "aftermath" => Ok(Keyword::Aftermath),
             "jump-start" | "jumpstart" => Ok(Keyword::JumpStart),
             "cipher" => Ok(Keyword::Cipher),
             "undaunted" => Ok(Keyword::Undaunted),
@@ -1687,6 +1695,7 @@ fn keyword_from_tagged(variant: &str, data: &serde_json::Value) -> Result<Keywor
         "Compleated" => Ok(Keyword::Compleated),
         "Conspire" => Ok(Keyword::Conspire),
         "Demonstrate" => Ok(Keyword::Demonstrate),
+        "Aftermath" => Ok(Keyword::Aftermath),
         "Dethrone" => Ok(Keyword::Dethrone),
         "DoubleTeam" => Ok(Keyword::DoubleTeam),
         "LivingMetal" => Ok(Keyword::LivingMetal),
@@ -1960,6 +1969,7 @@ mod tests {
             Keyword::SplitSecond
         );
         assert_eq!(Keyword::from_str("Battle Cry").unwrap(), Keyword::Battlecry);
+        assert_eq!(Keyword::from_str("Aftermath").unwrap(), Keyword::Aftermath);
     }
 
     #[test]
