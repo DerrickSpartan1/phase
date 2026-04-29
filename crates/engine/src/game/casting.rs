@@ -1314,6 +1314,27 @@ fn apply_self_spell_cost_modifiers(
     spell_id: ObjectId,
     mana_cost: &mut ManaCost,
 ) {
+    apply_self_spell_cost_modifiers_inner(state, caster, spell_id, None, false, mana_cost);
+}
+
+pub(super) fn apply_self_spell_cost_modifiers_with_selected_targets(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    ability: &ResolvedAbility,
+    mana_cost: &mut ManaCost,
+) {
+    apply_self_spell_cost_modifiers_inner(state, caster, spell_id, Some(ability), true, mana_cost);
+}
+
+fn apply_self_spell_cost_modifiers_inner(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    selected_ability: Option<&ResolvedAbility>,
+    target_sensitive_only: bool,
+    mana_cost: &mut ManaCost,
+) {
     let Some(spell_obj) = state.objects.get(&spell_id) else {
         return;
     };
@@ -1337,19 +1358,42 @@ fn apply_self_spell_cost_modifiers(
             continue;
         }
 
-        let (amount, dynamic_count, is_raise) = match &def.mode {
+        let (amount, spell_filter, dynamic_count, is_raise) = match &def.mode {
             StaticMode::ReduceCost {
                 amount,
+                spell_filter,
                 dynamic_count,
                 ..
-            } => (amount, dynamic_count, false),
+            } => (amount, spell_filter, dynamic_count, false),
             StaticMode::RaiseCost {
                 amount,
+                spell_filter,
                 dynamic_count,
                 ..
-            } => (amount, dynamic_count, true),
+            } => (amount, spell_filter, dynamic_count, true),
             _ => continue,
         };
+
+        if target_sensitive_only
+            && !spell_filter
+                .as_ref()
+                .is_some_and(cost_filter_has_target_ref)
+        {
+            continue;
+        }
+
+        if let Some(ref filter) = spell_filter {
+            let matches = if let Some(ability) = selected_ability {
+                spell_matches_cost_filter_with_selected_targets(
+                    state, caster, spell_id, filter, spell_id, ability,
+                )
+            } else {
+                spell_matches_cost_filter(state, caster, spell_id, filter, spell_id)
+            };
+            if !matches {
+                continue;
+            }
+        }
 
         // CR 604.1: Evaluate any trailing condition ("if you control a Wizard").
         if let Some(ref cond) = def.condition {
@@ -1370,6 +1414,123 @@ fn apply_self_spell_cost_modifiers(
         };
 
         apply_cost_mod_to_mana(mana_cost, amount, multiplier, is_raise);
+    }
+}
+
+fn cost_filter_has_target_ref(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|prop| {
+            matches!(
+                prop,
+                crate::types::ability::FilterProp::Targets { .. }
+                    | crate::types::ability::FilterProp::TargetsOnly { .. }
+            )
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(cost_filter_has_target_ref)
+        }
+        TargetFilter::Not { filter } => cost_filter_has_target_ref(filter),
+        _ => false,
+    }
+}
+
+fn target_ref_matches_cost_filter(
+    state: &GameState,
+    caster: PlayerId,
+    source_id: ObjectId,
+    target: &TargetRef,
+    filter: &TargetFilter,
+) -> bool {
+    match target {
+        TargetRef::Object(object_id) => {
+            let ctx = super::filter::FilterContext::from_source_with_controller(source_id, caster);
+            super::filter::matches_target_filter(state, *object_id, filter, &ctx)
+        }
+        TargetRef::Player(player_id) => {
+            super::filter::player_matches_target_filter(filter, *player_id, Some(caster))
+        }
+    }
+}
+
+fn selected_targets_match_filter(
+    state: &GameState,
+    caster: PlayerId,
+    source_id: ObjectId,
+    ability: &ResolvedAbility,
+    filter: &TargetFilter,
+    require_all: bool,
+) -> bool {
+    let targets = flatten_targets_in_chain(ability);
+    if targets.is_empty() {
+        return false;
+    }
+
+    if require_all {
+        targets
+            .iter()
+            .all(|target| target_ref_matches_cost_filter(state, caster, source_id, target, filter))
+    } else {
+        targets
+            .iter()
+            .any(|target| target_ref_matches_cost_filter(state, caster, source_id, target, filter))
+    }
+}
+
+fn spell_matches_cost_filter_with_selected_targets(
+    state: &GameState,
+    caster: PlayerId,
+    spell_id: ObjectId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    ability: &ResolvedAbility,
+) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            let non_target_props: Vec<_> = tf
+                .properties
+                .iter()
+                .filter(|prop| {
+                    !matches!(
+                        prop,
+                        crate::types::ability::FilterProp::Targets { .. }
+                            | crate::types::ability::FilterProp::TargetsOnly { .. }
+                    )
+                })
+                .cloned()
+                .collect();
+            let base = TargetFilter::Typed(crate::types::ability::TypedFilter {
+                type_filters: tf.type_filters.clone(),
+                controller: tf.controller.clone(),
+                properties: non_target_props,
+            });
+            if !spell_matches_cost_filter(state, caster, spell_id, &base, source_id) {
+                return false;
+            }
+
+            tf.properties.iter().all(|prop| match prop {
+                crate::types::ability::FilterProp::Targets { filter } => {
+                    selected_targets_match_filter(state, caster, source_id, ability, filter, false)
+                }
+                crate::types::ability::FilterProp::TargetsOnly { filter } => {
+                    selected_targets_match_filter(state, caster, source_id, ability, filter, true)
+                }
+                _ => true,
+            })
+        }
+        TargetFilter::Or { filters } => filters.iter().any(|inner| {
+            spell_matches_cost_filter_with_selected_targets(
+                state, caster, spell_id, inner, source_id, ability,
+            )
+        }),
+        TargetFilter::And { filters } => filters.iter().all(|inner| {
+            spell_matches_cost_filter_with_selected_targets(
+                state, caster, spell_id, inner, source_id, ability,
+            )
+        }),
+        TargetFilter::Not { filter: inner } => !spell_matches_cost_filter_with_selected_targets(
+            state, caster, spell_id, inner, source_id, ability,
+        ),
+        _ => spell_matches_cost_filter(state, caster, spell_id, filter, source_id),
     }
 }
 
@@ -4527,9 +4688,9 @@ mod tests {
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
         ActivationRestriction, BasicLandType, ChosenAttribute, ChosenSubtypeKind,
-        ContinuousModification, ControllerRef, GameRestriction, ManaContribution, ManaProduction,
-        QuantityExpr, RestrictionExpiry, RestrictionPlayerScope, StaticDefinition, TargetFilter,
-        TypeFilter, TypedFilter,
+        ContinuousModification, ControllerRef, FilterProp, GameRestriction, ManaContribution,
+        ManaProduction, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope, StaticDefinition,
+        TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::CoreType;
@@ -5814,6 +5975,111 @@ mod tests {
             ),
             other => panic!("expected ManaCost::Cost, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn target_gated_self_cost_reduction_applies_after_target_selection() {
+        let mut state = setup_game_at_main_phase();
+        let spell_id = create_object(
+            &mut state,
+            CardId(991),
+            PlayerId(0),
+            "A-Knockout Blow".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell_id).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::generic(3);
+            let mut def = StaticDefinition::new(StaticMode::ReduceCost {
+                amount: ManaCost::generic(2),
+                spell_filter: Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+                    FilterProp::Targets {
+                        filter: Box::new(TargetFilter::Typed(TypedFilter::creature().properties(
+                            vec![FilterProp::HasColor {
+                                color: ManaColor::Red,
+                            }],
+                        ))),
+                    },
+                ]))),
+                dynamic_count: None,
+            })
+            .affected(TargetFilter::SelfRef);
+            def.active_zones = vec![Zone::Hand, Zone::Stack];
+            obj.static_definitions.push(def);
+        }
+
+        let red_creature = create_object(
+            &mut state,
+            CardId(992),
+            PlayerId(1),
+            "Red Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&red_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.color.push(ManaColor::Red);
+        }
+        let blue_creature = create_object(
+            &mut state,
+            CardId(993),
+            PlayerId(1),
+            "Blue Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&blue_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.color.push(ManaColor::Blue);
+        }
+
+        let mut early_cost = state.objects.get(&spell_id).unwrap().mana_cost.clone();
+        super::super::casting::apply_self_spell_cost_modifiers(
+            &state,
+            PlayerId(0),
+            spell_id,
+            &mut early_cost,
+        );
+        assert_eq!(early_cost, ManaCost::generic(3));
+
+        let red_ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(red_creature)],
+            spell_id,
+            PlayerId(0),
+        );
+        let mut red_cost = state.objects.get(&spell_id).unwrap().mana_cost.clone();
+        super::super::casting::apply_self_spell_cost_modifiers_with_selected_targets(
+            &state,
+            PlayerId(0),
+            spell_id,
+            &red_ability,
+            &mut red_cost,
+        );
+        assert_eq!(red_cost, ManaCost::generic(1));
+
+        let blue_ability = ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                cant_regenerate: false,
+            },
+            vec![TargetRef::Object(blue_creature)],
+            spell_id,
+            PlayerId(0),
+        );
+        let mut blue_cost = state.objects.get(&spell_id).unwrap().mana_cost.clone();
+        super::super::casting::apply_self_spell_cost_modifiers_with_selected_targets(
+            &state,
+            PlayerId(0),
+            spell_id,
+            &blue_ability,
+            &mut blue_cost,
+        );
+        assert_eq!(blue_cost, ManaCost::generic(3));
     }
 
     /// CR 601.2f: Cost reductions are applied during cost determination (before

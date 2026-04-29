@@ -25,8 +25,9 @@ use super::oracle::ParsedAbilities;
 use super::oracle_warnings::push_warning;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, Effect, OpponentMayScope, PlayerFilter, QuantityExpr,
-    ReplacementDefinition, StaticDefinition, TriggerDefinition,
+    ReplacementDefinition, StaticDefinition, TargetFilter, TriggerDefinition,
 };
+use crate::types::statics::StaticMode;
 
 /// Strip parenthesized reminder text. Reminder text is the parser's
 /// responsibility to ignore at the keyword level — keywords themselves are
@@ -459,8 +460,45 @@ fn any_ability_has_conditional_mana_spell_grant(parsed: &ParsedAbilities) -> boo
         })
 }
 
+fn target_filter_has_targets_property(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf.properties.iter().any(|prop| {
+            matches!(
+                prop,
+                crate::types::ability::FilterProp::Targets { .. }
+                    | crate::types::ability::FilterProp::TargetsOnly { .. }
+            )
+        }),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(target_filter_has_targets_property)
+        }
+        TargetFilter::Not { filter } => target_filter_has_targets_property(filter),
+        _ => false,
+    }
+}
+
+fn static_has_target_gated_cost_modification(def: &StaticDefinition) -> bool {
+    match &def.mode {
+        StaticMode::ReduceCost {
+            spell_filter: Some(filter),
+            ..
+        }
+        | StaticMode::RaiseCost {
+            spell_filter: Some(filter),
+            ..
+        } => target_filter_has_targets_property(filter),
+        _ => false,
+    }
+}
+
+fn any_static_has_target_gated_cost_modification(parsed: &ParsedAbilities) -> bool {
+    parsed
+        .statics
+        .iter()
+        .any(static_has_target_gated_cost_modification)
+}
+
 fn any_ability_is_optional(parsed: &ParsedAbilities) -> bool {
-    use crate::types::statics::StaticMode;
     use crate::types::triggers::TriggerMode;
     parsed.abilities.iter().any(def_tree_has_optional)
         || parsed.triggers.iter().any(|t| {
@@ -808,6 +846,9 @@ fn detect_condition_if(cleaned: &str, original: &str, ast_json: &str, parsed: &P
         return;
     }
     if any_ability_has_conditional_mana_spell_grant(parsed) {
+        return;
+    }
+    if any_static_has_target_gated_cost_modification(parsed) {
         return;
     }
     // Strip CR-implicit "if" phrases that aren't real conditional gates

@@ -653,6 +653,16 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
         cost
     };
 
+    let mut target_adjusted_cost = cost.clone();
+    super::casting::apply_self_spell_cost_modifiers_with_selected_targets(
+        state,
+        player,
+        object_id,
+        &ability,
+        &mut target_adjusted_cost,
+    );
+    let cost = &target_adjusted_cost;
+
     let additional = state
         .objects
         .get(&object_id)

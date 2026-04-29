@@ -6788,6 +6788,30 @@ fn parse_self_spell_cost_subject(lower: &str) -> Option<()> {
     .map(|_| ())
 }
 
+fn parse_self_spell_target_cost_filter(lower: &str) -> Option<TargetFilter> {
+    let (_, target_text) = preceded(
+        take_until::<_, _, VerboseError<&str>>(" if "),
+        preceded(
+            alt((tag(" if it targets "), tag(" if this spell targets "))),
+            preceded(opt(alt((tag("a "), tag("an "), tag("one or more ")))), rest),
+        ),
+    )
+    .parse(lower)
+    .ok()?;
+
+    let target_text = target_text.trim().trim_end_matches('.');
+    let (target_filter, remainder) = parse_type_phrase(target_text);
+    if !remainder.trim().is_empty() || matches!(target_filter, TargetFilter::Any) {
+        return None;
+    }
+
+    Some(TargetFilter::Typed(TypedFilter::card().properties(vec![
+        FilterProp::Targets {
+            filter: Box::new(target_filter),
+        },
+    ])))
+}
+
 /// CR 601.2f: Parse cost modification statics from Oracle text.
 /// Handles all four sub-patterns:
 /// 1. Type-filtered: "Creature spells you cast cost {1} less to cast"
@@ -6878,7 +6902,9 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
 
     // Extract spell type filter from the text before "cost"
     // E.g., "Creature spells you cast" → Creature, "Instant and sorcery spells" → AnyOf(Instant, Sorcery)
-    let spell_filter = if let Some(filter) = first_qualified_spell_filter.clone() {
+    let spell_filter = if is_self_spell {
+        parse_self_spell_target_cost_filter(lower)
+    } else if let Some(filter) = first_qualified_spell_filter.clone() {
         Some(filter)
     } else if let Some(cost_idx) = lower.find(" cost") {
         let prefix = &lower[..cost_idx];
@@ -7737,6 +7763,53 @@ mod tests {
                 ..
             }
         ));
+        assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+    }
+
+    #[test]
+    fn static_this_spell_cost_less_if_it_targets_creature_filter() {
+        let def =
+            parse_static_line("This spell costs {2} less to cast if it targets a red creature.")
+                .unwrap();
+
+        assert!(matches!(
+            def.mode,
+            StaticMode::ReduceCost {
+                amount: ManaCost::Cost { generic: 2, .. },
+                ..
+            }
+        ));
+        let StaticMode::ReduceCost {
+            ref spell_filter, ..
+        } = def.mode
+        else {
+            panic!("expected ReduceCost");
+        };
+        let filter = spell_filter
+            .as_ref()
+            .expect("expected target-gated spell filter");
+        let TargetFilter::Typed(tf) = filter else {
+            panic!("expected typed spell filter, got {filter:?}");
+        };
+        let targets_filter = tf
+            .properties
+            .iter()
+            .find_map(|prop| match prop {
+                FilterProp::Targets { filter } => Some(filter),
+                _ => None,
+            })
+            .expect("expected Targets property");
+        let TargetFilter::Typed(target_tf) = targets_filter.as_ref() else {
+            panic!("expected typed target filter, got {targets_filter:?}");
+        };
+        assert!(target_tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(target_tf.properties.iter().any(|prop| matches!(
+            prop,
+            FilterProp::HasColor {
+                color: ManaColor::Red
+            }
+        )));
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
         assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
     }
