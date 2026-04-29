@@ -6709,7 +6709,15 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
 
         let (text_no_temporal, delayed_condition) = strip_temporal_suffix(&text);
         let (text_no_qty, multi_target) = strip_any_number_quantifier(text_no_temporal);
-        let clause = parse_effect_clause(&text_no_qty, ctx);
+        let (suffix_repeat_for, stripped_text_no_qty) = strip_for_each_repeat_suffix(&text_no_qty);
+        let stripped_clause = parse_effect_clause(&stripped_text_no_qty, ctx);
+        let (clause, repeat_for) = if suffix_repeat_for.is_some()
+            && matches!(stripped_clause.effect, Effect::CopySpell { .. })
+        {
+            (stripped_clause, repeat_for.or(suffix_repeat_for))
+        } else {
+            (parse_effect_clause(&text_no_qty, ctx), repeat_for)
+        };
 
         // CR 608.2c: Verb carry-forward for bare "target X" clauses in multi-target
         // conjunctions. When a clause parses as Unimplemented and starts with "target",
@@ -7596,6 +7604,29 @@ fn strip_for_each_prefix(text: &str) -> (Option<QuantityExpr>, String) {
                 let offset = text.len() - remainder.len();
                 return (Some(QuantityExpr::Ref { qty }), text[offset..].to_string());
             }
+        }
+    }
+    (None, text.to_string())
+}
+
+/// CR 609.3: Strip trailing "for each [quantity]" repeat suffixes whose base
+/// action should be repeated rather than have an embedded amount replaced.
+fn strip_for_each_repeat_suffix(text: &str) -> (Option<QuantityExpr>, String) {
+    let lower = text.to_lowercase();
+    let parsed = nom_on_lower(text, &lower, |input| {
+        let (rest, base) = take_until::<_, _, VerboseError<&str>>(" for each ").parse(input)?;
+        let (rest, _) = tag(" for each ").parse(rest)?;
+        let (rest, qty) = super::oracle_nom::quantity::parse_for_each_clause_ref(rest)?;
+        let (rest, _) = nom::combinator::opt(tag(".")).parse(rest)?;
+        let (rest, _) = nom::combinator::eof::<_, VerboseError<&str>>(rest)?;
+        Ok((rest, (base.len(), qty)))
+    });
+    if let Some(((base_len, qty), _)) = parsed {
+        if matches!(qty, QuantityRef::CommanderCastFromCommandZoneCount) {
+            return (
+                Some(QuantityExpr::Ref { qty }),
+                text[..base_len].trim_end().to_string(),
+            );
         }
     }
     (None, text.to_string())
@@ -11739,6 +11770,21 @@ mod tests {
             def.repeat_for,
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::Variable { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn effect_copy_it_for_each_commander_cast_sets_repeat_for() {
+        let def = parse_effect_chain(
+            "Copy it for each time you've cast your commander from the command zone this game",
+            AbilityKind::Spell,
+        );
+        assert!(matches!(*def.effect, Effect::CopySpell { .. }));
+        assert!(matches!(
+            def.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::CommanderCastFromCommandZoneCount
             })
         ));
     }

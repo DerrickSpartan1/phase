@@ -1266,9 +1266,19 @@ pub fn parse_for_each_clause_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_for_each_creature_died_this_turn,
         parse_for_each_attacking_controller_type,
         parse_for_each_battlefield_type,
+        parse_for_each_commander_cast_count,
         parse_for_each_controlled_type,
     ))
     .parse(input)
+}
+
+fn parse_for_each_commander_cast_count(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, _) = tag("time").parse(input)?;
+    let (rest, _) = opt(tag("s")).parse(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, _) = alt((tag("you've"), tag("youve"))).parse(rest)?;
+    let (rest, _) = tag(" cast your commander from the command zone this game").parse(rest)?;
+    Ok((rest, QuantityRef::CommanderCastFromCommandZoneCount))
 }
 
 /// CR 700.4 + CR 700.7: Parse "creature that died" / "creature that died
@@ -2105,6 +2115,23 @@ mod tests {
                 controller: ControllerRef::TargetPlayer,
             }
         );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_for_each_commander_cast_count() {
+        let (rest, q) = parse_for_each_clause_ref(
+            "times you've cast your commander from the command zone this game",
+        )
+        .unwrap();
+        assert_eq!(q, QuantityRef::CommanderCastFromCommandZoneCount);
+        assert_eq!(rest, "");
+
+        let (rest, q) = parse_for_each_clause_ref(
+            "time youve cast your commander from the command zone this game",
+        )
+        .unwrap();
+        assert_eq!(q, QuantityRef::CommanderCastFromCommandZoneCount);
         assert_eq!(rest, "");
     }
 

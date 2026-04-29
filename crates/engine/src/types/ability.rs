@@ -2107,6 +2107,11 @@ pub enum QuantityRef {
     /// by War Room's "pay life equal to the number of colors in your
     /// commanders' color identity" activation cost.
     ColorsInCommandersColorIdentity,
+    /// CR 903.8: Number of times the controller has cast their commander(s)
+    /// from the command zone this game. Used by commander storm effects such
+    /// as "copy it for each time you've cast your commander from the command
+    /// zone this game."
+    CommanderCastFromCommandZoneCount,
     /// CR 106.1 + CR 109.1: Number of distinct colors among permanents matching
     /// a filter. "Gold", "multicolor", and "colorless" are not colors (CR 105.1),
     /// so each of W/U/B/R/G is counted at most once. Used by Faeburrow Elder's

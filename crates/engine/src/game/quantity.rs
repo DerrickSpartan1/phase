@@ -935,6 +935,9 @@ fn resolve_ref(
         QuantityRef::ColorsInCommandersColorIdentity => usize_to_i32_saturating(
             super::commander::commander_color_identity(state, controller).len(),
         ),
+        QuantityRef::CommanderCastFromCommandZoneCount => u32_to_i32_saturating(
+            super::commander::commander_casts_from_command_zone(state, controller),
+        ),
         // CR 106.1 + CR 109.1: Count distinct colors (W/U/B/R/G) among permanents
         // matching the filter. "Gold"/"multicolor"/"colorless" are not colors, so
         // each ManaColor contributes at most once per colored permanent.
@@ -1664,6 +1667,53 @@ mod tests {
 
         // Other player (no commander of their own) still reports 0.
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(0)), 0);
+    }
+
+    #[test]
+    fn resolve_quantity_commander_cast_from_command_zone_count() {
+        use crate::game::commander::record_commander_cast;
+        use crate::types::format::FormatConfig;
+
+        let mut state = GameState::new(FormatConfig::commander(), 4, 42);
+        let commander_a = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Partner A".to_string(),
+            Zone::Command,
+        );
+        let commander_b = create_object(
+            &mut state,
+            CardId(202),
+            PlayerId(0),
+            "Partner B".to_string(),
+            Zone::Command,
+        );
+        let opponent_commander = create_object(
+            &mut state,
+            CardId(203),
+            PlayerId(1),
+            "Opponent Commander".to_string(),
+            Zone::Command,
+        );
+        state.objects.get_mut(&commander_a).unwrap().is_commander = true;
+        state.objects.get_mut(&commander_b).unwrap().is_commander = true;
+        state
+            .objects
+            .get_mut(&opponent_commander)
+            .unwrap()
+            .is_commander = true;
+
+        record_commander_cast(&mut state, commander_a);
+        record_commander_cast(&mut state, commander_a);
+        record_commander_cast(&mut state, commander_b);
+        record_commander_cast(&mut state, opponent_commander);
+
+        let expr = QuantityExpr::Ref {
+            qty: QuantityRef::CommanderCastFromCommandZoneCount,
+        };
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(0)), 3);
+        assert_eq!(resolve_quantity(&state, &expr, PlayerId(1), ObjectId(0)), 1);
     }
 
     /// CR 201.2 + CR 603.4: distinct-name count for Field of the Dead.

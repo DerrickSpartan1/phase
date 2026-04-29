@@ -22,6 +22,22 @@ pub fn record_commander_cast(state: &mut GameState, commander_id: ObjectId) {
     *state.commander_cast_count.entry(commander_id).or_insert(0) += 1;
 }
 
+/// CR 903.8: Count previous times `player` has cast their commander(s) from
+/// the command zone this game.
+pub fn commander_casts_from_command_zone(state: &GameState, player: PlayerId) -> u32 {
+    state
+        .commander_cast_count
+        .iter()
+        .filter(|(commander_id, _)| {
+            state
+                .objects
+                .get(commander_id)
+                .is_some_and(|obj| obj.is_commander && obj.owner == player)
+        })
+        .map(|(_, count)| *count)
+        .sum()
+}
+
 /// CR 903.10a: A player who has been dealt 21 or more combat damage by the same commander
 /// over the course of the game loses the game.
 ///
@@ -336,6 +352,33 @@ mod tests {
 
         assert_eq!(commander_tax(&state, commander_a), 4);
         assert_eq!(commander_tax(&state, commander_b), 2);
+    }
+
+    #[test]
+    fn commander_cast_count_sums_owned_commanders_only() {
+        let mut state = setup_commander_game();
+        let commander_a =
+            create_commander_in_command_zone(&mut state, PlayerId(0), "Partner A", vec![]);
+        let commander_b =
+            create_commander_in_command_zone(&mut state, PlayerId(0), "Partner B", vec![]);
+        let opponent_commander =
+            create_commander_in_command_zone(&mut state, PlayerId(1), "Opponent", vec![]);
+        let noncommander = create_object(
+            &mut state,
+            CardId(50),
+            PlayerId(0),
+            "Not Commander".to_string(),
+            Zone::Battlefield,
+        );
+
+        record_commander_cast(&mut state, commander_a);
+        record_commander_cast(&mut state, commander_a);
+        record_commander_cast(&mut state, commander_b);
+        record_commander_cast(&mut state, opponent_commander);
+        record_commander_cast(&mut state, noncommander);
+
+        assert_eq!(commander_casts_from_command_zone(&state, PlayerId(0)), 3);
+        assert_eq!(commander_casts_from_command_zone(&state, PlayerId(1)), 1);
     }
 
     // --- Zone Redirection Tests ---

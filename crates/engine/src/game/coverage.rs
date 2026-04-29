@@ -735,6 +735,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::ColorsInCommandersColorIdentity => {
             "# of colors in commander's color identity".into()
         }
+        QuantityRef::CommanderCastFromCommandZoneCount => {
+            "# of commander casts from command zone".into()
+        }
         QuantityRef::AttachmentsOnLeavingObject { kind, controller } => {
             let kind_s = match kind {
                 crate::types::ability::AttachmentKind::Aura => "auras",
@@ -4239,6 +4242,9 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::EventContextSourceCostX => ("EventContextSourceCostX", Handled),
         QuantityRef::ColorsInCommandersColorIdentity => {
             ("ColorsInCommandersColorIdentity", Handled)
+        }
+        QuantityRef::CommanderCastFromCommandZoneCount => {
+            ("CommanderCastFromCommandZoneCount", Handled)
         }
         QuantityRef::AttachmentsOnLeavingObject { .. } => ("AttachmentsOnLeavingObject", Handled),
         QuantityRef::PlayerCounter { .. } => ("PlayerCounter", Handled),
