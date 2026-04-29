@@ -1,6 +1,8 @@
 use crate::game::filter;
+use crate::game::quantity::resolve_quantity_with_targets;
 use crate::types::ability::{
-    Duration, Effect, EffectError, EffectKind, ResolvedAbility, StaticDefinition, TargetFilter,
+    CardTypeSetSource, ContinuousModification, Duration, Effect, EffectError, EffectKind,
+    FilterProp, QuantityExpr, QuantityRef, ResolvedAbility, StaticDefinition, TargetFilter,
     TargetRef,
 };
 use crate::types::events::GameEvent;
@@ -51,6 +53,8 @@ fn register_transient_effect(
     target_filter: Option<&TargetFilter>,
     duration: &Duration,
 ) {
+    let modifications = snapshot_transient_modifications(state, ability, &static_def.modifications);
+
     // Targeted effects: register one transient effect per target object
     if !ability.targets.is_empty() {
         for target in &ability.targets {
@@ -60,7 +64,7 @@ fn register_transient_effect(
                     ability.controller,
                     duration.clone(),
                     TargetFilter::SpecificObject { id: *obj_id },
-                    static_def.modifications.clone(),
+                    modifications.clone(),
                     static_def.condition.clone(),
                 );
             }
@@ -78,7 +82,7 @@ fn register_transient_effect(
                 TargetFilter::SpecificObject {
                     id: ability.source_id,
                 },
-                static_def.modifications.clone(),
+                modifications.clone(),
                 static_def.condition.clone(),
             );
         }
@@ -94,7 +98,7 @@ fn register_transient_effect(
                 TargetFilter::SpecificPlayer {
                     id: ability.controller,
                 },
-                static_def.modifications.clone(),
+                modifications.clone(),
                 static_def.condition.clone(),
             );
         }
@@ -105,7 +109,7 @@ fn register_transient_effect(
                 ability.controller,
                 duration.clone(),
                 TargetFilter::SpecificPlayer { id: *id },
-                static_def.modifications.clone(),
+                modifications.clone(),
                 static_def.condition.clone(),
             );
         }
@@ -127,11 +131,85 @@ fn register_transient_effect(
                     ability.controller,
                     duration.clone(),
                     TargetFilter::SpecificObject { id: obj_id },
-                    static_def.modifications.clone(),
+                    modifications.clone(),
                     static_def.condition.clone(),
                 );
             }
         }
+    }
+}
+
+fn snapshot_transient_modifications(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    modifications: &[ContinuousModification],
+) -> Vec<ContinuousModification> {
+    modifications
+        .iter()
+        .map(|modification| match modification {
+            ContinuousModification::AddDynamicPower { value }
+                if !quantity_expr_uses_recipient(value) =>
+            {
+                ContinuousModification::AddPower {
+                    value: resolve_quantity_with_targets(state, value, ability),
+                }
+            }
+            ContinuousModification::AddDynamicToughness { value }
+                if !quantity_expr_uses_recipient(value) =>
+            {
+                ContinuousModification::AddToughness {
+                    value: resolve_quantity_with_targets(state, value, ability),
+                }
+            }
+            ContinuousModification::SetPowerDynamic { value }
+                if !quantity_expr_uses_recipient(value) =>
+            {
+                ContinuousModification::SetPower {
+                    value: resolve_quantity_with_targets(state, value, ability),
+                }
+            }
+            ContinuousModification::SetToughnessDynamic { value }
+                if !quantity_expr_uses_recipient(value) =>
+            {
+                ContinuousModification::SetToughness {
+                    value: resolve_quantity_with_targets(state, value, ability),
+                }
+            }
+            _ => modification.clone(),
+        })
+        .collect()
+}
+
+fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
+    match expr {
+        QuantityExpr::Fixed { .. } => false,
+        QuantityExpr::Ref { qty } => match qty {
+            QuantityRef::ObjectCount { filter }
+            | QuantityRef::ObjectCountDistinctNames { filter }
+            | QuantityRef::DistinctCardTypes {
+                source: CardTypeSetSource::Objects { filter },
+            } => filter_uses_recipient(filter),
+            _ => false,
+        },
+        QuantityExpr::HalfRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_recipient(inner),
+        QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_recipient),
+        QuantityExpr::UpTo { max } => quantity_expr_uses_recipient(max),
+    }
+}
+
+fn filter_uses_recipient(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => tf
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::AttachedToRecipient)),
+        TargetFilter::Not { filter } => filter_uses_recipient(filter),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => {
+            filters.iter().any(filter_uses_recipient)
+        }
+        _ => false,
     }
 }
 
@@ -140,7 +218,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ContinuousModification, ControllerRef, Duration, StaticDefinition, TypedFilter,
+        ContinuousModification, ControllerRef, Duration, QuantityExpr, QuantityRef,
+        StaticDefinition, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::identifiers::CardId;
@@ -331,6 +410,116 @@ mod tests {
             TargetFilter::SpecificObject {
                 id: target_creature
             }
+        );
+    }
+
+    #[test]
+    fn generic_effect_snapshots_dynamic_pt_modifications_at_resolution() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Chorus of Might".to_string(),
+            Zone::Battlefield,
+        );
+        let target_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Target".to_string(),
+            Zone::Battlefield,
+        );
+        let ally_a = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Ally A".to_string(),
+            Zone::Battlefield,
+        );
+        let ally_b = create_object(
+            &mut state,
+            CardId(4),
+            PlayerId(0),
+            "Ally B".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [target_creature, ally_a, ally_b] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let creature_count = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You)),
+            },
+        };
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::ParentTarget)
+            .modifications(vec![
+                ContinuousModification::AddDynamicPower {
+                    value: creature_count.clone(),
+                },
+                ContinuousModification::AddDynamicToughness {
+                    value: creature_count,
+                },
+                ContinuousModification::AddKeyword {
+                    keyword: Keyword::Trample,
+                },
+            ]);
+
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: Some(TargetFilter::Typed(TypedFilter::creature())),
+            },
+            vec![TargetRef::Object(target_creature)],
+            source,
+            PlayerId(0),
+        )
+        .duration(Duration::UntilEndOfTurn);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let late_ally = create_object(
+            &mut state,
+            CardId(5),
+            PlayerId(0),
+            "Late Ally".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&late_ally)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        let modifications = &state.transient_continuous_effects[0].modifications;
+        assert!(
+            modifications.contains(&ContinuousModification::AddPower { value: 3 }),
+            "dynamic power should snapshot to the creature count at resolution, got {modifications:?}"
+        );
+        assert!(
+            modifications.contains(&ContinuousModification::AddToughness { value: 3 }),
+            "dynamic toughness should snapshot to the creature count at resolution, got {modifications:?}"
+        );
+        assert!(
+            !modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddDynamicPower { .. }
+                    | ContinuousModification::AddDynamicToughness { .. }
+            )),
+            "transient P/T pump must not remain live after resolution: {modifications:?}"
         );
     }
 
