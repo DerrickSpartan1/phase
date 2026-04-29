@@ -4042,17 +4042,21 @@ pub enum Effect {
         #[serde(default)]
         uses_tracked_set: bool,
     },
-    /// CR 614.1a + CR 514.2: Register a one-shot replacement effect on the parent
-    /// ability's target object at resolution time. Used by riders like
+    /// CR 614.1a + CR 514.2: Register a replacement effect on the parent
+    /// ability's target object or player at resolution time. Used by riders like
     /// "If that creature would die this turn, exile it instead." attached to
     /// damage-dealing spells/abilities. The replacement is appended to the
     /// target object's `replacement_definitions`; `valid_card: SelfRef`
     /// inside the carried definition naturally binds to *that* object since
     /// SelfRef on a replacement resolves against the carrying object.
+    /// Player-bound damage replacements are stored in GameState's pending
+    /// damage replacements after context references are resolved.
     /// Cleanup at end-of-turn relies on `expires_at_eot: true` on the
     /// carried definition (CR 514.2).
     AddTargetReplacement {
         replacement: Box<ReplacementDefinition>,
+        #[serde(default = "default_target_filter_any")]
+        target: TargetFilter,
     },
     /// CR 614.16: Apply a game-level restriction (e.g., disable damage prevention).
     AddRestriction {
@@ -6807,18 +6811,26 @@ pub enum ManaModification {
     ReplaceWith { mana_type: ManaType },
 }
 
+/// CR 614.1a: Player axis for damage-recipient replacement filters.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum DamageTargetPlayerScope {
+    Any,
+    Opponent,
+    Specific(PlayerId),
+}
+
 /// CR 614.1a: Restricts which damage targets a replacement applies to.
 /// Dedicated enum because `TargetRef` can be `Player` (not handled by `matches_target_filter`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DamageTargetFilter {
-    /// "to an opponent or a permanent an opponent controls"
-    OpponentOrTheirPermanents,
     /// "to a creature" / "to that creature"
     CreatureOnly,
-    /// "to a player" / "to that player"
-    PlayerOnly,
-    /// "to an opponent" — player-only AND opponent-only.
-    OpponentOnly,
+    /// "to a player" / "to that player" / "to an opponent"
+    Player { player: DamageTargetPlayerScope },
+    /// "to an opponent or a permanent an opponent controls" /
+    /// "to that player or a permanent that player controls".
+    PlayerOrPermanentsControlledBy { player: DamageTargetPlayerScope },
 }
 
 /// CR 614.1a: Restricts whether a damage replacement applies to combat, noncombat, or all damage.
@@ -6911,6 +6923,10 @@ pub struct ReplacementDefinition {
     /// EOT cleanup. Cleanup logic ORs both signals.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub expires_at_eot: bool,
+    /// CR 514.2 + CR 611.2a: Expiry for pending replacements whose lifetime is
+    /// not just cleanup, e.g. "until your next turn".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiry: Option<RestrictionExpiry>,
     /// CR 615.1a: Damage redirection target filter — when present, prevented damage is
     /// redirected to matching target instead (e.g., Pariah: "all damage that would be dealt
     /// to you is dealt to ~ instead" → SelfRef, meaning the enchanted permanent/source).
@@ -6969,6 +6985,7 @@ impl ReplacementDefinition {
             valid_player: None,
             is_consumed: false,
             expires_at_eot: false,
+            expiry: None,
             redirect_target: None,
             mana_modification: None,
             additional_token_spec: None,
@@ -7018,6 +7035,11 @@ impl ReplacementDefinition {
 
     pub fn damage_target_filter(mut self, filter: DamageTargetFilter) -> Self {
         self.damage_target_filter = Some(filter);
+        self
+    }
+
+    pub fn expiry(mut self, expiry: RestrictionExpiry) -> Self {
+        self.expiry = Some(expiry);
         self
     }
 

@@ -23,9 +23,9 @@ use super::oracle_util::{
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, CombatDamageScope, Comparator,
     ContinuousModification, ControllerRef, CopyManaValueLimit, DamageModification,
-    DamageTargetFilter, Duration, Effect, FilterProp, ManaModification, PreventionAmount,
-    QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition, ReplacementMode,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    DamageTargetFilter, DamageTargetPlayerScope, Duration, Effect, FilterProp, ManaModification,
+    PreventionAmount, QuantityExpr, QuantityRef, ReplacementCondition, ReplacementDefinition,
+    ReplacementMode, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::mana::{ManaColor, ManaCost, ManaType};
 use crate::types::replacements::ReplacementEvent;
@@ -2420,10 +2420,11 @@ fn parse_damage_target_filter(norm_lower: &str) -> Option<DamageTargetFilter> {
         if let Ok((_, filter)) = parse_damage_target_phrase(remaining) {
             // Guard: opponent-only and player-only exclude "permanent" from the full text
             match filter {
-                DamageTargetFilter::OpponentOnly | DamageTargetFilter::PlayerOnly
+                DamageTargetFilter::Player { .. }
                     if nom_primitives::scan_contains(norm_lower, "permanent") =>
                 {
-                    // Skip — "permanent" present means this is OpponentOrTheirPermanents (already tried)
+                    // Skip — "permanent" present means the broader player/permanent
+                    // scope already matched.
                 }
                 _ => return Some(filter),
             }
@@ -2435,22 +2436,40 @@ fn parse_damage_target_filter(norm_lower: &str) -> Option<DamageTargetFilter> {
     None
 }
 
+fn damage_target_any_player() -> DamageTargetFilter {
+    DamageTargetFilter::Player {
+        player: DamageTargetPlayerScope::Any,
+    }
+}
+
+fn damage_target_opponent() -> DamageTargetFilter {
+    DamageTargetFilter::Player {
+        player: DamageTargetPlayerScope::Opponent,
+    }
+}
+
+fn damage_target_opponent_or_permanents() -> DamageTargetFilter {
+    DamageTargetFilter::PlayerOrPermanentsControlledBy {
+        player: DamageTargetPlayerScope::Opponent,
+    }
+}
+
 /// Nom combinator for damage target phrases. Most specific tags first.
 fn parse_damage_target_phrase(
     input: &str,
 ) -> nom::IResult<&str, DamageTargetFilter, VerboseError<&str>> {
     alt((
         value(
-            DamageTargetFilter::OpponentOrTheirPermanents,
+            damage_target_opponent_or_permanents(),
             tag("to an opponent or a permanent an opponent controls"),
         ),
         value(
             DamageTargetFilter::CreatureOnly,
             alt((tag("to a creature"), tag("to that creature"))),
         ),
-        value(DamageTargetFilter::OpponentOnly, tag("to an opponent")),
+        value(damage_target_opponent(), tag("to an opponent")),
         value(
-            DamageTargetFilter::PlayerOnly,
+            damage_target_any_player(),
             alt((tag("to a player"), tag("to that player"))),
         ),
     ))
@@ -3037,7 +3056,7 @@ fn parse_damage_redirection_replacement(
         && nom_primitives::scan_contains(norm_lower, "is dealt to")
     {
         let target_filter = if nom_primitives::scan_contains(norm_lower, "would be dealt to you") {
-            Some(DamageTargetFilter::PlayerOnly)
+            Some(damage_target_any_player())
         } else {
             // "would be dealt to ~" or other targets — no specific filter
             None
@@ -3072,7 +3091,7 @@ fn parse_damage_redirection_replacement(
         return Some(
             ReplacementDefinition::new(ReplacementEvent::DamageDone)
                 .prevention_shield(PreventionAmount::All)
-                .damage_target_filter(DamageTargetFilter::PlayerOnly)
+                .damage_target_filter(damage_target_any_player())
                 .redirect_target(TargetFilter::SelfRef)
                 .description(original_text.to_string()),
         );
@@ -3157,7 +3176,7 @@ fn parse_damage_prevention_replacement(
     let damage_target_filter = if nom_primitives::scan_contains(norm_lower, "dealt to you")
         || nom_primitives::scan_contains(norm_lower, "deal to you")
     {
-        Some(DamageTargetFilter::PlayerOnly)
+        Some(damage_target_any_player())
     } else if nom_primitives::scan_contains(norm_lower, "dealt to target creature")
         || nom_primitives::scan_contains(norm_lower, "dealt to ~")
         || nom_primitives::scan_contains(norm_lower, "dealt to and dealt by ~")
@@ -3768,10 +3787,7 @@ mod tests {
             }
         ));
         assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
-        assert_eq!(
-            def.damage_target_filter,
-            Some(DamageTargetFilter::PlayerOnly)
-        );
+        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
     }
 
     #[test]
@@ -3828,10 +3844,7 @@ mod tests {
             }
         ));
         assert!(def.combat_scope.is_none()); // all damage, not just combat
-        assert_eq!(
-            def.damage_target_filter,
-            Some(DamageTargetFilter::PlayerOnly)
-        );
+        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
     }
 
     #[test]
@@ -5415,7 +5428,7 @@ mod tests {
         );
         assert_eq!(
             def.damage_target_filter,
-            Some(DamageTargetFilter::OpponentOrTheirPermanents)
+            Some(damage_target_opponent_or_permanents())
         );
         // Source filter: red source you control
         let sf = def.damage_source_filter.unwrap();
@@ -5443,7 +5456,7 @@ mod tests {
         assert_eq!(def.combat_scope, Some(CombatDamageScope::NoncombatOnly));
         assert_eq!(
             def.damage_target_filter,
-            Some(DamageTargetFilter::OpponentOrTheirPermanents)
+            Some(damage_target_opponent_or_permanents())
         );
         // Source filter: source you control (no color qualifier)
         match def.damage_source_filter.unwrap() {
@@ -5510,10 +5523,7 @@ mod tests {
         assert_eq!(def.damage_modification, Some(DamageModification::Double));
         assert_eq!(def.damage_source_filter, Some(TargetFilter::SelfRef));
         assert_eq!(def.combat_scope, Some(CombatDamageScope::CombatOnly));
-        assert_eq!(
-            def.damage_target_filter,
-            Some(DamageTargetFilter::PlayerOnly)
-        );
+        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
     }
 
     // ── Clone replacement tests ──
@@ -5938,10 +5948,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::DamageDone);
-        assert_eq!(
-            def.damage_target_filter,
-            Some(DamageTargetFilter::PlayerOnly)
-        );
+        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
         // CR 615.1a: Redirect populates prevention shield + redirect target
         assert!(matches!(
             def.shield_kind,
@@ -5962,10 +5969,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(def.event, ReplacementEvent::DamageDone);
-        assert_eq!(
-            def.damage_target_filter,
-            Some(DamageTargetFilter::PlayerOnly)
-        );
+        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
         assert!(matches!(
             def.shield_kind,
             ShieldKind::Prevention {

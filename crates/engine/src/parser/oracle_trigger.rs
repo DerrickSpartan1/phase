@@ -5820,10 +5820,11 @@ mod tests {
     use super::*;
     use crate::parser::oracle_warnings::{clear_warnings, take_warnings};
     use crate::types::ability::{
-        Comparator, ControllerRef, Duration, Effect, FilterProp, PlayerFilter, PlayerScope,
-        PtValue, QuantityExpr, QuantityRef, TypeFilter, TypedFilter, UnlessCost,
+        Comparator, ControllerRef, DamageModification, Duration, Effect, FilterProp, PlayerFilter,
+        PlayerScope, PtValue, QuantityExpr, QuantityRef, TypeFilter, TypedFilter, UnlessCost,
     };
     use crate::types::counter::{CounterMatch, CounterType};
+    use crate::types::replacements::ReplacementEvent;
 
     #[test]
     fn trigger_etb_self() {
@@ -6043,6 +6044,40 @@ mod tests {
             "execute body should be Effect::Proliferate, got {:?}",
             exec.effect,
         );
+    }
+
+    #[test]
+    fn trigger_combat_damage_installs_until_next_turn_damage_doubler() {
+        let def = parse_trigger_line(
+            "Whenever Lightning deals combat damage to a player, until your next turn, if a source would deal damage to that player or a permanent that player controls, it deals double that damage instead.",
+            "Lightning, Army of One",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_source, Some(TargetFilter::SelfRef));
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+
+        let exec = def.execute.as_deref().expect("execute should be set");
+        assert_eq!(
+            exec.duration,
+            Some(Duration::UntilNextTurnOf {
+                player: PlayerScope::Controller
+            })
+        );
+        let Effect::AddTargetReplacement {
+            replacement,
+            target,
+        } = exec.effect.as_ref()
+        else {
+            panic!("expected AddTargetReplacement, got {:?}", exec.effect);
+        };
+        assert_eq!(*target, TargetFilter::TriggeringPlayer);
+        assert_eq!(replacement.event, ReplacementEvent::DamageDone);
+        assert_eq!(
+            replacement.damage_modification,
+            Some(DamageModification::Double)
+        );
+        assert!(replacement.damage_target_filter.is_none());
     }
 
     #[test]

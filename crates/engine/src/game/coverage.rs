@@ -1387,7 +1387,7 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("tracked".into(), "yes".into()));
             }
         }
-        Effect::AddTargetReplacement { replacement } => {
+        Effect::AddTargetReplacement { replacement, .. } => {
             d.push(("event".into(), format!("{:?}", replacement.event)));
             if let Some(zone) = replacement.destination_zone {
                 d.push(("destination".into(), format!("{zone:?}")));

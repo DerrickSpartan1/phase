@@ -1,6 +1,7 @@
 use crate::types::ability::{
-    CombatDamageScope, DamageTargetFilter, Effect, EffectError, EffectKind, FilterProp,
-    PreventionScope, ReplacementDefinition, ResolvedAbility, TargetFilter, TargetRef,
+    CombatDamageScope, DamageTargetFilter, DamageTargetPlayerScope, Effect, EffectError,
+    EffectKind, FilterProp, PreventionScope, ReplacementDefinition, ResolvedAbility, TargetFilter,
+    TargetRef,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
@@ -71,7 +72,7 @@ pub fn resolve(
 
     // Build the prevention shield replacement definition.
     // Note: valid_card is NOT set here — targeted shields scope via placement on the target
-    // object, and global shields (pending_damage_prevention) must match any damage event.
+    // object, and global shields (pending_damage_replacements) must match any damage event.
     let mut shield = ReplacementDefinition::new(ReplacementEvent::DamageDone)
         .prevention_shield(amount)
         .description("Prevent damage".to_string());
@@ -108,9 +109,12 @@ pub fn resolve(
                 TargetRef::Player(_) => {
                     // Player-targeted prevention: attach to source (permanent abilities)
                     // and scope with damage_target_filter.
-                    let player_shield = shield
-                        .clone()
-                        .damage_target_filter(DamageTargetFilter::PlayerOnly);
+                    let player_shield =
+                        shield
+                            .clone()
+                            .damage_target_filter(DamageTargetFilter::Player {
+                                player: DamageTargetPlayerScope::Any,
+                            });
                     if let Some(obj) = state.objects.get_mut(&ability.source_id) {
                         obj.replacement_definitions.push(player_shield);
                     }
@@ -134,7 +138,7 @@ pub fn resolve(
         } else {
             // Source is on the Stack (instant/sorcery mid-resolution) or already left —
             // store in game-state-level registry so it persists until end of turn.
-            state.pending_damage_prevention.push(shield);
+            state.pending_damage_replacements.push(shield);
         }
     }
 

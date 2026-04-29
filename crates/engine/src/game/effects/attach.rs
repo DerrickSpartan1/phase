@@ -265,6 +265,30 @@ mod tests {
     }
 
     #[test]
+    fn multiple_distinct_equipment_can_attach_to_same_creature() {
+        let mut state = setup();
+        let sword = spawn_with_subtype(&mut state, "Sword", "Equipment");
+        let shield = spawn_with_subtype(&mut state, "Shield", "Equipment");
+        let creature = spawn_creature(&mut state, "Bear");
+
+        attach_to(&mut state, sword, creature);
+        attach_to(&mut state, shield, creature);
+
+        assert_eq!(
+            state.objects.get(&sword).unwrap().attached_to,
+            Some(AttachTarget::Object(creature))
+        );
+        assert_eq!(
+            state.objects.get(&shield).unwrap().attached_to,
+            Some(AttachTarget::Object(creature))
+        );
+        assert_eq!(
+            state.objects.get(&creature).unwrap().attachments,
+            vec![sword, shield]
+        );
+    }
+
+    #[test]
     fn test_attach_re_equip_moves_equipment() {
         let mut state = setup();
         let equipment_id = create_object(

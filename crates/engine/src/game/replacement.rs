@@ -3,8 +3,8 @@ use std::collections::HashSet;
 
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, CombatDamageScope, ControllerRef, DamageModification,
-    DamageTargetFilter, Effect, PreventionAmount, QuantityExpr, ReplacementCondition,
-    ReplacementMode, ShieldKind, TargetFilter, TargetRef,
+    DamageTargetFilter, DamageTargetPlayerScope, Effect, PreventionAmount, QuantityExpr,
+    ReplacementCondition, ReplacementMode, ShieldKind, TargetFilter, TargetRef,
 };
 use crate::types::card_type::CoreType;
 
@@ -244,7 +244,7 @@ fn damage_modification_for_rid(
     // CR 615.3: Pending prevention shields use sentinel ObjectId(0).
     if rid.source == ObjectId(0) {
         return state
-            .pending_damage_prevention
+            .pending_damage_replacements
             .get(rid.index)?
             .damage_modification
             .clone();
@@ -313,10 +313,10 @@ fn damage_done_applier(
     }
 
     // Branch 2: CR 615 — Prevention shield
-    // Look up shield from either object replacement_definitions or pending_damage_prevention.
+    // Look up shield from either object replacement_definitions or pending_damage_replacements.
     let shield_kind = if rid.source == ObjectId(0) {
         state
-            .pending_damage_prevention
+            .pending_damage_replacements
             .get(rid.index)
             .map(|repl| repl.shield_kind)
     } else {
@@ -413,7 +413,7 @@ fn consume_prevention_shield(
     new_amount: Option<PreventionAmount>,
 ) {
     let repl = if rid.source == ObjectId(0) {
-        state.pending_damage_prevention.get_mut(rid.index)
+        state.pending_damage_replacements.get_mut(rid.index)
     } else {
         state
             .objects
@@ -1450,9 +1450,9 @@ fn is_damage_prevention_replacement(
         return false;
     }
 
-    // Look up the replacement definition from either objects or pending_damage_prevention.
+    // Look up the replacement definition from either objects or pending_damage_replacements.
     let repl_def = if rid.source == ObjectId(0) {
-        state.pending_damage_prevention.get(rid.index)
+        state.pending_damage_replacements.get(rid.index)
     } else {
         state
             .objects
@@ -1486,13 +1486,29 @@ fn matches_damage_target_filter(
     repl_controller: PlayerId,
     state: &GameState,
 ) -> bool {
+    fn player_scope_matches(
+        scope: &DamageTargetPlayerScope,
+        player: PlayerId,
+        repl_controller: PlayerId,
+    ) -> bool {
+        match scope {
+            DamageTargetPlayerScope::Any => true,
+            DamageTargetPlayerScope::Opponent => player != repl_controller,
+            DamageTargetPlayerScope::Specific(specific) => player == *specific,
+        }
+    }
+
     match filter {
-        DamageTargetFilter::OpponentOrTheirPermanents => match target {
-            TargetRef::Player(pid) => *pid != repl_controller,
+        DamageTargetFilter::Player { player } => match target {
+            TargetRef::Player(pid) => player_scope_matches(player, *pid, repl_controller),
+            TargetRef::Object(_) => false,
+        },
+        DamageTargetFilter::PlayerOrPermanentsControlledBy { player } => match target {
+            TargetRef::Player(pid) => player_scope_matches(player, *pid, repl_controller),
             TargetRef::Object(oid) => state
                 .objects
                 .get(oid)
-                .is_some_and(|obj| obj.controller != repl_controller),
+                .is_some_and(|obj| player_scope_matches(player, obj.controller, repl_controller)),
         },
         DamageTargetFilter::CreatureOnly => match target {
             TargetRef::Player(_) => false,
@@ -1501,10 +1517,6 @@ fn matches_damage_target_filter(
                 .get(oid)
                 .is_some_and(|obj| obj.card_types.core_types.contains(&CoreType::Creature)),
         },
-        DamageTargetFilter::PlayerOnly => matches!(target, TargetRef::Player(_)),
-        DamageTargetFilter::OpponentOnly => {
-            matches!(target, TargetRef::Player(pid) if *pid != repl_controller)
-        }
     }
 }
 
@@ -2006,10 +2018,11 @@ pub fn find_applicable_replacements(
         }
     }
 
-    // CR 615.3: Also scan game-state-level prevention shields (fog-like spells).
-    // These use a sentinel source ObjectId(0) to distinguish from object-attached shields.
+    // CR 614.1a + CR 615.3: Also scan game-state-level pending damage
+    // replacements. These use a sentinel source ObjectId(0) to distinguish
+    // them from object-attached replacements.
     if matches!(event, ProposedEvent::Damage { .. }) {
-        for (index, repl_def) in state.pending_damage_prevention.iter().enumerate() {
+        for (index, repl_def) in state.pending_damage_replacements.iter().enumerate() {
             if repl_def.is_consumed {
                 continue;
             }
@@ -2055,8 +2068,9 @@ pub fn find_applicable_replacements(
                         }
                     }
                 }
-                // Check if prevention is disabled
-                if is_prevention_disabled(state, event) {
+                if is_damage_prevention_replacement(state, &rid, &repl_def.event)
+                    && is_prevention_disabled(state, event)
+                {
                     continue;
                 }
                 // Verify the handler matcher still matches (for DamageDone events)
@@ -2315,7 +2329,7 @@ fn apply_single_replacement(
     // CR 615.3: Pending damage prevention shields use sentinel ObjectId(0).
     // Look up from game-state-level registry instead of object replacement_definitions.
     let repl_def_ref = if rid.source == ObjectId(0) {
-        state.pending_damage_prevention.get(rid.index)
+        state.pending_damage_replacements.get(rid.index)
     } else {
         state
             .objects
@@ -4046,8 +4060,11 @@ mod tests {
 
     #[test]
     fn damage_target_filter_opponent_blocks_self() {
-        let repl = damage_repl(DamageModification::Plus { value: 2 })
-            .damage_target_filter(DamageTargetFilter::OpponentOrTheirPermanents);
+        let repl = damage_repl(DamageModification::Plus { value: 2 }).damage_target_filter(
+            DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                player: DamageTargetPlayerScope::Opponent,
+            },
+        );
         // Replacement on P0's object
         let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
 
@@ -4066,8 +4083,11 @@ mod tests {
 
     #[test]
     fn damage_target_filter_opponent_allows_opponent() {
-        let repl = damage_repl(DamageModification::Plus { value: 2 })
-            .damage_target_filter(DamageTargetFilter::OpponentOrTheirPermanents);
+        let repl = damage_repl(DamageModification::Plus { value: 2 }).damage_target_filter(
+            DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                player: DamageTargetPlayerScope::Opponent,
+            },
+        );
         let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
 
         // Damage targets P1 (opponent) — should match
@@ -4086,8 +4106,11 @@ mod tests {
     #[test]
     fn damage_target_filter_opponent_allows_opponents_permanent() {
         use crate::types::card_type::CoreType;
-        let repl = damage_repl(DamageModification::Plus { value: 2 })
-            .damage_target_filter(DamageTargetFilter::OpponentOrTheirPermanents);
+        let repl = damage_repl(DamageModification::Plus { value: 2 }).damage_target_filter(
+            DamageTargetFilter::PlayerOrPermanentsControlledBy {
+                player: DamageTargetPlayerScope::Opponent,
+            },
+        );
         let mut state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
 
         // Add opponent's creature
@@ -4711,8 +4734,11 @@ mod tests {
 
     #[test]
     fn damage_target_filter_opponent_only() {
-        let repl = damage_repl(DamageModification::Plus { value: 1 })
-            .damage_target_filter(DamageTargetFilter::OpponentOnly);
+        let repl = damage_repl(DamageModification::Plus { value: 1 }).damage_target_filter(
+            DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Opponent,
+            },
+        );
         let state = test_state_with_damage_repl(ObjectId(10), PlayerId(0), vec![repl]);
 
         // Damage to opponent (P1) — should match
@@ -4742,7 +4768,7 @@ mod tests {
             "Should not match damage to self"
         );
 
-        // Damage to a creature — should NOT match (OpponentOnly is player-only)
+        // Damage to a creature — should NOT match (opponent player filter is player-only)
         let mut state2 = state.clone();
         let mut creature = GameObject::new(
             ObjectId(60),
@@ -4764,7 +4790,7 @@ mod tests {
         };
         assert!(
             find_applicable_replacements(&state2, &proposed_creature, &registry).is_empty(),
-            "OpponentOnly should not match damage to creatures"
+            "opponent player filter should not match damage to creatures"
         );
     }
 

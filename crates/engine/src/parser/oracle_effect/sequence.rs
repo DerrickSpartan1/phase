@@ -276,6 +276,7 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
         tag("then, if "),
         tag("otherwise"),
         tag("if not"),
+        tag("the next time "),
         tag("at the beginning "),
         tag("for as long as "),
     ))

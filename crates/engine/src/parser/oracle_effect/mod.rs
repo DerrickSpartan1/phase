@@ -37,11 +37,12 @@ use crate::parser::oracle_effect::subject::parse_subject_application;
 use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
-    ChooseFromZoneConstraint, ConjureCard, ContinuousModification, ControllerRef, DamageSource,
-    DelayedTriggerCondition, Duration, Effect, FilterProp, GainLifePlayer, GameRestriction,
-    MultiTargetSpec, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
-    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
+    ChooseFromZoneConstraint, CombatDamageScope, ConjureCard, ContinuousModification,
+    ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect,
+    FilterProp, GainLifePlayer, GameRestriction, MultiTargetSpec, PlayerFilter, PlayerScope,
+    PreventionAmount, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry,
+    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, TargetFilter,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{DistributionUnit, NextSpellModifier, RetargetScope};
@@ -49,6 +50,7 @@ use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 use crate::types::phase::Phase;
+use crate::types::replacements::ReplacementEvent;
 use crate::types::statics::StaticMode;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
@@ -513,8 +515,10 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
     let (rest, _) = tag::<_, _, VerboseError<&str>>(" instead")
         .parse(rest)
         .ok()?;
-    let rest = rest.trim_end_matches('.').trim();
-    if !rest.is_empty() {
+    let (rest, _) = nom::combinator::opt(tag::<_, _, VerboseError<&str>>("."))
+        .parse(rest)
+        .ok()?;
+    if !rest.trim().is_empty() {
         return None;
     }
 
@@ -546,8 +550,115 @@ fn try_parse_die_exile_rider(lower: &str, kind: AbilityKind) -> Option<AbilityDe
         kind,
         Effect::AddTargetReplacement {
             replacement: Box::new(repl),
+            target: TargetFilter::Any,
         },
     ))
+}
+
+fn parse_optional_period_and_end(input: &str) -> Option<()> {
+    let (rest, _) = nom::combinator::opt(tag::<_, _, VerboseError<&str>>("."))
+        .parse(input)
+        .ok()?;
+    rest.trim().is_empty().then_some(())
+}
+
+fn parse_damage_source_subject(input: &str) -> Option<&str> {
+    alt((
+        tag::<_, _, VerboseError<&str>>("a source"),
+        tag("that source"),
+        tag("it"),
+    ))
+    .parse(input)
+    .ok()
+    .map(|(rest, _)| rest)
+}
+
+fn parse_that_player_or_their_permanent(input: &str) -> Option<&str> {
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("that player")
+        .parse(input)
+        .ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" or ").parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("a permanent ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("that player controls"),
+        tag("controlled by that player"),
+    ))
+    .parse(rest)
+    .ok()?;
+    Some(rest)
+}
+
+fn parse_source_deals_double_instead(input: &str) -> Option<&str> {
+    let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("it"), tag("that source")))
+        .parse(input)
+        .ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" deals double that damage instead")
+        .parse(rest)
+        .ok()?;
+    Some(rest)
+}
+
+fn try_parse_triggered_damage_replacement(lower: &str) -> Option<Effect> {
+    let (rest, _) = nom::combinator::opt(tag::<_, _, VerboseError<&str>>("if "))
+        .parse(lower)
+        .ok()?;
+    let rest = parse_damage_source_subject(rest)?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" would deal damage to ")
+        .parse(rest)
+        .ok()?;
+    let rest = parse_that_player_or_their_permanent(rest)?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(", ").parse(rest).ok()?;
+    let rest = parse_source_deals_double_instead(rest)?;
+    parse_optional_period_and_end(rest)?;
+
+    let replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .damage_modification(DamageModification::Double);
+
+    Some(Effect::AddTargetReplacement {
+        replacement: Box::new(replacement),
+        target: TargetFilter::TriggeringPlayer,
+    })
+}
+
+fn try_parse_next_time_source_damage_replacement(lower: &str) -> Option<Effect> {
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("the next time ")
+        .parse(lower)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("that creature would deal combat damage this turn, "),
+        tag("it would deal combat damage this turn, "),
+    ))
+    .parse(rest)
+    .ok()?;
+
+    let mut replacement = ReplacementDefinition::new(ReplacementEvent::DamageDone)
+        .damage_source_filter(TargetFilter::SelfRef)
+        .combat_scope(CombatDamageScope::CombatOnly);
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, VerboseError<&str>>("it deals double that damage instead"),
+        tag("that creature deals double that damage instead"),
+    ))
+    .parse(rest)
+    {
+        parse_optional_period_and_end(rest)?;
+        replacement = replacement.damage_modification(DamageModification::Double);
+    } else if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("prevent that damage").parse(rest)
+    {
+        parse_optional_period_and_end(rest)?;
+        replacement = replacement.prevention_shield(PreventionAmount::All);
+    } else {
+        return None;
+    }
+
+    replacement.is_consumed = true;
+    replacement.expires_at_eot = true;
+
+    Some(Effect::AddTargetReplacement {
+        replacement: Box::new(replacement),
+        target: TargetFilter::TriggeringSource,
+    })
 }
 
 /// Parse "that creature enters with an additional [N] +1/+1 counter(s) on it" into
@@ -1599,6 +1710,13 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
 
+    if let Some(effect) = try_parse_triggered_damage_replacement(&lower) {
+        return parsed_clause(effect);
+    }
+    if let Some(effect) = try_parse_next_time_source_damage_replacement(&lower) {
+        return parsed_clause(effect);
+    }
+
     // CR 700.2 + CR 608.2d: Inline binary-choice imperative — "discard a card
     // or sacrifice a land" (Highway Robbery) and analogous "A or B" patterns
     // that are not bulleted `Choose one —` modals. The split happens BEFORE
@@ -1643,7 +1761,11 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
         return clause;
     }
 
-    if let Some(clause) = try_parse_gain_energy(tp) {
+    if let Some(clause) = try_parse_random_card_perpetual_gain_quoted_ability(tp) {
+        return clause;
+    }
+
+    if let Some(clause) = try_parse_gain_energy(tp, ctx) {
         return clause;
     }
 
@@ -3131,7 +3253,7 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
     None
 }
 
-fn try_parse_gain_energy(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
+fn try_parse_gain_energy(tp: TextPair<'_>, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     let (rest, _) = alt((tag::<_, _, VerboseError<&str>>("you get "), tag("get ")))
         .parse(tp.lower)
         .ok()?;
@@ -3153,8 +3275,22 @@ fn try_parse_gain_energy(tp: TextPair<'_>) -> Option<ParsedEffectClause> {
         return Some(parsed_clause(Effect::GainEnergy { amount }));
     }
 
-    let effect = parse_energy_symbols_gain(rest, QuantityExpr::Fixed { value: 1 })?;
-    Some(parsed_clause(effect))
+    let (rest, effect) =
+        parse_energy_symbols_gain_with_rest(rest, QuantityExpr::Fixed { value: 1 })?;
+    let mut clause = parsed_clause(effect);
+    let rest = rest.trim();
+    if rest.is_empty() || rest == "." {
+        return Some(clause);
+    }
+    if let Some(continuation) = parse_energy_gain_continuation(rest) {
+        clause.sub_ability = Some(Box::new(parse_effect_chain_impl(
+            continuation,
+            AbilityKind::Spell,
+            ctx,
+        )));
+        return Some(clause);
+    }
+    None
 }
 
 fn parse_energy_gain_base(input: &str, multiplier: QuantityExpr) -> Option<Effect> {
@@ -3164,8 +3300,119 @@ fn parse_energy_gain_base(input: &str, multiplier: QuantityExpr) -> Option<Effec
     parse_energy_symbols_gain(rest, multiplier)
 }
 
+fn nonland_card_in_hand_filter(controller: Option<ControllerRef>) -> TargetFilter {
+    let mut filter = TypedFilter::card()
+        .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+        .properties(vec![FilterProp::InZone { zone: Zone::Hand }]);
+    filter.controller = controller;
+    TargetFilter::Typed(filter)
+}
+
+fn try_parse_random_card_perpetual_gain_quoted_ability(
+    tp: TextPair<'_>,
+) -> Option<ParsedEffectClause> {
+    let parsed = nom_on_lower(tp.original, tp.lower, |input| {
+        alt((
+            value(
+                Some(ControllerRef::You),
+                tag("a random nonland card in your hand perpetually gains "),
+            ),
+            value(
+                None,
+                tag("a random nonland card in that player's hand perpetually gains "),
+            ),
+        ))
+        .parse(input)
+    })?;
+    let (controller, quoted_text) = parsed;
+    let modifications =
+        crate::parser::oracle_static::parse_quoted_ability_modifications(quoted_text);
+    if modifications.is_empty() {
+        return None;
+    }
+
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(nonland_card_in_hand_filter(controller))
+                .affected_zone(Zone::Hand)
+                .modifications(modifications)
+                .description(tp.original.to_string())],
+            duration: Some(Duration::Permanent),
+            target: None,
+        },
+        duration: None,
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+    })
+}
+
 fn parse_energy_symbols_gain(input: &str, multiplier: QuantityExpr) -> Option<Effect> {
+    let (rest, effect) = parse_energy_symbols_gain_with_rest(input, multiplier)?;
+    let rest = rest.trim().trim_end_matches('.');
+    rest.is_empty().then_some(effect)
+}
+
+fn parse_energy_symbols_gain_with_rest(
+    input: &str,
+    multiplier: QuantityExpr,
+) -> Option<(&str, Effect)> {
     let input = input.trim_start();
+
+    if let Ok((after_that_many, _)) = (
+        tag::<_, _, VerboseError<&str>>("that many"),
+        multispace1,
+        tag("{e}"),
+    )
+        .parse(input)
+    {
+        return Some((
+            after_that_many,
+            Effect::GainEnergy {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            },
+        ));
+    }
+
+    if let Ok((after_x, _)) = (
+        tag::<_, _, VerboseError<&str>>("x"),
+        multispace1,
+        tag("{e}"),
+    )
+        .parse(input)
+    {
+        return Some((
+            after_x,
+            Effect::GainEnergy {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            },
+        ));
+    }
+
+    if let Ok((after_number, value)) = nom_primitives::parse_number.parse(input) {
+        if let Ok((after_energy, _)) =
+            (multispace1, tag::<_, _, VerboseError<&str>>("{e}")).parse(after_number)
+        {
+            return Some((
+                after_energy,
+                Effect::GainEnergy {
+                    amount: QuantityExpr::Fixed {
+                        value: value as i32,
+                    },
+                },
+            ));
+        }
+    }
+
     let (after_symbols, symbols) = many1(tag::<_, _, VerboseError<&str>>("{e}"))
         .parse(input)
         .ok()?;
@@ -3178,11 +3425,21 @@ fn parse_energy_symbols_gain(input: &str, multiplier: QuantityExpr) -> Option<Ef
             inner: Box::new(multiplier),
         },
     };
-    let rest = after_symbols.trim().trim_end_matches('.');
-    if rest.is_empty() {
-        return Some(Effect::GainEnergy { amount });
-    }
-    None
+    Some((after_symbols, Effect::GainEnergy { amount }))
+}
+
+fn parse_energy_gain_continuation(rest: &str) -> Option<&str> {
+    let rest = rest.trim();
+    let (continuation, _) = alt((
+        tag::<_, _, VerboseError<&str>>(", then "),
+        tag("then "),
+        tag(", and "),
+        tag("and "),
+    ))
+    .parse(rest)
+    .ok()?;
+    let continuation = continuation.trim();
+    (!continuation.is_empty()).then_some(continuation)
 }
 
 /// Thread subject through for-each effects that carry a `target` field.
@@ -6397,6 +6654,33 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
                 defs.push(new_def);
                 continue;
             }
+        }
+
+        if let Some((is_win, effect_text)) = imperative::try_parse_coin_flip_branch(normalized_text)
+        {
+            let branch_def = parse_effect_chain_impl(effect_text, kind, ctx);
+            defs.push(AbilityDefinition::new(
+                kind,
+                if is_win {
+                    Effect::FlipCoin {
+                        win_effect: Some(Box::new(branch_def)),
+                        lose_effect: None,
+                    }
+                } else {
+                    Effect::FlipCoin {
+                        win_effect: None,
+                        lose_effect: Some(Box::new(branch_def)),
+                    }
+                },
+            ));
+            continue;
+        }
+
+        if let Some(effect) =
+            try_parse_next_time_source_damage_replacement(&normalized_text.to_lowercase())
+        {
+            defs.push(AbilityDefinition::new(kind, effect));
+            continue;
         }
 
         // CR 608.2e: "if [condition], [effect] instead" — the preceding ability's effect
@@ -17512,6 +17796,45 @@ mod tests {
     }
 
     #[test]
+    fn effect_gain_energy_fixed_number_word() {
+        let e = parse_effect("you get six {e}");
+        assert_eq!(
+            e,
+            Effect::GainEnergy {
+                amount: QuantityExpr::Fixed { value: 6 },
+            },
+        );
+    }
+
+    #[test]
+    fn effect_gain_energy_x() {
+        let e = parse_effect("you get x {e}");
+        assert_eq!(
+            e,
+            Effect::GainEnergy {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Variable {
+                        name: "X".to_string(),
+                    },
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn effect_gain_energy_that_many() {
+        let e = parse_effect("you get that many {e}");
+        assert_eq!(
+            e,
+            Effect::GainEnergy {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount,
+                },
+            },
+        );
+    }
+
+    #[test]
     fn effect_gain_energy_for_each_creature_you_control() {
         let e = parse_effect("you get {e} for each creature you control");
         assert_eq!(
@@ -17544,6 +17867,141 @@ mod tests {
             ),
             "expected dynamic GainEnergy ManaSpentOnTriggeringSpell, got: {e:?}"
         );
+    }
+
+    #[test]
+    fn effect_next_time_source_combat_damage_doubles() {
+        let e = parse_effect(
+            "the next time that creature would deal combat damage this turn, it deals double that damage instead",
+        );
+        let Effect::AddTargetReplacement {
+            replacement,
+            target,
+        } = e
+        else {
+            panic!("expected AddTargetReplacement, got: {e:?}");
+        };
+        assert_eq!(target, TargetFilter::TriggeringSource);
+        assert_eq!(
+            replacement.damage_modification,
+            Some(DamageModification::Double)
+        );
+        assert_eq!(
+            replacement.damage_source_filter,
+            Some(TargetFilter::SelfRef)
+        );
+        assert_eq!(
+            replacement.combat_scope,
+            Some(CombatDamageScope::CombatOnly)
+        );
+        assert!(replacement.is_consumed);
+        assert!(replacement.expires_at_eot);
+    }
+
+    #[test]
+    fn effect_triggered_damage_replacement_accepts_controlled_by_wording() {
+        let e = parse_effect(
+            "if that source would deal damage to that player or a permanent controlled by that player, that source deals double that damage instead",
+        );
+        let Effect::AddTargetReplacement {
+            replacement,
+            target,
+        } = e
+        else {
+            panic!("expected AddTargetReplacement, got: {e:?}");
+        };
+        assert_eq!(target, TargetFilter::TriggeringPlayer);
+        assert_eq!(replacement.event, ReplacementEvent::DamageDone);
+        assert_eq!(
+            replacement.damage_modification,
+            Some(DamageModification::Double)
+        );
+    }
+
+    #[test]
+    fn effect_next_time_source_combat_damage_prevents() {
+        let e = parse_effect(
+            "the next time that creature would deal combat damage this turn, prevent that damage",
+        );
+        let Effect::AddTargetReplacement {
+            replacement,
+            target,
+        } = e
+        else {
+            panic!("expected AddTargetReplacement, got: {e:?}");
+        };
+        assert_eq!(target, TargetFilter::TriggeringSource);
+        assert!(matches!(
+            replacement.shield_kind,
+            crate::types::ability::ShieldKind::Prevention { .. }
+        ));
+        assert_eq!(
+            replacement.damage_source_filter,
+            Some(TargetFilter::SelfRef)
+        );
+        assert_eq!(
+            replacement.combat_scope,
+            Some(CombatDamageScope::CombatOnly)
+        );
+        assert!(replacement.is_consumed);
+        assert!(replacement.expires_at_eot);
+    }
+
+    #[test]
+    fn effect_flip_coin_branches_keep_next_time_replacements() {
+        let def = parse_effect_chain(
+            "flip a coin. if you win the flip, the next time that creature would deal combat damage this turn, it deals double that damage instead. if you lose the flip, the next time that creature would deal combat damage this turn, prevent that damage.",
+            AbilityKind::Spell,
+        );
+        let Effect::FlipCoin {
+            win_effect: Some(win),
+            lose_effect: Some(lose),
+        } = def.effect.as_ref()
+        else {
+            panic!("expected FlipCoin with both branches, got {:?}", def.effect);
+        };
+        assert!(matches!(
+            win.effect.as_ref(),
+            Effect::AddTargetReplacement { replacement, target }
+                if *target == TargetFilter::TriggeringSource
+                    && replacement.damage_modification == Some(DamageModification::Double)
+        ));
+        assert!(matches!(
+            lose.effect.as_ref(),
+            Effect::AddTargetReplacement { replacement, target }
+                if *target == TargetFilter::TriggeringSource
+                    && matches!(
+                        replacement.shield_kind,
+                        crate::types::ability::ShieldKind::Prevention { .. }
+                    )
+        ));
+    }
+
+    #[test]
+    fn effect_random_nonland_card_perpetually_gains_quoted_trigger() {
+        let e = parse_effect(
+            "a random nonland card in your hand perpetually gains \"when you cast this spell, you lose 3 life.\"",
+        );
+        let Effect::GenericEffect {
+            static_abilities,
+            duration: Some(Duration::Permanent),
+            ..
+        } = e
+        else {
+            panic!("expected permanent GenericEffect, got {e:?}");
+        };
+        let static_def = static_abilities
+            .first()
+            .expect("expected granted static definition");
+        assert_eq!(
+            static_def.affected,
+            Some(nonland_card_in_hand_filter(Some(ControllerRef::You)))
+        );
+        assert_eq!(static_def.affected_zone, Some(Zone::Hand));
+        assert!(static_def
+            .modifications
+            .iter()
+            .any(|m| matches!(m, ContinuousModification::GrantTrigger { .. })));
     }
 
     #[test]

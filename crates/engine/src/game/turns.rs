@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use crate::game::replacement::{self, ReplacementResult};
+use crate::types::ability::RestrictionExpiry;
 use crate::types::counter::CounterType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{AutoPassMode, GameState, WaitingFor};
@@ -314,8 +315,16 @@ pub fn execute_untap(state: &mut GameState, events: &mut Vec<GameEvent>) {
     // the active player with `UntilYourNextTurn` duration (impulse draws that
     // last "until your next turn").
     super::layers::prune_until_next_turn_casting_permissions(state, active);
+    for obj in state.objects.iter_mut().map(|(_, v)| v) {
+        obj.replacement_definitions.retain(|r| {
+            !matches!(r.expiry, Some(RestrictionExpiry::UntilPlayerNextTurn { player }) if player == active)
+        });
+    }
+    state.pending_damage_replacements.retain(|r| {
+        !matches!(r.expiry, Some(RestrictionExpiry::UntilPlayerNextTurn { player }) if player == active)
+    });
     state.restrictions.retain(|restriction| {
-        use crate::types::ability::{GameRestriction, RestrictionExpiry};
+        use crate::types::ability::GameRestriction;
 
         match restriction {
             GameRestriction::CastOnlyFromZones { expiry, .. }
@@ -626,11 +635,17 @@ pub fn execute_cleanup(state: &mut GameState, events: &mut Vec<GameEvent>) -> Op
     // spells) also expire here regardless of whether they fired.
     // Also prune any consumed shields from earlier this turn.
     for obj in state.objects.iter_mut().map(|(_, v)| v) {
-        obj.replacement_definitions
-            .retain(|r| !(r.shield_kind.is_shield() || r.expires_at_eot));
+        obj.replacement_definitions.retain(|r| {
+            !(r.shield_kind.is_shield()
+                || r.expires_at_eot
+                || matches!(r.expiry, Some(RestrictionExpiry::EndOfTurn)))
+        });
     }
-    // CR 615.3: Clear game-state-level prevention shields (fog-like spells).
-    state.pending_damage_prevention.clear();
+    state.pending_damage_replacements.retain(|r| {
+        !(r.shield_kind.is_shield()
+            || r.expires_at_eot
+            || matches!(r.expiry, Some(RestrictionExpiry::EndOfTurn)))
+    });
 
     // CR 514.2: Prune "until end of turn" transient continuous effects.
     super::layers::prune_end_of_turn_effects(state);
@@ -1071,6 +1086,13 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 // CR 511.3: At end of combat, all creatures are removed from combat.
                 state.combat = None;
                 super::layers::prune_end_of_combat_effects(state);
+                for obj in state.objects.iter_mut().map(|(_, v)| v) {
+                    obj.replacement_definitions
+                        .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
+                }
+                state
+                    .pending_damage_replacements
+                    .retain(|r| !matches!(r.expiry, Some(RestrictionExpiry::EndOfCombat)));
                 if triggers_fired {
                     return WaitingFor::Priority {
                         player: state.active_player,

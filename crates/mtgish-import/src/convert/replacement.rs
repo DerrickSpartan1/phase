@@ -7,8 +7,8 @@
 
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ControllerRef, DamageModification,
-    DamageTargetFilter, Effect, QuantityExpr, QuantityModification, ReplacementCondition,
-    ReplacementDefinition, ReplacementMode, TargetFilter,
+    DamageTargetFilter, DamageTargetPlayerScope, Effect, QuantityExpr, QuantityModification,
+    ReplacementCondition, ReplacementDefinition, ReplacementMode, TargetFilter,
 };
 use engine::types::replacements::ReplacementEvent;
 use engine::types::zones::Zone;
@@ -63,6 +63,7 @@ pub fn convert_as_enters(
         let (condition, mode, exec) = build_replacement_exec(act, &valid_card)?;
         out.push(ReplacementDefinition {
             expires_at_eot: false,
+            expiry: None,
             event: ReplacementEvent::ChangeZone,
             execute: Some(Box::new(exec)),
             mode,
@@ -138,6 +139,7 @@ pub fn convert_replace_would_enter(
         let (condition, mode, exec) = build_replacement_exec(act, &valid_card)?;
         out.push(ReplacementDefinition {
             expires_at_eot: false,
+            expiry: None,
             event: ReplacementEvent::ChangeZone,
             execute: Some(Box::new(exec)),
             mode,
@@ -196,6 +198,7 @@ pub fn convert_replace_would_deal_damage(
         let modification = damage_action_to_modification(act)?;
         out.push(ReplacementDefinition {
             expires_at_eot: false,
+            expiry: None,
             event: ReplacementEvent::DamageDone,
             execute: None,
             mode: Default::default(),
@@ -323,7 +326,9 @@ fn recipient_to_damage_target_filter(r: &SingleDamageRecipient) -> Option<Damage
             // (`Player::Opponent` doesn't exist; opponent recipients in the
             // corpus are encoded via `Players::Opponent` paired with a
             // multi-recipient list, not a `SingleDamageRecipient::Player`.)
-            _ => Some(DamageTargetFilter::PlayerOnly),
+            _ => Some(DamageTargetFilter::Player {
+                player: DamageTargetPlayerScope::Any,
+            }),
         },
         // Permanent recipient — narrow shapes use `CreatureOnly` (the
         // closest engine analogue for "to a permanent / creature").
@@ -534,6 +539,7 @@ pub fn convert_replace_would_draw(
         );
         out.push(ReplacementDefinition {
             expires_at_eot: false,
+            expiry: None,
             event: ReplacementEvent::Draw,
             execute: Some(Box::new(exec)),
             mode: Default::default(),
@@ -649,6 +655,7 @@ pub fn convert_replace_would_put_into_graveyard(
         );
         out.push(ReplacementDefinition {
             expires_at_eot: false,
+            expiry: None,
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(exec)),
             mode: Default::default(),
@@ -756,6 +763,7 @@ pub fn convert_as_put_into_graveyard_from_anywhere(
         );
         out.push(ReplacementDefinition {
             expires_at_eot: false,
+            expiry: None,
             event: ReplacementEvent::Moved,
             execute: Some(Box::new(exec)),
             mode: Default::default(),
@@ -833,6 +841,7 @@ pub fn convert_replace_would_put_counters(
         let modification = counter_action_to_modification(act)?;
         out.push(ReplacementDefinition {
             expires_at_eot: false,
+            expiry: None,
             event: ReplacementEvent::AddCounter,
             execute: None,
             mode: Default::default(),
@@ -990,6 +999,7 @@ pub fn convert_replace_would_gain_life(
         let modification = gain_life_action_to_modification(act)?;
         out.push(ReplacementDefinition {
             expires_at_eot: false,
+            expiry: None,
             event: ReplacementEvent::GainLife,
             execute: None,
             mode: Default::default(),
@@ -1102,6 +1112,7 @@ fn try_build_may_cost_pair(
 
     Ok(Some(ReplacementDefinition {
         expires_at_eot: false,
+        expiry: None,
         event: ReplacementEvent::ChangeZone,
         execute: execute.map(Box::new),
         mode: ReplacementMode::MayCost {
