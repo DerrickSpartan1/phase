@@ -7789,6 +7789,36 @@ mod tests {
     }
 
     #[test]
+    fn static_this_spell_cost_less_for_each_creature_that_attacked_this_turn() {
+        let def = parse_static_line(
+            "This spell costs {1} less to cast for each creature that attacked this turn.",
+        )
+        .unwrap();
+
+        let StaticMode::ReduceCost {
+            amount: ManaCost::Cost { generic: 1, .. },
+            dynamic_count:
+                Some(QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(filter),
+                }),
+            ..
+        } = &def.mode
+        else {
+            panic!("expected self-spell dynamic ReduceCost, got {:?}", def.mode);
+        };
+        assert!(filter
+            .type_filters
+            .iter()
+            .any(|filter| matches!(filter, TypeFilter::Creature)));
+        assert!(filter
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::AttackedThisTurn)));
+        assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
+        assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+    }
+
+    #[test]
     fn static_this_spell_cost_less_if_it_targets_creature_filter() {
         let def =
             parse_static_line("This spell costs {2} less to cast if it targets a red creature.")

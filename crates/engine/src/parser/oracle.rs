@@ -6427,6 +6427,87 @@ mod tests {
     }
 
     #[test]
+    fn spell_cost_reduction_for_creatures_that_attacked_stays_static() {
+        let r = parse(
+            "This spell costs {1} less to cast for each creature that attacked this turn.\nDraw three cards.",
+            "Rowdy Research",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        assert_eq!(r.abilities.len(), 1);
+        assert!(
+            matches!(*r.abilities[0].effect, Effect::Draw { .. }),
+            "real spell effect should be preserved, got {:?}",
+            r.abilities[0].effect
+        );
+        assert_eq!(r.statics.len(), 1);
+        let StaticMode::ReduceCost {
+            amount: ManaCost::Cost { generic: 1, .. },
+            dynamic_count:
+                Some(QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(filter),
+                }),
+            ..
+        } = &r.statics[0].mode
+        else {
+            panic!(
+                "expected self-spell ReduceCost over attacked creatures, got {:?}",
+                r.statics[0].mode
+            );
+        };
+        assert!(filter
+            .type_filters
+            .iter()
+            .any(|filter| matches!(filter, TypeFilter::Creature)));
+        assert!(filter
+            .properties
+            .iter()
+            .any(|prop| matches!(prop, FilterProp::AttackedThisTurn)));
+        assert!(matches!(r.statics[0].affected, Some(TargetFilter::SelfRef)));
+        assert_eq!(r.statics[0].active_zones, vec![Zone::Hand, Zone::Stack]);
+        assert!(
+            r.parse_warnings
+                .iter()
+                .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+            "unexpected DynamicQty warning: {:?}",
+            r.parse_warnings
+        );
+    }
+
+    #[test]
+    fn spell_cost_reduction_for_creatures_that_attacked_preserves_damage_effect() {
+        let r = parse(
+            "This spell costs {1} less to cast for each creature that attacked this turn.\nWitchstalker Frenzy deals 5 damage to target creature.",
+            "Witchstalker Frenzy",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        assert_eq!(r.abilities.len(), 1);
+        assert!(
+            matches!(*r.abilities[0].effect, Effect::DealDamage { .. }),
+            "real spell effect should be preserved, got {:?}",
+            r.abilities[0].effect
+        );
+        assert_eq!(r.statics.len(), 1);
+        assert!(
+            matches!(r.statics[0].mode, StaticMode::ReduceCost { .. }),
+            "cost-reduction sentence should be a static, got {:?}",
+            r.statics[0].mode
+        );
+        assert!(
+            r.abilities
+                .iter()
+                .all(|ability| !matches!(*ability.effect, Effect::CastFromZone { .. })),
+            "cost-reduction sentence must not become CastFromZone: {:?}",
+            r.abilities
+        );
+    }
+
+    #[test]
     fn spell_restriction_then_damage_skullcrack() {
         // Skullcrack: "Players can't gain life this turn. Damage can't be prevented this turn.
         //              Skullcrack deals 3 damage to target player or planeswalker."

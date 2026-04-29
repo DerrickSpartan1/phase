@@ -6,6 +6,7 @@ use nom_language::error::VerboseError;
 
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::scan_contains;
+use super::oracle_util::parse_mana_symbols;
 use crate::parser::oracle_effect::{split_leading_conditional, try_parse_named_choice};
 
 pub(crate) fn is_cant_win_lose_compound(lower: &str) -> bool {
@@ -72,11 +73,36 @@ pub(crate) fn is_damage_prevention_pattern(lower: &str) -> bool {
 }
 
 pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
+    if is_self_spell_cost_modification(lower) {
+        return false;
+    }
+
     ((scan_contains(lower, "deals ") || scan_contains(lower, "deal "))
         && scan_contains(lower, "damage"))
         || scan_contains(lower, "until end of turn")
         || scan_contains(lower, "until your next turn")
         || scan_contains(lower, "this turn")
+}
+
+fn is_self_spell_cost_modification(lower: &str) -> bool {
+    let Ok((after_subject, _)) = alt((
+        tag::<_, _, VerboseError<&str>>("this spell costs "),
+        tag("this card costs "),
+        tag("~ costs "),
+    ))
+    .parse(lower) else {
+        return false;
+    };
+    let Some((_, after_cost)) = parse_mana_symbols(after_subject) else {
+        return false;
+    };
+    let after_cost = after_cost.trim_start();
+    alt((
+        tag::<_, _, VerboseError<&str>>("less to cast"),
+        tag("more to cast"),
+    ))
+    .parse(after_cost)
+    .is_ok()
 }
 
 const STATIC_CONTAINS_PATTERNS: &[&str] = &[
