@@ -2352,6 +2352,42 @@ mod tests {
     }
 
     #[test]
+    fn suffix_another_filtered_spell_condition_uses_spell_history_quantity() {
+        let (condition, body) = strip_suffix_conditional(
+            "Target creature you control gets +1/+0 until end of turn if you've cast another instant or sorcery spell this turn.",
+        );
+        assert_eq!(
+            body,
+            "Target creature you control gets +1/+0 until end of turn"
+        );
+        let Some(AbilityCondition::QuantityCheck {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::SpellsCastThisTurn {
+                            filter: Some(TargetFilter::Or { filters }),
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 2 },
+        }) = condition
+        else {
+            panic!("expected filtered spell-history quantity condition, got {condition:?}");
+        };
+        assert!(
+            filters.iter().any(|filter| matches!(
+                filter,
+                TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters == &vec![TypeFilter::Instant]
+            )) && filters.iter().any(|filter| matches!(
+                filter,
+                TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters == &vec![TypeFilter::Sorcery]
+            ))
+        );
+    }
+
+    #[test]
     fn leading_word_mana_spent_condition_parses_adamant() {
         let (condition, body) = strip_leading_general_conditional(
             "If at least three red mana was spent to cast this spell, it deals 4 damage instead.",

@@ -7330,7 +7330,9 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
             let cond_text = lower[cond_pos + marker.len()..]
                 .trim()
                 .trim_end_matches('.');
-            if let Ok((rest, sc)) = nom_condition::parse_inner_condition(cond_text) {
+            if let Some(sc) = parse_cost_modifier_condition(cond_text) {
+                definition.condition = Some(sc);
+            } else if let Ok((rest, sc)) = nom_condition::parse_inner_condition(cond_text) {
                 if rest.trim().is_empty() || rest.trim() == "." {
                     definition.condition = Some(sc);
                 }
@@ -7339,6 +7341,44 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
     }
 
     Some(definition)
+}
+
+fn parse_cost_modifier_condition(cond_text: &str) -> Option<StaticCondition> {
+    let (rest, filter) = parse_cost_modifier_another_spell_condition(cond_text).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(StaticCondition::QuantityComparison {
+        lhs: QuantityExpr::Ref {
+            qty: QuantityRef::SpellsCastThisTurn {
+                filter: if filter == TargetFilter::Any {
+                    None
+                } else {
+                    Some(filter)
+                },
+            },
+        },
+        comparator: Comparator::GE,
+        rhs: QuantityExpr::Fixed { value: 1 },
+    })
+}
+
+fn parse_cost_modifier_another_spell_condition(input: &str) -> OracleResult<'_, TargetFilter> {
+    let (rest, _) = alt((tag("you've cast another "), tag("you cast another "))).parse(input)?;
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("spell this turn").parse(rest) {
+        return Ok((rest, TargetFilter::Any));
+    }
+    let (rest, type_text) = take_until(" spell this turn").parse(rest)?;
+    let (rest, _) = tag(" spell this turn").parse(rest)?;
+    let Some(filter) = nom_condition::parse_spell_history_filter(type_text) else {
+        return Err(nom::Err::Error(VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
+            )],
+        }));
+    };
+    Ok((rest, filter))
 }
 
 /// Parse a basic land type name (case-insensitive) to its enum variant.
@@ -8022,6 +8062,43 @@ mod tests {
             .any(|prop| matches!(prop, FilterProp::AttackedThisTurn)));
         assert!(matches!(def.affected, Some(TargetFilter::SelfRef)));
         assert_eq!(def.active_zones, vec![Zone::Hand, Zone::Stack]);
+    }
+
+    #[test]
+    fn self_cost_reduction_another_filtered_spell_requires_prior_matching_spell() {
+        let def = parse_static_line(
+            "This spell costs {2} less to cast if you've cast another instant or sorcery spell this turn.",
+        )
+        .unwrap();
+
+        let Some(StaticCondition::QuantityComparison {
+            lhs:
+                QuantityExpr::Ref {
+                    qty:
+                        QuantityRef::SpellsCastThisTurn {
+                            filter: Some(TargetFilter::Or { filters }),
+                        },
+                },
+            comparator: Comparator::GE,
+            rhs: QuantityExpr::Fixed { value: 1 },
+        }) = def.condition
+        else {
+            panic!(
+                "expected filtered prior-spell condition, got {:?}",
+                def.condition
+            );
+        };
+        assert!(
+            filters.iter().any(|filter| matches!(
+                filter,
+                TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters == &vec![TypeFilter::Instant]
+            )) && filters.iter().any(|filter| matches!(
+                filter,
+                TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters == &vec![TypeFilter::Sorcery]
+            ))
+        );
     }
 
     #[test]

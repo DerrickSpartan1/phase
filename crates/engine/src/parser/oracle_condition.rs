@@ -1,12 +1,13 @@
 use std::str::FromStr;
 
 use nom::branch::alt;
-use nom::bytes::complete::tag;
+use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
 use nom::sequence::terminated;
 use nom::Parser;
 use nom_language::error::{VerboseError, VerboseErrorKind};
 
+use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{
     Comparator, ControllerRef, ParsedCondition, PlayerFilter, PlayerScope, QuantityRef,
@@ -625,30 +626,20 @@ fn parse_you_cast_spell_this_turn(
     text: &str,
 ) -> nom::IResult<&str, TargetFilter, VerboseError<&str>> {
     let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("you've cast another "),
+        tag("you cast another "),
         tag::<_, _, VerboseError<&str>>("you've cast an "),
         tag("you cast an "),
         tag("you've cast a "),
         tag("you cast a "),
     ))
     .parse(text)?;
-    let (rest, filter) = alt((
-        value(
-            TargetFilter::Typed(TypedFilter::default().with_type(TypeFilter::AnyOf(vec![
-                TypeFilter::Instant,
-                TypeFilter::Sorcery,
-            ]))),
-            tag("instant or sorcery"),
-        ),
-        value(
-            TargetFilter::Typed(TypedFilter::new(TypeFilter::Instant)),
-            tag("instant"),
-        ),
-        value(
-            TargetFilter::Typed(TypedFilter::new(TypeFilter::Sorcery)),
-            tag("sorcery"),
-        ),
-    ))
-    .parse(rest)?;
+    let (rest, type_text) = take_until(" spell this turn").parse(rest)?;
+    let Some(filter) = nom_condition::parse_spell_history_filter(type_text) else {
+        return Err(nom::Err::Error(VerboseError {
+            errors: vec![(text, VerboseErrorKind::Nom(nom::error::ErrorKind::Tag))],
+        }));
+    };
     let (rest, _) = tag(" spell this turn").parse(rest)?;
     Ok((rest, filter))
 }
@@ -945,6 +936,7 @@ fn capitalize_condition_word(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ability::FilterProp;
 
     #[test]
     fn parses_source_conditions() {
@@ -1071,14 +1063,27 @@ mod tests {
         assert!(matches!(
             parse_restriction_condition("you've cast an instant or sorcery spell this turn"),
             Some(ParsedCondition::YouCastSpellThisTurn {
+                filter: Some(TargetFilter::Or { filters })
+            }) if filters.iter().any(|filter| matches!(
+                filter,
+                TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters == &vec![TypeFilter::Instant]
+            )) && filters.iter().any(|filter| matches!(
+                filter,
+                TargetFilter::Typed(TypedFilter { type_filters, .. })
+                    if type_filters == &vec![TypeFilter::Sorcery]
+            ))
+        ));
+        assert!(matches!(
+            parse_restriction_condition("you've cast another green spell this turn"),
+            Some(ParsedCondition::YouCastSpellThisTurn {
                 filter: Some(TargetFilter::Typed(TypedFilter {
-                    type_filters,
+                    properties,
                     ..
                 }))
-            }) if type_filters == vec![TypeFilter::AnyOf(vec![
-                TypeFilter::Instant,
-                TypeFilter::Sorcery,
-            ])]
+            }) if properties == vec![FilterProp::HasColor {
+                color: ManaColor::Green
+            }]
         ));
         assert_eq!(
             parse_restriction_condition("a creature died this turn"),

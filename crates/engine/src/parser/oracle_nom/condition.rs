@@ -15,8 +15,8 @@ use super::primitives::{parse_article, parse_mana_cost, parse_number};
 use super::quantity as nom_quantity;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    AggregateFunction, Comparator, ControllerRef, PlayerScope, QuantityExpr, QuantityRef,
-    StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    AggregateFunction, Comparator, ControllerRef, FilterProp, PlayerScope, QuantityExpr,
+    QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::zones::Zone;
@@ -1014,6 +1014,7 @@ fn parse_zone_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
 fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you've ").parse(input)?;
     alt((
+        |input| parse_another_spell_cast_this_turn(input, 2),
         value(
             make_quantity_ge(QuantityRef::CrimesCommittedThisTurn, 1),
             tag("committed a crime this turn"),
@@ -1039,10 +1040,7 @@ fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         // "you've cast another spell this turn" → SpellsCastThisTurn >= 2
         value(
             make_quantity_ge(QuantityRef::SpellsCastThisTurn { filter: None }, 2),
-            alt((
-                tag("cast another spell this turn"),
-                tag("cast two or more spells this turn"),
-            )),
+            tag("cast two or more spells this turn"),
         ),
         // "you've attacked this turn" / "you've attacked with a creature this turn"
         value(
@@ -1483,6 +1481,9 @@ fn parse_opponent_lost_life_this_turn(input: &str) -> OracleResult<'_, StaticCon
 fn parse_you_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = alt((tag("you cast "), tag("you've cast "))).parse(input)?;
     // "another spell this turn" → >= 2
+    if let Ok((rest, condition)) = parse_another_spell_this_turn(rest, 2) {
+        return Ok((rest, condition));
+    }
     if let Ok((rest, _)) =
         tag::<_, _, nom_language::error::VerboseError<&str>>("another spell this turn").parse(rest)
     {
@@ -1515,6 +1516,59 @@ fn parse_you_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticConditi
             nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
         )],
     }))
+}
+
+fn parse_another_spell_cast_this_turn(
+    input: &str,
+    minimum: u32,
+) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("cast another ").parse(input)?;
+    parse_another_spell_this_turn(rest, minimum)
+}
+
+fn parse_another_spell_this_turn(input: &str, minimum: u32) -> OracleResult<'_, StaticCondition> {
+    if let Ok((rest, _)) =
+        tag::<_, _, nom_language::error::VerboseError<&str>>("spell this turn").parse(input)
+    {
+        return Ok((
+            rest,
+            make_quantity_ge(QuantityRef::SpellsCastThisTurn { filter: None }, minimum),
+        ));
+    }
+    let (rest, type_text) = take_until(" spell this turn").parse(input)?;
+    let (rest, _) = tag(" spell this turn").parse(rest)?;
+    let Some(filter) = parse_spell_history_filter(type_text) else {
+        return Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
+            )],
+        }));
+    };
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::SpellsCastThisTurn {
+                filter: Some(filter),
+            },
+            minimum,
+        ),
+    ))
+}
+
+pub(crate) fn parse_spell_history_filter(type_text: &str) -> Option<TargetFilter> {
+    let type_text = type_text.trim();
+    let (filter, leftover) = parse_type_phrase(type_text);
+    if leftover.trim().is_empty() && filter != TargetFilter::Any {
+        return Some(filter);
+    }
+    let (rest, color) = super::primitives::parse_color(type_text).ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(TargetFilter::Typed(
+        TypedFilter::card().properties(vec![FilterProp::HasColor { color }]),
+    ))
 }
 
 /// Parse "two or more spells were cast last turn" / "a player cast two or more spells last turn".
@@ -3275,6 +3329,38 @@ mod tests {
         let (rest, c) = parse_condition("as long as you control a swamp").unwrap();
         assert_eq!(rest, "");
         assert!(matches!(c, StaticCondition::IsPresent { filter: Some(_) }));
+    }
+
+    #[test]
+    fn another_filtered_spell_this_turn_counts_current_spell_context() {
+        let (rest, c) =
+            parse_inner_condition("you've cast another instant or sorcery spell this turn")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::SpellsCastThisTurn {
+                                filter: Some(TargetFilter::Or { filters }),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 2 },
+            } => assert!(
+                filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                        if type_filters == &vec![TypeFilter::Instant]
+                )) && filters.iter().any(|filter| matches!(
+                    filter,
+                    TargetFilter::Typed(TypedFilter { type_filters, .. })
+                        if type_filters == &vec![TypeFilter::Sorcery]
+                ))
+            ),
+            other => panic!("expected filtered SpellsCastThisTurn GE 2, got {other:?}"),
+        }
     }
 
     #[test]
