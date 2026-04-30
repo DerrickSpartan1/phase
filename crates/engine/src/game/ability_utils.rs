@@ -422,6 +422,16 @@ pub fn auto_select_targets_for_ability(
     }
 }
 
+pub fn has_legal_target_assignment_for_ability(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    target_slots: &[TargetSelectionSlot],
+    constraints: &[TargetSelectionConstraint],
+) -> bool {
+    let specs = target_slot_specs(ability);
+    has_legal_completion_with_specs(state, ability, &specs, target_slots, constraints, 0, &[])
+}
+
 /// CR 608.2b: When resolving, check that targets are still legal. If all targets are illegal,
 /// the spell or ability doesn't resolve.
 pub fn validate_selected_targets(
@@ -3244,6 +3254,49 @@ mod tests {
 
         assert_eq!(slots.len(), 2);
         assert!(slots.iter().all(|slot| slot.optional));
+    }
+
+    #[test]
+    fn has_legal_target_assignment_short_circuits_multi_target_existence() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        for index in 0..16 {
+            let land = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(index),
+                PlayerId(0),
+                format!("Land {index}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&land)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Land);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Untap {
+                target: TargetFilter::Typed(TypedFilter::land()),
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec {
+            min: 0,
+            max: Some(4),
+        });
+
+        let slots = build_target_slots(&state, &ability).expect("multi-target slots should build");
+
+        assert!(has_legal_target_assignment_for_ability(
+            &state,
+            &ability,
+            &slots,
+            &[]
+        ));
     }
 
     #[test]

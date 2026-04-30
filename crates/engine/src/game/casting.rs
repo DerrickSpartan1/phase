@@ -24,7 +24,8 @@ use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets, auto_select_targets_for_ability,
     begin_target_selection, begin_target_selection_for_ability, build_resolved_from_def,
     build_target_slots, compute_unavailable_modes, flatten_targets_in_chain,
-    modal_choice_for_player, target_constraints_from_modal,
+    has_legal_target_assignment_for_ability, modal_choice_for_player,
+    target_constraints_from_modal,
 };
 use super::casting_costs::{self, auto_tap_mana_sources, check_additional_cost_or_pay};
 use super::engine::EngineError;
@@ -2858,7 +2859,7 @@ pub fn spell_has_legal_targets(
             if target_slots.is_empty() {
                 true
             } else {
-                auto_select_targets_for_ability(&simulated, &resolved, &target_slots, &[]).is_ok()
+                has_legal_target_assignment_for_ability(&simulated, &resolved, &target_slots, &[])
             }
         }
         Err(_) => false,
@@ -4013,8 +4014,12 @@ pub fn can_activate_ability_now(
     match build_target_slots(&simulated, &resolved) {
         Ok(target_slots) => {
             target_slots.is_empty()
-                || auto_select_targets_for_ability(&simulated, &resolved, &target_slots, &[])
-                    .is_ok()
+                || has_legal_target_assignment_for_ability(
+                    &simulated,
+                    &resolved,
+                    &target_slots,
+                    &[],
+                )
         }
         Err(_) => false,
     }

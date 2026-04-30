@@ -7,19 +7,17 @@ use crate::strategy_profile::StrategyProfile;
 /// Wall-clock budget for AI search across ALL difficulties and platforms.
 ///
 /// When `Some(ms)`, search terminates at the deadline even if `max_depth` /
-/// `max_nodes` hasn't been reached — capping user-visible AI latency at the
-/// cost of search quality on slow hardware. When `None`, search runs to its
-/// node/depth budget, keeping quality consistent regardless of host speed.
+/// `max_nodes` hasn't been reached, capping user-visible AI latency at the
+/// cost of search quality on slow hardware. The same deadline gates expensive
+/// tactical projections so optional lookahead cannot dominate a move.
 ///
-/// Historically set to 1500/2500/4000 ms for Medium/Hard/VeryHard to mask a
-/// deep-clone perf regression on AI search nodes. The Arc-share migration
-/// (Commits 1/2/3 of perf(engine) on 2026-04-24) eliminated that cost, so
-/// the deadline is currently disabled.
+/// Deterministic test and duel-suite runs call [`AiConfig::into_deterministic`]
+/// to disable this wall-clock cap and remain bounded solely by node/depth
+/// budgets.
 ///
 /// **Single source of truth** — every `SearchConfig::time_budget_ms` in this
-/// crate references this constant. Change the value here to re-enable or
-/// re-tune wall-clock capping globally.
-pub const AI_SEARCH_TIME_BUDGET_MS: Option<u32> = None;
+/// crate references this constant.
+pub const AI_SEARCH_TIME_BUDGET_MS: Option<u32> = Some(1500);
 
 /// How much the AI reasons about what the opponent might hold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -81,9 +79,10 @@ pub struct SearchConfig {
     /// to cache-only lookups and a heuristic score — preserves the tactical
     /// signal without blowing the user-visible turn-time budget.
     ///
-    /// Scaled per difficulty: Medium needs tighter gating than VeryHard because
-    /// Medium's shorter budget (1500ms native) leaves less headroom for a
-    /// ~1.5s opponent-turn simulation. Set to 0 to always run projections.
+    /// Production configs set this above the move budget so uncached projections
+    /// are skipped unless a prior node already populated the cache. Deterministic
+    /// runs still allow projections because they have no wall-clock deadline.
+    /// Set to 0 to always run projections.
     pub projection_min_budget_ms: u128,
 }
 
@@ -147,7 +146,7 @@ impl Default for SearchConfig {
             time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
             deterministic: false,
             threat_awareness: ThreatAwareness::None,
-            projection_min_budget_ms: 500,
+            projection_min_budget_ms: 2000,
         }
     }
 }
@@ -435,7 +434,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 deterministic: false,
                 threat_awareness: ThreatAwareness::ArchetypeOnly,
-                projection_min_budget_ms: 500,
+                projection_min_budget_ms: 2000,
             },
         ),
         AiDifficulty::Hard => (
@@ -459,7 +458,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 deterministic: false,
                 threat_awareness: ThreatAwareness::Full,
-                projection_min_budget_ms: 300,
+                projection_min_budget_ms: 2000,
             },
         ),
         AiDifficulty::VeryHard => (
@@ -483,7 +482,7 @@ pub fn create_config(difficulty: AiDifficulty, platform: Platform) -> AiConfig {
                 time_budget_ms: AI_SEARCH_TIME_BUDGET_MS,
                 deterministic: false,
                 threat_awareness: ThreatAwareness::Full,
-                projection_min_budget_ms: 300,
+                projection_min_budget_ms: 2000,
             },
         ),
     };
