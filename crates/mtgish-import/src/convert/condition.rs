@@ -3375,6 +3375,9 @@ mod tests {
             ])));
 
         let converted = convert_trigger(&condition).unwrap();
+        let expected_filter = TargetFilter::Typed(TypedFilter::creature().with_type(
+            TypeFilter::Non(Box::new(TypeFilter::Subtype("Zombie".to_string()))),
+        ));
 
         assert_eq!(
             converted,
@@ -3383,16 +3386,7 @@ mod tests {
                     qty: QuantityRef::ZoneChangeCountThisTurn {
                         from: Some(Zone::Battlefield),
                         to: Some(Zone::Graveyard),
-                        filter: TargetFilter::And {
-                            filters: vec![
-                                TargetFilter::Typed(TypedFilter::creature()),
-                                TargetFilter::Typed(TypedFilter::creature().with_type(
-                                    TypeFilter::Non(Box::new(TypeFilter::Subtype(
-                                        "Zombie".to_string()
-                                    )))
-                                )),
-                            ],
-                        },
+                        filter: expected_filter,
                     },
                 },
                 comparator: Comparator::GE,
