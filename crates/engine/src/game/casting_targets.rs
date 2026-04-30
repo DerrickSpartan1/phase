@@ -75,7 +75,7 @@ pub(crate) fn handle_select_modes(
             &pending.target_constraints,
         )? {
             let mut resolved = resolved;
-            assign_targets_in_chain(&mut resolved, &targets)?;
+            assign_targets_in_chain(state, &mut resolved, &targets)?;
             return check_additional_cost_or_pay(
                 state,
                 player,
@@ -153,7 +153,7 @@ pub(crate) fn handle_select_targets(
     };
 
     let mut ability = pending.ability;
-    assign_targets_in_chain(&mut ability, &targets)?;
+    assign_targets_in_chain(state, &mut ability, &targets)?;
 
     // CR 601.2d: If this spell requires distribution among targets, trigger
     // WaitingFor::DistributeAmong. For non-X spells, extract the fixed total now.

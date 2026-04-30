@@ -1124,8 +1124,12 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
             &trigger.target_constraints,
         ) {
             Ok(Some(targets)) => {
-                if super::ability_utils::assign_targets_in_chain(&mut trigger.ability, &targets)
-                    .is_err()
+                if super::ability_utils::assign_targets_in_chain(
+                    state,
+                    &mut trigger.ability,
+                    &targets,
+                )
+                .is_err()
                 {
                     continue;
                 }
@@ -3489,10 +3493,7 @@ pub mod tests {
                     enter_with_counters: vec![],
                 },
             );
-            execute.multi_target = Some(MultiTargetSpec {
-                min: 0,
-                max: Some(3),
-            });
+            execute.multi_target = Some(MultiTargetSpec::fixed(0, 3));
             obj.trigger_definitions.push(
                 TriggerDefinition::new(TriggerMode::ChangesZone)
                     .execute(execute)
@@ -3609,10 +3610,7 @@ pub mod tests {
                     enter_with_counters: vec![],
                 },
             );
-            execute.multi_target = Some(MultiTargetSpec {
-                min: 0,
-                max: Some(3),
-            });
+            execute.multi_target = Some(MultiTargetSpec::fixed(0, 3));
             obj.trigger_definitions.push(
                 TriggerDefinition::new(TriggerMode::ChangesZone)
                     .execute(execute)

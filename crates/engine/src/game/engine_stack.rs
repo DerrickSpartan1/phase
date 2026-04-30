@@ -59,7 +59,7 @@ pub(super) fn handle_trigger_target_selection_select_targets(
         .take()
         .ok_or_else(|| EngineError::InvalidAction("No pending trigger".to_string()))?;
     let mut ability = trigger.ability.clone();
-    assign_targets_in_chain(&mut ability, &targets)?;
+    assign_targets_in_chain(state, &mut ability, &targets)?;
 
     finalize_trigger_target_selection(state, trigger, ability, events);
     Ok(WaitingFor::Priority { player })

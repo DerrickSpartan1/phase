@@ -1773,10 +1773,7 @@ mod tests {
             colors: vec![ManaColor::Green],
             contribution: ManaContribution::Base,
         });
-        def.multi_target = Some(MultiTargetSpec {
-            min: 1,
-            max: Some(1),
-        });
+        def.multi_target = Some(MultiTargetSpec::fixed(1, 1));
         assert!(!is_mana_ability(&def));
     }
 
@@ -2826,10 +2823,7 @@ mod tests {
         // CR 605.1b criterion (a) + CR 115.6: any link declaring targets
         // anywhere in the chain disqualifies inline resolution.
         let mut sub = mana_producing_resolved();
-        sub.multi_target = Some(MultiTargetSpec {
-            min: 1,
-            max: Some(1),
-        });
+        sub.multi_target = Some(MultiTargetSpec::fixed(1, 1));
         let mut head = mana_producing_resolved();
         head.sub_ability = Some(Box::new(sub));
         assert!(!is_triggered_mana_ability(&head, Some(&mana_added_event())));

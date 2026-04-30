@@ -111,7 +111,7 @@ pub fn handle_activate_loyalty(
             auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
         {
             let mut resolved = resolved;
-            assign_targets_in_chain(&mut resolved, &targets)?;
+            assign_targets_in_chain(state, &mut resolved, &targets)?;
             return Ok(finalize_loyalty_activation(
                 state,
                 player,

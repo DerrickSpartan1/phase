@@ -177,15 +177,9 @@ fn resolve_counter_placement_target<'a>(
         nom_on_lower(on_rest, on_rest, |i| {
             value((), alt((tag("each of up to "), tag("up to ")))).parse(i)
         }) {
-        if let Some((n, after_n)) = parse_number(after_up_to) {
-            let on_offset = lower.len() - after_n.len();
-            (
-                &text[on_offset..],
-                Some(MultiTargetSpec {
-                    min: 0,
-                    max: Some(n as usize),
-                }),
-            )
+        if let Ok((after_qty, max)) = super::parse_multi_target_count_expr(after_up_to) {
+            let on_offset = lower.len() - after_qty.len();
+            (&text[on_offset..], Some(MultiTargetSpec::up_to(max)))
         } else {
             let on_offset = lower.len() - on_rest.len();
             (&text[on_offset..], None)
@@ -1055,11 +1049,46 @@ mod tests {
         assert!(matches!(target, TargetFilter::Typed { .. }));
         assert_eq!(
             multi,
-            Some(MultiTargetSpec {
-                min: 0,
-                max: Some(1)
-            }),
+            Some(MultiTargetSpec::fixed(0, 1)),
             "up to one target creature → MultiTargetSpec {{ 0, 1 }}"
+        );
+    }
+
+    #[test]
+    fn put_counter_each_of_up_to_x_target_creatures_keeps_dynamic_max() {
+        let (_effect, _, multi) = try_parse_put_counter(
+            "put a +1/+1 counter on each of up to x target creatures",
+            "put a +1/+1 counter on each of up to x target creatures",
+            &default_ctx(),
+        )
+        .expect("parse");
+
+        assert_eq!(
+            multi,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn put_counter_each_of_up_to_x_target_creatures_applies_where_x_max() {
+        let def = super::super::parse_effect_chain(
+            "Put a +1/+1 counter on each of up to X target creatures, where X is the number of creatures you control.",
+            crate::types::ability::AbilityKind::Spell,
+        );
+        let mut expected_filter = crate::types::ability::TypedFilter::creature();
+        expected_filter.controller = Some(crate::types::ability::ControllerRef::You);
+
+        assert_eq!(
+            def.multi_target,
+            Some(MultiTargetSpec::up_to(QuantityExpr::Ref {
+                qty: crate::types::ability::QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(expected_filter)
+                }
+            }))
         );
     }
 

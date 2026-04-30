@@ -2681,7 +2681,7 @@ fn continue_with_prepared(
             }];
             if let Some(targets) = auto_select_targets(&target_slots, &[])? {
                 let mut resolved = resolved;
-                assign_targets_in_chain(&mut resolved, &targets)?;
+                assign_targets_in_chain(state, &mut resolved, &targets)?;
                 return check_additional_cost_or_pay(
                     state,
                     player,
@@ -2723,7 +2723,7 @@ fn continue_with_prepared(
             auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
         {
             let mut resolved = resolved;
-            assign_targets_in_chain(&mut resolved, &targets)?;
+            assign_targets_in_chain(state, &mut resolved, &targets)?;
             return check_additional_cost_or_pay(
                 state,
                 player,
@@ -4264,7 +4264,7 @@ pub fn handle_activate_ability(
             auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
         {
             let mut resolved = resolved;
-            assign_targets_in_chain(&mut resolved, &targets)?;
+            assign_targets_in_chain(state, &mut resolved, &targets)?;
 
             if let Some(ref cost) = ability_def.cost {
                 if variable_speed_payment_range(cost, effective_speed(state, player)).is_some() {

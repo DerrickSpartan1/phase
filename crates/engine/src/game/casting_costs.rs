@@ -512,7 +512,7 @@ pub(super) fn push_activated_ability_to_stack(
             auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
         {
             let mut resolved = resolved;
-            assign_targets_in_chain(&mut resolved, &targets)?;
+            assign_targets_in_chain(state, &mut resolved, &targets)?;
 
             let assigned_targets = flatten_targets_in_chain(&resolved);
             emit_targeting_events(state, &assigned_targets, source_id, player, events);

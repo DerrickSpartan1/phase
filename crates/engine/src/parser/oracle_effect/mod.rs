@@ -18,7 +18,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::value;
+use nom::combinator::{opt, value};
 use nom::multi::many1;
 use nom::sequence::preceded;
 use nom::Parser;
@@ -26,6 +26,7 @@ use nom_language::error::VerboseError;
 
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_quantity::{
     parse_cda_quantity, parse_for_each_clause, parse_for_each_clause_expr,
 };
@@ -1895,10 +1896,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
     // Strip the count, recursively parse the remainder, and attach MultiTargetSpec.
     if let Some((count, rest)) = strip_numeric_target_prefix(tp.lower) {
         let mut clause = parse_effect_clause(rest, ctx);
-        clause.multi_target = Some(MultiTargetSpec {
-            min: count,
-            max: Some(count),
-        });
+        clause.multi_target = Some(MultiTargetSpec::fixed(count, count));
         return clause;
     }
 
@@ -8592,12 +8590,8 @@ fn extract_put_counter_multi_target(text: &str) -> Option<MultiTargetSpec> {
     ]
     .into_iter()
     .find_map(|marker| strip_after(&lower, marker))?;
-    // Delegate to nom combinator (input already lowercase).
-    let (_, n) = nom_primitives::parse_number.parse(after).ok()?;
-    Some(MultiTargetSpec {
-        min: 0,
-        max: Some(n as usize),
-    })
+    let (_, max) = parse_multi_target_count_expr(after).ok()?;
+    Some(MultiTargetSpec::up_to(max))
 }
 
 /// Post-parse fixup for "exile N target" multi_target.
@@ -8608,10 +8602,7 @@ fn extract_exile_multi_target(text: &str) -> Option<MultiTargetSpec> {
         .parse(lower.as_str())
         .ok()?;
     let (count, _) = strip_numeric_target_prefix(after_verb)?;
-    Some(MultiTargetSpec {
-        min: count,
-        max: Some(count),
-    })
+    Some(MultiTargetSpec::fixed(count, count))
 }
 
 /// Verbs where "any number of" / "up to N" modifies the target set (CR 115.1d),
@@ -8659,8 +8650,7 @@ pub(super) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTar
     else {
         return (text, None);
     };
-    // Delegate to nom combinator (input already lowercase).
-    let Ok((remainder, n)) = nom_primitives::parse_number.parse(after_up_to) else {
+    let Ok((remainder, max)) = parse_multi_target_count_expr(after_up_to) else {
         return (text, None);
     };
     let consumed = lower.len() - remainder.len();
@@ -8676,13 +8666,17 @@ pub(super) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTar
     {
         return (text, None);
     }
-    (
-        rest,
-        Some(MultiTargetSpec {
-            min: 0,
-            max: Some(n as usize),
-        }),
-    )
+    (rest, Some(MultiTargetSpec::up_to(max)))
+}
+
+pub(super) fn parse_multi_target_count_expr(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, QuantityExpr> {
+    alt((
+        nom_quantity::parse_quantity_expr_number,
+        nom_quantity::parse_quantity,
+    ))
+    .parse(input)
 }
 
 /// CR 115.1d: Strip "any number of" or "up to N" quantifier from imperative text.
@@ -8704,7 +8698,7 @@ fn strip_any_number_quantifier(text: &str) -> (String, Option<MultiTargetSpec>) 
         })
     {
         let rebuilt = format!("{}{}", verb_tp.original, rest_orig);
-        return (rebuilt, Some(MultiTargetSpec { min: 0, max: None }));
+        return (rebuilt, Some(MultiTargetSpec::unlimited(0)));
     }
     if let Some((_, after_up_to_orig)) =
         super::oracle_nom::bridge::nom_on_lower(after_verb_tp.original, after_verb_tp.lower, |i| {
@@ -8714,18 +8708,11 @@ fn strip_any_number_quantifier(text: &str) -> (String, Option<MultiTargetSpec>) 
         let after_up_to_lower =
             &after_verb_tp.lower[after_verb_tp.lower.len() - after_up_to_orig.len()..];
         let after_up_to = TextPair::new(after_up_to_orig, after_up_to_lower);
-        // Delegate to nom combinator (input already lowercase from TextPair.lower).
-        if let Ok((remainder, n)) = nom_primitives::parse_number.parse(after_up_to.lower) {
+        if let Ok((remainder, max)) = parse_multi_target_count_expr(after_up_to.lower) {
             let consumed_len = after_up_to.lower.len() - remainder.len();
             let (_, rest) = after_up_to.split_at(consumed_len);
             let rebuilt = format!("{}{}", verb_tp.original, rest.original.trim_start());
-            return (
-                rebuilt,
-                Some(MultiTargetSpec {
-                    min: 0,
-                    max: Some(n as usize),
-                }),
-            );
+            return (rebuilt, Some(MultiTargetSpec::up_to(max)));
         }
     }
     (text.to_string(), None)
@@ -8996,7 +8983,7 @@ fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<ParsedEffectCl
         (
             &target_text[skip..],
             // CR 601.2d: min: 1 because each target must receive at least 1.
-            Some(MultiTargetSpec { min: 1, max: None }),
+            Some(MultiTargetSpec::unlimited(1)),
         )
     } else {
         (target_text, None)
@@ -9064,7 +9051,7 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
         (
             &target_text[skip..],
             // CR 601.2d: min: 1 because each target must receive at least 1.
-            Some(MultiTargetSpec { min: 1, max: None }),
+            Some(MultiTargetSpec::unlimited(1)),
         )
     } else {
         (target_text, None)
@@ -9606,7 +9593,107 @@ fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) ->
 }
 
 fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<QuantityExpr> {
+    let expression = where_x_expression.trim().trim_end_matches('.');
+    let expression_lower = expression.to_ascii_lowercase();
+    if let Ok((rest_lower, (n, sign))) = (
+        nom_primitives::parse_number,
+        alt((
+            value(1i32, tag::<_, _, VerboseError<&str>>(" plus ")),
+            value(-1i32, tag(" minus ")),
+        )),
+    )
+        .parse(expression_lower.as_str())
+    {
+        let consumed = expression_lower.len() - rest_lower.len();
+        if let Some(inner) = parse_where_x_quantity_expression(&expression[consumed..]) {
+            let inner = if sign < 0 {
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(inner),
+                }
+            } else {
+                inner
+            };
+            return Some(QuantityExpr::Offset {
+                inner: Box::new(inner),
+                offset: n as i32,
+            });
+        }
+    }
+    if let Some(expr) = parse_where_x_cards_named_in_all_graveyards(expression) {
+        return Some(expr);
+    }
+    if let Some(expr) = parse_where_x_kicker_count(expression) {
+        return Some(expr);
+    }
+    let lower = expression.to_ascii_lowercase();
+    if tag::<_, _, VerboseError<&str>>("the number of times ")
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return None;
+    }
     parse_cda_quantity(where_x_expression)
+}
+
+fn parse_where_x_cards_named_in_all_graveyards(where_x_expression: &str) -> Option<QuantityExpr> {
+    let lower = where_x_expression.to_ascii_lowercase();
+    let (rest, name_lower) = preceded(
+        tag::<_, _, VerboseError<&str>>("the number of cards named "),
+        take_until(" in all graveyards"),
+    )
+    .parse(lower.as_str())
+    .ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" in all graveyards")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = opt(tag::<_, _, VerboseError<&str>>(" as you cast this spell"))
+        .parse(rest)
+        .ok()?;
+    if !rest.is_empty() || name_lower.trim().is_empty() {
+        return None;
+    }
+    let name_offset = lower.find(name_lower)?;
+    let name = where_x_expression[name_offset..name_offset + name_lower.len()].trim();
+    Some(QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Card],
+                controller: None,
+                properties: vec![
+                    FilterProp::Named {
+                        name: name.to_string(),
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ],
+            }),
+        },
+    })
+}
+
+fn parse_where_x_kicker_count(where_x_expression: &str) -> Option<QuantityExpr> {
+    let lower = where_x_expression.to_ascii_lowercase();
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("the number of times ")
+        .parse(lower.as_str())
+        .ok()?;
+    let rest = alt((
+        preceded(
+            take_until::<_, _, VerboseError<&str>>(" was kicked"),
+            tag(" was kicked"),
+        ),
+        preceded(
+            take_until::<_, _, VerboseError<&str>>(" kicked"),
+            tag(" kicked"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?
+    .0;
+    rest.is_empty().then_some(QuantityExpr::Ref {
+        qty: QuantityRef::KickerCount,
+    })
 }
 
 fn apply_where_x_quantity_expression(
@@ -9685,6 +9772,11 @@ fn apply_where_x_ability_expression(def: &mut AbilityDefinition, where_x_express
             repeat_for,
             where_x_expression,
         ));
+    }
+    if let Some(spec) = def.multi_target.as_mut() {
+        if let Some(max) = spec.max.take() {
+            spec.max = Some(apply_where_x_quantity_expression(max, where_x_expression));
+        }
     }
     apply_where_x_effect_expression(def.effect.as_mut(), where_x_expression);
     if let Some(sub) = def.sub_ability.as_mut() {
@@ -10466,6 +10558,58 @@ mod tests {
             },
             other => panic!("expected GainLife, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn where_x_named_cards_in_all_graveyards_uses_named_graveyard_count() {
+        let expr = parse_where_x_quantity_expression(
+            "one plus the number of cards named Aether Burst in all graveyards as you cast this spell",
+        )
+        .expect("where-X quantity");
+
+        match expr {
+            QuantityExpr::Offset { inner, offset } => {
+                assert_eq!(offset, 1);
+                match *inner {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    } => {
+                        assert!(filter.type_filters.contains(&TypeFilter::Card));
+                        assert!(filter.properties.iter().any(
+                            |prop| matches!(prop, FilterProp::Named { name } if name == "Aether Burst")
+                        ));
+                        assert!(filter.properties.iter().any(
+                            |prop| matches!(prop, FilterProp::InZone { zone } if *zone == Zone::Graveyard)
+                        ));
+                    }
+                    other => panic!("expected ObjectCount inner, got {other:?}"),
+                }
+            }
+            other => panic!("expected offset quantity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn where_x_times_kicked_uses_kicker_count() {
+        let expr = parse_where_x_quantity_expression("the number of times Zethi was kicked")
+            .expect("where-X quantity");
+        assert_eq!(
+            expr,
+            QuantityExpr::Ref {
+                qty: QuantityRef::KickerCount
+            }
+        );
+    }
+
+    #[test]
+    fn where_x_unknown_times_clause_remains_unparsed() {
+        assert_eq!(
+            parse_where_x_quantity_expression("the number of times this creature has mutated"),
+            None
+        );
     }
 
     #[test]
@@ -12348,13 +12492,7 @@ mod tests {
     fn effect_up_to_one_target_creature_explores_sets_multi_target() {
         let def = parse_effect_chain("Up to one target creature explores", AbilityKind::Spell);
         assert!(matches!(*def.effect, Effect::TargetOnly { .. }));
-        assert_eq!(
-            def.multi_target,
-            Some(MultiTargetSpec {
-                min: 0,
-                max: Some(1),
-            })
-        );
+        assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
         assert!(matches!(
             *def.sub_ability
                 .expect("expected explore sub ability")
@@ -13505,7 +13643,7 @@ mod tests {
         }
         let spec = multi.expect("should have multi_target");
         assert_eq!(spec.min, 0);
-        assert_eq!(spec.max, Some(1));
+        assert_eq!(spec, MultiTargetSpec::fixed(0, 1));
     }
 
     #[test]
@@ -13526,13 +13664,7 @@ mod tests {
             "put a +1/+1 counter on each of up to two target creatures",
             &ParseContext::default(),
         );
-        assert_eq!(
-            clause.multi_target,
-            Some(MultiTargetSpec {
-                min: 0,
-                max: Some(2),
-            })
-        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 2)));
         assert!(
             matches!(
                 clause.effect,
@@ -14212,7 +14344,7 @@ mod tests {
         );
         assert_eq!(
             clause.multi_target,
-            Some(MultiTargetSpec { min: 0, max: None }),
+            Some(MultiTargetSpec::unlimited(0)),
             "should have unlimited multi_target"
         );
     }
@@ -14228,10 +14360,7 @@ mod tests {
             "expected PhaseOut, got {:?}",
             clause.effect
         );
-        assert_eq!(
-            clause.multi_target,
-            Some(MultiTargetSpec { min: 0, max: None }),
-        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::unlimited(0)),);
     }
 
     #[test]
@@ -14248,10 +14377,7 @@ mod tests {
             "expected Mill or TargetOnly, got {:?}",
             clause.effect
         );
-        assert_eq!(
-            clause.multi_target,
-            Some(MultiTargetSpec { min: 0, max: None }),
-        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::unlimited(0)),);
     }
 
     // CR 115.1d: Scrollboost — "One or two target creatures each get +2/+2
@@ -14269,13 +14395,7 @@ mod tests {
             "expected parsed pump effect, got {:?}",
             clause.effect
         );
-        assert_eq!(
-            clause.multi_target,
-            Some(MultiTargetSpec {
-                min: 1,
-                max: Some(2)
-            }),
-        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(1, 2)),);
     }
 
     #[test]
@@ -14289,13 +14409,7 @@ mod tests {
             "expected parsed pump effect, got {:?}",
             clause.effect
         );
-        assert_eq!(
-            clause.multi_target,
-            Some(MultiTargetSpec {
-                min: 1,
-                max: Some(3)
-            }),
-        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(1, 3)),);
     }
 
     #[test]
@@ -15545,10 +15659,7 @@ mod tests {
         );
         assert_eq!(
             def.multi_target,
-            Some(MultiTargetSpec {
-                min: 2,
-                max: Some(2),
-            }),
+            Some(MultiTargetSpec::fixed(2, 2)),
             "Expected multi_target with min=2, max=2"
         );
     }
@@ -15871,12 +15982,20 @@ mod tests {
         let (rest, multi_target) =
             strip_optional_target_prefix("up to one other target creature or spell");
         assert_eq!(rest, "other target creature or spell");
+        assert_eq!(multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+    }
+
+    #[test]
+    fn strip_optional_target_prefix_up_to_x_target() {
+        let (rest, multi_target) = strip_optional_target_prefix("up to X target creatures");
+        assert_eq!(rest, "target creatures");
         assert_eq!(
             multi_target,
-            Some(MultiTargetSpec {
-                min: 0,
-                max: Some(1),
-            })
+            Some(MultiTargetSpec::up_to(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            }))
         );
     }
 
@@ -18146,13 +18265,7 @@ mod tests {
             "airbend up to one other target creature or spell",
             &ParseContext::default(),
         );
-        assert_eq!(
-            clause.multi_target,
-            Some(MultiTargetSpec {
-                min: 0,
-                max: Some(1),
-            })
-        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
         match clause.effect {
             Effect::ChangeZone {
                 target: TargetFilter::Or { filters },

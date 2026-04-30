@@ -6567,7 +6567,7 @@ mod tests {
         let ab = &r.abilities[0];
         assert_eq!(
             ab.multi_target,
-            Some(MultiTargetSpec { min: 0, max: None }),
+            Some(MultiTargetSpec::unlimited(0)),
             "expected any-number multi_target"
         );
 

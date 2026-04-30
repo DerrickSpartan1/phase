@@ -1198,7 +1198,28 @@ pub enum DelayedTriggerCondition {
 pub struct MultiTargetSpec {
     pub min: usize,
     /// `None` means "any number" (unlimited). CR 115.1d.
-    pub max: Option<usize>,
+    pub max: Option<QuantityExpr>,
+}
+
+impl MultiTargetSpec {
+    pub fn fixed(min: usize, max: usize) -> Self {
+        Self::bounded(min, QuantityExpr::Fixed { value: max as i32 })
+    }
+
+    pub fn up_to(max: QuantityExpr) -> Self {
+        Self::bounded(0, max)
+    }
+
+    pub fn unlimited(min: usize) -> Self {
+        Self { min, max: None }
+    }
+
+    pub fn bounded(min: usize, max: QuantityExpr) -> Self {
+        Self {
+            min,
+            max: Some(max),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

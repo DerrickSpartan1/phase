@@ -1786,8 +1786,8 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
     if let Some(mt) = &def.multi_target {
         d.push((
             "targets".into(),
-            match mt.max {
-                Some(max) => format!("{}-{}", mt.min, max),
+            match &mt.max {
+                Some(max) => format!("{}-{}", mt.min, fmt_quantity(max)),
                 None => format!("{}+", mt.min),
             },
         ));
