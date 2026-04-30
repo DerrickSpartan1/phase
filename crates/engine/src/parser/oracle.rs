@@ -343,6 +343,221 @@ fn strip_instead_suffix(text: &str) -> (String, Option<AbilityCondition>, bool) 
     (text.to_string(), None, false)
 }
 
+#[derive(Debug, Clone)]
+struct SpellResolutionLine {
+    line: String,
+    effect_text: String,
+    ability_word_condition: Option<StaticCondition>,
+}
+
+fn prepare_spell_resolution_line(raw_line: &str) -> Option<SpellResolutionLine> {
+    let raw_line = raw_line.trim();
+    if raw_line.is_empty() {
+        return None;
+    }
+
+    let reminder_body_owned = extract_ability_word_reminder_body(raw_line);
+    let raw_line = reminder_body_owned.as_deref().unwrap_or(raw_line);
+    let line = strip_x_cant_be_zero_suffix(&strip_reminder_text(raw_line));
+    if line.is_empty() {
+        return None;
+    }
+
+    let (ability_word_condition, effect_text) =
+        if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
+            (ability_word_to_condition(&aw_name), effect_text)
+        } else {
+            (None, line.clone())
+        };
+
+    Some(SpellResolutionLine {
+        line,
+        effect_text,
+        ability_word_condition,
+    })
+}
+
+fn is_semicolon_keyword_line(line: &str, mtgjson_keyword_names: &[String]) -> bool {
+    let mut saw_multiple_parts = false;
+    let mut parts = line
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty());
+    let Some(first) = parts.next() else {
+        return false;
+    };
+
+    if extract_keyword_line(first, mtgjson_keyword_names).is_none() {
+        return false;
+    }
+
+    for part in parts {
+        saw_multiple_parts = true;
+        if extract_keyword_line(part, mtgjson_keyword_names).is_none() {
+            return false;
+        }
+    }
+
+    saw_multiple_parts
+}
+
+fn is_spell_resolution_instruction_line(
+    prepared: &SpellResolutionLine,
+    card_name: &str,
+    mtgjson_keyword_names: &[String],
+    parsed_so_far: &ParsedAbilities,
+) -> bool {
+    let line = &prepared.line;
+    let lower = line.to_lowercase();
+
+    if is_semicolon_keyword_line(line, mtgjson_keyword_names) {
+        return false;
+    }
+
+    if lower == "start your engines!" || lower == "start your engines" {
+        return false;
+    }
+
+    if lower == "your speed can increase beyond 4." || lower == "your speed can increase beyond 4" {
+        return false;
+    }
+
+    if lower_starts_with(&lower, "equip")
+        && !lower_starts_with(&lower, "equipped")
+        && try_parse_equip(line).is_some()
+    {
+        return false;
+    }
+
+    if !is_ability_activate_cost_static(&lower)
+        && extract_keyword_line(line, mtgjson_keyword_names).is_some()
+    {
+        return false;
+    }
+
+    if lower_starts_with(&lower, "enchant ") && !lower_starts_with(&lower, "enchanted ") {
+        return false;
+    }
+
+    if is_commander_permission_sentence(line) || try_parse_loyalty_line(line).is_some() {
+        return false;
+    }
+
+    if is_granted_static_line(&lower) {
+        return false;
+    }
+
+    if nom_on_lower(line, &lower, |i| {
+        value((), alt((tag("to solve \u{2014} "), tag("to solve -- ")))).parse(i)
+    })
+    .is_some()
+    {
+        return false;
+    }
+
+    if nom_on_lower(line, &lower, |i| {
+        value((), alt((tag("solved \u{2014} "), tag("solved -- ")))).parse(i)
+    })
+    .is_some()
+    {
+        return false;
+    }
+
+    if nom_on_lower(line, &lower, |i| {
+        value((), alt((tag("channel \u{2014} "), tag("channel -- ")))).parse(i)
+    })
+    .is_some()
+    {
+        return false;
+    }
+
+    if find_activated_colon(line).is_some() {
+        return false;
+    }
+
+    let effect_lower = prepared.effect_text.to_lowercase();
+    if has_trigger_prefix(&effect_lower) {
+        return false;
+    }
+
+    if is_static_pattern(&effect_lower) && !should_defer_spell_to_effect(&effect_lower) {
+        return false;
+    }
+
+    if is_replacement_pattern(&effect_lower)
+        && !(scan_contains(&effect_lower, "prevent") && scan_contains(&effect_lower, "damage"))
+        && parse_replacement_line(line, card_name).is_some()
+    {
+        return false;
+    }
+
+    if is_opening_hand_begin_game(&lower) || lower_starts_with(&lower, "as an additional cost") {
+        return false;
+    }
+
+    if parsed_so_far.strive_cost.is_some() {
+        if let Some(effect_text) = strip_ability_word(line) {
+            let effect_lower = effect_text.to_lowercase();
+            if lower_starts_with(&effect_lower, "this spell costs ")
+                && scan_contains(
+                    &effect_lower,
+                    "more to cast for each target beyond the first",
+                )
+            {
+                return false;
+            }
+        }
+    }
+
+    if parse_casting_restriction_line(line).is_some()
+        || parse_spell_casting_option_line(line, card_name).is_some()
+    {
+        return false;
+    }
+
+    if is_saga_chapter(&lower)
+        || is_flashback_equal_mana_cost(&lower)
+        || lower_starts_with(&lower, "commander ninjutsu ")
+        || lower_starts_with(&lower, "escape")
+        || lower_starts_with(&lower, "cumulative upkeep")
+        || is_keyword_cost_line(&lower)
+        || is_vehicle_tier_line(&lower)
+        || lower_starts_with(&lower, "activate ")
+        || lower_starts_with(&lower, "suspend ")
+        || lower_starts_with(&lower, "harmonize ")
+        || lower_starts_with(&lower, "flashback")
+        || lower_starts_with(&lower, "buyback")
+        || lower_starts_with(&lower, "this spell costs ")
+        || alt((
+            tag::<_, _, VerboseError<&str>>("kicker"),
+            tag("multikicker"),
+            tag("replicate"),
+            tag("mayhem"),
+        ))
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return false;
+    }
+
+    let saved_warnings = take_warnings();
+    let parsed = parse_effect_chain_with_context(
+        &prepared.effect_text,
+        AbilityKind::Spell,
+        &ParseContext {
+            subject: None,
+            card_name: Some(card_name.to_string()),
+            actor: None,
+            ..Default::default()
+        },
+    );
+    let _candidate_warnings = take_warnings();
+    for warning in saved_warnings {
+        push_warning(warning);
+    }
+    !has_unimplemented(&parsed)
+}
+
 /// Map a known ability word name to a typed `StaticCondition`.
 /// Returns `None` for unrecognized ability words (Landfall, Constellation, etc.
 /// don't have implicit conditions — their trigger text encodes the condition).
@@ -1546,12 +1761,48 @@ pub fn parse_oracle_text(
         // Priority 9: Imperative verb for instants/sorceries
         if is_spell {
             // B7: Strip ability-word prefix and attach condition for spell effects.
-            let (aw_condition, effect_line) =
-                if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
-                    (ability_word_to_condition(&aw_name), effect_text)
-                } else {
-                    (None, line.clone())
+            let mut spell_body_lines = Vec::new();
+            let mut spell_description_lines = Vec::new();
+            let Some(prepared_line) = prepare_spell_resolution_line(&line) else {
+                i += 1;
+                continue;
+            };
+            let aw_condition = prepared_line.ability_word_condition.clone();
+            spell_body_lines.push(prepared_line.effect_text);
+            spell_description_lines.push(prepared_line.line);
+
+            let mut next_i = i + 1;
+            while next_i < lines.len() {
+                if level_consumed.iter().any(|idx| *idx == next_i)
+                    || saga_consumed.iter().any(|idx| *idx == next_i)
+                    || spacecraft_consumed.iter().any(|idx| *idx == next_i)
+                    || parse_oracle_block(&lines, next_i).is_some()
+                {
+                    break;
+                }
+
+                let Some(next_prepared) = prepare_spell_resolution_line(lines[next_i]) else {
+                    break;
                 };
+
+                if next_prepared.ability_word_condition.is_some()
+                    || !is_spell_resolution_instruction_line(
+                        &next_prepared,
+                        card_name,
+                        mtgjson_keyword_names,
+                        &result,
+                    )
+                {
+                    break;
+                }
+
+                spell_body_lines.push(next_prepared.effect_text);
+                spell_description_lines.push(next_prepared.line);
+                next_i += 1;
+            }
+
+            let effect_line = spell_body_lines.join(" ");
+            let description = spell_description_lines.join("\n");
             // CR 608.2c: Pre-strip "instead if [condition]" or trailing "instead"
             // from the effect text before chain parsing. This allows
             // strip_mana_value_conditional inside the chain parser to handle
@@ -1560,9 +1811,9 @@ pub fn parse_oracle_text(
             let (effect_line_clean, instead_condition, is_instead) =
                 strip_instead_suffix(&effect_line);
             let parse_line = if is_instead {
-                &effect_line_clean
+                effect_line_clean.as_str()
             } else {
-                &effect_line
+                effect_line.as_str()
             };
             let mut def = parse_effect_chain_with_context(
                 parse_line,
@@ -1574,7 +1825,7 @@ pub fn parse_oracle_text(
                     ..Default::default()
                 },
             );
-            def.description = Some(line.to_string());
+            def.description = Some(description);
             // CR 608.2c: Compose ability word condition with chain-extracted condition.
             // When both exist (e.g., Revolt + MV ≤ 4), compose through
             // `merge_ability_condition` which dedupes structurally-equal conditions
@@ -1596,7 +1847,7 @@ pub fn parse_oracle_text(
                     instead_condition,
                 ));
             }
-            i += 1;
+            i = next_i;
             // CR 706: If the parsed chain ends with "roll a dN", consume
             // subsequent d20 table lines and attach them as die result branches.
             if has_roll_die_pattern(&lower) {
@@ -2668,6 +2919,77 @@ mod tests {
     }
 
     #[test]
+    fn nonmodal_spell_contiguous_resolution_lines_chain_once() {
+        let r = parse("Scry 1.\nDraw a card.", "Test Opt", &[], &["Instant"], &[]);
+
+        assert_eq!(r.abilities.len(), 1);
+        assert!(r.modal.is_none());
+        assert!(matches!(
+            *r.abilities[0].effect,
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+        let draw = r.abilities[0]
+            .sub_ability
+            .as_ref()
+            .expect("draw should be chained after scry");
+        assert!(matches!(
+            *draw.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn modal_spell_block_keeps_mode_branches_separate() {
+        let r = parse(
+            "Choose one —\n• Scry 1.\n• Draw a card.",
+            "Test Charm",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        let modal = r.modal.expect("modal metadata should remain on spell face");
+        assert_eq!(modal.mode_count, 2);
+        assert_eq!(r.abilities.len(), 2);
+        assert!(matches!(
+            *r.abilities[0].effect,
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+        assert!(matches!(
+            *r.abilities[1].effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn non_spell_permanent_resolution_like_lines_do_not_merge() {
+        let r = parse(
+            "Target player draws a card.\nTarget player gains 3 life.",
+            "Test Permanent",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+
+        assert_eq!(r.abilities.len(), 2);
+        assert!(r.abilities[0].sub_ability.is_none());
+        assert!(matches!(*r.abilities[0].effect, Effect::Draw { .. }));
+        assert!(matches!(*r.abilities[1].effect, Effect::GainLife { .. }));
+    }
+
+    #[test]
     fn multani_cda_parses_total_cards_in_all_players_hands() {
         let r = parse(
             "Multani's power and toughness are each equal to the total number of cards in all players' hands.",
@@ -3615,9 +3937,15 @@ mod tests {
         );
 
         assert_eq!(r.statics.len(), 0);
-        assert_eq!(r.abilities.len(), 2);
-        assert!(r.abilities[1].optional);
-        match &*r.abilities[1].effect {
+        assert_eq!(r.abilities.len(), 1);
+        let cast = r.abilities[0].sub_ability.as_ref().unwrap_or_else(|| {
+            panic!(
+                "free cast instruction should be chained after bounce, got {:?}",
+                r.abilities[0]
+            )
+        });
+        assert!(cast.optional);
+        match &*cast.effect {
             Effect::CastFromZone {
                 target: TargetFilter::Typed(filter),
                 without_paying_mana_cost: true,

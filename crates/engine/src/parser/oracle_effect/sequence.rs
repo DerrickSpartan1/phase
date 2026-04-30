@@ -612,6 +612,7 @@ pub(super) fn is_possessive_apostrophe(current: &str, next: Option<char>) -> boo
     matches!(
         (prev, next),
         (Some(prev), Some(next)) if prev.is_alphanumeric() && next.is_alphanumeric()
+            || prev == 's' && next.is_whitespace()
     )
 }
 
@@ -1862,6 +1863,20 @@ mod tests {
     fn bare_and_splits_destroy_and_gain() {
         let chunks = clause_texts("destroy target creature and gain 3 life");
         assert_eq!(chunks, vec!["destroy target creature", "gain 3 life"]);
+    }
+
+    #[test]
+    fn sentence_split_handles_plural_possessive_apostrophe() {
+        let chunks = clause_texts(
+            "return target artifacts to their owners' hands. you may cast a spell from your hand",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "return target artifacts to their owners' hands",
+                "you may cast a spell from your hand"
+            ]
+        );
     }
 
     /// CR 701.27 + CR 701.28: "transform"/"convert" must split as clause-starts.
