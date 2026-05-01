@@ -1197,38 +1197,26 @@ fn distributed_target_to_target_filter(
     match target {
         DistributedTarget::BetweenOneAndNumberAnyTargets(n) => Ok((
             TargetFilter::Any,
-            MultiTargetSpec {
-                min: 1,
-                max: Some(fixed_max(n, "BetweenOneAndNumberAnyTargets")?),
-            },
+            MultiTargetSpec::fixed(1, fixed_max(n, "BetweenOneAndNumberAnyTargets")?),
         )),
         DistributedTarget::UptoNumberAnyTargets(n) => Ok((
             TargetFilter::Any,
-            MultiTargetSpec {
-                min: 0,
-                max: Some(fixed_max(n, "UptoNumberAnyTargets")?),
-            },
+            MultiTargetSpec::fixed(0, fixed_max(n, "UptoNumberAnyTargets")?),
         )),
         DistributedTarget::AnyNumberOfAnyTargets => {
-            Ok((TargetFilter::Any, MultiTargetSpec { min: 1, max: None }))
+            Ok((TargetFilter::Any, MultiTargetSpec::unlimited(1)))
         }
         DistributedTarget::BetweenOneAndNumberTargetPermanents(n, permanents) => Ok((
             convert_permanents(permanents)?,
-            MultiTargetSpec {
-                min: 1,
-                max: Some(fixed_max(n, "BetweenOneAndNumberTargetPermanents")?),
-            },
+            MultiTargetSpec::fixed(1, fixed_max(n, "BetweenOneAndNumberTargetPermanents")?),
         )),
         DistributedTarget::UptoNumberTargetPermanents(n, permanents) => Ok((
             convert_permanents(permanents)?,
-            MultiTargetSpec {
-                min: 0,
-                max: Some(fixed_max(n, "UptoNumberTargetPermanents")?),
-            },
+            MultiTargetSpec::fixed(0, fixed_max(n, "UptoNumberTargetPermanents")?),
         )),
         DistributedTarget::AnyNumberOfTargetPermanents(permanents) => Ok((
             convert_permanents(permanents)?,
-            MultiTargetSpec { min: 1, max: None },
+            MultiTargetSpec::unlimited(1),
         )),
         other => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "MultiTargetSpec",
@@ -7024,13 +7012,7 @@ mod tests {
         let conv = convert_actions(&actions).unwrap();
         let ability = build_ability_from_actions(AbilityKind::Spell, None, conv).unwrap();
 
-        assert_eq!(
-            ability.multi_target,
-            Some(MultiTargetSpec {
-                min: 1,
-                max: Some(3),
-            })
-        );
+        assert_eq!(ability.multi_target, Some(MultiTargetSpec::fixed(1, 3)));
         assert_eq!(ability.distribute, Some(DistributionUnit::Damage));
         let Effect::DealDamage { amount, target, .. } = ability.effect.as_ref() else {
             panic!("expected DealDamage, got {:?}", ability.effect);
@@ -7087,13 +7069,7 @@ mod tests {
         let conv = convert_actions(&actions).unwrap();
         let ability = build_ability_from_actions(AbilityKind::Spell, None, conv).unwrap();
 
-        assert_eq!(
-            ability.multi_target,
-            Some(MultiTargetSpec {
-                min: 0,
-                max: Some(4),
-            })
-        );
+        assert_eq!(ability.multi_target, Some(MultiTargetSpec::fixed(0, 4)));
         assert_eq!(
             ability.distribute,
             Some(DistributionUnit::Counters("+1/+1".to_string()))

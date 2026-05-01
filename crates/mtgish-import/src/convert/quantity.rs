@@ -6,9 +6,9 @@
 //! per-variant mapping into engine `QuantityRef` and lands in later phases.
 
 use engine::types::ability::{
-    AggregateFunction, CardTypeSetSource, CountScope, DevotionColors, FilterProp, ObjectProperty,
-    PlayerFilter, PlayerScope, QuantityExpr, QuantityRef, RoundingMode, TargetFilter, TypedFilter,
-    ZoneRef,
+    AggregateFunction, CardTypeSetSource, CastManaObjectScope, CastManaSpentMetric, CountScope,
+    DevotionColors, FilterProp, ObjectProperty, PlayerFilter, PlayerScope, QuantityExpr,
+    QuantityRef, RoundingMode, TargetFilter, TypedFilter, ZoneRef,
 };
 use engine::types::player::PlayerCounterKind;
 use engine::types::zones::Zone;
@@ -105,18 +105,12 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             },
         },
 
-        // CR 601.2h + CR 202.2: Sunburst / Converge — "the number of colors
-        // of mana spent to cast [spell]". Engine slot
-        // `QuantityRef::ColorsSpentOnSelf` resolves against the source
-        // object's `colors_spent_to_cast` tally; only the self-spell-ref
-        // (`ThisSpell`) shape lowers cleanly. Other spell refs (target spell,
-        // resolved-spell, etc.) need a parameterized
-        // `QuantityRef::ColorsSpentToCast { spell: SpellRef }` engine
-        // extension and strict-fail today.
+        // CR 601.2h + CR 202.2: Sunburst / Converge.
         GameNumber::TheNumberOfColorsOfManaSpentToCastSpell(spell) => match &**spell {
-            Spell::ThisSpell => QuantityExpr::Ref {
-                qty: QuantityRef::ColorsSpentOnSelf,
-            },
+            Spell::ThisSpell => mana_spent_quantity(
+                CastManaObjectScope::SelfObject,
+                CastManaSpentMetric::DistinctColors,
+            ),
             other => {
                 return Err(ConversionGap::MalformedIdiom {
                     idiom: "GameNumber/TheNumberOfColorsOfManaSpentToCastSpell",
@@ -581,11 +575,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             qty: mana_value_of_spell_ref(spell)?,
         },
 
-        // CR 601.2h: "the amount of mana spent to cast [spell]". `ThisSpell`
-        // → ManaSpentOnSelf (resolves against the ability's own source —
-        // ability.rs ~1882). `Trigger_ThatSpell` → ManaSpentOnTriggeringSpell
-        // (resolves against the spell referenced by the current trigger event
-        // — ability.rs ~1875). Other spell refs strict-fail.
+        // CR 601.2h: "the amount of mana spent to cast [spell]".
         GameNumber::AmountOfManaSpentToCastSpell(spell) => QuantityExpr::Ref {
             qty: mana_spent_to_cast_ref(spell)?,
         },
@@ -856,19 +846,16 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
             }
         }
 
-        // CR 601.2h + CR 202.2: "the number of colors of mana spent to cast
-        // [this spell / this entering permanent]" → ColorsSpentOnSelf. Both
-        // schema variants reference the source object's own
-        // `colors_spent_to_cast` channel (ability.rs:2036 resolves against
-        // the entering object inside ETB replacements; otherwise the static
-        // source).
-        GameNumber::NumColorsManaSpentToCastEnteringPermanent => QuantityExpr::Ref {
-            qty: QuantityRef::ColorsSpentOnSelf,
-        },
+        // CR 601.2h + CR 202.2: colors of mana spent to cast this source object.
+        GameNumber::NumColorsManaSpentToCastEnteringPermanent => mana_spent_quantity(
+            CastManaObjectScope::SelfObject,
+            CastManaSpentMetric::DistinctColors,
+        ),
         GameNumber::NumColorsManaSpentToCastSpell(spell) => match &**spell {
-            Spell::ThisSpell => QuantityExpr::Ref {
-                qty: QuantityRef::ColorsSpentOnSelf,
-            },
+            Spell::ThisSpell => mana_spent_quantity(
+                CastManaObjectScope::SelfObject,
+                CastManaSpentMetric::DistinctColors,
+            ),
             other => {
                 return Err(ConversionGap::EnginePrerequisiteMissing {
                     engine_type: "QuantityRef",
@@ -975,15 +962,24 @@ fn mana_value_of_spell_ref(spell: &Spell) -> ConvResult<QuantityRef> {
     }
 }
 
+fn mana_spent_quantity(scope: CastManaObjectScope, metric: CastManaSpentMetric) -> QuantityExpr {
+    QuantityExpr::Ref {
+        qty: QuantityRef::ManaSpentToCast { scope, metric },
+    }
+}
+
 /// CR 601.2h: Map a `Spell` reference to its "mana spent to cast" resolver.
-/// `ThisSpell` → ManaSpentOnSelf (reads `mana_spent_to_cast_amount` on the
-/// ability's source object). `Trigger_ThatSpell` / `ThatSpell` →
-/// ManaSpentOnTriggeringSpell (reads the same field on the spell referenced
-/// by the current trigger event). Other spell anaphors strict-fail.
 fn mana_spent_to_cast_ref(spell: &Spell) -> ConvResult<QuantityRef> {
     match spell {
-        Spell::ThisSpell => Ok(QuantityRef::ManaSpentOnSelf),
-        Spell::Trigger_ThatSpell | Spell::ThatSpell => Ok(QuantityRef::ManaSpentOnTriggeringSpell),
+        Spell::ThisSpell => Ok(QuantityRef::ManaSpentToCast {
+            scope: CastManaObjectScope::SelfObject,
+            metric: CastManaSpentMetric::Total,
+        }),
+        // Spell-event anaphors read the triggering spell, not this ability's source object.
+        Spell::Trigger_ThatSpell | Spell::ThatSpell => Ok(QuantityRef::ManaSpentToCast {
+            scope: CastManaObjectScope::TriggeringSpell,
+            metric: CastManaSpentMetric::Total,
+        }),
         other => Err(ConversionGap::EnginePrerequisiteMissing {
             engine_type: "QuantityRef",
             needed_variant: format!("AmountOfManaSpentToCastSpell/{other:?}"),
