@@ -1017,11 +1017,11 @@ mod tests {
     /// put a number of +1/+1 counters equal to that spell's mana value on
     /// up to one target creature." The dynamic count binds to the triggering
     /// SpellCast event's source object (the spell itself) via
-    /// `QuantityRef::EventContextSourceManaValue`, which resolves to the
-    /// spell's printed CMC at trigger resolution time.
+    /// `QuantityRef::ObjectManaValue { scope: EventSource }`, which resolves
+    /// to the spell's printed CMC at trigger resolution time.
     #[test]
     fn put_counter_a_number_of_equal_to_spells_mana_value() {
-        use crate::types::ability::QuantityRef;
+        use crate::types::ability::{ObjectScope, QuantityRef};
         let (effect, _, multi) = try_parse_put_counter(
             "put a number of +1/+1 counters equal to that spell's mana value on up to one target creature",
             "put a number of +1/+1 counters equal to that spell's mana value on up to one target creature",
@@ -1041,10 +1041,12 @@ mod tests {
             matches!(
                 count,
                 QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextSourceManaValue
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::EventSource
+                    }
                 }
             ),
-            "count should be EventContextSourceManaValue, got {count:?}"
+            "count should be ObjectManaValue {{ scope: EventSource }}, got {count:?}"
         );
         assert!(matches!(target, TargetFilter::Typed { .. }));
         assert_eq!(
