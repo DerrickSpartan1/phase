@@ -700,7 +700,7 @@ fn parse_clone_replacement(
     // Both converge on "… a copy of <filter> on the battlefield [<suffix>]". The
     // verb phrase is the only grammatical difference, so we split on it via alt()
     // and share every downstream step (filter, zone, duration, except-clause).
-    let (before_copy, after_copy) = find_copy_verb(norm_lower)?;
+    let (before_copy, after_copy, enter_tapped) = find_copy_verb(norm_lower)?;
 
     // Must be preceded by "you may have" for the optional framing (CR 614.1c).
     // Both framings share this prefix — Phantasmal Image: "You may have ~ enter…",
@@ -779,9 +779,27 @@ fn parse_clone_replacement(
         copy_effect = copy_effect.sub_ability(reflexive);
     }
 
+    // CR 614.1c: When the verb phrase includes "tapped" ("enter tapped as a copy
+    // of"), compose a Tap modifier as the top-level execute with BecomeCopy as its
+    // sub_ability. The replacement pipeline walks the chain: event_modifiers_for_ability
+    // extracts EtbTapState::Tapped from Tap, then first_non_modifier_ability finds
+    // BecomeCopy for the post-replacement CopyTargetChoice dispatch.
+    let execute_effect = if enter_tapped {
+        AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Tap {
+                target: TargetFilter::SelfRef,
+            },
+        )
+        .sub_ability(copy_effect)
+        .description(original_text.to_string())
+    } else {
+        copy_effect
+    };
+
     Some(
         ReplacementDefinition::new(ReplacementEvent::Moved)
-            .execute(copy_effect)
+            .execute(execute_effect)
             .mode(ReplacementMode::Optional { decline: None })
             .valid_card(TargetFilter::SelfRef)
             .description(original_text.to_string()),
@@ -789,31 +807,36 @@ fn parse_clone_replacement(
 }
 
 /// Locate the clone-verb phrase in a normalised Oracle line and return
-/// `(before_verb, after_verb)` around it.
+/// `(before_verb, after_verb, enter_tapped)` around it.
 ///
 /// Recognises both grammatical framings of the ETB-copy replacement class:
 /// - `"enter as a copy of "` (Phantasmal Image / Phyrexian Metamorph / …)
+/// - `"enter tapped as a copy of "` (Vesuva / Callidus Assassin / Echoing Deeps)
 /// - `"become a copy of "` (Cursed Mirror / future ETB-copy prints using
 ///   the "as this enters, …, become a copy of" shape)
 ///
 /// The verbs are leaf alternatives with no shared prefix, so each is scanned
 /// independently and the earliest match wins — this mirrors the earliest-match
 /// discipline used by `split_on_clone_source_zone` / `split_on_first_of`.
-fn find_copy_verb(norm_lower: &str) -> Option<(&str, &str)> {
-    let candidates: &[&str] = &["enter as a copy of ", "become a copy of "];
-    let mut best: Option<(usize, usize)> = None;
-    for phrase in candidates {
+fn find_copy_verb(norm_lower: &str) -> Option<(&str, &str, bool)> {
+    let candidates: &[(&str, bool)] = &[
+        ("enter tapped as a copy of ", true),
+        ("enter as a copy of ", false),
+        ("become a copy of ", false),
+    ];
+    let mut best: Option<(usize, usize, bool)> = None;
+    for &(phrase, tapped) in candidates {
         if let Some((before, _)) = nom_primitives::scan_split_at_phrase(norm_lower, |i| {
-            tag::<_, _, VerboseError<&str>>(*phrase).parse(i)
+            tag::<_, _, VerboseError<&str>>(phrase).parse(i)
         }) {
             let pos = before.len();
-            if best.is_none_or(|(bp, _)| pos < bp) {
-                best = Some((pos, phrase.len()));
+            if best.is_none_or(|(bp, _, _)| pos < bp) {
+                best = Some((pos, phrase.len(), tapped));
             }
         }
     }
-    let (pos, len) = best?;
-    Some((&norm_lower[..pos], &norm_lower[pos + len..]))
+    let (pos, len, tapped) = best?;
+    Some((&norm_lower[..pos], &norm_lower[pos + len..], tapped))
 }
 
 /// Split the post-"enter as a copy of " remainder into (type_text, suffix, source_zone).
@@ -5919,6 +5942,95 @@ mod tests {
             },
             other => panic!("Expected BecomeCopy, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn clone_enter_tapped_as_copy_vesuva() {
+        // CR 614.1c + CR 707.9: "enter tapped as a copy" composes Tap { SelfRef }
+        // as the top-level execute with BecomeCopy as its sub_ability. The replacement
+        // pipeline walks the chain: event_modifiers_for_ability extracts EtbTapState::Tapped
+        // from Tap, then first_non_modifier_ability finds BecomeCopy for CopyTargetChoice.
+        let def = parse_replacement_line(
+            "You may have Vesuva enter tapped as a copy of any land on the battlefield.",
+            "Vesuva",
+        )
+        .unwrap();
+        assert_eq!(def.event, ReplacementEvent::Moved);
+        assert!(matches!(
+            def.mode,
+            ReplacementMode::Optional { decline: None }
+        ));
+        let execute = def.execute.as_ref().unwrap();
+        assert!(
+            matches!(
+                &*execute.effect,
+                Effect::Tap {
+                    target: TargetFilter::SelfRef
+                }
+            ),
+            "top-level execute must be Tap {{ SelfRef }}, got {:?}",
+            execute.effect
+        );
+        let sub = execute
+            .sub_ability
+            .as_ref()
+            .expect("sub_ability must carry BecomeCopy");
+        match &*sub.effect {
+            Effect::BecomeCopy { target, .. } => match target {
+                TargetFilter::Typed(tf) => {
+                    assert!(tf.type_filters.contains(&TypeFilter::Land));
+                }
+                other => panic!("Expected Typed land filter, got {other:?}"),
+            },
+            other => panic!("Expected BecomeCopy in sub_ability, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_enter_tapped_as_copy_echoing_deeps() {
+        // CR 614.1c: Graveyard source zone + "except it's a Cave" modification
+        let def = parse_replacement_line(
+            "You may have this land enter tapped as a copy of any land card in a graveyard, except it's a Cave in addition to its other types.",
+            "Echoing Deeps",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        assert!(matches!(
+            &*execute.effect,
+            Effect::Tap {
+                target: TargetFilter::SelfRef
+            }
+        ));
+        let sub = execute.sub_ability.as_ref().unwrap();
+        match &*sub.effect {
+            Effect::BecomeCopy {
+                additional_modifications,
+                ..
+            } => {
+                assert!(
+                    additional_modifications.contains(&ContinuousModification::AddSubtype {
+                        subtype: "Cave".to_string(),
+                    })
+                );
+            }
+            other => panic!("Expected BecomeCopy, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clone_without_tapped_still_direct_become_copy() {
+        // Non-tapped clone (Phantasmal Image class) must NOT compose through Tap
+        let def = parse_replacement_line(
+            "You may have Clone enter as a copy of any creature on the battlefield.",
+            "Clone",
+        )
+        .unwrap();
+        let execute = def.execute.as_ref().unwrap();
+        assert!(
+            matches!(&*execute.effect, Effect::BecomeCopy { .. }),
+            "non-tapped clone must have BecomeCopy as top-level, got {:?}",
+            execute.effect
+        );
     }
 
     #[test]

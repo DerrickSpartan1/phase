@@ -3885,9 +3885,6 @@ pub enum Effect {
         mana_value_limit: Option<CopyManaValueLimit>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         additional_modifications: Vec<ContinuousModification>,
-        /// CR 614.1c: When true, the copy enters tapped (Vesuva class).
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        enter_tapped: bool,
     },
     ChooseCard {
         #[serde(default)]

@@ -385,10 +385,18 @@ fn copy_effect_for_source(state: &GameState, source_id: ObjectId) -> Option<&Abi
     state.objects.get(&source_id)?;
     // CR 702.26b + CR 114.4: `active_replacements` filters out phased-out /
     // non-emblem command-zone sources.
+    // CR 614.1c: Walk past modifier-only effects in the sub_ability chain to find
+    // the BecomeCopy ability directly. Composed replacements (Vesuva "enter tapped
+    // as a copy") have Tap { SelfRef } as the top-level with BecomeCopy as a
+    // sub_ability; returning the BecomeCopy directly avoids a redundant Tap
+    // re-execution in `resolve_ability_chain`.
     super::functioning_abilities::active_replacements(state)
         .filter(|(_, o, _)| o.id == source_id)
         .filter_map(|(_, _, replacement)| replacement.execute.as_deref())
-        .find(|effect_def| matches!(&*effect_def.effect, Effect::BecomeCopy { .. }))
+        .find_map(|effect_def| {
+            super::replacement::EventModifiers::first_non_modifier_ability(Some(effect_def))
+                .filter(|real| matches!(&*real.effect, Effect::BecomeCopy { .. }))
+        })
 }
 
 /// Apply a post-replacement side effect after a zone change has been executed.
@@ -411,9 +419,18 @@ pub(super) fn apply_post_replacement_effect(
         })
         .unwrap_or((ObjectId(0), state.active_player));
 
-    if let Effect::BecomeCopy { ref target, .. } = *effect_def.effect {
+    // CR 614.1c: Walk past modifier-only effects (Tap/Untap/PutCounter/ChangeZone)
+    // in the sub_ability chain to find the real work. Composable replacements like
+    // Vesuva's "enter tapped as a copy" emit Tap { SelfRef } → sub_ability(BecomeCopy);
+    // the modifier was already applied to the ProposedEvent by `event_modifiers_for_ability`,
+    // so we skip to the first non-modifier effect for post-replacement dispatch.
+    let real_work =
+        super::replacement::EventModifiers::first_non_modifier_ability(Some(effect_def))
+            .unwrap_or(effect_def);
+
+    if let Effect::BecomeCopy { ref target, .. } = *real_work.effect {
         let max_mana_value = spell_resolution
-            .and_then(|ctx| copy_target_mana_value_ceiling(ctx.actual_mana_spent, effect_def));
+            .and_then(|ctx| copy_target_mana_value_ceiling(ctx.actual_mana_spent, real_work));
         let valid_targets = find_copy_targets(state, target, source_id, controller, max_mana_value);
         if valid_targets.is_empty() {
             return None;
