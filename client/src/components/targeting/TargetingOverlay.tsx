@@ -5,6 +5,8 @@ import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { renderDescription } from "../../utils/description.ts";
+import type { GameObject } from "../../adapter/types.ts";
+import { RichLabel } from "../mana/RichLabel.tsx";
 
 export function TargetingOverlay() {
   const canActForWaitingState = useCanActForWaitingState();
@@ -23,8 +25,6 @@ export function TargetingOverlay() {
   const currentTargetSlot = selection?.current_slot ?? 0;
   const activeSlot = targetSlots[currentTargetSlot];
   const isOptionalCurrentSlot = activeSlot?.optional === true;
-
-  // Derive context for the targeting prompt
   const sourceId = waitingFor?.type === "TriggerTargetSelection"
     ? waitingFor.data.source_id
     : waitingFor?.type === "TargetSelection"
@@ -37,6 +37,15 @@ export function TargetingOverlay() {
         ? waitingFor.data.pending_cast?.object_id
       : undefined;
   const sourceName = sourceId != null ? objects?.[sourceId]?.name : undefined;
+
+  const inferredPrompt = buildInferredTargetPrompt({
+    waitingFor: isTargetSelection ? waitingFor : null,
+    objects,
+    activeSlot,
+    targetSlots,
+    selection,
+  });
+
   const triggerDescription = waitingFor?.type === "TriggerTargetSelection" && waitingFor.data.description
     ? renderDescription(waitingFor.data.description, sourceName ?? "this")
     : undefined;
@@ -87,19 +96,21 @@ export function TargetingOverlay() {
             </div>
           )}
             <div className="rounded-lg bg-gray-900/90 px-6 py-2 text-lg font-semibold text-cyan-400 shadow-lg">
-              {isCopyTargetChoice
-                ? "Choose a permanent to copy"
-                : isExploreChoice
-                  ? "Choose which creature explores next"
-                : isTapCreatureChoice
-                  ? `Tap ${waitingFor.data.count} untapped creature${waitingFor.data.count > 1 ? "s" : ""}`
-                : targetSlots.length > 1
+            {isCopyTargetChoice
+              ? "Choose a permanent to copy"
+              : isExploreChoice
+                ? "Choose which creature explores next"
+              : isTapCreatureChoice
+                ? `Tap ${waitingFor.data.count} untapped creature${waitingFor.data.count > 1 ? "s" : ""}`
+              : inferredPrompt ?? (
+                targetSlots.length > 1
                   ? `Choose target ${Math.min(currentTargetSlot + 1, targetSlots.length)} of ${targetSlots.length}`
-                  : "Choose a target"}
+                  : "Choose a target"
+              )}
             </div>
           {triggerDescription && (
             <div className="max-w-md rounded-md bg-gray-800/90 px-4 py-1 text-center text-xs text-gray-300 shadow">
-              {triggerDescription}
+              <RichLabel text={triggerDescription} size="xs" />
             </div>
           )}
         </div>
@@ -136,4 +147,78 @@ export function TargetingOverlay() {
       </motion.div>
     </AnimatePresence>
   );
+}
+
+type TargetingPromptParams = {
+  waitingFor: {
+    type: "TargetSelection" | "TriggerTargetSelection" | "ExploreChoice" | "CopyTargetChoice" | "TapCreaturesForManaAbility" | "TapCreaturesForSpellCost";
+    data: {
+      target_slots?: { legal_targets: { Object?: number; Player?: number }[]; optional?: boolean }[];
+      selection?: { current_slot: number };
+      player?: number;
+    };
+  } | null;
+  objects?: Record<number, GameObject> | undefined;
+  activeSlot: { legal_targets: { Object?: number; Player?: number }[]; optional?: boolean } | undefined;
+  targetSlots: { legal_targets: { Object?: number; Player?: number }[]; optional?: boolean }[];
+  selection: { current_slot: number } | null;
+};
+
+function buildInferredTargetPrompt({
+  waitingFor,
+  objects,
+  activeSlot,
+  targetSlots,
+  selection,
+}: TargetingPromptParams): string | null {
+  if (!waitingFor) return null;
+  if (waitingFor.type !== "TargetSelection" && waitingFor.type !== "TriggerTargetSelection") return null;
+  if (!selection) return null;
+
+  if (!activeSlot) return null;
+  if (activeSlot.legal_targets.length === 0) {
+    return "No legal targets available";
+  }
+
+  const targetNouns = inferTargetNoun(activeSlot.legal_targets, objects);
+  const targetWord = targetNouns ? targetNouns : "target";
+  const maybePrefix = selection && targetSlots.length === 1 && activeSlot.optional ? "up to one" : "a";
+
+  if (waitingFor.type === "TriggerTargetSelection") {
+    return `${maybePrefix} ${targetWord}`;
+  }
+
+  if (targetSlots.length <= 1) {
+    return `${maybePrefix} ${targetWord}`;
+  }
+
+  return `Choose target ${Math.min(selection.current_slot + 1, targetSlots.length)} of ${targetSlots.length}`;
+}
+
+function inferTargetNoun(
+  targets: { Object?: number; Player?: number }[],
+  objects?: Record<number, GameObject>,
+): string | null {
+  const allPlayers = targets.every((target) => "Player" in target);
+  if (allPlayers) return "player";
+
+  const objectTargets = targets.flatMap((target) =>
+    typeof target.Object === "number" ? [objects?.[target.Object]].filter(Boolean) : [],
+  ) as GameObject[];
+  if (objectTargets.length !== targets.filter((target) => typeof target.Object === "number").length) {
+    return "target";
+  }
+  if (objectTargets.length === 0) return "target";
+  if (objectTargets.every((obj) => !obj.card_types.core_types.includes("Land"))) {
+    return "nonland permanent";
+  }
+  if (objectTargets.every((obj) => obj.card_types.core_types.includes("Creature"))) {
+    return "creature";
+  }
+  if (objectTargets.every((obj) =>
+    obj.card_types.core_types.includes("Planeswalker"),
+  )) {
+    return "planeswalker";
+  }
+  return "target permanent";
 }

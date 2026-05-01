@@ -87,6 +87,7 @@ function makeState(eligible: TargetRef[]): GameState {
 function setUp(eligible: TargetRef[]) {
   const state = makeState(eligible);
   useGameStore.setState({
+    gameMode: "online",
     gameState: state,
     waitingFor: state.waiting_for,
   });

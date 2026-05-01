@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import type { GameState } from "../../../adapter/types.ts";
+import { buildGameObject, buildGameObjectWithCoreTypes } from "../../../test/factories/gameObjectFactory.ts";
 import { TargetingOverlay } from "../TargetingOverlay.tsx";
 import { useGameStore } from "../../../stores/gameStore.ts";
 import { useMultiplayerStore } from "../../../stores/multiplayerStore.ts";
@@ -85,7 +86,7 @@ describe("TargetingOverlay", () => {
     render(<TargetingOverlay />);
 
     expect(screen.queryByRole("button", { name: /Target Player/i })).toBeNull();
-    expect(screen.getByText("Choose a target")).toBeInTheDocument();
+    expect(screen.getByText("a player")).toBeInTheDocument();
   });
 
   it("dispatches null target when the active engine slot is optional and skipped", () => {
@@ -126,5 +127,90 @@ describe("TargetingOverlay", () => {
       type: "ChooseTarget",
       data: { target: null },
     });
+  });
+
+  it("informs the player when the target slot is up to one nonland permanent", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const nonLandTarget = buildGameObject({
+      id: 7,
+      card_id: 7,
+      name: "Nonland Artifact",
+    });
+
+    const sourceObject = buildGameObject({
+      id: 9,
+      name: "Deceit",
+    });
+
+    const gameState = createGameState({
+      objects: {
+        "7": nonLandTarget,
+        "9": sourceObject,
+      },
+      waiting_for: {
+        type: "TriggerTargetSelection",
+        data: {
+          player: 0,
+          target_slots: [{
+            legal_targets: [{ Object: 7 }],
+            optional: true,
+          }],
+          selection: { current_slot: 0, current_legal_targets: [{ Object: 7 }] },
+          source_id: 9,
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.getByText("up to one nonland permanent")).toBeInTheDocument();
+  });
+
+  it("renders mana symbols in trigger descriptions", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const sourceObject = buildGameObjectWithCoreTypes(["Instant"], {
+      id: 9,
+      card_id: 9,
+      name: "Deceit",
+      color: ["Blue"],
+      base_color: ["Blue"],
+    });
+
+    const gameState = createGameState({
+      objects: {
+        "9": sourceObject,
+      },
+      waiting_for: {
+        type: "TriggerTargetSelection",
+        data: {
+          player: 0,
+          target_slots: [{ legal_targets: [{ Player: 1 }], optional: true }],
+          selection: { current_slot: 0, current_legal_targets: [{ Player: 1 }] },
+          source_id: 9,
+          description: "~ costs {U}{U}",
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    expect(screen.getByText("up to one player")).toBeInTheDocument();
+    expect(screen.getAllByAltText("U")).toHaveLength(2);
   });
 });

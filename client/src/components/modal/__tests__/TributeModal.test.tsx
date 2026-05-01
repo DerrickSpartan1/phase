@@ -82,6 +82,9 @@ function makeState(): GameState {
 describe("TributeModal", () => {
   beforeEach(() => {
     dispatchMock.mockClear();
+    useGameStore.setState({
+      gameMode: "online",
+    });
     useMultiplayerStore.setState({ activePlayerId: 1 });
     const state = makeState();
     useGameStore.setState({
