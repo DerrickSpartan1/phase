@@ -1632,9 +1632,10 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
     // Duration: route through `with_clause_duration` so
     // GenericEffect/GrantCastingPermission's embedded duration field
     // is patched alongside `clause.duration`. Skip when the body parser
-    // already populated `clause.duration` (some specialized parsers set
-    // it themselves and we must not clobber).
-    if clause.duration.is_none() {
+    // already populated a non-default `clause.duration` (some specialized
+    // parsers set it themselves and we must not clobber). A default
+    // `Permanent` from a body parser yields to the explicit peeled duration.
+    if clause.duration.is_none() || matches!(clause.duration, Some(Duration::Permanent)) {
         if let Some(duration) = peel_ctx.duration().cloned() {
             clause = with_clause_duration(clause, duration);
         }
@@ -10366,7 +10367,8 @@ mod tests {
     use crate::types::ability::{
         CardTypeSetSource, CastVariantPaid, ChoiceType, Comparator, ContinuousModification,
         ControllerRef, CountScope, DoublePTMode, Duration, FilterProp, GainLifePlayer,
-        LinkedExileScope, ManaContribution, ManaProduction, PaymentCost, TypeFilter, ZoneRef,
+        LinkedExileScope, ManaContribution, ManaProduction, ObjectScope, PaymentCost, QuantityExpr,
+        QuantityRef, TypeFilter, ZoneRef,
     };
     use crate::types::card_type::Supertype;
     use crate::types::keywords::Keyword;
@@ -13496,6 +13498,48 @@ mod tests {
                 && static_abilities.len() == 1
                 && static_abilities[0].modifications.contains(&ContinuousModification::SetColor { colors: vec![ManaColor::Blue] })
         ));
+    }
+
+    #[test]
+    fn effect_target_noncreature_artifact_becomes_dynamic_artifact_creature_until_eot() {
+        let e = parse_effect(
+            "Target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value until end of turn",
+        );
+        let Effect::GenericEffect {
+            target: Some(TargetFilter::Typed(tf)),
+            static_abilities,
+            duration: Some(Duration::UntilEndOfTurn),
+        } = e
+        else {
+            panic!("expected UEOT GenericEffect, got {e:?}");
+        };
+
+        assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature))));
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::ParentTarget)
+        );
+
+        let mods = &static_abilities[0].modifications;
+        let expected = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Recipient,
+            },
+        };
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: crate::types::card_type::CoreType::Artifact,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: crate::types::card_type::CoreType::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::SetPowerDynamic {
+            value: expected.clone(),
+        }));
+        assert!(mods.contains(&ContinuousModification::SetToughnessDynamic { value: expected }));
     }
 
     #[test]

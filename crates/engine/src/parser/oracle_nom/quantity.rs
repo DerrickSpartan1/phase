@@ -367,6 +367,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         parse_life_lost_ref,
         parse_life_gained_ref,
         parse_starting_life_ref,
+        parse_object_mana_value_ref,
         // CR 117.1 + CR 202.3: cost-paid object's mana value — must precede
         // `parse_event_context_refs` so the cost-paid resolver wins over the
         // generic event-source resolver for sacrificed/exiled possessives
@@ -1160,6 +1161,18 @@ fn parse_starting_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         tag("your starting life total"),
     )
     .parse(input)
+}
+
+/// CR 202.3: Object mana value references in continuous effects.
+///
+/// Composes the existing object-scope possessive grammar with the mana-value
+/// property, so per-recipient animation effects ("its mana value") and target
+/// references ("that creature's mana value") lower through the same
+/// `QuantityRef::ObjectManaValue` building block.
+fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+    let (rest, scope) = parse_object_possessive_scope(input)?;
+    let (rest, _) = alt((tag(" mana value"), tag(" converted mana cost"))).parse(rest)?;
+    Ok((rest, QuantityRef::ObjectManaValue { scope }))
 }
 
 /// CR 117.1 + CR 202.3: Cost-paid object's mana value.
@@ -2634,6 +2647,27 @@ mod tests {
             q,
             QuantityRef::ObjectNameWordCount {
                 scope: crate::types::ability::ObjectScope::Target
+            }
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_object_mana_value_recipient_and_target() {
+        let (rest, q) = parse_quantity_ref("its mana value").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectManaValue {
+                scope: crate::types::ability::ObjectScope::Recipient,
+            }
+        );
+        assert_eq!(rest, "");
+
+        let (rest, q) = parse_quantity_ref("that creature's converted mana cost").unwrap();
+        assert_eq!(
+            q,
+            QuantityRef::ObjectManaValue {
+                scope: crate::types::ability::ObjectScope::Target,
             }
         );
         assert_eq!(rest, "");

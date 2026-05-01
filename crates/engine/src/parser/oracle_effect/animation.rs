@@ -1,20 +1,22 @@
 use std::str::FromStr;
 
 use nom::branch::alt;
-use nom::bytes::complete::{tag, tag_no_case};
+use nom::bytes::complete::{tag, tag_no_case, take_until};
 use nom::character::complete::{multispace0, multispace1, satisfy};
-use nom::combinator::{opt, peek, recognize, value};
+use nom::combinator::{eof, opt, peek, recognize, value};
 use nom::multi::{many0, separated_list1};
 use nom::sequence::{pair, preceded};
 use nom::Parser;
 
 use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
+use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_util::split_around;
 use super::token::{
     map_token_keyword, push_unique_string, split_token_keyword_list, title_case_word,
 };
 use super::types::*;
+use crate::types::ability::QuantityExpr;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;
 
@@ -65,6 +67,12 @@ pub(super) fn parse_animation_spec(text: &str) -> Option<AnimationSpec> {
         rest = descriptor;
     }
 
+    if let Some((descriptor, value)) = split_animation_dynamic_pt_clause(rest) {
+        spec.dynamic_power = Some(value.clone());
+        spec.dynamic_toughness = Some(value);
+        rest = descriptor;
+    }
+
     let (descriptor, keywords) = split_animation_keyword_clause(rest);
     spec.keywords = keywords;
     rest = descriptor;
@@ -74,10 +82,18 @@ pub(super) fn parse_animation_spec(text: &str) -> Option<AnimationSpec> {
         rest = after_colors;
     }
 
-    spec.types = parse_animation_types(rest, spec.power.is_some() || spec.toughness.is_some());
+    spec.types = parse_animation_types(
+        rest,
+        spec.power.is_some()
+            || spec.toughness.is_some()
+            || spec.dynamic_power.is_some()
+            || spec.dynamic_toughness.is_some(),
+    );
 
     if spec.power.is_none()
         && spec.toughness.is_none()
+        && spec.dynamic_power.is_none()
+        && spec.dynamic_toughness.is_none()
         && spec.colors.is_none()
         && spec.keywords.is_empty()
         && spec.types.is_empty()
@@ -102,6 +118,16 @@ pub(super) fn animation_modifications(
     }
     if let Some(toughness) = spec.toughness {
         modifications.push(ContinuousModification::SetToughness { value: toughness });
+    }
+    if let Some(value) = &spec.dynamic_power {
+        modifications.push(ContinuousModification::SetPowerDynamic {
+            value: value.clone(),
+        });
+    }
+    if let Some(value) = &spec.dynamic_toughness {
+        modifications.push(ContinuousModification::SetToughnessDynamic {
+            value: value.clone(),
+        });
     }
     if let Some(colors) = &spec.colors {
         modifications.push(ContinuousModification::SetColor {
@@ -230,6 +256,27 @@ fn split_animation_base_pt_clause(text: &str) -> Option<(&str, i32, i32)> {
     let pt_text = text[pos + NEEDLE.len()..].trim();
     let (power, toughness, _) = parse_fixed_become_pt_prefix(pt_text)?;
     Some((descriptor, power, toughness))
+}
+
+fn parse_dynamic_pt_clause(input: &str) -> OracleResult<'_, (&str, QuantityExpr)> {
+    let (rest, descriptor) = take_until(" with ").parse(input)?;
+    let (rest, _) = tag(" with ").parse(rest)?;
+    let (rest, _) = alt((
+        tag("power and toughness each equal to "),
+        tag("base power and toughness each equal to "),
+    ))
+    .parse(rest)?;
+    let (rest, qty) = nom_quantity::parse_quantity_ref.parse(rest)?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    let (rest, _) = eof.parse(rest)?;
+    Ok((rest, (descriptor, QuantityExpr::Ref { qty })))
+}
+
+fn split_animation_dynamic_pt_clause(text: &str) -> Option<(&str, QuantityExpr)> {
+    let lower = text.to_lowercase();
+    let (_, (descriptor_lower, value)) = parse_dynamic_pt_clause(lower.as_str()).ok()?;
+    let descriptor = text[..descriptor_lower.len()].trim_end_matches(',').trim();
+    Some((descriptor, value))
 }
 
 /// Classification of a single token within a "becomes [type expression]" noun
@@ -638,6 +685,40 @@ mod test_den_bugbear {
             parse_animation_types("in addition to its other types and gains flying", false),
             Vec::<String>::new()
         );
+    }
+
+    #[test]
+    fn animation_dynamic_pt_equal_to_recipient_mana_value() {
+        let spec = parse_animation_spec(
+            "an artifact creature with power and toughness each equal to its mana value",
+        )
+        .expect("Karn/Sydri animation phrase should parse");
+        assert_eq!(spec.types, vec!["Artifact", "Creature"]);
+
+        let mods = animation_modifications(&spec);
+        let expected = crate::types::ability::QuantityExpr::Ref {
+            qty: crate::types::ability::QuantityRef::ObjectManaValue {
+                scope: crate::types::ability::ObjectScope::Recipient,
+            },
+        };
+        assert!(
+            mods.contains(&crate::types::ability::ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Artifact,
+            })
+        );
+        assert!(
+            mods.contains(&crate::types::ability::ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Creature,
+            })
+        );
+        assert!(mods.contains(
+            &crate::types::ability::ContinuousModification::SetPowerDynamic {
+                value: expected.clone(),
+            }
+        ));
+        assert!(mods.contains(
+            &crate::types::ability::ContinuousModification::SetToughnessDynamic { value: expected }
+        ));
     }
 
     /// Regression: supertypes (CR 205.4) must be recognized-and-discarded

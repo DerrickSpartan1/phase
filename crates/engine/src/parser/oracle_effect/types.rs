@@ -68,6 +68,8 @@ pub(crate) struct TokenDescription {
 pub(super) struct AnimationSpec {
     pub(super) power: Option<i32>,
     pub(super) toughness: Option<i32>,
+    pub(super) dynamic_power: Option<crate::types::ability::QuantityExpr>,
+    pub(super) dynamic_toughness: Option<crate::types::ability::QuantityExpr>,
     pub(super) colors: Option<Vec<ManaColor>>,
     pub(super) keywords: Vec<Keyword>,
     pub(super) types: Vec<String>,

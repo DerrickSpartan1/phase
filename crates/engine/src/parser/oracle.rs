@@ -7441,6 +7441,64 @@ mod tests {
     }
 
     #[test]
+    fn karn_sydri_artifact_animation_has_dynamic_mana_value_pt_no_warning() {
+        for (name, text) in [
+            (
+                "Karn, Silver Golem",
+                "{1}: Target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value until end of turn.",
+            ),
+            (
+                "Sydri, Galvanic Genius",
+                "{U}: Target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value until end of turn.",
+            ),
+        ] {
+            let r = parse(text, name, &[], &["Artifact"], &[]);
+            assert!(
+                r.parse_warnings
+                    .iter()
+                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                "unexpected DynamicQty warning for {name}: {:?}",
+                r.parse_warnings
+            );
+            assert_eq!(r.abilities.len(), 1, "{name}: expected one activated ability");
+
+            let Effect::GenericEffect {
+                target: Some(TargetFilter::Typed(tf)),
+                static_abilities,
+                duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
+            } = r.abilities[0].effect.as_ref()
+            else {
+                panic!("{name}: expected UEOT GenericEffect, got {:?}", r.abilities[0].effect);
+            };
+            assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature)))
+            );
+            assert_eq!(static_abilities.len(), 1);
+
+            let mods = &static_abilities[0].modifications;
+            let expected = QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Recipient,
+                },
+            };
+            assert!(mods.contains(&ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Artifact,
+            }));
+            assert!(mods.contains(&ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Creature,
+            }));
+            assert!(mods.contains(&ContinuousModification::SetPowerDynamic {
+                value: expected.clone(),
+            }));
+            assert!(mods.contains(&ContinuousModification::SetToughnessDynamic {
+                value: expected,
+            }));
+        }
+    }
+
+    #[test]
     fn spell_pump_all_with_duration_not_static() {
         // CR 611.2a: Spell lines with subject + pump + duration are one-shot
         // continuous effects, not permanent static abilities.
