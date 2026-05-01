@@ -3103,12 +3103,17 @@ mod tests {
     }
 
     /// CR 603.7c: Dusty Parlor — the SpellCast event's source object is the
-    /// spell, so "that spell's mana value" reads its CMC via the shared
-    /// `EventContextSourceManaValue` resolution path.
+    /// spell, so "that spell's mana value" reads its CMC via the parameterized
+    /// `ObjectManaValue { scope: EventSource }` path.
     #[test]
     fn test_parse_that_spells_mana_value() {
         let (rest, q) = parse_quantity_ref("that spell's mana value").unwrap();
-        assert_eq!(q, QuantityRef::EventContextSourceManaValue);
+        assert_eq!(
+            q,
+            QuantityRef::ObjectManaValue {
+                scope: crate::types::ability::ObjectScope::EventSource
+            }
+        );
         assert_eq!(rest, "");
     }
 
