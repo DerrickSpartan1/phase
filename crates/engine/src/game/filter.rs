@@ -455,6 +455,10 @@ fn filter_inner_for_object(
             // All properties must match
             let source_obj = state.objects.get(&source_id);
             let source_attached_to = source_obj.and_then(|s| s.attached_to);
+            let source_is_aura =
+                source_obj.is_some_and(|s| s.card_types.subtypes.iter().any(|s| s == "Aura"));
+            let source_is_equipment =
+                source_obj.is_some_and(|s| s.card_types.subtypes.iter().any(|s| s == "Equipment"));
             let source_chosen_creature_type =
                 source_obj.and_then(|s| s.chosen_creature_type().map(|t| t.to_string()));
             let empty_attrs: Vec<crate::types::ability::ChosenAttribute> = Vec::new();
@@ -465,6 +469,8 @@ fn filter_inner_for_object(
                 id: source_id,
                 controller: source_controller,
                 attached_to: source_attached_to,
+                source_is_aura,
+                source_is_equipment,
                 chosen_creature_type: source_chosen_creature_type.as_deref(),
                 chosen_attributes: source_chosen_attributes,
                 ability,
@@ -686,6 +692,10 @@ fn zone_change_filter_inner(
 
             let source_obj = state.objects.get(&source_id);
             let source_attached_to = source_obj.and_then(|s| s.attached_to);
+            let source_is_aura =
+                source_obj.is_some_and(|s| s.card_types.subtypes.iter().any(|s| s == "Aura"));
+            let source_is_equipment =
+                source_obj.is_some_and(|s| s.card_types.subtypes.iter().any(|s| s == "Equipment"));
             let source_chosen_creature_type =
                 source_obj.and_then(|s| s.chosen_creature_type().map(|t| t.to_string()));
             let empty_attrs: Vec<crate::types::ability::ChosenAttribute> = Vec::new();
@@ -696,6 +706,8 @@ fn zone_change_filter_inner(
                 id: source_id,
                 controller: source_controller,
                 attached_to: source_attached_to,
+                source_is_aura,
+                source_is_equipment,
                 chosen_creature_type: source_chosen_creature_type.as_deref(),
                 chosen_attributes: source_chosen_attributes,
                 ability,
@@ -1345,6 +1357,11 @@ struct SourceContext<'a> {
     /// (`EnchantedBy`, `EquippedBy`) can route on Object vs Player. The
     /// `FilterContext` snapshot mirrors this shape — see `FilterContext`.
     attached_to: Option<crate::game::game_object::AttachTarget>,
+    /// CR 301.5f + CR 303.4: Whether the source is an attachment-capable subtype.
+    /// Disambiguates `attached_to == None`: an unattached Equipment/Aura matches
+    /// nothing, while a non-attachment source triggers "has any" fallback semantics.
+    source_is_aura: bool,
+    source_is_equipment: bool,
     chosen_creature_type: Option<&'a str>,
     chosen_attributes: &'a [crate::types::ability::ChosenAttribute],
     /// CR 107.3a + CR 601.2b: The resolving ability, when one is in scope.
@@ -1573,17 +1590,19 @@ fn matches_filter_prop(
                     .is_some_and(|pid| pid == obj.owner)
             }
         },
-        // CR 303.4: `EnchantedBy` is source-relative when the source is an Aura
-        // ("enchanted creature gets +1/+1" on Gift of Estates). When the source is
-        // NOT an Aura (e.g. Hateful Eidolon's "whenever an enchanted creature
-        // dies"), `source.attached_to` is None and the same `FilterProp` is
-        // understood as "has at least one Aura attached" — the common Oracle-text
-        // use of "enchanted creature" on a non-Aura trigger source.
+        // CR 303.4 + CR 301.5f: `EnchantedBy` is source-relative when the
+        // source is an Aura ("enchanted creature gets +1/+1"). When the source
+        // is NOT an Aura (e.g. Hateful Eidolon's "whenever an enchanted creature
+        // dies"), `FilterProp` means "has at least one Aura attached". An Aura
+        // that exists but is unattached matches nothing.
         FilterProp::EnchantedBy => {
             if source.attached_to.is_some() {
                 // CR 303.4: An Aura attached to a player never matches an object
                 // filter ("enchanted creature"); only Object hosts qualify.
                 source.attached_to.and_then(|t| t.as_object()) == Some(object_id)
+            } else if source.source_is_aura {
+                // CR 303.4: Unattached Aura — no creature is "enchanted by" it.
+                false
             } else {
                 obj.attachments.iter().any(|att_id| {
                     state
@@ -1593,15 +1612,19 @@ fn matches_filter_prop(
                 })
             }
         }
-        // CR 301.5: Same reasoning as `EnchantedBy` — source-relative for Equipment
-        // sources (which always set `attached_to` when attached), falling back to
-        // "has at least one Equipment attached" for non-Equipment trigger sources.
+        // CR 301.5 + CR 301.5f: Same reasoning as `EnchantedBy` — source-relative
+        // for Equipment sources, falling back to "has at least one Equipment
+        // attached" for non-Equipment trigger sources. Unattached Equipment
+        // matches nothing.
         FilterProp::EquippedBy => {
             if source.attached_to.is_some() {
                 // CR 301.5: Equipment can attach only to creatures (objects), so
                 // a Player host is structurally impossible here — but routing
                 // through `as_object` is the typed way to express that.
                 source.attached_to.and_then(|t| t.as_object()) == Some(object_id)
+            } else if source.source_is_equipment {
+                // CR 301.5f: Unattached Equipment — no creature is "equipped by" it.
+                false
             } else {
                 obj.attachments.iter().any(|att_id| {
                     state
@@ -5002,6 +5025,8 @@ mod tests {
             id: ObjectId(1),
             controller: Some(PlayerId(0)),
             attached_to: None,
+            source_is_aura: false,
+            source_is_equipment: false,
             chosen_creature_type: None,
             chosen_attributes: &[],
             ability: None,
@@ -5129,6 +5154,8 @@ mod tests {
             id: ObjectId(1),
             controller: Some(PlayerId(0)),
             attached_to: None,
+            source_is_aura: false,
+            source_is_equipment: false,
             chosen_creature_type: None,
             chosen_attributes: &[],
             ability: None,
@@ -5172,6 +5199,8 @@ mod tests {
             id: ObjectId(1),
             controller: Some(PlayerId(0)),
             attached_to: None,
+            source_is_aura: false,
+            source_is_equipment: false,
             chosen_creature_type: None,
             chosen_attributes: &[],
             ability: None,
