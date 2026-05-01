@@ -2922,8 +2922,8 @@ mod tests {
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
         FilterProp, ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint,
         ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
-        QuantityRef, ReplacementCondition, RoundingMode, StaticCondition, TargetFilter, TypeFilter,
-        TypedFilter,
+        QuantityRef, ReplacementCondition, RoundingMode, SharedQuality, SharedQualityRelation,
+        StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -8961,6 +8961,85 @@ mod tests {
             "unexpected DynamicQty warning: {:?}",
             parsed.parse_warnings
         );
+    }
+
+    #[test]
+    fn coat_of_arms_velis_vel_static_shared_type_no_dynamic_qty_warning() {
+        for (name, types, subtypes, oracle) in [
+            (
+                "Coat of Arms",
+                &["Artifact"][..],
+                &[][..],
+                "Each creature gets +1/+1 for each other creature on the battlefield that shares at least one creature type with it. (For example, if two Goblin Warriors and a Goblin Shaman are on the battlefield, each gets +2/+2.)",
+            ),
+            (
+                "Velis Vel",
+                &["Plane"][..],
+                &[][..],
+                "Each creature gets +1/+1 for each other creature on the battlefield that shares at least one creature type with it. (For example, if two Elemental Shamans and an Elemental Spirit are on the battlefield, each gets +2/+2.)\nWhenever chaos ensues, target creature gains all creature types until end of turn.",
+            ),
+        ] {
+            let parsed = parse(oracle, name, &[], types, subtypes);
+            assert!(
+                parsed
+                    .parse_warnings
+                    .iter()
+                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                "unexpected DynamicQty warning for {name}: {:?}",
+                parsed.parse_warnings
+            );
+
+            let mut matching_static = None;
+            for static_def in &parsed.statics {
+                if static_def.affected == Some(TargetFilter::Typed(TypedFilter::creature())) {
+                    matching_static = Some(static_def);
+                    break;
+                }
+            }
+            let static_def = matching_static.expect("expected global creature static");
+            let expected = QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: None,
+                        properties: vec![
+                            FilterProp::Another,
+                            FilterProp::SharesQuality {
+                                quality: SharedQuality::CreatureType,
+                                reference: Some(Box::new(TargetFilter::ParentTarget)),
+                                relation: SharedQualityRelation::Shares,
+                            },
+                        ],
+                    }),
+                },
+            };
+
+            assert!(
+                static_def.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddDynamicPower { value } if value == &expected
+                )),
+                "expected dynamic power for {name}, got {:?}",
+                static_def.modifications
+            );
+            assert!(
+                static_def.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddDynamicToughness { value } if value == &expected
+                )),
+                "expected dynamic toughness for {name}, got {:?}",
+                static_def.modifications
+            );
+            assert!(
+                static_def.modifications.iter().all(|m| !matches!(
+                    m,
+                    ContinuousModification::AddPower { .. }
+                        | ContinuousModification::AddToughness { .. }
+                )),
+                "must not emit fixed P/T mods for {name}: {:?}",
+                static_def.modifications
+            );
+        }
     }
 
     // ------------------------------------------------------------------

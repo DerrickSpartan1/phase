@@ -11196,6 +11196,52 @@ mod tests {
     }
 
     #[test]
+    fn static_each_creature_shares_at_least_one_type_emits_dynamic_pt() {
+        let def = parse_static_line(
+            "Each creature gets +1/+1 for each other creature on the battlefield that shares at least one creature type with it.",
+        )
+        .expect("Coat of Arms static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter::creature()))
+        );
+
+        let expected = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![
+                        FilterProp::Another,
+                        FilterProp::SharesQuality {
+                            quality: SharedQuality::CreatureType,
+                            reference: Some(Box::new(TargetFilter::ParentTarget)),
+                            relation: SharedQualityRelation::Shares,
+                        },
+                    ],
+                }),
+            },
+        };
+
+        assert!(def.modifications.iter().any(
+            |m| matches!(m, ContinuousModification::AddDynamicPower { value } if value == &expected)
+        ));
+        assert!(def.modifications.iter().any(
+            |m| matches!(m, ContinuousModification::AddDynamicToughness { value } if value == &expected)
+        ));
+        assert!(
+            !def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddPower { .. }
+                    | ContinuousModification::AddToughness { .. }
+            )),
+            "must not emit flat P/T modifications alongside dynamic ones: {:?}",
+            def.modifications
+        );
+    }
+
+    #[test]
     fn static_for_each_of_its_colors_emits_recipient_color_count() {
         let def = parse_static_line("Each creature you control gets +1/+1 for each of its colors.")
             .expect("color-count anthem static must parse");

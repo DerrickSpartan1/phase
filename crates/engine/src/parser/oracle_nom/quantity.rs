@@ -2295,33 +2295,35 @@ mod tests {
 
     #[test]
     fn parse_for_each_other_battlefield_creature_sharing_type_with_recipient() {
-        let (rest, q) = parse_for_each_clause_ref(
+        for clause in [
             "other creature on the battlefield that shares a creature type with it",
-        )
-        .unwrap();
-        assert_eq!(rest, "");
-        match q {
-            QuantityRef::ObjectCount { filter } => match filter {
-                TargetFilter::Typed(TypedFilter {
-                    type_filters,
-                    controller,
-                    properties,
-                }) => {
-                    assert_eq!(type_filters, vec![TypeFilter::Creature]);
-                    assert_eq!(controller, None);
-                    assert!(properties.iter().any(|prop| prop == &FilterProp::Another));
-                    assert!(properties.iter().any(|prop| matches!(
-                        prop,
-                        FilterProp::SharesQuality {
-                            quality: SharedQuality::CreatureType,
-                            reference: Some(reference),
-                            relation: SharedQualityRelation::Shares,
-                        } if matches!(reference.as_ref(), TargetFilter::ParentTarget)
-                    )));
-                }
-                other => panic!("expected Typed filter, got {other:?}"),
-            },
-            other => panic!("expected ObjectCount, got {other:?}"),
+            "other creature on the battlefield that shares at least one creature type with it",
+        ] {
+            let (rest, q) = parse_for_each_clause_ref(clause).unwrap();
+            assert_eq!(rest, "");
+            match q {
+                QuantityRef::ObjectCount { filter } => match filter {
+                    TargetFilter::Typed(TypedFilter {
+                        type_filters,
+                        controller,
+                        properties,
+                    }) => {
+                        assert_eq!(type_filters, vec![TypeFilter::Creature]);
+                        assert_eq!(controller, None);
+                        assert!(properties.iter().any(|prop| prop == &FilterProp::Another));
+                        assert!(properties.iter().any(|prop| matches!(
+                            prop,
+                            FilterProp::SharesQuality {
+                                quality: SharedQuality::CreatureType,
+                                reference: Some(reference),
+                                relation: SharedQualityRelation::Shares,
+                            } if matches!(reference.as_ref(), TargetFilter::ParentTarget)
+                        )));
+                    }
+                    other => panic!("expected Typed filter, got {other:?}"),
+                },
+                other => panic!("expected ObjectCount, got {other:?}"),
+            }
         }
     }
 
