@@ -2025,6 +2025,10 @@ function formatUnlessCost(cost: { type: string; cost?: { type: string; shards?: 
       const n = (cost as { count?: number }).count ?? 1;
       return n > 1 ? `sacrifice ${n} permanents` : "sacrifice a permanent";
     }
+    case "ReturnToHand": {
+      const n = (cost as { count?: number }).count ?? 1;
+      return n > 1 ? `return ${n} permanents to hand` : "return a permanent to hand";
+    }
     default:
       return "a cost";
   }

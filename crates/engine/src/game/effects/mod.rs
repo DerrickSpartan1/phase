@@ -1344,7 +1344,8 @@ pub fn resolve_ability_chain(
             match &unless_pay.cost {
                 UnlessCost::PayLife { .. }
                 | UnlessCost::DiscardCard
-                | UnlessCost::Sacrifice { .. } => {
+                | UnlessCost::Sacrifice { .. }
+                | UnlessCost::ReturnToHand { .. } => {
                     let mut pending = ability.clone();
                     pending.unless_pay = None;
                     state.waiting_for = WaitingFor::UnlessPayment {
@@ -1372,7 +1373,8 @@ pub fn resolve_ability_chain(
                 // Non-mana costs handled above.
                 UnlessCost::PayLife { .. }
                 | UnlessCost::DiscardCard
-                | UnlessCost::Sacrifice { .. } => unreachable!(),
+                | UnlessCost::Sacrifice { .. }
+                | UnlessCost::ReturnToHand { .. } => unreachable!(),
             };
             // CR 118.5: If the cost is {0}, the player is considered to have paid.
             if resolved_cost != ManaCost::zero() {

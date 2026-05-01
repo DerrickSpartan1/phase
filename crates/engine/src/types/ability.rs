@@ -3332,6 +3332,15 @@ pub enum UnlessCost {
     DiscardCard,
     /// CR 702.21a: Sacrifice N permanents matching a filter as ward cost.
     Sacrifice { count: u32, filter: TargetFilter },
+    /// CR 118.12: Return N objects matching a filter to their owner's hand
+    /// as an unless cost. Source zone defaults to battlefield; Harvest Wurm
+    /// uses `from_zone: Some(Graveyard)`.
+    ReturnToHand {
+        count: u32,
+        filter: TargetFilter,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_zone: Option<crate::types::zones::Zone>,
+    },
 }
 
 /// CR 118.12: "Effect unless [player] pays {cost}"

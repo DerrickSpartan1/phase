@@ -1274,6 +1274,19 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 118.12: Unless bounce cost — choose a permanent to return to hand.
+        WaitingFor::UnlessBounceChoice {
+            player, permanents, ..
+        } => permanents
+            .iter()
+            .map(|&perm| {
+                candidate(
+                    GameAction::SelectCards { cards: vec![perm] },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 704.5j: Choose which legend to keep.
         WaitingFor::ChooseLegend {
             player, candidates, ..

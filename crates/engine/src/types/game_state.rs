@@ -1411,6 +1411,14 @@ pub enum WaitingFor {
         #[serde(default = "default_remaining_one")]
         remaining: u32,
     },
+    /// CR 118.12: Player must choose permanent(s) to return to hand as unless cost.
+    UnlessBounceChoice {
+        player: PlayerId,
+        permanents: Vec<ObjectId>,
+        pending_effect: Box<ResolvedAbility>,
+        #[serde(default = "default_remaining_one")]
+        remaining: u32,
+    },
     /// CR 701.54: Player must choose which creature becomes their ring-bearer.
     ChooseRingBearer {
         player: PlayerId,
@@ -1950,6 +1958,7 @@ impl WaitingFor {
             | WaitingFor::RetargetChoice { player, .. }
             | WaitingFor::WardDiscardChoice { player, .. }
             | WaitingFor::WardSacrificeChoice { player, .. }
+            | WaitingFor::UnlessBounceChoice { player, .. }
             | WaitingFor::ConniveDiscard { player, .. }
             | WaitingFor::CombatTaxPayment { player, .. }
             | WaitingFor::PhyrexianPayment { player, .. }
