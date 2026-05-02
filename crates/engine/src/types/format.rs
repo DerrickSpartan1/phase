@@ -11,6 +11,7 @@ pub enum FormatGroup {
     Constructed,
     Commander,
     Multiplayer,
+    Limited,
 }
 
 /// Authoritative metadata for a single user-selectable format. Produced by
@@ -33,6 +34,7 @@ pub struct FormatMetadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GameFormat {
     Standard,
+    Limited,
     Commander,
     Pioneer,
     Modern,
@@ -99,7 +101,7 @@ impl GameFormat {
             GameFormat::DuelCommander => Some(LegalityFormat::DuelCommander),
             GameFormat::Brawl => Some(LegalityFormat::StandardBrawl),
             GameFormat::HistoricBrawl => Some(LegalityFormat::Brawl),
-            GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => None,
+            GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => None,
         }
     }
 
@@ -123,7 +125,9 @@ impl GameFormat {
             | GameFormat::DuelCommander
             | GameFormat::Brawl
             | GameFormat::HistoricBrawl => SideboardPolicy::Forbidden,
-            GameFormat::FreeForAll | GameFormat::TwoHeadedGiant => SideboardPolicy::Unlimited,
+            GameFormat::FreeForAll | GameFormat::TwoHeadedGiant | GameFormat::Limited => {
+                SideboardPolicy::Unlimited
+            }
         }
     }
 
@@ -149,6 +153,7 @@ impl GameFormat {
     pub fn label(self) -> &'static str {
         match self {
             GameFormat::Standard => "Standard",
+            GameFormat::Limited => "Limited",
             GameFormat::Commander => "Commander",
             GameFormat::Pioneer => "Pioneer",
             GameFormat::Modern => "Modern",
@@ -284,6 +289,14 @@ impl GameFormat {
                 description: "3\u{2013}6 player battle royale",
                 group: FormatGroup::Multiplayer,
                 default_config: FormatConfig::free_for_all(),
+            },
+            FormatMetadata {
+                format: GameFormat::Limited,
+                label: "Limited",
+                short_label: "LIM",
+                description: "Draft or sealed, 40-card deck",
+                group: FormatGroup::Limited,
+                default_config: FormatConfig::limited(),
             },
         ]
     }
@@ -437,6 +450,23 @@ impl FormatConfig {
         }
     }
 
+    /// Limited: 40-card minimum, 20 starting life, 2-player, no singleton,
+    /// no command zone. Used by all Draft variants.
+    pub fn limited() -> Self {
+        FormatConfig {
+            format: GameFormat::Limited,
+            starting_life: 20,
+            min_players: 2,
+            max_players: 2,
+            deck_size: 40,
+            singleton: false,
+            command_zone: false,
+            commander_damage_threshold: None,
+            range_of_influence: None,
+            team_based: false,
+        }
+    }
+
     pub fn two_headed_giant() -> Self {
         FormatConfig {
             format: GameFormat::TwoHeadedGiant,
@@ -462,6 +492,7 @@ impl FormatConfig {
     pub fn for_format(format: GameFormat) -> Self {
         match format {
             GameFormat::Standard => Self::standard(),
+            GameFormat::Limited => Self::limited(),
             GameFormat::Commander => Self::commander(),
             GameFormat::Pioneer => Self::pioneer(),
             GameFormat::Modern => Self::modern(),
