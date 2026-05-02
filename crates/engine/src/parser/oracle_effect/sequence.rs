@@ -7,7 +7,7 @@ use nom_language::error::VerboseError;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_target::parse_target;
 use super::super::oracle_util::contains_possessive;
-use super::types::*;
+use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, Chooser, Effect, QuantityExpr, QuantityRef, StaticDefinition,

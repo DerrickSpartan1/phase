@@ -6,8 +6,8 @@ use nom::Parser;
 use nom_language::error::VerboseError;
 
 use super::animation::{animation_modifications, parse_animation_spec};
-use super::types::*;
 use super::{resolve_it_pronoun, ParseContext};
+use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ContinuousModification, ControllerRef, Duration, Effect,
     FilterProp, GainLifePlayer, MultiTargetSpec, PlayerScope, PtValue, QuantityExpr, QuantityRef,

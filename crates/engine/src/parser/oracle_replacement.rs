@@ -3056,7 +3056,7 @@ fn split_subtype_list(s: &str) -> Vec<String> {
 /// uses the parser's `PtValue::Fixed` directly; variable P/T in an appended
 /// spec is not a pattern any known card uses.
 fn token_description_to_spec(
-    token: &super::oracle_effect::TokenDescription,
+    token: &crate::parser::oracle_ir::ast::TokenDescription,
 ) -> Option<crate::types::proposed_event::TokenSpec> {
     use crate::types::ability::PtValue;
     use crate::types::card_type::{CoreType, Supertype};

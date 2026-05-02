@@ -287,21 +287,7 @@ fn parse_static_line_with_graveyard_keyword_continuation(line: &str) -> Vec<Stat
     parse_static_line_multi(line)
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct ActivatedConstraintAst {
-    pub(super) restrictions: Vec<ActivationRestriction>,
-    /// CR 602.2: "Any player may activate this ability." — annotation recognized
-    /// during parsing. Runtime enforcement is a future item; currently stripped
-    /// so the sentence does not produce an `Unimplemented` fallback.
-    pub(super) any_player_may_activate: bool,
-}
-
-impl ActivatedConstraintAst {
-    pub(super) fn sorcery_speed(&self) -> bool {
-        self.restrictions
-            .contains(&ActivationRestriction::AsSorcery)
-    }
-}
+use crate::parser::oracle_ir::ast::ActivatedConstraintAst;
 
 /// CR 608.2c: Pre-strip "instead if [condition]" or trailing "instead" from effect text.
 /// The "instead" keyword signals a cross-line replacement pattern. The trailing

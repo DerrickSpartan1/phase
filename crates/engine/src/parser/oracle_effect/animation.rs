@@ -15,7 +15,7 @@ use super::super::oracle_util::split_around;
 use super::token::{
     map_token_keyword, push_unique_string, split_token_keyword_list, title_case_word,
 };
-use super::types::*;
+use crate::parser::oracle_ir::ast::*;
 use crate::types::ability::QuantityExpr;
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaColor;

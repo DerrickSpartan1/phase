@@ -13,43 +13,8 @@ use super::oracle::find_activated_colon;
 use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context, ParseContext};
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text};
+use crate::parser::oracle_ir::ast::{ModalHeaderAst, ModeAst, OracleBlockAst};
 use crate::types::ability::TargetFilter;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum OracleBlockAst {
-    ActivatedModal {
-        cost_text: String,
-        header: ModalHeaderAst,
-        modes: Vec<ModeAst>,
-    },
-    Modal {
-        header: ModalHeaderAst,
-        modes: Vec<ModeAst>,
-    },
-    TriggeredModal {
-        trigger_line: String,
-        header: ModalHeaderAst,
-        modes: Vec<ModeAst>,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ModeAst {
-    pub(crate) raw: String,
-    pub(crate) label: Option<String>,
-    pub(crate) body: String,
-    /// Per-mode additional cost (Spree). None for standard `•` modes.
-    pub(crate) mode_cost: Option<crate::types::mana::ManaCost>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ModalHeaderAst {
-    pub(crate) raw: String,
-    pub(crate) min_choices: usize,
-    pub(crate) max_choices: usize,
-    pub(crate) allow_repeat_modes: bool,
-    pub(crate) constraints: Vec<ModalSelectionConstraint>,
-}
 
 pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(OracleBlockAst, usize)> {
     let line = strip_reminder_text(lines.get(start)?.trim());

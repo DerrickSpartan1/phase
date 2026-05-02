@@ -1320,7 +1320,7 @@ pub(super) fn try_parse_dig_instead_alternative(
     kind: AbilityKind,
 ) -> Option<AbilityDefinition> {
     use super::sequence::parse_dig_from_among;
-    use super::types::ContinuationAst;
+    use crate::parser::oracle_ir::ast::ContinuationAst;
 
     // Gate: previous effect must be a Dig that the alternative can piggy-back on.
     let prev = previous?;

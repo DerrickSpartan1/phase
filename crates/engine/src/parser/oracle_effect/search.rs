@@ -13,8 +13,8 @@ use super::super::oracle_target::{
 use super::super::oracle_util::{
     contains_possessive, infer_core_type_for_subtype, split_around, strip_after,
 };
-use super::types::{SearchLibraryDetails, SeekDetails};
 use super::{capitalize, scan_contains_phrase};
+use crate::parser::oracle_ir::ast::{SearchLibraryDetails, SeekDetails};
 use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
     ControllerRef, FilterProp, QuantityExpr, SearchSelectionConstraint, SharedQuality,

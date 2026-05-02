@@ -914,7 +914,8 @@ pub(crate) fn assert_no_compound_remainder(rem: &str, context: &str) {
         rem.is_empty()
             || !rem.strip_prefix(" and ").is_some_and(|after| { // allow-noncombinator: debug assertion on pre-parsed remainder
                 let after = after.trim();
-                !after.starts_with("put ") && crate::parser::oracle_effect::sequence::starts_bare_and_clause(after) // allow-noncombinator: delegates to nom-based verb detection
+                !after.starts_with("put ") // allow-noncombinator: debug assertion guard, not parsing dispatch
+                    && crate::parser::oracle_effect::sequence::starts_bare_and_clause(after)
             }),
         "silent remainder drop: {rem:?} from: {context:?}"
     );

@@ -16,8 +16,8 @@ use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::parse_for_each_clause_expr;
 use super::super::oracle_target::{parse_target, parse_type_phrase};
 use super::super::oracle_util::{parse_count_expr, parse_number};
-use super::types::replace_fixed_quantity;
 use super::{resolve_it_pronoun, ParseContext};
+use crate::parser::oracle_ir::ast::{assert_no_compound_remainder, replace_fixed_quantity};
 
 /// Check if text starts with a self-reference: "this ", "~"
 fn is_self_ref(text: &str) -> bool {
@@ -415,7 +415,7 @@ pub(super) fn try_parse_remove_counter(lower: &str, ctx: &ParseContext) -> Optio
     } else {
         let (t, _rem) = parse_target(target_text);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, target_text);
+        assert_no_compound_remainder(_rem, target_text);
         t
     };
 
@@ -456,7 +456,7 @@ fn resolve_counter_target(text: &str, ctx: &ParseContext) -> TargetFilter {
     } else {
         let (t, _rem) = parse_target(text);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         t
     }
 }

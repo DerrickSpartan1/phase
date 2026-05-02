@@ -11,10 +11,10 @@ use super::counter::{
 };
 use super::mana::{try_parse_activate_only_condition, try_parse_add_mana_effect};
 use super::token::try_parse_token;
-use super::types::*;
 use super::{
     attach_controller_if_absent, is_bare_object_pronoun, resolve_it_pronoun, ParseContext,
 };
+use crate::parser::oracle_ir::ast::*;
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::{
@@ -83,7 +83,7 @@ fn try_parse_control_next_turn_suffix(_text: &str, rest: &str) -> Option<(Target
         (rem_after_during, false)
     };
     #[cfg(debug_assertions)]
-    super::types::assert_no_compound_remainder(_tail, _text);
+    assert_no_compound_remainder(_tail, _text);
     Some((target, grant_extra_turn_after))
 }
 
@@ -679,7 +679,7 @@ pub(super) fn parse_targeted_action_ast(
     }) {
         let (target, _rem) = parse_target(rest);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::TapAll { target });
     }
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
@@ -687,7 +687,7 @@ pub(super) fn parse_targeted_action_ast(
     }) {
         let (target, _rem) = parse_target(rest);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::UntapAll { target });
     }
     // CR 701.16a: "sacrifice [count] <filter> [of their choice]" —
@@ -734,7 +734,7 @@ pub(super) fn parse_targeted_action_ast(
         } else {
             let (target, _rem) = parse_target(&target_text);
             #[cfg(debug_assertions)]
-            super::types::assert_no_compound_remainder(_rem, text);
+            assert_no_compound_remainder(_rem, text);
             target
         };
         // CR 701.16a: When the count expression already carries a typed filter
@@ -762,7 +762,7 @@ pub(super) fn parse_targeted_action_ast(
         let (target_text, _) = super::strip_optional_target_prefix(strip_article(rest));
         let (target, _rem) = parse_target(target_text);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return match verb {
             "tap" => Some(TargetedImperativeAst::Tap { target }),
             "untap" => Some(TargetedImperativeAst::Untap { target }),
@@ -916,7 +916,7 @@ pub(super) fn parse_targeted_action_ast(
         let (target, _rem) = parse_target(target_text);
         let origin = super::infer_origin_zone(rest_lower);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
 
         // CR 400.7: Battlefield destination ⇒ ChangeZone (single-target until
         // a separate ChangeZoneAll-shape extension lands). Non-hand non-
@@ -974,7 +974,7 @@ pub(super) fn parse_targeted_action_ast(
         let (target_text, _) = super::strip_optional_target_prefix(rest);
         let (target, _rem) = parse_target(target_text);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::Fight { target });
     }
     // CR 722.1: "You control target player during that player's next turn"
@@ -1009,7 +1009,7 @@ pub(super) fn parse_targeted_action_ast(
         let (target_text, _) = super::strip_optional_target_prefix(rest);
         let (target, _rem) = parse_target(target_text);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::GainControl { target });
     }
     // Earthbend: "earthbend [N] [target <type>]"
@@ -1954,7 +1954,7 @@ pub(super) fn parse_utility_imperative_ast(
             "copy" => {
                 let (target, _rem) = parse_target(rest);
                 #[cfg(debug_assertions)]
-                super::types::assert_no_compound_remainder(_rem, text);
+                assert_no_compound_remainder(_rem, text);
                 Some(UtilityImperativeAst::Copy { target })
             }
             _ => unreachable!(),
@@ -2029,9 +2029,9 @@ pub(super) fn parse_utility_imperative_ast(
             let (attachment, _attachment_rem) = parse_target(&attachment_text);
             let (target, _target_rem) = parse_attach_recipient(&target_text);
             #[cfg(debug_assertions)]
-            super::types::assert_no_compound_remainder(_attachment_rem, text);
+            assert_no_compound_remainder(_attachment_rem, text);
             #[cfg(debug_assertions)]
-            super::types::assert_no_compound_remainder(_target_rem, text);
+            assert_no_compound_remainder(_target_rem, text);
             return Some(UtilityImperativeAst::Attach { attachment, target });
         }
     }
@@ -2042,7 +2042,7 @@ pub(super) fn parse_utility_imperative_ast(
         let after_to = tp.strip_after(" to ").map(|tp| tp.original).unwrap_or(rest);
         let (target, _rem) = parse_target(after_to);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return Some(UtilityImperativeAst::Attach {
             attachment: TargetFilter::SelfRef,
             target,
@@ -3061,7 +3061,7 @@ pub(super) fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
         let (_, rest) = nom_on_lower(text, lower, |input| value((), tag("destroy ")).parse(input))?;
         let (target, _rem) = parse_target(rest);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return Some(ZoneCounterImperativeAst::Destroy { target, all: true });
     }
     if let Some((_, rest)) =
@@ -3069,7 +3069,7 @@ pub(super) fn parse_destroy_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
     {
         let (target, _rem) = parse_target(rest);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         return Some(ZoneCounterImperativeAst::Destroy { target, all: false });
     }
     None
@@ -3131,7 +3131,7 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
         let rest_lower = &lower[lower.len() - rest.len()..];
         let (parsed_target, _rem) = parse_target(rest);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         // CR 701.5a: "exile all spells" must constrain to the stack.
         let target = if nom_primitives::scan_contains(rest_lower, "spell") {
             super::constrain_filter_to_stack(parsed_target)
@@ -3160,7 +3160,7 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
     if mass_zone {
         let (target, _rem) = parse_target(rest_text);
         #[cfg(debug_assertions)]
-        super::types::assert_no_compound_remainder(_rem, text);
+        assert_no_compound_remainder(_rem, text);
         let origin = super::infer_origin_zone(rest_lower);
         return Some(ZoneCounterImperativeAst::Exile {
             origin,
@@ -3171,7 +3171,7 @@ pub(super) fn parse_exile_ast(text: &str, lower: &str) -> Option<ZoneCounterImpe
 
     let (parsed_target, _rem) = parse_target(rest_text);
     #[cfg(debug_assertions)]
-    super::types::assert_no_compound_remainder(_rem, text);
+    assert_no_compound_remainder(_rem, text);
     // CR 701.5a: "exile target spell" must constrain targeting to the stack,
     // mirroring parse_counter_ast at line 1218-1219.
     let target = if nom_primitives::scan_contains(rest_lower, "spell") {
@@ -3232,7 +3232,7 @@ pub(super) fn parse_counter_ast(text: &str, lower: &str) -> Option<ZoneCounterIm
 
     let (target, _rem) = parse_target(rest_orig);
     #[cfg(debug_assertions)]
-    super::types::assert_no_compound_remainder(_rem, text);
+    assert_no_compound_remainder(_rem, text);
     let target = if nom_primitives::scan_contains(rest, "spell") {
         super::constrain_filter_to_stack(target)
     } else {

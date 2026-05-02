@@ -20,7 +20,7 @@ use super::super::oracle_target::parse_target;
 use super::super::oracle_util::{
     normalize_card_name_refs, parse_number, strip_reminder_text, TextPair,
 };
-use super::types::*;
+use crate::parser::oracle_ir::ast::*;
 
 /// Bridge: run a nom combinator on a lowercase copy, mapping the consumed length
 /// back to the original-case text to compute the correct remainder.

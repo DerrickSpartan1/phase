@@ -8,10 +8,9 @@ mod search;
 pub(crate) mod sequence;
 pub(crate) mod subject;
 pub(crate) mod token;
-pub(crate) mod types;
 
 pub(crate) use self::token::parse_token_description;
-pub(crate) use self::types::TokenDescription;
+pub(crate) use crate::parser::oracle_ir::ast::TokenDescription;
 
 use std::str::FromStr;
 
@@ -72,7 +71,7 @@ use self::sequence::{
     parse_intrinsic_continuation_ast, split_clause_sequence,
 };
 use self::subject::{try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life};
-use self::types::*;
+use crate::parser::oracle_ir::ast::*;
 
 /// Context threaded through the effect parsing pipeline.
 /// Enables pronoun resolution relative to the current subject.
@@ -9246,7 +9245,7 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
                 } else if let Some((target, ecr_rem)) = parse_event_context_ref(target_phrase) {
                     let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
                     #[cfg(debug_assertions)]
-                    types::assert_no_compound_remainder(ecr_rem, target_phrase);
+                    assert_no_compound_remainder(ecr_rem, target_phrase);
                     return Some((
                         Effect::DealDamage {
                             amount: qty,
