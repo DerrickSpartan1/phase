@@ -1,3 +1,5 @@
+use serde::Serialize;
+
 use crate::types::ability::MultiTargetSpec;
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ActivationRestriction, CastingPermission, Duration,
@@ -11,7 +13,7 @@ use crate::types::mana::ManaCost;
 use crate::types::player::PlayerCounterKind;
 use crate::types::zones::Zone;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ParsedEffectClause {
     pub(crate) effect: Effect,
     pub(crate) duration: Option<Duration>,
@@ -31,7 +33,7 @@ pub(crate) struct ParsedEffectClause {
     pub(crate) optional: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct SubjectApplication {
     pub(crate) affected: TargetFilter,
     pub(crate) target: Option<TargetFilter>,
@@ -44,7 +46,7 @@ pub(crate) struct SubjectApplication {
     pub(crate) is_optional: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct TokenDescription {
     pub(crate) name: String,
     pub(crate) power: Option<crate::types::ability::PtValue>,
@@ -64,7 +66,7 @@ pub(crate) struct TokenDescription {
     pub(crate) enters_attacking: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub(crate) struct AnimationSpec {
     pub(crate) power: Option<i32>,
     pub(crate) toughness: Option<i32>,
@@ -76,7 +78,7 @@ pub(crate) struct AnimationSpec {
     pub(crate) remove_all_abilities: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct SearchLibraryDetails {
     pub(crate) filter: TargetFilter,
     pub(crate) count: QuantityExpr,
@@ -108,7 +110,7 @@ pub(crate) struct SearchLibraryDetails {
     pub(crate) multi_enter_tapped: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct SeekDetails {
     pub(crate) filter: TargetFilter,
     pub(crate) count: QuantityExpr,
@@ -116,7 +118,7 @@ pub(crate) struct SeekDetails {
     pub(crate) enter_tapped: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ClauseAst {
     Imperative {
         text: String,
@@ -132,7 +134,7 @@ pub(crate) enum ClauseAst {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct SubjectPhraseAst {
     pub(crate) affected: TargetFilter,
     pub(crate) target: Option<TargetFilter>,
@@ -142,7 +144,7 @@ pub(crate) struct SubjectPhraseAst {
     pub(crate) is_optional: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum PredicateAst {
     Continuous {
         effect: Effect,
@@ -163,7 +165,7 @@ pub(crate) enum PredicateAst {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ContinuationAst {
     SearchDestination {
         destination: Zone,
@@ -268,7 +270,7 @@ pub(crate) enum ContinuationAst {
     RevealUntilAllToZone { destination: Zone },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ImperativeAst {
     Numeric(NumericImperativeAst),
     Targeted(TargetedImperativeAst),
@@ -278,7 +280,7 @@ pub(crate) enum ImperativeAst {
     Utility(UtilityImperativeAst),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ImperativeFamilyAst {
     Structured(ImperativeAst),
     CostResource(CostResourceImperativeAst),
@@ -364,7 +366,7 @@ pub(crate) enum ImperativeFamilyAst {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum NumericImperativeAst {
     Draw {
         count: QuantityExpr,
@@ -491,7 +493,7 @@ impl TargetedImperativeAst {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum TargetedImperativeAst {
     Tap {
         target: TargetFilter,
@@ -588,7 +590,7 @@ pub(crate) enum TargetedImperativeAst {
     ZoneCounterProxy(Box<ZoneCounterImperativeAst>),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum SearchCreationImperativeAst {
     SearchLibrary {
         filter: TargetFilter,
@@ -649,7 +651,7 @@ pub(crate) enum SearchCreationImperativeAst {
     MultiZoneSameNameExile,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum UtilityImperativeAst {
     Prevent {
         text: String,
@@ -673,7 +675,7 @@ pub(crate) enum UtilityImperativeAst {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum HandRevealImperativeAst {
     LookAt {
         target: TargetFilter,
@@ -690,7 +692,7 @@ pub(crate) enum HandRevealImperativeAst {
     RevealBackRef,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ChooseImperativeAst {
     TargetOnly {
         target: TargetFilter,
@@ -731,7 +733,7 @@ pub(crate) enum ChooseImperativeAst {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum PutImperativeAst {
     Mill {
         count: u32,
@@ -761,7 +763,7 @@ pub(crate) enum PutImperativeAst {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ShuffleImperativeAst {
     ShuffleLibrary {
         target: TargetFilter,
@@ -801,7 +803,7 @@ pub(crate) enum ShuffleImperativeAst {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum CostResourceImperativeAst {
     ActivateOnlyIfControlsLandSubtypeAny {
         subtypes: Vec<String>,
@@ -829,7 +831,7 @@ pub(crate) enum CostResourceImperativeAst {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum ZoneCounterImperativeAst {
     Destroy {
         target: TargetFilter,
@@ -890,14 +892,14 @@ pub(crate) enum ZoneCounterImperativeAst {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub(crate) enum ClauseBoundary {
     Sentence,
     Then,
     Comma,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ClauseChunk {
     pub(crate) text: String,
     pub(crate) boundary_after: Option<ClauseBoundary>,
@@ -964,7 +966,7 @@ pub(crate) fn with_clause_duration(
 
 // --- Modal types (moved from oracle_modal.rs) ---
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) enum OracleBlockAst {
     ActivatedModal {
         cost_text: String,
@@ -982,7 +984,7 @@ pub(crate) enum OracleBlockAst {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ModeAst {
     pub(crate) raw: String,
     pub(crate) label: Option<String>,
@@ -991,7 +993,7 @@ pub(crate) struct ModeAst {
     pub(crate) mode_cost: Option<crate::types::mana::ManaCost>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct ModalHeaderAst {
     pub(crate) raw: String,
     pub(crate) min_choices: usize,
@@ -1002,7 +1004,7 @@ pub(crate) struct ModalHeaderAst {
 
 // --- ActivatedConstraintAst (moved from oracle.rs) ---
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub(crate) struct ActivatedConstraintAst {
     pub(crate) restrictions: Vec<ActivationRestriction>,
     /// CR 602.2: "Any player may activate this ability." — annotation recognized
