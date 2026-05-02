@@ -471,7 +471,7 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
 ///
 /// Subject-prefixed verb patterns ("you gain", "you lose", etc.) are safe because
 /// "you" + verb is never a noun phrase — it always starts an independent clause.
-pub(super) fn starts_bare_and_clause(text: &str) -> bool {
+pub(crate) fn starts_bare_and_clause(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     starts_bare_and_clause_lower(&lower)
 }

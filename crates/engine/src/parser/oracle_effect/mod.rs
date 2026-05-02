@@ -5,7 +5,7 @@ pub(crate) mod counter;
 pub(crate) mod imperative;
 pub(crate) mod mana;
 mod search;
-mod sequence;
+pub(crate) mod sequence;
 pub(crate) mod subject;
 pub(crate) mod token;
 pub(crate) mod types;
