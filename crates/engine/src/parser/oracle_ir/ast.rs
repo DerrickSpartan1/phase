@@ -912,7 +912,8 @@ pub(crate) struct ClauseChunk {
 pub(crate) fn assert_no_compound_remainder(rem: &str, context: &str) {
     assert!(
         rem.is_empty()
-            || !rem.strip_prefix(" and ").is_some_and(|after| { // allow-noncombinator: debug assertion on pre-parsed remainder
+            // allow-noncombinator: debug assertion on pre-parsed remainder, not parsing dispatch
+            || !rem.strip_prefix(" and ").is_some_and(|after| {
                 let after = after.trim();
                 !after.starts_with("put ") // allow-noncombinator: debug assertion guard, not parsing dispatch
                     && crate::parser::oracle_effect::sequence::starts_bare_and_clause(after)

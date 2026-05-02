@@ -2,8 +2,13 @@
 //!
 //! Phase 47: Foundation module for the Oracle AST/IR layer (v1.4).
 //! - `ast`: All parser AST types (moved from oracle_effect/types.rs, oracle_modal.rs, oracle.rs)
-//! - `doc`: Document-level IR types (OracleDocIr, OracleItemIr) — added in plan 02
+//! - `doc`: Document-level IR types (OracleDocIr, OracleItemIr)
 
 pub(crate) mod ast;
+pub(crate) mod doc;
 
+#[allow(unused_imports)]
+// Re-exports for future consumers; direct ast:: paths used during migration.
 pub(crate) use self::ast::*;
+#[allow(unused_imports)] // Re-export for future consumers; wired into parser in Phase 48.
+pub(crate) use self::doc::*;
