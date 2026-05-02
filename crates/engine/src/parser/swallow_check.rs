@@ -1425,7 +1425,7 @@ fn detect_apnap(cleaned: &str, original: &str, ast_json: &str) {
 // the structural diff detects *parser bugs* ("the cascade variable was
 // set, but def-assembly dropped it").
 //
-// Hooked into `parse_effect_chain_impl` at the end of each chunk
+// Hooked into `parse_effect_chain_ir` at the end of each chunk
 // iteration, after `current_defs` has been finalized but before
 // `defs.extend(current_defs)`. The cascade variables in scope at that
 // point are compared against the resulting primary def's fields. Any

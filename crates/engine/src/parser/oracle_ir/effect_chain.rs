@@ -10,8 +10,9 @@ use serde::Serialize;
 
 use super::ast::{ClauseBoundary, ContinuationAst, ParsedEffectClause};
 use crate::types::ability::{
-    AbilityCondition, AbilityKind, ControllerRef, DelayedTriggerCondition, MultiTargetSpec,
-    OpponentMayScope, PlayerFilter, QuantityExpr, RoundingMode,
+    AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef,
+    DelayedTriggerCondition, MultiTargetSpec, OpponentMayScope, PlayerFilter, QuantityExpr,
+    RoundingMode,
 };
 
 /// Chain-level IR: the complete parsed representation of an effect chain before assembly.
@@ -21,8 +22,12 @@ use crate::types::ability::{
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[allow(dead_code)] // Constructed in tests now; wired into parser in Plan 02.
 pub(crate) struct EffectChainIr {
-    /// Parsed clauses in source order.
+    /// Parsed clauses in source order — per-chunk metadata for future consumers.
     pub(crate) clauses: Vec<ClauseIr>,
+    /// Pre-assembled defs from the chunk loop, before post-loop assembly.
+    /// Lowering converts this flat list into a linked-list `AbilityDefinition`
+    /// via sub_ability chaining and post-loop transforms.
+    pub(crate) pre_assembled_defs: Vec<AbilityDefinition>,
     /// The ability kind (Spell, Activated, etc.).
     pub(crate) kind: AbilityKind,
     /// CR 107.1a: Chain-level rounding annotation ("Round down/up each time").
@@ -31,10 +36,38 @@ pub(crate) struct EffectChainIr {
     pub(crate) actor: Option<ControllerRef>,
 }
 
+/// Special-case clause actions that modify or attach to adjacent clauses during lowering.
+///
+/// The chunk loop's special-case handlers (otherwise, instead, alt-cost rider, etc.)
+/// currently modify `defs: Vec<AbilityDefinition>` inline. In the IR split, these
+/// become markers that lowering processes when building the def list.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[allow(dead_code)] // Variants defined for Plan 03 IR production; not yet constructed.
+pub(crate) enum SpecialClause {
+    /// CR 118.9 + CR 119.4: Alternative-cost rider — fold cost onto previous CastFromZone.
+    AltCostRider(AbilityCost),
+    /// CR 608.2c: "Otherwise, [effect]" — attach as else_ability on previous conditional.
+    Otherwise(Box<AbilityDefinition>),
+    /// CR 608.2c: "Otherwise" fallback — no conditional found, emit as Unimplemented + def.
+    OtherwiseFallback(Box<AbilityDefinition>),
+    /// CR 614.1a + CR 514.2: Die-exile-rider — attach as sub_ability on previous def.
+    DieExileRider(Box<AbilityDefinition>),
+    /// CR 608.2c: Dig-instead alternative — replace previous Dig with conditional alternative.
+    DigInsteadAlt(Box<AbilityDefinition>),
+    /// CR 608.2e: Generic instead clause — attach to previous def as sub_ability.
+    InsteadClause(Box<AbilityDefinition>),
+    /// CR 508.4 / CR 614.1: Conditional enters-tapped-attacking modifier on previous clause.
+    EntersTappedAttacking,
+    /// CR 608.2e: TargetHasKeywordInstead — attach to previous def as sub_ability.
+    KeywordInsteadOverride,
+    /// CR 608.2e: AdditionalCostPaidInstead + SearchLibrary — fold else_ability from previous.
+    AdditionalCostInsteadSearch,
+}
+
 /// Per-clause IR: captures everything about a single parsed chunk before chain assembly.
 ///
 /// Each field corresponds to a local variable extracted during the chunk loop's
-/// "strip cascade" in `parse_effect_chain_impl`. All assembly logic (continuation
+/// "strip cascade" in `parse_effect_chain_ir`. All assembly logic (continuation
 /// patching, condition lifting, sub_ability wiring) is deferred to lowering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[allow(dead_code)] // Constructed in tests now; wired into parser in Plan 02.
@@ -69,6 +102,8 @@ pub(crate) struct ClauseIr {
     pub(crate) where_x_expression: Option<String>,
     /// Special-case: "otherwise" clause that attaches to prior conditional.
     pub(crate) is_otherwise: bool,
+    /// Special-case action that modifies adjacent clauses during lowering.
+    pub(crate) special: Option<SpecialClause>,
     /// The raw normalized text (for debug/diagnostic purposes).
     pub(crate) source_text: String,
 }
@@ -83,6 +118,7 @@ mod tests {
     fn effect_chain_ir_empty_construction() {
         let ir = EffectChainIr {
             clauses: vec![],
+            pre_assembled_defs: vec![],
             kind: AbilityKind::Spell,
             chain_rounding: None,
             actor: None,
@@ -111,6 +147,7 @@ mod tests {
             multi_target: None,
             where_x_expression: None,
             is_otherwise: false,
+            special: None,
             source_text: "draw a card".to_string(),
         };
         assert_eq!(clause.source_text, "draw a card");
@@ -122,6 +159,7 @@ mod tests {
     #[test]
     fn effect_chain_ir_with_single_clause() {
         let ir = EffectChainIr {
+            pre_assembled_defs: vec![],
             clauses: vec![ClauseIr {
                 parsed: parsed_clause(Effect::Draw {
                     count: QuantityExpr::Fixed { value: 2 },
@@ -141,6 +179,7 @@ mod tests {
                 multi_target: None,
                 where_x_expression: None,
                 is_otherwise: false,
+                special: None,
                 source_text: "draw two cards".to_string(),
             }],
             kind: AbilityKind::Spell,

@@ -73,6 +73,7 @@ use self::sequence::{
 };
 use self::subject::{try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life};
 use crate::parser::oracle_ir::ast::*;
+use crate::parser::oracle_ir::effect_chain::EffectChainIr;
 
 /// Context threaded through the effect parsing pipeline.
 /// Enables pronoun resolution relative to the current subject.
@@ -1905,7 +1906,10 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
     // Returns a FlipCoin with the appropriate branch filled in.
     // consolidate_die_and_coin_defs merges these into the preceding FlipCoin.
     if let Some((is_win, effect_text)) = imperative::try_parse_coin_flip_branch(text) {
-        let branch_def = parse_effect_chain_impl(effect_text, AbilityKind::Spell, ctx);
+        let branch_def = {
+            let ir = parse_effect_chain_ir(effect_text, AbilityKind::Spell, ctx);
+            lower_effect_chain_ir(&ir)
+        };
         return if is_win {
             parsed_clause(Effect::FlipCoin {
                 win_effect: Some(Box::new(branch_def)),
@@ -3352,11 +3356,10 @@ fn try_parse_gain_energy(tp: TextPair<'_>, ctx: &ParseContext) -> Option<ParsedE
         return Some(clause);
     }
     if let Some(continuation) = parse_energy_gain_continuation(rest) {
-        clause.sub_ability = Some(Box::new(parse_effect_chain_impl(
-            continuation,
-            AbilityKind::Spell,
-            ctx,
-        )));
+        clause.sub_ability = Some(Box::new({
+            let ir = parse_effect_chain_ir(continuation, AbilityKind::Spell, ctx);
+            lower_effect_chain_ir(&ir)
+        }));
         return Some(clause);
     }
     None
@@ -5248,7 +5251,7 @@ fn is_player_applicable_keyword(keyword: &crate::types::keywords::Keyword) -> bo
 }
 
 /// CR 608.2c + CR 117.3a: Extract a non-caster player anchor from an effect's
-/// own subject. Used by `parse_effect_chain_impl` to remember "who is acting"
+/// own subject. Used by `parse_effect_chain_ir` to remember "who is acting"
 /// when a later clause in the same chain has a caster-defaulted player target
 /// that should inherit the earlier subject (Assassin's Trophy's "then
 /// shuffle" inheriting "its controller" from the preceding search clause).
@@ -6361,7 +6364,7 @@ fn intrinsic_continuation_effect(def: &AbilityDefinition) -> &Effect {
 
 /// CR 107.1a: Strip a trailing "Round down each time" / "Round up each time"
 /// sentence from a chain of Oracle text, returning the stripped text and the
-/// captured rounding mode. Used by `parse_effect_chain_impl` to consume the
+/// captured rounding mode. Used by `parse_effect_chain_ir` to consume the
 /// chain-level rounding annotation (Pox Plague) before chunk splitting so
 /// the phrase doesn't become an Unimplemented chunk. The captured mode is
 /// re-applied to every `HalfRounded` in the built chain via
@@ -6540,7 +6543,7 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
 }
 
 /// CR 107.1a: Back-apply a rounding mode to every `HalfRounded` in an ability
-/// tree. Used by `parse_effect_chain_impl` after stripping a trailing
+/// tree. Used by `parse_effect_chain_ir` after stripping a trailing
 /// "Round down each time" / "Round up each time" sentence (Pox Plague), so
 /// earlier chunks that defaulted to `RoundingMode::Down` pick up an explicit
 /// `Up` annotation that Oracle grammar places in a separate closing
@@ -6592,7 +6595,8 @@ fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
 /// that invoke `normalize_card_name_refs` internally. External test callers
 /// must pre-normalize via `normalize_card_name_refs` before invoking.
 pub fn parse_effect_chain(text: &str, kind: AbilityKind) -> AbilityDefinition {
-    parse_effect_chain_impl(text, kind, &ParseContext::default())
+    let ir = parse_effect_chain_ir(text, kind, &ParseContext::default());
+    lower_effect_chain_ir(&ir)
 }
 
 /// Parse a compound effect chain with subject context for pronoun resolution.
@@ -6603,10 +6607,22 @@ pub(crate) fn parse_effect_chain_with_context(
     kind: AbilityKind,
     ctx: &ParseContext,
 ) -> AbilityDefinition {
-    parse_effect_chain_impl(text, kind, ctx)
+    let ir = parse_effect_chain_ir(text, kind, ctx);
+    lower_effect_chain_ir(&ir)
 }
 
-fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) -> AbilityDefinition {
+/// Produce an intermediate representation of an effect chain from Oracle text.
+///
+/// This is the IR-production half of the parse/lower split (Phase 48).
+/// It runs the chunk loop — text splitting, strip cascade, per-chunk effect
+/// parsing, continuation recognition — producing a flat `Vec<AbilityDefinition>`
+/// (pre-assembled defs). Post-loop assembly (demoting Dig, sub_ability chaining,
+/// anaphoric resolution, etc.) is handled by [`lower_effect_chain_ir`].
+pub(crate) fn parse_effect_chain_ir(
+    text: &str,
+    kind: AbilityKind,
+    ctx: &ParseContext,
+) -> EffectChainIr {
     // CR 107.1a: Strip a trailing "Round down each time" / "Round up each time"
     // sentence before chain splitting — it is a chain-level rounding annotation
     // (Pox Plague) that back-applies to every `HalfRounded` the chain contains.
@@ -6681,7 +6697,10 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             .parse(i)
         });
         if let Some((_, else_text)) = otherwise_rest {
-            let else_def = parse_effect_chain_impl(else_text, kind, ctx);
+            let else_def = {
+                let ir = parse_effect_chain_ir(else_text, kind, ctx);
+                lower_effect_chain_ir(&ir)
+            };
             // Walk defs backward to find the most recent conditional
             let has_condition = defs.iter().any(|d| d.condition.is_some());
             if has_condition {
@@ -6761,7 +6780,10 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
 
         if let Some((is_win, effect_text)) = imperative::try_parse_coin_flip_branch(normalized_text)
         {
-            let branch_def = parse_effect_chain_impl(effect_text, kind, ctx);
+            let branch_def = {
+                let ir = parse_effect_chain_ir(effect_text, kind, ctx);
+                lower_effect_chain_ir(&ir)
+            };
             defs.push(AbilityDefinition::new(
                 kind,
                 if is_win {
@@ -7452,6 +7474,29 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
             apply_clause_continuation(&mut defs, continuation, kind);
         }
     }
+
+    EffectChainIr {
+        clauses: vec![],
+        pre_assembled_defs: defs,
+        kind,
+        chain_rounding,
+        actor: ctx.actor.clone(),
+    }
+}
+
+/// Lower an effect chain IR into a fully-assembled `AbilityDefinition`.
+///
+/// This is the assembly half of the parse/lower split (Phase 48).
+/// It takes the flat `pre_assembled_defs` produced by [`parse_effect_chain_ir`]
+/// and performs all post-loop transforms: Dig demotion, conditional peek marking,
+/// anaphor resolution, die/coin consolidation, sub_ability chain assembly,
+/// player_scope rewriting, chain-level rounding, and forward_result wiring.
+///
+/// Pure function of `&EffectChainIr` — no `ParseContext` dependency (D-08).
+pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
+    let mut defs = ir.pre_assembled_defs.clone();
+    let kind = ir.kind;
+    let chain_rounding = ir.chain_rounding;
 
     // CR 701.20a vs CR 701.16a: Demote reveal-Dig back to RevealTop when no DigFromAmong
     // continuation patched it. An unpatched Dig { reveal: true, keep_count: None, filter: Any }
@@ -21910,10 +21955,7 @@ mod snapshot_tests {
 
     #[test]
     fn continuation_draw_then_discard() {
-        let def = parse_effect_chain(
-            "draw two cards, then discard a card",
-            AbilityKind::Spell,
-        );
+        let def = parse_effect_chain("draw two cards, then discard a card", AbilityKind::Spell);
         assert_json_snapshot!("continuation_draw_then_discard", def);
     }
 
@@ -21932,10 +21974,7 @@ mod snapshot_tests {
 
     #[test]
     fn condition_if_then_draw() {
-        let def = parse_effect_chain(
-            "if you control a creature, draw a card",
-            AbilityKind::Spell,
-        );
+        let def = parse_effect_chain("if you control a creature, draw a card", AbilityKind::Spell);
         assert_json_snapshot!("condition_if_control_creature_draw", def);
     }
 
@@ -21950,10 +21989,7 @@ mod snapshot_tests {
 
     #[test]
     fn condition_optional_you_may_draw() {
-        let def = parse_effect_chain(
-            "you may draw a card",
-            AbilityKind::Spell,
-        );
+        let def = parse_effect_chain("you may draw a card", AbilityKind::Spell);
         assert_json_snapshot!("condition_you_may_draw", def);
     }
 
@@ -22030,19 +22066,13 @@ mod snapshot_tests {
 
     #[test]
     fn assembly_each_opponent_discard() {
-        let def = parse_effect_chain(
-            "each opponent discards a card",
-            AbilityKind::Spell,
-        );
+        let def = parse_effect_chain("each opponent discards a card", AbilityKind::Spell);
         assert_json_snapshot!("assembly_each_opponent_discard", def);
     }
 
     #[test]
     fn assembly_gain_life_and_draw() {
-        let def = parse_effect_chain(
-            "you gain 3 life. draw a card",
-            AbilityKind::Spell,
-        );
+        let def = parse_effect_chain("you gain 3 life. draw a card", AbilityKind::Spell);
         assert_json_snapshot!("assembly_gain_life_draw", def);
     }
 

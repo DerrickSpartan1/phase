@@ -36,7 +36,7 @@ use super::oracle_effect::{parse_effect_chain_with_context, ParseContext};
 /// The input is the trigger/effect *body* text — i.e., what comes after
 /// "Whenever ~ enters or deals combat damage to a player, ". The "starting
 /// with you, " prefix is consumed here (kept inside this module so chain-level
-/// stripping in `parse_effect_chain_impl` doesn't interfere).
+/// stripping in `parse_effect_chain_ir` doesn't interfere).
 pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityDefinition> {
     let lower = text.to_lowercase();
     // Phase 1: optional "starting with you," prefix.

@@ -447,7 +447,7 @@ fn starts_multiword_keyword_continuation(s: &str) -> bool {
 
 /// CR 603.7a: Check if accumulated clause text begins with a temporal prefix
 /// (delayed trigger condition), indicating the clause body should not be split.
-/// These prefixes create CreateDelayedTrigger wrappers in parse_effect_chain_impl,
+/// These prefixes create CreateDelayedTrigger wrappers in parse_effect_chain_ir,
 /// and splitting the inner compound effect would leave only the first sub-effect
 /// wrapped while the remainder becomes a separate top-level clause.
 fn is_inside_temporal_prefix(lower: &str) -> bool {
