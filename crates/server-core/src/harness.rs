@@ -144,8 +144,7 @@ impl TournamentHarness {
 
         // Create fresh manager (simulates server restart)
         let mut new_manager = DraftSessionManager::new();
-        let restored: crate::persist::PersistedDraftSession =
-            serde_json::from_str(&json).unwrap();
+        let restored: crate::persist::PersistedDraftSession = serde_json::from_str(&json).unwrap();
         new_manager.restore_session(restored);
 
         // Reconstruct source (not serializable — test fixture only)
@@ -251,7 +250,11 @@ mod tests {
         // Verify pools were preserved (each seat should have 10 cards)
         for seat in 0..8 {
             let view = restored.manager.sessions[&restored.draft_code].view_for_seat(seat);
-            assert_eq!(view.pool.len(), 10, "seat {seat} pool preserved after crash");
+            assert_eq!(
+                view.pool.len(),
+                10,
+                "seat {seat} pool preserved after crash"
+            );
         }
 
         // Continue drafting after restore

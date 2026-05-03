@@ -50,7 +50,9 @@ fn with_draft<R>(f: impl FnOnce(&DraftSession) -> R) -> Result<R, JsValue> {
 }
 
 /// Take the draft session out of the Cell, pass it mutably, then put it back.
-fn with_draft_mut<R>(f: impl FnOnce(&mut DraftSession) -> Result<R, JsValue>) -> Result<R, JsValue> {
+fn with_draft_mut<R>(
+    f: impl FnOnce(&mut DraftSession) -> Result<R, JsValue>,
+) -> Result<R, JsValue> {
     DRAFT_SESSION.with(|cell| {
         let mut session = cell
             .take()
@@ -175,7 +177,8 @@ pub fn submit_pick(card_instance_id: &str) -> Result<JsValue, JsValue> {
 
         // 2. Resolve bot picks for seats 1..8
         let difficulty = DIFFICULTY.with(|cell| cell.get());
-        let mut rng = RNG.with(|cell| cell.take())
+        let mut rng = RNG
+            .with(|cell| cell.take())
             .ok_or_else(|| JsValue::from_str("RNG not initialized"))?;
 
         CARD_DB.with(|cell| {
@@ -189,18 +192,10 @@ pub fn submit_pick(card_instance_id: &str) -> Result<JsValue, JsValue> {
                     .is_some_and(|p| p.is_some());
 
                 if has_pack {
-                    let pack = draft_session.current_pack[seat as usize]
-                        .as_ref()
-                        .unwrap();
+                    let pack = draft_session.current_pack[seat as usize].as_ref().unwrap();
                     let pool = &draft_session.pools[seat as usize];
 
-                    let pick_idx = bot_ai::bot_pick(
-                        &pack.0,
-                        difficulty,
-                        pool,
-                        card_db,
-                        &mut rng,
-                    );
+                    let pick_idx = bot_ai::bot_pick(&pack.0, difficulty, pool, card_db, &mut rng);
                     let pick_id = pack.0[pick_idx].instance_id.clone();
 
                     session::apply(
@@ -242,10 +237,7 @@ pub fn submit_deck(main_deck_json: &str) -> Result<JsValue, JsValue> {
     with_draft_mut(|session| {
         session::apply(
             session,
-            DraftAction::SubmitDeck {
-                seat: 0,
-                main_deck,
-            },
+            DraftAction::SubmitDeck { seat: 0, main_deck },
             None,
         )
         .map_err(|e| JsValue::from_str(&format!("Deck submission failed: {}", e)))?;
@@ -395,15 +387,9 @@ pub fn submit_deck_for_seat(seat: u8, main_deck_json: &str) -> Result<JsValue, J
         .map_err(|e| JsValue::from_str(&format!("Failed to parse deck: {e}")))?;
 
     with_draft_mut(|session| {
-        session::apply(
-            session,
-            DraftAction::SubmitDeck {
-                seat,
-                main_deck,
-            },
-            None,
-        )
-        .map_err(|e| JsValue::from_str(&format!("Deck submission failed for seat {seat}: {e}")))?;
+        session::apply(session, DraftAction::SubmitDeck { seat, main_deck }, None).map_err(
+            |e| JsValue::from_str(&format!("Deck submission failed for seat {seat}: {e}")),
+        )?;
 
         Ok(to_js(&filter_for_player(session, seat)))
     })
@@ -489,13 +475,8 @@ pub fn get_bot_deck(bot_seat: u8) -> Result<JsValue, JsValue> {
 #[derive(Deserialize)]
 #[serde(tag = "type")]
 enum SeatDescriptor {
-    Human {
-        player_id: u8,
-        display_name: String,
-    },
-    Bot {
-        name: String,
-    },
+    Human { player_id: u8, display_name: String },
+    Bot { name: String },
 }
 
 /// Create a multiplayer draft session. Used by the P2P host to initialize a
@@ -528,7 +509,11 @@ pub fn create_multiplayer_draft(
         0 => DraftKind::Quick,
         1 => DraftKind::Premier,
         2 => DraftKind::Traditional,
-        _ => return Err(JsValue::from_str("kind must be 0 (Quick), 1 (Premier), or 2 (Traditional)")),
+        _ => {
+            return Err(JsValue::from_str(
+                "kind must be 0 (Quick), 1 (Premier), or 2 (Traditional)",
+            ))
+        }
     };
 
     let set_code = set_pool.code.clone();

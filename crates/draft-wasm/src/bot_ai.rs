@@ -97,9 +97,25 @@ fn pick_by_evaluation(
     pack.iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| {
-            let score_a = eval_score(a, card_db, &preferred_colors, pick_number, on_color_bonus, off_color_penalty);
-            let score_b = eval_score(b, card_db, &preferred_colors, pick_number, on_color_bonus, off_color_penalty);
-            score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+            let score_a = eval_score(
+                a,
+                card_db,
+                &preferred_colors,
+                pick_number,
+                on_color_bonus,
+                off_color_penalty,
+            );
+            let score_b = eval_score(
+                b,
+                card_db,
+                &preferred_colors,
+                pick_number,
+                on_color_bonus,
+                off_color_penalty,
+            );
+            score_a
+                .partial_cmp(&score_b)
+                .unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(|(i, _)| i)
         .unwrap_or(0)
@@ -231,10 +247,18 @@ fn curve_bonus(cmc: u8, pick_number: u8) -> i8 {
 
     match cmc {
         2 => {
-            if early { 2 } else { 1 }
+            if early {
+                2
+            } else {
+                1
+            }
         }
         3 => {
-            if early { 2 } else { 1 }
+            if early {
+                2
+            } else {
+                1
+            }
         }
         4 => 1,
         5 => 0,
@@ -242,7 +266,11 @@ fn curve_bonus(cmc: u8, pick_number: u8) -> i8 {
         0 => 0, // lands, weird cards
         _ => {
             // CMC 6+: slight penalty, less so late
-            if early { -1 } else { 0 }
+            if early {
+                -1
+            } else {
+                0
+            }
         }
     }
 }

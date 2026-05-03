@@ -449,7 +449,8 @@ async fn main() {
                 let mut dsm = draft_sessions.lock().await;
                 let mut restored_drafts = 0u32;
                 for (draft_code, json) in &persisted_drafts {
-                    match serde_json::from_str::<server_core::persist::PersistedDraftSession>(json) {
+                    match serde_json::from_str::<server_core::persist::PersistedDraftSession>(json)
+                    {
                         Ok(ps) => {
                             let timer_ms = ps.timer_remaining_ms;
                             dsm.restore_session(ps);
@@ -595,13 +596,8 @@ async fn main() {
                         let pod_size = session.player_tokens.len();
                         (0..pod_size).map(|i| session.view_for_seat(i)).collect()
                     };
-                    broadcast_draft_views(
-                        draft_code,
-                        &views,
-                        &bg_connections,
-                        &bg_draft_state,
-                    )
-                    .await;
+                    broadcast_draft_views(draft_code, &views, &bg_connections, &bg_draft_state)
+                        .await;
                     // Broadcast to spectators
                     broadcast_draft_spectator_views(
                         draft_code,
@@ -610,12 +606,7 @@ async fn main() {
                     )
                     .await;
                     // Persist
-                    persist_draft_session_async(
-                        &bg_game_db,
-                        draft_code,
-                        &bg_draft_state,
-                    )
-                    .await;
+                    persist_draft_session_async(&bg_game_db, draft_code, &bg_draft_state).await;
                 }
             }
         }
@@ -3570,8 +3561,7 @@ async fn handle_client_message(
             if let Some(session) = drafts.sessions.get(&draft_code) {
                 // Derive visibility from session config (host-configured, per D-07)
                 let visibility = session.config.spectator_visibility;
-                let view =
-                    draft_core::view::filter_for_spectator(&session.session, visibility);
+                let view = draft_core::view::filter_for_spectator(&session.session, visibility);
                 // Record spectator identity (T-60-09: prevents spectator from sending DraftAction)
                 identity.spectator_draft_code = Some(draft_code.clone());
                 identity.spectator_visibility = Some(visibility);

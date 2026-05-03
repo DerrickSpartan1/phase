@@ -10,7 +10,10 @@ use crate::AppState;
 
 /// Validate draft code format: exactly 6 alphanumeric uppercase chars.
 fn is_valid_draft_code(code: &str) -> bool {
-    code.len() == 6 && code.chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    code.len() == 6
+        && code
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
 /// GET /admin/drafts — List all active draft sessions with summary info.

@@ -43,7 +43,9 @@ pub fn suggest_deck(
         .iter()
         .filter(|c| {
             c.colors.is_empty()
-                || c.colors.iter().any(|col| best_colors.contains(&col.as_str()))
+                || c.colors
+                    .iter()
+                    .any(|col| best_colors.contains(&col.as_str()))
         })
         .collect();
 
@@ -171,11 +173,11 @@ fn select_spells_with_curve<'a>(
 ) -> Vec<&'a DraftCardInstance> {
     // Curve slot targets
     let curve_targets: [(u8, u8, usize); 6] = [
-        (0, 1, 2),  // CMC 0-1: up to 2
-        (2, 2, 6),  // CMC 2: up to 6
-        (3, 3, 6),  // CMC 3: up to 6
-        (4, 4, 4),  // CMC 4: up to 4
-        (5, 5, 3),  // CMC 5: up to 3
+        (0, 1, 2),   // CMC 0-1: up to 2
+        (2, 2, 6),   // CMC 2: up to 6
+        (3, 3, 6),   // CMC 3: up to 6
+        (4, 4, 4),   // CMC 4: up to 4
+        (5, 5, 3),   // CMC 5: up to 3
         (6, 255, 2), // CMC 6+: up to 2
     ];
 
@@ -218,10 +220,7 @@ fn select_spells_with_curve<'a>(
 /// Compute color-proportional land distribution for a set of spells.
 ///
 /// Per D-11: distributes 17 lands proportional to color frequency.
-pub fn suggest_lands(
-    spell_names: &[String],
-    pool: &[DraftCardInstance],
-) -> HashMap<String, u8> {
+pub fn suggest_lands(spell_names: &[String], pool: &[DraftCardInstance]) -> HashMap<String, u8> {
     // Build name -> card lookup from pool
     let card_by_name: HashMap<&str, &DraftCardInstance> =
         pool.iter().map(|c| (c.name.as_str(), c)).collect();
@@ -273,7 +272,8 @@ pub fn suggest_lands(
             let remaining_colors = sorted_colors.len() - i - 1;
             let raw = ((**count as f64 / total_pips as f64) * total_lands as f64).round() as u8;
             // Minimum 1 land of any represented color, max leaves room for remaining
-            raw.max(1).min(total_lands - assigned - remaining_colors as u8)
+            raw.max(1)
+                .min(total_lands - assigned - remaining_colors as u8)
         };
         lands.insert(land_name.to_string(), share);
         assigned += share;

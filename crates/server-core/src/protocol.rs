@@ -1407,10 +1407,7 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let parsed: ClientMessage = serde_json::from_str(&json).unwrap();
         match parsed {
-            ClientMessage::DraftAction {
-                draft_code,
-                action,
-            } => {
+            ClientMessage::DraftAction { draft_code, action } => {
                 assert_eq!(draft_code, "ABCD12");
                 assert_eq!(
                     action,
