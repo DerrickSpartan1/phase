@@ -11,6 +11,7 @@ import { useUiStore } from "../../stores/uiStore.ts";
 import { partitionByType } from "../../viewmodel/battlefieldProps.ts";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
+import { ScoreBadge } from "../draft/ScoreBadge.tsx";
 import { CounterBadge, StatusBadge } from "./HudBadges.tsx";
 import { HudPlate } from "./HudPlate.tsx";
 import { IncomingAttackersPopover } from "./IncomingAttackersPopover.tsx";
@@ -144,6 +145,7 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
     const isDisconnected = isOnline && disconnectedPlayers.has(opponentId);
     const isOpponentPhasedOut =
       gameState?.players[opponentId]?.status?.type === "PhasedOut";
+    const matchScore = gameState?.match_score ?? null;
     const label = opponentName ?? getOpponentDisplayName(opponentId);
 
     const hudTone = isValidTarget ? "cyan" : isOpponentTurn ? "rose" : "neutral";
@@ -167,8 +169,9 @@ export function OpponentHud({ opponentName, onKickPlayer }: OpponentHudProps) {
           seatColor={opponentSeatColor}
           underAttack={isOpponentUnderAttack}
           onClick={isValidTarget ? () => handlePlayerTarget(opponentId) : undefined}
-          trailing={opponentPoisonCounters > 0 || opponentSpeed > 0 || opponentCompanion || isOnline || isOpponentPhasedOut ? (
+          trailing={matchScore || opponentPoisonCounters > 0 || opponentSpeed > 0 || opponentCompanion || isOnline || isOpponentPhasedOut ? (
             <>
+              {matchScore ? <ScoreBadge score={matchScore} player={1} /> : null}
               {isOpponentPhasedOut ? <StatusBadge label="Phased Out" tone="neutral" /> : null}
               {opponentPoisonCounters > 0 ? <CounterBadge kind="poison" value={opponentPoisonCounters} /> : null}
               {opponentSpeed > 0 ? <CounterBadge kind="speed" value={opponentSpeed} /> : null}
