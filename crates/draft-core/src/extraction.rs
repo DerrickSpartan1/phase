@@ -58,8 +58,8 @@ struct MtgjsonBoosterPlay {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MtgjsonSheet {
-    cards: HashMap<String, u32>,
-    total_weight: u32,
+    cards: HashMap<String, u64>,
+    total_weight: u64,
     #[serde(default)]
     foil: bool,
     #[serde(default)]

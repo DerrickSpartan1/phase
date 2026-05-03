@@ -36,7 +36,7 @@ pub struct SheetCard {
     pub set_code: String,
     pub collector_number: String,
     pub rarity: Rarity,
-    pub weight: u32,
+    pub weight: u64,
     /// Color identity letters, e.g. ["W", "U"]. Populated from MTGJSON at extraction.
     #[serde(default)]
     pub colors: Vec<String>,
@@ -52,7 +52,7 @@ pub struct SheetCard {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SheetDefinition {
     pub cards: Vec<SheetCard>,
-    pub total_weight: u32,
+    pub total_weight: u64,
     pub foil: bool,
     pub balance_colors: bool,
 }

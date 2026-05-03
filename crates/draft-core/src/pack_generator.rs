@@ -20,12 +20,12 @@ impl PackGenerator {
     fn select_variant(&self, rng: &mut dyn rand::RngCore) -> &PackVariant {
         let idx = weighted_select(
             rng,
-            self.set_pool.pack_variants_total_weight,
+            u64::from(self.set_pool.pack_variants_total_weight),
             self.set_pool
                 .pack_variants
                 .iter()
                 .enumerate()
-                .map(|(i, v)| (i, v.weight)),
+                .map(|(i, v)| (i, u64::from(v.weight))),
         );
         &self.set_pool.pack_variants[idx]
     }
@@ -39,11 +39,14 @@ impl PackGenerator {
         if choices.len() == 1 {
             return &choices[0].sheet;
         }
-        let total: u32 = choices.iter().map(|c| c.weight).sum();
+        let total: u64 = choices.iter().map(|c| u64::from(c.weight)).sum();
         let idx = weighted_select(
             rng,
             total,
-            choices.iter().enumerate().map(|(i, c)| (i, c.weight)),
+            choices
+                .iter()
+                .enumerate()
+                .map(|(i, c)| (i, u64::from(c.weight))),
         );
         &choices[idx].sheet
     }
@@ -91,11 +94,11 @@ impl PackSource for PackGenerator {
 /// `total_weight` is the precomputed sum of all weights.
 fn weighted_select(
     rng: &mut dyn rand::RngCore,
-    total_weight: u32,
-    weights: impl Iterator<Item = (usize, u32)>,
+    total_weight: u64,
+    weights: impl Iterator<Item = (usize, u64)>,
 ) -> usize {
     let roll = rng.random_range(0..total_weight);
-    let mut cumulative = 0u32;
+    let mut cumulative = 0u64;
     for (idx, w) in weights {
         cumulative += w;
         if roll < cumulative {
@@ -116,18 +119,18 @@ fn weighted_select_n(
     let count = count.min(available);
 
     // Build mutable pool of (original_index, weight).
-    let mut pool: Vec<(usize, u32)> = sheet
+    let mut pool: Vec<(usize, u64)> = sheet
         .cards
         .iter()
         .enumerate()
         .map(|(i, c)| (i, c.weight))
         .collect();
-    let mut total: u32 = sheet.total_weight;
+    let mut total: u64 = sheet.total_weight;
     let mut result = Vec::with_capacity(count);
 
     for _ in 0..count {
         let roll = rng.random_range(0..total);
-        let mut cumulative = 0u32;
+        let mut cumulative = 0u64;
         let mut pick_pos = 0;
         for (pos, &(_, w)) in pool.iter().enumerate() {
             cumulative += w;
@@ -159,7 +162,7 @@ mod tests {
         set_code: &str,
         count: usize,
         rarity: Rarity,
-        weight: u32,
+        weight: u64,
     ) -> Vec<SheetCard> {
         (0..count)
             .map(|i| SheetCard {

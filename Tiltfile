@@ -20,10 +20,12 @@ enabled = config.parse().get('enable', [])
 ENGINE_SRC = ['crates/engine/src/']
 AI_SRC = ['crates/phase-ai/src/']
 WASM_SRC = ['crates/engine-wasm/src/']
+DRAFT_CORE_SRC = ['crates/draft-core/src/']
+DRAFT_WASM_SRC = ['crates/draft-wasm/src/']
 
 local_resource('wasm',
     cmd = './scripts/build-wasm.sh',
-    deps = ENGINE_SRC + AI_SRC + WASM_SRC,
+    deps = ENGINE_SRC + AI_SRC + WASM_SRC + DRAFT_CORE_SRC + DRAFT_WASM_SRC,
     resource_deps = ['clippy'],
     allow_parallel = True,
     labels = ['build'],
@@ -120,6 +122,14 @@ local_resource('check-frontend',
 local_resource('card-data',
     cmd = './scripts/gen-card-data.sh',
     deps = ENGINE_SRC,
+    allow_parallel = True,
+    auto_init = True,
+    labels = ['data'],
+)
+
+local_resource('draft-pools',
+    cmd = 'cargo run --bin draft-pool-gen',
+    deps = DRAFT_CORE_SRC + ['data/mtgjson/sets/'],
     allow_parallel = True,
     auto_init = True,
     labels = ['data'],

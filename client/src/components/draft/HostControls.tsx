@@ -1,6 +1,8 @@
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 import { menuButtonClass } from "../menu/buttonStyles";
 
+const EMPTY_SEATS: Array<{ seat_index: number; display_name: string; is_bot: boolean; connected: boolean }> = [];
+
 // ── Component ───────────────────────────────────────────────────────────
 
 /**
@@ -22,7 +24,7 @@ export function HostControls() {
   const replaceSeatWithBot = useMultiplayerDraftStore(
     (s) => s.replaceSeatWithBot,
   );
-  const seats = useMultiplayerDraftStore((s) => s.view?.seats ?? []);
+  const seats = useMultiplayerDraftStore((s) => s.view?.seats ?? EMPTY_SEATS);
 
   if (role !== "host") return null;
 

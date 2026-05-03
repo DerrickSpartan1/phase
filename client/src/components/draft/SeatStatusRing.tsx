@@ -1,6 +1,8 @@
 import type { SeatPublicView } from "../../adapter/draft-adapter";
 import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
 
+const EMPTY_SEATS: SeatPublicView[] = [];
+
 // ── Pick status colors ──────────────────────────────────────────────────
 
 const PICK_STATUS_BORDER: Record<SeatPublicView["pick_status"], string> = {
@@ -45,7 +47,7 @@ function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
 
 /** 8-seat status ring showing each player's name and pick status with pass direction. */
 export function SeatStatusRing() {
-  const seats = useMultiplayerDraftStore((s) => s.view?.seats ?? []);
+  const seats = useMultiplayerDraftStore((s) => s.view?.seats ?? EMPTY_SEATS);
   const passDirection = useMultiplayerDraftStore((s) => s.view?.pass_direction);
   const localSeat = useMultiplayerDraftStore((s) => s.seatIndex);
 
