@@ -51,6 +51,7 @@ fn main() {
             cards: vec![],
             top_gaps: vec![],
             gap_bundles: vec![],
+            diagnostics: Default::default(),
         };
         println!("{}", serde_json::to_string_pretty(&empty).unwrap());
         process::exit(0);
@@ -76,13 +77,28 @@ fn main() {
                 cards: vec![],
                 top_gaps: vec![],
                 gap_bundles: vec![],
+                diagnostics: Default::default(),
             };
             println!("{}", serde_json::to_string_pretty(&empty).unwrap());
             process::exit(1);
         }
     };
 
-    let summary = analyze_coverage(&db);
+    let mut summary = analyze_coverage(&db);
+
+    // Populate per-category diagnostic counts for JSON output (D-08).
+    {
+        let mut counts: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
+        for (_key, face) in db.face_iter() {
+            for warning in &face.parse_warnings {
+                *counts
+                    .entry(warning.category_name().to_string())
+                    .or_default() += 1;
+            }
+        }
+        summary.diagnostics = counts;
+    }
 
     // Print JSON to stdout
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());

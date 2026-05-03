@@ -188,4 +188,29 @@ if [[ "$FAIL_ON_ENGINE" -eq 1 && "$engine_count" -gt 0 ]]; then
     exit 1
 fi
 
+# Diagnostic count ratchet (D-09): any increase in any category = failure.
+diag_fail=0
+while IFS='=' read -r cat count; do
+    base_count=$(jq -r ".diagnostics[\"$cat\"] // 0" "$BASELINE" 2>/dev/null)
+    if [[ "$count" -gt "$base_count" ]]; then
+        echo "DIAGNOSTIC REGRESSION: $cat increased from $base_count to $count" >&2
+        diag_fail=1
+    elif [[ "$count" -lt "$base_count" ]]; then
+        echo "DIAGNOSTIC IMPROVEMENT: $cat decreased from $base_count to $count"
+    fi
+done < <(jq -r '.diagnostics // {} | to_entries[] | "\(.key)=\(.value)"' "$CURRENT" 2>/dev/null)
+
+# Also check for new categories not in baseline
+while IFS='=' read -r cat count; do
+    if ! jq -e ".diagnostics[\"$cat\"]" "$BASELINE" > /dev/null 2>&1; then
+        echo "DIAGNOSTIC REGRESSION: new category $cat with count $count (not in baseline)" >&2
+        diag_fail=1
+    fi
+done < <(jq -r '.diagnostics // {} | to_entries[] | "\(.key)=\(.value)"' "$CURRENT" 2>/dev/null)
+
+if [[ "$diag_fail" -eq 1 ]]; then
+    echo "FAIL: one or more diagnostic categories regressed." >&2
+    exit 1
+fi
+
 exit 0

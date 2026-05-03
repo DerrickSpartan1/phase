@@ -185,6 +185,9 @@ pub struct CoverageSummary {
     /// Top 2-gap and 3-gap exact-match bundles that would unlock cards if all handlers implemented.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub gap_bundles: Vec<GapBundle>,
+    /// Per-category diagnostic counts for regression ratcheting (D-08).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub diagnostics: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2944,6 +2947,7 @@ pub fn analyze_coverage(card_db: &CardDatabase) -> CoverageSummary {
         cards,
         top_gaps,
         gap_bundles,
+        diagnostics: BTreeMap::new(),
     }
 }
 
