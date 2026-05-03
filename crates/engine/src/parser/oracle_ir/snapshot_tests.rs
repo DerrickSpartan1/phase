@@ -773,3 +773,86 @@ fn bomat_courier() {
     insta::assert_json_snapshot!("bomat_courier_ir", &ir);
     insta::assert_json_snapshot!("bomat_courier_lowered", &lowered);
 }
+
+// ---------------------------------------------------------------------------
+// Diagnostic snapshot tests (Phase 51, D-10)
+// ---------------------------------------------------------------------------
+
+mod diagnostic_snapshots {
+    use crate::parser::oracle::parse_oracle_ir;
+    use crate::parser::oracle_warnings::clear_diagnostics;
+
+    /// Parse Oracle text and return only the diagnostics vec from the IR.
+    fn parse_diagnostics(
+        oracle_text: &str,
+        card_name: &str,
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> Vec<crate::parser::oracle_ir::diagnostic::OracleDiagnostic> {
+        clear_diagnostics();
+        let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
+        let ir = parse_oracle_ir(oracle_text, card_name, &[], &types, &subtypes);
+        ir.diagnostics
+    }
+
+    #[test]
+    fn diagnostic_target_fallback() {
+        let diagnostics = parse_diagnostics(
+            "Whenever this creature attacks, you may sacrifice another creature. When you do, this creature deals damage equal to the sacrificed creature's power to any target. If the sacrificed creature was a Giant, this creature deals twice that much damage instead.",
+            "Surtland Flinger",
+            &["Creature"],
+            &["Giant", "Berserker"],
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.category_name() == "target-fallback"),
+            "Expected target-fallback diagnostic for Surtland Flinger, got: {:?}",
+            diagnostics
+        );
+        insta::assert_json_snapshot!("diagnostic_target_fallback", &diagnostics);
+    }
+
+    #[test]
+    fn diagnostic_ignored_remainder() {
+        let diagnostics = parse_diagnostics(
+            "Whenever this creature attacks, it deals damage to the player or planeswalker it's attacking equal to the number of artifacts you control.\nEncore {5}{R} ({5}{R}, Exile this card from your graveyard: For each opponent, create a token copy that attacks that opponent this turn if able. They gain haste. Sacrifice them at the beginning of the next end step. Activate only as a sorcery.)",
+            "Fathom Fleet Swordjack",
+            &["Creature"],
+            &["Orc", "Pirate"],
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.category_name() == "ignored-remainder"),
+            "Expected ignored-remainder diagnostic for Fathom Fleet Swordjack, got: {:?}",
+            diagnostics
+        );
+        insta::assert_json_snapshot!("diagnostic_ignored_remainder", &diagnostics);
+    }
+
+    #[test]
+    fn diagnostic_swallowed_clause() {
+        let diagnostics = parse_diagnostics(
+            "When this enchantment enters, create a 1/1 white Human creature token, a 1/1 blue Merfolk creature token, and a 1/1 red Goblin creature token. Then secretly choose Human, Merfolk, or Goblin.\nSacrifice this enchantment, Reveal the creature type you chose: If target attacking creature token is the chosen type, put three +1/+1 counters on it and it gains deathtouch until end of turn.",
+            "A Killer Among Us",
+            &["Enchantment"],
+            &[],
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.category_name() == "swallowed-clause"),
+            "Expected swallowed-clause diagnostic for A Killer Among Us, got: {:?}",
+            diagnostics
+        );
+        insta::assert_json_snapshot!("diagnostic_swallowed_clause", &diagnostics);
+    }
+
+    // NOTE: CascadeLoss diagnostic is not triggered by any card in the current
+    // card-data.json corpus (0 occurrences in coverage report). The variant exists
+    // for cascade-diff detection in swallow_check.rs but no current Oracle text
+    // triggers it. A test will be added when a card that produces this diagnostic
+    // is identified.
+}
