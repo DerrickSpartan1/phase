@@ -12627,3 +12627,82 @@ mod tests {
         }
     }
 }
+
+/// Snapshot tests locking current trigger parser output before the IR split.
+/// These verify behavioral parity: identical snapshots before and after the
+/// `parse_trigger_line_with_index_ir` / `lower_trigger_ir` refactor.
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+
+    fn parse_trigger_line(text: &str, card_name: &str) -> TriggerDefinition {
+        parse_trigger_line_with_index(text, card_name, None)
+    }
+
+    #[test]
+    fn trigger_simple_etb_self() {
+        let def = parse_trigger_line(
+            "When Test Card enters the battlefield, draw a card.",
+            "Test Card",
+        );
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn trigger_conditional_upkeep() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, if you control no creatures, sacrifice Test Card.",
+            "Test Card",
+        );
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn trigger_compound_and_when_etb_half() {
+        let defs = parse_trigger_lines_at_index(
+            "When Test Card enters the battlefield and whenever a creature dies, draw a card.",
+            "Test Card",
+            None,
+        );
+        assert_eq!(defs.len(), 2, "compound trigger should split into 2");
+        insta::assert_json_snapshot!(defs[0]);
+    }
+
+    #[test]
+    fn trigger_compound_and_when_dies_half() {
+        let defs = parse_trigger_lines_at_index(
+            "When Test Card enters the battlefield and whenever a creature dies, draw a card.",
+            "Test Card",
+            None,
+        );
+        assert_eq!(defs.len(), 2, "compound trigger should split into 2");
+        insta::assert_json_snapshot!(defs[1]);
+    }
+
+    #[test]
+    fn trigger_optional_you_may() {
+        let def = parse_trigger_line(
+            "When Test Card enters the battlefield, you may draw a card.",
+            "Test Card",
+        );
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn trigger_once_per_turn() {
+        let def = parse_trigger_line(
+            "Whenever a creature enters the battlefield under your control for the first time each turn, draw a card.",
+            "Test Card",
+        );
+        insta::assert_json_snapshot!(def);
+    }
+
+    #[test]
+    fn trigger_unless_pay() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, sacrifice Test Card unless you pay {2}.",
+            "Test Card",
+        );
+        insta::assert_json_snapshot!(def);
+    }
+}
