@@ -1,13 +1,14 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use draft_core::pack_source::PackSource;
-use draft_core::types::{DraftAction, DraftConfig, DraftSeat};
+use draft_core::types::{DraftAction, DraftConfig, DraftSeat, DraftStatus};
 use draft_core::view::DraftPlayerView;
 use engine::types::player::PlayerId;
 use rand::Rng;
 use tracing::{info, warn};
 
-use crate::persist::PersistedLobbyMeta;
+use crate::persist::{PersistedDraftSession, PersistedLobbyMeta};
 use crate::reconnect::ReconnectManager;
 use crate::session::generate_player_token;
 
@@ -49,6 +50,40 @@ impl DraftSession {
     /// Returns true if all seats are claimed.
     pub fn is_full(&self) -> bool {
         self.player_tokens.iter().all(|t| !t.is_empty())
+    }
+
+    /// Create a serializable snapshot for disk persistence.
+    pub fn to_persisted(&self) -> PersistedDraftSession {
+        PersistedDraftSession {
+            draft_code: self.draft_code.clone(),
+            session: self.session.clone(),
+            player_tokens: self.player_tokens.clone(),
+            display_names: self.display_names.clone(),
+            config: self.config.clone(),
+            active_matches: self.active_matches.clone(),
+            lobby_meta: self.lobby_meta.clone(),
+            timer_remaining_ms: self.timer_remaining_ms,
+        }
+    }
+
+    /// Restore a draft session from a persisted snapshot.
+    ///
+    /// All players start disconnected. `timer_task` is None — the caller
+    /// should re-arm from `timer_remaining_ms` if needed.
+    pub fn from_persisted(ps: PersistedDraftSession) -> Self {
+        let pod_size = ps.player_tokens.len();
+        Self {
+            draft_code: ps.draft_code,
+            session: ps.session,
+            player_tokens: ps.player_tokens,
+            connected: vec![false; pod_size],
+            display_names: ps.display_names,
+            config: ps.config,
+            active_matches: ps.active_matches,
+            lobby_meta: ps.lobby_meta,
+            timer_remaining_ms: ps.timer_remaining_ms,
+            timer_task: None,
+        }
     }
 
     /// Inject server-side timer into the filtered view before serializing.
@@ -273,6 +308,19 @@ impl DraftSessionManager {
         self.token_to_draft.get(token).map(|s| s.as_str())
     }
 
+    /// Restore a previously persisted draft session, rebuilding the token_to_draft index.
+    pub fn restore_session(&mut self, ps: PersistedDraftSession) {
+        let session = DraftSession::from_persisted(ps);
+        let draft_code = session.draft_code.clone();
+        for token in &session.player_tokens {
+            if !token.is_empty() {
+                self.token_to_draft
+                    .insert(token.clone(), draft_code.clone());
+            }
+        }
+        self.sessions.insert(draft_code, session);
+    }
+
     /// Scan active_matches across all sessions to find the draft owning a game.
     pub fn draft_for_game_code(&self, game_code: &str) -> Option<String> {
         self.sessions
@@ -297,10 +345,32 @@ pub fn generate_draft_code() -> String {
         .collect()
 }
 
+/// Returns the appropriate reconnect grace period for the given draft phase.
+///
+/// Longer than the 10s game reconnect because tournaments span hours.
+/// - Lobby: 30 min (gathering players)
+/// - Drafting: 5 min (picks in progress, auto-pick kicks in after)
+/// - Deckbuilding: 15 min (building takes time)
+/// - MatchInProgress / BetweenRounds: 10 min
+/// - Complete / Abandoned: 1 min (draft is over)
+/// - Paused / Pairing / RoundComplete: 10 min (transient states)
+pub fn draft_grace_period(status: &DraftStatus) -> Duration {
+    match status {
+        DraftStatus::Lobby => Duration::from_secs(1800),
+        DraftStatus::Drafting => Duration::from_secs(300),
+        DraftStatus::Deckbuilding => Duration::from_secs(900),
+        DraftStatus::MatchInProgress => Duration::from_secs(600),
+        DraftStatus::RoundComplete => Duration::from_secs(600),
+        DraftStatus::Paused => Duration::from_secs(600),
+        DraftStatus::Pairing => Duration::from_secs(600),
+        DraftStatus::Complete | DraftStatus::Abandoned => Duration::from_secs(60),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use draft_core::types::{DraftKind, DraftStatus, PodPolicy, TournamentFormat};
+    use draft_core::types::{DraftKind, PodPolicy, TournamentFormat};
 
     fn test_config() -> DraftConfig {
         DraftConfig {
@@ -438,5 +508,87 @@ mod tests {
 
         assert_eq!(mgr.draft_for_game_code("GAME01"), Some(code));
         assert_eq!(mgr.draft_for_game_code("NONEXIST"), None);
+    }
+
+    #[test]
+    fn to_persisted_roundtrips_through_serde_json() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        for i in 1..8 {
+            mgr.join_draft(&code, format!("Player {i}"), None).unwrap();
+        }
+
+        let session = &mgr.sessions[&code];
+        let persisted = session.to_persisted();
+        let json = serde_json::to_string(&persisted).expect("serialize");
+        let restored: PersistedDraftSession =
+            serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(restored.draft_code, persisted.draft_code);
+        assert_eq!(restored.player_tokens, persisted.player_tokens);
+        assert_eq!(restored.display_names, persisted.display_names);
+        assert_eq!(restored.timer_remaining_ms, persisted.timer_remaining_ms);
+    }
+
+    #[test]
+    fn from_persisted_sets_connected_false_and_timer_task_none() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+
+        let persisted = mgr.sessions[&code].to_persisted();
+        let restored = DraftSession::from_persisted(persisted);
+
+        assert!(restored.connected.iter().all(|&c| !c));
+        assert!(restored.timer_task.is_none());
+    }
+
+    #[test]
+    fn restore_session_rebuilds_token_to_draft_index() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        for i in 1..8 {
+            mgr.join_draft(&code, format!("Player {i}"), None).unwrap();
+        }
+
+        let persisted = mgr.sessions[&code].to_persisted();
+        let tokens = persisted.player_tokens.clone();
+
+        // Create a fresh manager and restore into it
+        let mut mgr2 = DraftSessionManager::new();
+        mgr2.restore_session(persisted);
+
+        // All tokens should resolve to the same draft code
+        for t in &tokens {
+            if !t.is_empty() {
+                assert_eq!(mgr2.draft_for_token(t), Some(code.as_str()));
+            }
+        }
+
+        // Original host token should still work
+        assert_eq!(mgr2.draft_for_token(&token), Some(code.as_str()));
+    }
+
+    #[test]
+    fn draft_grace_period_returns_correct_durations() {
+        assert_eq!(
+            draft_grace_period(&DraftStatus::Lobby),
+            Duration::from_secs(1800)
+        );
+        assert_eq!(
+            draft_grace_period(&DraftStatus::Drafting),
+            Duration::from_secs(300)
+        );
+        assert_eq!(
+            draft_grace_period(&DraftStatus::Deckbuilding),
+            Duration::from_secs(900)
+        );
+        assert_eq!(
+            draft_grace_period(&DraftStatus::MatchInProgress),
+            Duration::from_secs(600)
+        );
+        assert_eq!(
+            draft_grace_period(&DraftStatus::Complete),
+            Duration::from_secs(60)
+        );
     }
 }
