@@ -28,6 +28,9 @@ impl PackSource for FixturePackSource {
                 } else {
                     "common".to_string()
                 },
+                colors: Vec::new(),
+                cmc: 0,
+                type_line: String::new(),
             })
             .collect();
         DraftPack(cards)
