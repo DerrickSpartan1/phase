@@ -13,12 +13,14 @@ export interface DraftCardInstance {
   type_line: string;
 }
 
+// @sync-with: crates/draft-core/src/view.rs
 export interface SeatPublicView {
   seat_index: number;
   display_name: string;
   is_bot: boolean;
   connected: boolean;
   has_submitted_deck: boolean;
+  pick_status: "Pending" | "Picked" | "TimedOut" | "NotDrafting";
 }
 
 export type DraftStatus =
@@ -32,6 +34,36 @@ export type DraftStatus =
   | "Complete"
   | "Abandoned";
 
+export type TournamentFormat = "Swiss" | "SingleElimination";
+
+export type PodPolicy = "Competitive" | "Casual";
+
+export type PairingStatus = "Pending" | "InProgress" | "Complete";
+
+// @sync-with: crates/draft-core/src/view.rs
+export interface StandingEntry {
+  seat_index: number;
+  display_name: string;
+  match_wins: number;
+  match_losses: number;
+  game_wins: number;
+  game_losses: number;
+}
+
+// @sync-with: crates/draft-core/src/view.rs
+export interface PairingView {
+  round: number;
+  table: number;
+  seat_a: number;
+  name_a: string;
+  seat_b: number;
+  name_b: string;
+  match_id: string;
+  status: PairingStatus;
+  winner_seat: number | null;
+}
+
+// @sync-with: crates/draft-core/src/view.rs
 export interface DraftPlayerView {
   status: DraftStatus;
   kind: "Quick" | "Premier" | "Traditional";
@@ -43,6 +75,12 @@ export interface DraftPlayerView {
   seats: SeatPublicView[];
   cards_per_pack: number;
   pack_count: number;
+  timer_remaining_ms: number | null;
+  standings: StandingEntry[];
+  current_round: number;
+  tournament_format: TournamentFormat;
+  pod_policy: PodPolicy;
+  pairings: PairingView[];
 }
 
 export interface SuggestedDeck {

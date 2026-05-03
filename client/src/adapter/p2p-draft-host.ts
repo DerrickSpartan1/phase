@@ -13,7 +13,7 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
 import { DraftAdapter } from "./draft-adapter";
-import type { DraftPlayerView } from "./draft-adapter";
+import type { DraftPlayerView, SeatPublicView } from "./draft-adapter";
 import {
   createDraftPeerSession,
   type DraftPeerSession,
@@ -167,18 +167,7 @@ export class P2PDraftHost {
     session.onMessage((msg) => this.handleGuestMessage(seat, msg));
 
     // Send welcome with empty view (draft hasn't started)
-    const emptyView: DraftPlayerView = {
-      status: "Lobby",
-      kind: this.kind,
-      current_pack_number: 0,
-      pick_number: 0,
-      pass_direction: "Left",
-      current_pack: null,
-      pool: [],
-      seats: this.buildSeatPublicViews(),
-      cards_per_pack: 14,
-      pack_count: 3,
-    };
+    const emptyView: DraftPlayerView = this.buildLobbyView();
 
     session.send({
       type: "draft_welcome",
@@ -666,8 +655,8 @@ export class P2PDraftHost {
     return 1 + this.seatTokens.size - (this.seatTokens.has(0) ? 0 : 0);
   }
 
-  private buildSeatPublicViews() {
-    const seats = [];
+  private buildSeatPublicViews(): SeatPublicView[] {
+    const seats: SeatPublicView[] = [];
     for (let i = 0; i < this.podSize; i++) {
       seats.push({
         seat_index: i,
@@ -675,6 +664,7 @@ export class P2PDraftHost {
         is_bot: false,
         connected: i === 0 || this.guestSessions.has(i),
         has_submitted_deck: false,
+        pick_status: "NotDrafting",
       });
     }
     return seats;
@@ -692,6 +682,12 @@ export class P2PDraftHost {
       seats: this.buildSeatPublicViews(),
       cards_per_pack: 14,
       pack_count: 3,
+      timer_remaining_ms: null,
+      standings: [],
+      current_round: 0,
+      tournament_format: "Swiss",
+      pod_policy: "Competitive",
+      pairings: [],
     };
   }
 
