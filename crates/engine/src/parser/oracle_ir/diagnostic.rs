@@ -8,7 +8,6 @@ use std::fmt;
 /// Severity level for parse diagnostics (D-05).
 /// Derived from the variant — not stored as a field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[allow(dead_code)] // Used by future consumers in Plan 3.
 pub enum DiagnosticSeverity {
     Error,
     Warning,
@@ -63,34 +62,36 @@ pub enum OracleDiagnostic {
         line_index: usize,
     },
 
-    /// Legacy string warning not yet migrated to a typed variant.
-    /// Used during dual-emit transition (D-11) for swallow_check warnings
-    /// that are deferred to Plan 3.
-    Legacy { message: String, line_index: usize },
 }
 
 impl OracleDiagnostic {
     /// Severity level, determined by variant (D-05).
-    #[allow(dead_code)] // Used by future consumers in Plan 3.
     pub fn severity(&self) -> DiagnosticSeverity {
         match self {
             Self::TargetFallback { .. } => DiagnosticSeverity::Warning,
             Self::IgnoredRemainder { .. } => DiagnosticSeverity::Info,
             Self::SwallowedClause { .. } => DiagnosticSeverity::Warning,
             Self::CascadeLoss { .. } => DiagnosticSeverity::Warning,
-            Self::Legacy { .. } => DiagnosticSeverity::Warning,
         }
     }
 
     /// Oracle text line index (D-06 provenance).
-    #[allow(dead_code)] // Used by future consumers in Plan 3.
     pub fn line_index(&self) -> usize {
         match self {
             Self::TargetFallback { line_index, .. }
             | Self::IgnoredRemainder { line_index, .. }
             | Self::SwallowedClause { line_index, .. }
-            | Self::CascadeLoss { line_index, .. }
-            | Self::Legacy { line_index, .. } => *line_index,
+            | Self::CascadeLoss { line_index, .. } => *line_index,
+        }
+    }
+
+    /// Diagnostic category name for regression tracking (D-08).
+    pub fn category_name(&self) -> &'static str {
+        match self {
+            Self::TargetFallback { .. } => "target-fallback",
+            Self::IgnoredRemainder { .. } => "ignored-remainder",
+            Self::SwallowedClause { .. } => "swallowed-clause",
+            Self::CascadeLoss { .. } => "cascade-loss",
         }
     }
 }
@@ -131,7 +132,6 @@ impl fmt::Display for OracleDiagnostic {
                     "Swallow:{slot_name} — cascade slot lost (effect={effect_name})"
                 )
             }
-            Self::Legacy { message, .. } => write!(f, "{message}"),
         }
     }
 }
@@ -179,11 +179,6 @@ mod tests {
             "ignored-remainder(must-block): 'extra stuff'"
         );
 
-        let diag = OracleDiagnostic::Legacy {
-            message: "Swallow:DynamicQty — some issue".into(),
-            line_index: 0,
-        };
-        assert_eq!(diag.to_string(), "Swallow:DynamicQty — some issue");
     }
 
     #[test]

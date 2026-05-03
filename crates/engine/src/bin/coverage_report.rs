@@ -129,23 +129,7 @@ fn main() {
             std::collections::BTreeMap::new();
         for (_key, face) in db.face_iter() {
             for warning in &face.parse_warnings {
-                let category_name = match warning {
-                    engine::parser::oracle_ir::diagnostic::OracleDiagnostic::TargetFallback {
-                        ..
-                    } => "target-fallback",
-                    engine::parser::oracle_ir::diagnostic::OracleDiagnostic::IgnoredRemainder {
-                        ..
-                    } => "ignored-remainder",
-                    engine::parser::oracle_ir::diagnostic::OracleDiagnostic::SwallowedClause {
-                        ..
-                    } => "swallowed-clause",
-                    engine::parser::oracle_ir::diagnostic::OracleDiagnostic::CascadeLoss {
-                        ..
-                    } => "cascade-loss",
-                    engine::parser::oracle_ir::diagnostic::OracleDiagnostic::Legacy { .. } => {
-                        "legacy"
-                    }
-                };
+                let category_name = warning.category_name();
                 warnings_by_category
                     .entry(category_name.to_string())
                     .or_default()
