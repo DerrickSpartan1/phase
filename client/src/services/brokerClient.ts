@@ -1,4 +1,5 @@
 import type {
+  DraftLobbyMetadata,
   FormatConfig,
   JoinTargetInfo,
   LobbyGame,
@@ -29,6 +30,9 @@ export interface RegisterHostRequest {
   formatConfig: FormatConfig | null;
   aiSeats: unknown[];
   roomName: string | null;
+  /** Draft-specific metadata. When set, the lobby entry is badged as a
+   *  draft pod with set code and draft kind. */
+  draftMetadata: DraftLobbyMetadata | null;
 }
 
 export interface RegisteredGame {
@@ -163,6 +167,7 @@ function makeBrokerClient(socket: PhaseSocket): BrokerClient {
             ai_seats: req.aiSeats,
             room_name: req.roomName,
             host_peer_id: req.hostPeerId,
+            draft_metadata: req.draftMetadata,
           },
         }),
       );

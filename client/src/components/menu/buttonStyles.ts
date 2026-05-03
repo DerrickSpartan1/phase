@@ -1,4 +1,4 @@
-export type MenuButtonTone = "neutral" | "emerald" | "amber" | "blue" | "red" | "indigo" | "slate" | "cyan";
+export type MenuButtonTone = "neutral" | "emerald" | "amber" | "blue" | "red" | "indigo" | "slate" | "cyan" | "purple";
 export type MenuButtonSize = "sm" | "md" | "lg";
 
 const BASE =
@@ -13,6 +13,7 @@ const TONES: Record<MenuButtonTone, string> = {
   indigo: "border-indigo-300/18 bg-indigo-400/10 text-indigo-100 hover:border-indigo-300/26 hover:bg-indigo-400/14",
   slate: "border-slate-300/16 bg-slate-300/8 text-slate-100 hover:border-slate-300/24 hover:bg-slate-300/12",
   cyan: "border-cyan-300/18 bg-cyan-400/10 text-cyan-100 hover:border-cyan-300/26 hover:bg-cyan-400/14",
+  purple: "border-purple-300/18 bg-purple-400/10 text-purple-100 hover:border-purple-300/26 hover:bg-purple-400/14",
 };
 
 const SIZES: Record<MenuButtonSize, string> = {

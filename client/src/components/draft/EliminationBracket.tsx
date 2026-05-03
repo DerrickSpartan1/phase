@@ -1,0 +1,72 @@
+import type { PairingView } from "../../adapter/draft-adapter";
+import { useMultiplayerDraftStore } from "../../stores/multiplayerDraftStore";
+
+// ── Round labels ────────────────────────────────────────────────────────
+
+const ROUND_LABELS = ["Quarterfinals", "Semifinals", "Final"] as const;
+
+// ── Match Card ──────────────────────────────────────────────────────────
+
+function MatchCard({ pairing }: { pairing: PairingView }) {
+  return (
+    <div className="border border-white/10 bg-black/50 rounded-lg px-3 py-2 text-sm">
+      <div
+        className={
+          pairing.winner_seat === pairing.seat_a
+            ? "text-green-300"
+            : "text-white/80"
+        }
+      >
+        {pairing.name_a}
+      </div>
+      <div className="text-white/20 text-xs my-0.5">vs</div>
+      <div
+        className={
+          pairing.winner_seat === pairing.seat_b
+            ? "text-green-300"
+            : "text-white/80"
+        }
+      >
+        {pairing.name_b}
+      </div>
+    </div>
+  );
+}
+
+// ── Component ───────────────────────────────────────────────────────────
+
+/** CSS grid single-elimination bracket for 8 players (3 rounds). */
+export function EliminationBracket() {
+  const tournamentFormat = useMultiplayerDraftStore(
+    (s) => s.view?.tournament_format,
+  );
+  const pairings = useMultiplayerDraftStore((s) => s.pairings);
+
+  if (tournamentFormat !== "SingleElimination") return null;
+
+  // Group pairings by round
+  const byRound = new Map<number, PairingView[]>();
+  for (const p of pairings) {
+    const list = byRound.get(p.round) ?? [];
+    list.push(p);
+    byRound.set(p.round, list);
+  }
+
+  return (
+    <div className="rounded-xl border border-white/10 bg-black/30 p-4">
+      <h3 className="text-lg font-medium text-white mb-4">Bracket</h3>
+      <div className="grid grid-cols-3 gap-8">
+        {ROUND_LABELS.map((label, round) => (
+          <div key={round} className="flex flex-col gap-4 justify-around">
+            <div className="text-xs text-white/40 text-center mb-1">
+              {label}
+            </div>
+            {(byRound.get(round) ?? []).map((p) => (
+              <MatchCard key={p.match_id} pairing={p} />
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

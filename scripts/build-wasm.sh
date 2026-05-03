@@ -4,30 +4,39 @@ set -euo pipefail
 WASM_OUT="client/src/wasm"
 PROFILE="${1:-wasm-dev}"
 
-echo "Building WASM (profile: $PROFILE)..."
+# Build a single WASM crate: compile, bind, optimize.
+build_wasm_crate() {
+  local PACKAGE="$1"
+  local OUT_NAME="$2"
 
-# Step 1: Compile Rust to WASM
-if [ "$PROFILE" = "release" ]; then
-  cargo build --package engine-wasm --target wasm32-unknown-unknown --release
-else
-  cargo build --package engine-wasm --target wasm32-unknown-unknown --profile "$PROFILE"
-fi
+  echo "Building $PACKAGE (profile: $PROFILE)..."
 
-# Step 2: Generate JS/TS bindings
+  if [ "$PROFILE" = "release" ]; then
+    cargo build --package "$PACKAGE" --target wasm32-unknown-unknown --release
+  else
+    cargo build --package "$PACKAGE" --target wasm32-unknown-unknown --profile "$PROFILE"
+  fi
+
+  wasm-bindgen \
+    --target web \
+    --out-dir "$WASM_OUT" \
+    --out-name "$OUT_NAME" \
+    "target/wasm32-unknown-unknown/$PROFILE/${PACKAGE//-/_}.wasm"
+
+  if [ "$PROFILE" = "release" ] && command -v wasm-opt &> /dev/null; then
+    echo "Optimizing $OUT_NAME..."
+    wasm-opt -Oz --strip-debug --enable-bulk-memory --enable-nontrapping-float-to-int \
+      "$WASM_OUT/${OUT_NAME}_bg.wasm" \
+      -o "$WASM_OUT/${OUT_NAME}_bg.wasm"
+  fi
+}
+
 mkdir -p "$WASM_OUT"
-wasm-bindgen \
-  --target web \
-  --out-dir "$WASM_OUT" \
-  --out-name engine_wasm \
-  "target/wasm32-unknown-unknown/$PROFILE/engine_wasm.wasm"
 
-# Step 3: Optimize (release only)
-if [ "$PROFILE" = "release" ] && command -v wasm-opt &> /dev/null; then
-  echo "Optimizing WASM binary..."
-  wasm-opt -Oz --strip-debug --enable-bulk-memory --enable-nontrapping-float-to-int \
-    "$WASM_OUT/engine_wasm_bg.wasm" \
-    -o "$WASM_OUT/engine_wasm_bg.wasm"
-fi
+build_wasm_crate engine-wasm engine_wasm
+build_wasm_crate draft-wasm draft_wasm
 
+echo ""
 echo "WASM build complete. Output in $WASM_OUT"
-echo "Binary size: $(du -h "$WASM_OUT/engine_wasm_bg.wasm" | cut -f1)"
+echo "  engine: $(du -h "$WASM_OUT/engine_wasm_bg.wasm" | cut -f1)"
+echo "  draft:  $(du -h "$WASM_OUT/draft_wasm_bg.wasm" | cut -f1)"

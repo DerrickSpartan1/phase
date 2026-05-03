@@ -18,7 +18,8 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true,
     "paths": {
-      "@wasm/engine": ["./src/wasm/engine_wasm"]
+      "@wasm/engine": ["./src/wasm/engine_wasm"],
+      "@wasm/draft": ["./src/wasm/draft_wasm"]
     }
   },
   "include": ["src"],

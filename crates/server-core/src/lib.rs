@@ -1,5 +1,8 @@
 pub mod deck_resolve;
+pub mod draft_session;
 pub mod filter;
+#[cfg(test)]
+mod harness;
 pub mod lobby;
 pub mod persist;
 pub mod protocol;
@@ -8,6 +11,7 @@ pub mod session;
 pub mod starter_decks;
 
 pub use deck_resolve::resolve_deck;
+pub use draft_session::{generate_draft_code, DraftSession, DraftSessionManager};
 pub use filter::filter_state_for_player;
 pub use lobby::LobbyManager;
 pub use persist::{PersistedLobbyMeta, PersistedSession};

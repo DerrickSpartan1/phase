@@ -525,6 +525,7 @@ export function GameProvider({
                 formatConfig: formatConfig ?? null,
                 aiSeats: [],
                 roomName: roomName ?? null,
+                draftMetadata: null,
               });
               signal.throwIfAborted();
               if (result) {
@@ -938,7 +939,36 @@ export function GameProvider({
         return;
       }
 
-      // No saved state — start a new game
+      // No saved state — start a new game.
+      // Draft mode: deck data was pre-built by DraftPage and stored in
+      // sessionStorage. Use it directly instead of loadActiveDeck + buildDeckList.
+      const draftDeckKey = `phase:draft-deck:${gameId}`;
+      const draftDeckRaw = sessionStorage.getItem(draftDeckKey);
+      if (draftDeckRaw) {
+        sessionStorage.removeItem(draftDeckKey);
+        const deckList = JSON.parse(draftDeckRaw) as {
+          player: { main_deck: string[]; sideboard: string[]; commander: string[] };
+          opponent: { main_deck: string[]; sideboard: string[]; commander: string[] };
+          ai_decks: Array<{ main_deck: string[]; sideboard: string[]; commander: string[] }>;
+        };
+        try {
+          await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
+          if (cancelled) return;
+          controller = createGameLoopController({
+            mode,
+            difficulty,
+            aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
+            playerCount,
+          });
+          controller.start();
+          audioManager.setContext("battlefield");
+        } catch (err) {
+          console.error("Draft deck validation failed:", err);
+          if (!cancelled) onNoDeckRef.current?.();
+        }
+        return;
+      }
+
       const parsedDeck = loadActiveDeck();
       if (!parsedDeck) {
         onNoDeckRef.current?.();
