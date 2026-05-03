@@ -14,7 +14,6 @@ pub(crate) mod trigger;
 #[allow(unused_imports)]
 // Re-exports for future consumers; direct ast:: paths used during migration.
 pub(crate) use self::ast::*;
-#[allow(unused_imports)] // Re-export for future consumers; wired into parser in Phase 48.
 pub(crate) use self::doc::*;
 #[allow(unused_imports)] // Re-export for future consumers; wired into parser in Plan 02.
 pub(crate) use self::effect_chain::*;

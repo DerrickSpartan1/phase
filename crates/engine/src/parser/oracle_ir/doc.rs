@@ -1,23 +1,26 @@
 //! Document-level Oracle IR types.
 //!
 //! `OracleDocIr` represents the complete parsed output of a card's Oracle text.
-//! `OracleItemIr` categorizes each parsed item. In Phase 47, variants carry
-//! existing engine types directly (per D-05). Phases 48-49 swap in proper IR
-//! types as each parser branch gets its lowering split.
+//! `OracleItemIr` categorizes each parsed item. Core variants carry proper IR
+//! types (EffectChainIr, TriggerIr, StaticIr, ReplacementIr). PreLowered
+//! variants carry already-assembled engine types from pre-processors and
+//! dispatch paths that construct definitions directly.
 
 use super::effect_chain::EffectChainIr;
 use super::replacement::ReplacementIr;
 use super::static_ir::StaticIr;
 use super::trigger::TriggerIr;
 use crate::types::ability::{
-    AdditionalCost, CastingRestriction, ModalChoice, SolveCondition, SpellCastingOption,
+    AbilityDefinition, AdditionalCost, CastingRestriction, ModalChoice, ReplacementDefinition,
+    SolveCondition, SpellCastingOption, StaticDefinition, TriggerDefinition,
 };
 use crate::types::keywords::Keyword;
 use crate::types::mana::ManaCost;
 
 /// Document-level IR: the complete parsed representation of a card's Oracle text.
+///
+/// Produced by `parse_oracle_ir`, consumed by `lower_oracle_ir`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[allow(dead_code)] // Constructed in tests now; wired into parser in Phase 48.
 pub(crate) struct OracleDocIr {
     /// Parsed items in source order.
     pub(crate) items: Vec<OracleItemIr>,
@@ -29,11 +32,12 @@ pub(crate) struct OracleDocIr {
 
 /// Individual parsed item from Oracle text.
 ///
-/// Each variant carries existing engine types directly — these will be replaced
-/// by proper IR types (EffectChainIr, TriggerIr, etc.) in Phases 48-49.
+/// Core variants carry IR types (EffectChainIr, TriggerIr, StaticIr, ReplacementIr).
+/// PreLowered variants carry already-assembled engine types from pre-processors
+/// and dispatch paths that construct definitions directly.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[allow(dead_code)] // Used in tests now; wired into parser in Phase 48.
-#[allow(clippy::large_enum_variant)] // Intentional: variants carry existing engine types directly per D-05.
+#[allow(dead_code)] // Core IR variants used in tests + wired in future phases.
+#[allow(clippy::large_enum_variant)] // Intentional: variants carry engine types directly.
 pub(crate) enum OracleItemIr {
     /// Spell or activated ability effect chain (carries EffectChainIr since Phase 49).
     Spell(EffectChainIr),
@@ -57,6 +61,19 @@ pub(crate) enum OracleItemIr {
     SolveCondition(SolveCondition),
     /// Strive per-target surcharge.
     StriveCost(ManaCost),
+    /// Pre-lowered trigger from pre-processors (saga, leveler, spacecraft, exert, etc.)
+    /// that construct `TriggerDefinition` directly without going through branch IR parsers.
+    PreLoweredTrigger(TriggerDefinition),
+    /// Pre-lowered static from pre-processors (leveler, defiler, etc.)
+    /// that construct `StaticDefinition` directly.
+    PreLoweredStatic(StaticDefinition),
+    /// Pre-lowered replacement from pre-processors (saga ETB replacement, etc.)
+    /// that construct `ReplacementDefinition` directly.
+    PreLoweredReplacement(ReplacementDefinition),
+    /// Pre-lowered spell/activated ability from dispatch paths that construct
+    /// `AbilityDefinition` directly with post-processing (equip, loyalty,
+    /// activated abilities with manual cost/restriction, etc.).
+    PreLoweredSpell(AbilityDefinition),
 }
 
 #[cfg(test)]

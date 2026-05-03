@@ -35,7 +35,10 @@ use super::oracle_classifier::{
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
 use super::oracle_dispatch::{dispatch_line_nom, make_unimplemented_with_effect};
-use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context, ParseContext};
+use super::oracle_effect::{
+    lower_effect_chain_ir, parse_effect_chain, parse_effect_chain_with_context, ParseContext,
+};
+use super::oracle_ir::{OracleDocIr, OracleItemIr};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{
     extract_keyword_line, is_keyword_cost_line, parse_keyword_from_oracle,
@@ -46,7 +49,7 @@ use super::oracle_modal::{
     extract_ability_word_reminder_body, lower_oracle_block, parse_oracle_block, strip_ability_word,
     strip_ability_word_with_name,
 };
-use super::oracle_replacement::parse_replacement_line;
+use super::oracle_replacement::{lower_replacement_ir, parse_replacement_line};
 use super::oracle_saga::{is_saga_chapter, parse_saga_chapters};
 use super::oracle_spacecraft::parse_spacecraft_threshold_lines;
 use super::oracle_special::{
@@ -55,9 +58,10 @@ use super::oracle_special::{
     parse_harmonize_keyword, parse_solve_condition, try_parse_die_roll_table,
 };
 use super::oracle_static::{
-    parse_static_line_multi, try_parse_graveyard_keyword_grant_clause, GraveyardGrantedKeywordKind,
+    lower_static_ir, parse_static_line_multi, try_parse_graveyard_keyword_grant_clause,
+    GraveyardGrantedKeywordKind,
 };
-use super::oracle_trigger::parse_trigger_lines_at_index;
+use super::oracle_trigger::{lower_trigger_ir, parse_trigger_lines_at_index};
 use super::oracle_util::{
     normalize_card_name_refs, parse_mana_symbols, parse_number, strip_reminder_text, TextPair,
 };
@@ -794,42 +798,95 @@ fn ability_word_to_trigger_condition(
     }
 }
 
-/// Parse Oracle text into structured ability definitions.
+/// Lower an `OracleDocIr` into the final `ParsedAbilities` via exhaustive match
+/// on each `OracleItemIr` variant.
 ///
-/// Splits on newlines, strips reminder text, then classifies each line
-/// according to a priority table (keywords, enchant, equip, activated,
-/// triggered, static, replacement, spell effect, modal, loyalty, etc.).
+/// Core IR variants are lowered through their dedicated lowering functions.
+/// PreLowered variants are identity-lowered (pushed directly to the result).
+pub(crate) fn lower_oracle_ir(ir: &OracleDocIr) -> ParsedAbilities {
+    let mut result = ParsedAbilities {
+        abilities: Vec::new(),
+        triggers: Vec::new(),
+        statics: Vec::new(),
+        replacements: Vec::new(),
+        extracted_keywords: Vec::new(),
+        modal: None,
+        additional_cost: None,
+        casting_restrictions: Vec::new(),
+        casting_options: Vec::new(),
+        solve_condition: None,
+        strive_cost: None,
+        parse_warnings: Vec::new(),
+    };
+    for item in &ir.items {
+        match item {
+            OracleItemIr::Spell(effect_ir) => {
+                result.abilities.push(lower_effect_chain_ir(effect_ir));
+            }
+            OracleItemIr::Trigger(trigger_ir) => {
+                result.triggers.push(lower_trigger_ir(trigger_ir));
+            }
+            OracleItemIr::Static(static_ir) => {
+                result.statics.push(lower_static_ir(static_ir));
+            }
+            OracleItemIr::Replacement(replacement_ir) => {
+                result
+                    .replacements
+                    .push(lower_replacement_ir(replacement_ir));
+            }
+            OracleItemIr::Keyword(kw) => {
+                result.extracted_keywords.push(kw.clone());
+            }
+            OracleItemIr::Modal(modal) => {
+                result.modal = Some(modal.clone());
+            }
+            OracleItemIr::AdditionalCost(cost) => {
+                result.additional_cost = Some(cost.clone());
+            }
+            OracleItemIr::CastingRestriction(restriction) => {
+                result.casting_restrictions.push(restriction.clone());
+            }
+            OracleItemIr::CastingOption(option) => {
+                result.casting_options.push(option.clone());
+            }
+            OracleItemIr::SolveCondition(condition) => {
+                result.solve_condition = Some(condition.clone());
+            }
+            OracleItemIr::StriveCost(cost) => {
+                result.strive_cost = Some(cost.clone());
+            }
+            OracleItemIr::PreLoweredTrigger(def) => {
+                result.triggers.push(def.clone());
+            }
+            OracleItemIr::PreLoweredStatic(def) => {
+                result.statics.push(def.clone());
+            }
+            OracleItemIr::PreLoweredReplacement(def) => {
+                result.replacements.push(def.clone());
+            }
+            OracleItemIr::PreLoweredSpell(def) => {
+                result.abilities.push(def.clone());
+            }
+        }
+    }
+    result
+}
+
+/// Produce an `OracleDocIr` from Oracle text — the IR-production half of the
+/// parse/lower split (Phase 49, Plan 03).
 ///
-/// `mtgjson_keyword_names` are the raw lowercased keyword names from MTGJSON
-/// (e.g. `["flying", "protection"]`). Used to identify keyword-only lines
-/// and to avoid re-extracting keywords MTGJSON already provides.
-///
-/// # Self-reference normalization
-///
-/// This function is the **single normalization entry point** for the parser.
-/// It invokes [`normalize_card_name_refs`] once on the raw Oracle text (CR
-/// 201.4b) so every downstream block parser — saga chapters, class levels,
-/// leveler blocks, modal mode bodies, triggers, statics, effects, replacements,
-/// spacecraft thresholds — receives text with the card's self-references
-/// rewritten to `~`.
-///
-/// The `pub fn` wrappers exposed for direct testing
-/// (`parse_replacement_line`, `parse_trigger_line`, `parse_trigger_lines`,
-/// `parse_class_oracle_text`, etc.) re-invoke `normalize_card_name_refs`
-/// internally; when called via this function the re-invocation is an
-/// idempotent no-op.
-#[tracing::instrument(
-    level = "info",
-    skip(oracle_text, mtgjson_keyword_names, types, subtypes)
-)]
-pub fn parse_oracle_text(
+/// Contains all pre-processing (saga, class, leveler, modal, spacecraft, strive)
+/// and the full per-line dispatch loop. Parsed items are wrapped in `OracleItemIr`
+/// variants. Pre-processors and complex dispatch paths use `PreLowered*` variants
+/// carrying already-assembled engine types; future phases will incrementally
+/// migrate these to proper IR types.
+pub(crate) fn parse_oracle_ir(
     oracle_text: &str,
     card_name: &str,
     mtgjson_keyword_names: &[String],
     types: &[String],
     subtypes: &[String],
-) -> ParsedAbilities {
-    clear_warnings();
+) -> OracleDocIr {
     let is_spell = types.iter().any(|t| t == "Instant" || t == "Sorcery");
 
     let mut result = ParsedAbilities {
@@ -870,10 +927,9 @@ pub fn parse_oracle_text(
 
     // CR 716: Pre-parse Class level sections into level-gated abilities.
     if subtypes.iter().any(|s| s == "Class") {
-        let mut class_result =
+        let class_result =
             parse_class_oracle_text(&lines, card_name, mtgjson_keyword_names, result);
-        class_result.parse_warnings = take_warnings();
-        return class_result;
+        return parsed_abilities_to_doc_ir(class_result, oracle_text, card_name);
     }
 
     // CR 711: Pre-parse leveler LEVEL blocks into counter-gated static abilities.
@@ -2110,6 +2166,87 @@ pub fn parse_oracle_text(
     // (Phase 1: observability only — see swallow_check.rs for detector
     // catalog and Phase 2 demotion plan).
     super::swallow_check::check_swallowed_clauses(oracle_text, &result);
+
+    parsed_abilities_to_doc_ir(result, oracle_text, card_name)
+}
+
+/// Convert a `ParsedAbilities` into an `OracleDocIr` using `PreLowered*` variants.
+///
+/// Preserves source ordering: abilities, triggers, statics, replacements are pushed
+/// in their parsed order. Scalar fields (modal, additional_cost, solve_condition,
+/// strive_cost) are pushed as their corresponding `OracleItemIr` variants.
+fn parsed_abilities_to_doc_ir(
+    result: ParsedAbilities,
+    oracle_text: &str,
+    card_name: &str,
+) -> OracleDocIr {
+    let mut items: Vec<OracleItemIr> = Vec::new();
+    for def in result.abilities {
+        items.push(OracleItemIr::PreLoweredSpell(def));
+    }
+    for def in result.triggers {
+        items.push(OracleItemIr::PreLoweredTrigger(def));
+    }
+    for def in result.statics {
+        items.push(OracleItemIr::PreLoweredStatic(def));
+    }
+    for def in result.replacements {
+        items.push(OracleItemIr::PreLoweredReplacement(def));
+    }
+    for kw in result.extracted_keywords {
+        items.push(OracleItemIr::Keyword(kw));
+    }
+    if let Some(modal) = result.modal {
+        items.push(OracleItemIr::Modal(modal));
+    }
+    if let Some(cost) = result.additional_cost {
+        items.push(OracleItemIr::AdditionalCost(cost));
+    }
+    for restriction in result.casting_restrictions {
+        items.push(OracleItemIr::CastingRestriction(restriction));
+    }
+    for option in result.casting_options {
+        items.push(OracleItemIr::CastingOption(option));
+    }
+    if let Some(condition) = result.solve_condition {
+        items.push(OracleItemIr::SolveCondition(condition));
+    }
+    if let Some(cost) = result.strive_cost {
+        items.push(OracleItemIr::StriveCost(cost));
+    }
+    OracleDocIr {
+        items,
+        source_text: oracle_text.to_string(),
+        card_name: card_name.to_string(),
+    }
+}
+
+/// Parse Oracle text into structured ability definitions.
+///
+/// This is the public API entry point — a thin wrapper around [`parse_oracle_ir`]
+/// (IR production) and [`lower_oracle_ir`] (IR lowering). The thread-local
+/// warning system is managed here: `clear_warnings()` before parsing,
+/// `take_warnings()` after lowering.
+#[tracing::instrument(
+    level = "info",
+    skip(oracle_text, mtgjson_keyword_names, types, subtypes)
+)]
+pub fn parse_oracle_text(
+    oracle_text: &str,
+    card_name: &str,
+    mtgjson_keyword_names: &[String],
+    types: &[String],
+    subtypes: &[String],
+) -> ParsedAbilities {
+    clear_warnings();
+    let ir = parse_oracle_ir(
+        oracle_text,
+        card_name,
+        mtgjson_keyword_names,
+        types,
+        subtypes,
+    );
+    let mut result = lower_oracle_ir(&ir);
     result.parse_warnings = take_warnings();
     result
 }
