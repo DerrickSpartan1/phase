@@ -140,3 +140,316 @@ fn weighted_select_n(
 
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, HashSet};
+
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    use super::*;
+    use crate::set_pool::{PackSlot, Rarity, SheetCard};
+
+    fn make_sheet_cards(
+        prefix: &str,
+        set_code: &str,
+        count: usize,
+        rarity: Rarity,
+        weight: u32,
+    ) -> Vec<SheetCard> {
+        (0..count)
+            .map(|i| SheetCard {
+                name: format!("{prefix}_{i}"),
+                set_code: set_code.to_string(),
+                collector_number: format!("{}", i + 1),
+                rarity,
+                weight,
+            })
+            .collect()
+    }
+
+    fn single_choice(sheet: &str) -> Vec<WeightedSheetChoice> {
+        vec![WeightedSheetChoice {
+            sheet: sheet.to_string(),
+            weight: 1,
+        }]
+    }
+
+    /// Standard test pool: 20 commons, 10 uncommons, 5 rares + 2 mythics.
+    /// Single pack variant: 10 common + 3 uncommon + 1 rareMythic = 14 cards.
+    fn test_pool() -> LimitedSetPool {
+        let common_cards = make_sheet_cards("TST_common", "TST", 20, Rarity::Common, 1);
+        let uncommon_cards = make_sheet_cards("TST_uncommon", "TST", 10, Rarity::Uncommon, 1);
+        let mut rare_mythic_cards = make_sheet_cards("TST_rare", "TST", 5, Rarity::Rare, 7);
+        rare_mythic_cards.extend(make_sheet_cards("TST_mythic", "TST", 2, Rarity::Mythic, 1));
+
+        let mut sheets = BTreeMap::new();
+        sheets.insert(
+            "common".to_string(),
+            SheetDefinition {
+                total_weight: 20,
+                foil: false,
+                balance_colors: false,
+                cards: common_cards,
+            },
+        );
+        sheets.insert(
+            "uncommon".to_string(),
+            SheetDefinition {
+                total_weight: 10,
+                foil: false,
+                balance_colors: false,
+                cards: uncommon_cards,
+            },
+        );
+        sheets.insert(
+            "rareMythic".to_string(),
+            SheetDefinition {
+                total_weight: 37, // 5*7 + 2*1
+                foil: false,
+                balance_colors: false,
+                cards: rare_mythic_cards,
+            },
+        );
+
+        LimitedSetPool {
+            code: "TST".to_string(),
+            name: "Test Set".to_string(),
+            release_date: None,
+            pack_variants: vec![PackVariant {
+                contents: vec![
+                    PackSlot {
+                        slot: "common".to_string(),
+                        count: 10,
+                        choices: single_choice("common"),
+                    },
+                    PackSlot {
+                        slot: "uncommon".to_string(),
+                        count: 3,
+                        choices: single_choice("uncommon"),
+                    },
+                    PackSlot {
+                        slot: "rareMythic".to_string(),
+                        count: 1,
+                        choices: single_choice("rareMythic"),
+                    },
+                ],
+                weight: 1,
+            }],
+            pack_variants_total_weight: 1,
+            sheets,
+            prints: vec![],
+            basic_lands: vec![],
+        }
+    }
+
+    /// Two-variant pool: variant 1 (weight 9) is standard, variant 2 (weight 1) includes bonus sheet.
+    fn two_variant_pool() -> LimitedSetPool {
+        let common_cards = make_sheet_cards("TV2_common", "TV2", 15, Rarity::Common, 1);
+        let uncommon_cards = make_sheet_cards("TV2_uncommon", "TV2", 8, Rarity::Uncommon, 1);
+        let rare_cards = make_sheet_cards("TV2_rare", "TV2", 5, Rarity::Rare, 1);
+        let bonus_cards = make_sheet_cards("BONUS_card", "STA", 3, Rarity::Rare, 1);
+
+        let mut sheets = BTreeMap::new();
+        sheets.insert(
+            "common".to_string(),
+            SheetDefinition {
+                total_weight: 15,
+                foil: false,
+                balance_colors: false,
+                cards: common_cards,
+            },
+        );
+        sheets.insert(
+            "uncommon".to_string(),
+            SheetDefinition {
+                total_weight: 8,
+                foil: false,
+                balance_colors: false,
+                cards: uncommon_cards,
+            },
+        );
+        sheets.insert(
+            "rareMythic".to_string(),
+            SheetDefinition {
+                total_weight: 5,
+                foil: false,
+                balance_colors: false,
+                cards: rare_cards,
+            },
+        );
+        sheets.insert(
+            "bonus".to_string(),
+            SheetDefinition {
+                total_weight: 3,
+                foil: false,
+                balance_colors: false,
+                cards: bonus_cards,
+            },
+        );
+
+        LimitedSetPool {
+            code: "TV2".to_string(),
+            name: "Two Variant Set".to_string(),
+            release_date: None,
+            pack_variants: vec![
+                PackVariant {
+                    contents: vec![
+                        PackSlot {
+                            slot: "common".to_string(),
+                            count: 10,
+                            choices: single_choice("common"),
+                        },
+                        PackSlot {
+                            slot: "uncommon".to_string(),
+                            count: 3,
+                            choices: single_choice("uncommon"),
+                        },
+                        PackSlot {
+                            slot: "rareMythic".to_string(),
+                            count: 1,
+                            choices: single_choice("rareMythic"),
+                        },
+                    ],
+                    weight: 9,
+                },
+                PackVariant {
+                    contents: vec![
+                        PackSlot {
+                            slot: "common".to_string(),
+                            count: 9,
+                            choices: single_choice("common"),
+                        },
+                        PackSlot {
+                            slot: "uncommon".to_string(),
+                            count: 3,
+                            choices: single_choice("uncommon"),
+                        },
+                        PackSlot {
+                            slot: "rareMythic".to_string(),
+                            count: 1,
+                            choices: single_choice("rareMythic"),
+                        },
+                        PackSlot {
+                            slot: "bonus".to_string(),
+                            count: 1,
+                            choices: single_choice("bonus"),
+                        },
+                    ],
+                    weight: 1,
+                },
+            ],
+            pack_variants_total_weight: 10,
+            sheets,
+            prints: vec![],
+            basic_lands: vec![],
+        }
+    }
+
+    #[test]
+    fn test_deterministic_generation() {
+        let gen = PackGenerator::new(test_pool());
+        let mut rng1 = ChaCha8Rng::seed_from_u64(42);
+        let mut rng2 = ChaCha8Rng::seed_from_u64(42);
+        let pack1 = gen.generate_pack(&mut rng1, 0, 0);
+        let pack2 = gen.generate_pack(&mut rng2, 0, 0);
+        assert_eq!(pack1, pack2);
+    }
+
+    #[test]
+    fn test_correct_pack_size() {
+        let gen = PackGenerator::new(test_pool());
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let pack = gen.generate_pack(&mut rng, 0, 0);
+        // 10 common + 3 uncommon + 1 rareMythic = 14
+        assert_eq!(pack.0.len(), 14);
+    }
+
+    #[test]
+    fn test_no_duplicate_cards_in_pack() {
+        let gen = PackGenerator::new(test_pool());
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let pack = gen.generate_pack(&mut rng, 0, 0);
+        let ids: HashSet<_> = pack.0.iter().map(|c| &c.instance_id).collect();
+        assert_eq!(ids.len(), pack.0.len());
+        // Also verify card names are unique (no duplicate cards from same sheet slot).
+        let names: HashSet<_> = pack.0.iter().map(|c| &c.name).collect();
+        assert_eq!(names.len(), pack.0.len());
+    }
+
+    #[test]
+    fn test_variant_weight_distribution() {
+        let gen = PackGenerator::new(two_variant_pool());
+        let mut bonus_count = 0;
+        let iterations = 2000;
+        for seed in 0..iterations {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let pack = gen.generate_pack(&mut rng, 0, 0);
+            if pack.0.iter().any(|c| c.name.starts_with("BONUS_")) {
+                bonus_count += 1;
+            }
+        }
+        // Expected ~10% = ~200, allow 100-350 for statistical stability.
+        assert!(
+            (100..=350).contains(&bonus_count),
+            "Expected ~200 bonus packs out of {iterations}, got {bonus_count}"
+        );
+    }
+
+    #[test]
+    fn test_different_seats_different_packs() {
+        let gen = PackGenerator::new(test_pool());
+        let mut rng1 = ChaCha8Rng::seed_from_u64(42);
+        let mut rng2 = ChaCha8Rng::seed_from_u64(42);
+        let pack_a = gen.generate_pack(&mut rng1, 0, 0);
+        let pack_b = gen.generate_pack(&mut rng2, 1, 0);
+        // Instance IDs differ due to seat encoding.
+        assert_ne!(pack_a.0[0].instance_id, pack_b.0[0].instance_id);
+    }
+
+    #[test]
+    fn test_set_code_matches() {
+        let gen = PackGenerator::new(test_pool());
+        let mut rng = ChaCha8Rng::seed_from_u64(42);
+        let pack = gen.generate_pack(&mut rng, 0, 0);
+        for card in &pack.0 {
+            assert_eq!(card.set_code, "TST");
+        }
+    }
+
+    #[test]
+    fn test_rarity_from_sheet() {
+        let gen = PackGenerator::new(test_pool());
+        // Generate many packs — the last card in each is from rareMythic sheet.
+        for seed in 0..100u64 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let pack = gen.generate_pack(&mut rng, 0, 0);
+            let rare_card = &pack.0[13]; // index 13 = slot 3 (rareMythic), count 1
+            assert!(
+                rare_card.rarity == "rare" || rare_card.rarity == "mythic",
+                "Expected rare or mythic, got '{}' for card '{}'",
+                rare_card.rarity,
+                rare_card.name
+            );
+        }
+    }
+
+    #[test]
+    fn test_bonus_sheet_variant() {
+        let gen = PackGenerator::new(two_variant_pool());
+        let mut found_bonus = false;
+        for seed in 0..100u64 {
+            let mut rng = ChaCha8Rng::seed_from_u64(seed);
+            let pack = gen.generate_pack(&mut rng, 0, 0);
+            if pack.0.iter().any(|c| c.name.starts_with("BONUS_")) {
+                found_bonus = true;
+                break;
+            }
+        }
+        assert!(
+            found_bonus,
+            "Expected at least one pack with bonus sheet card in 100 iterations"
+        );
+    }
+}
