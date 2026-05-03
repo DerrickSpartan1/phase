@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use draft_core::pack_generator::PackGenerator;
@@ -308,4 +308,130 @@ pub fn get_bot_deck(bot_seat: u8) -> Result<JsValue, JsValue> {
             to_js(&result)
         })
     })
+}
+
+// ── Host-role exports for multiplayer (P2P) draft coordination ─────────
+
+/// Seat descriptor for multiplayer draft creation.
+/// JSON: `{ "type": "Human", "player_id": 0, "display_name": "Alice" }`
+///    or `{ "type": "Bot", "name": "Bot 1" }`
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum SeatDescriptor {
+    Human {
+        player_id: u8,
+        display_name: String,
+    },
+    Bot {
+        name: String,
+    },
+}
+
+/// Create a multiplayer draft session. Used by the P2P host to initialize a
+/// Premier or Traditional draft with human + bot seats.
+///
+/// - `set_pool_json`: serialized LimitedSetPool from draft-pools.json
+/// - `seats_json`: JSON array of SeatDescriptors
+/// - `kind`: 0=Quick, 1=Premier, 2=Traditional
+/// - `seed`: RNG seed for deterministic pack generation
+/// - `draft_code`: unique room identifier
+///
+/// Stores the session in the same thread-local as Quick Draft (one active
+/// draft at a time per WASM instance). Returns the initial DraftPlayerView
+/// for seat 0.
+#[wasm_bindgen]
+pub fn create_multiplayer_draft(
+    set_pool_json: &str,
+    seats_json: &str,
+    kind: u8,
+    seed: u32,
+    draft_code: &str,
+) -> Result<JsValue, JsValue> {
+    let set_pool: LimitedSetPool = serde_json::from_str(set_pool_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse set pool: {}", e)))?;
+
+    let seat_descriptors: Vec<SeatDescriptor> = serde_json::from_str(seats_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse seats: {}", e)))?;
+
+    let draft_kind = match kind {
+        0 => DraftKind::Quick,
+        1 => DraftKind::Premier,
+        2 => DraftKind::Traditional,
+        _ => return Err(JsValue::from_str("kind must be 0 (Quick), 1 (Premier), or 2 (Traditional)")),
+    };
+
+    let set_code = set_pool.code.clone();
+
+    let seats: Vec<DraftSeat> = seat_descriptors
+        .into_iter()
+        .map(|desc| match desc {
+            SeatDescriptor::Human {
+                player_id,
+                display_name,
+            } => DraftSeat::Human {
+                player_id: engine::types::player::PlayerId(player_id),
+                display_name,
+                connected: true,
+            },
+            SeatDescriptor::Bot { name } => DraftSeat::Bot { name },
+        })
+        .collect();
+
+    let config = DraftConfig {
+        set_code,
+        kind: draft_kind,
+        cards_per_pack: 14,
+        pack_count: 3,
+        rng_seed: seed as u64,
+    };
+
+    let mut draft_session = DraftSession::new(config, seats, draft_code.to_string());
+    let pack_gen = PackGenerator::new(set_pool);
+
+    session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
+        .map_err(|e| JsValue::from_str(&format!("Failed to start draft: {}", e)))?;
+
+    let view = filter_for_player(&draft_session, 0);
+
+    DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+    PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
+    RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
+
+    Ok(to_js(&view))
+}
+
+/// Apply a draft action from any seat. Used by the P2P host to forward
+/// picks from connected guests.
+///
+/// `action_json`: serialized DraftAction, e.g.:
+///   `{ "type": "Pick", "data": { "seat": 2, "card_instance_id": "abc-123" } }`
+///
+/// Returns the list of DraftDeltas produced (serialized as a JS array).
+#[wasm_bindgen]
+pub fn apply_draft_action(action_json: &str) -> Result<JsValue, JsValue> {
+    let action: DraftAction = serde_json::from_str(action_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse action: {}", e)))?;
+
+    with_draft_mut(|draft_session| {
+        let deltas = session::apply(draft_session, action, None)
+            .map_err(|e| JsValue::from_str(&format!("Draft action failed: {}", e)))?;
+        Ok(to_js(&deltas))
+    })
+}
+
+/// Get a filtered draft view for a specific seat. The P2P host calls this
+/// after each action to produce per-player state snapshots to send over
+/// the P2P channel.
+///
+/// `seat_index`: 0-based seat index.
+#[wasm_bindgen]
+pub fn get_draft_view_for_seat(seat_index: u8) -> Result<JsValue, JsValue> {
+    with_draft(|session| to_js(&filter_for_player(session, seat_index)))
+}
+
+/// Get the full draft status. Lightweight check so the host can decide
+/// whether to broadcast updates or transition phases.
+#[wasm_bindgen]
+pub fn get_draft_status() -> Result<JsValue, JsValue> {
+    with_draft(|session| to_js(&session.status))
 }

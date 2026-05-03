@@ -55,6 +55,41 @@ export function suggest_lands(spells_json: string): any;
  */
 export function get_bot_deck(bot_seat: number): any;
 
+/**
+ * Create a multiplayer draft session (P2P host role).
+ *
+ * `set_pool_json`: serialized LimitedSetPool
+ * `seats_json`: JSON array of seat descriptors
+ * `kind`: 0=Quick, 1=Premier, 2=Traditional
+ * `seed`: RNG seed
+ * `draft_code`: unique room identifier
+ */
+export function create_multiplayer_draft(
+  set_pool_json: string,
+  seats_json: string,
+  kind: number,
+  seed: number,
+  draft_code: string,
+): any;
+
+/**
+ * Apply a draft action from any seat (P2P host forwards guest actions).
+ * `action_json`: serialized DraftAction.
+ * Returns array of DraftDeltas.
+ */
+export function apply_draft_action(action_json: string): any;
+
+/**
+ * Get a filtered draft view for a specific seat.
+ * Used by P2P host to produce per-player state snapshots.
+ */
+export function get_draft_view_for_seat(seat_index: number): any;
+
+/**
+ * Get the current draft status string.
+ */
+export function get_draft_status(): any;
+
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
