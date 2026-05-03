@@ -74,6 +74,9 @@ impl PackSource for PackGenerator {
                     set_code: card.set_code.clone(),
                     collector_number: card.collector_number.clone(),
                     rarity: format!("{:?}", card.rarity).to_lowercase(),
+                    colors: card.colors.clone(),
+                    cmc: card.cmc,
+                    type_line: card.type_line.clone(),
                 });
                 card_index += 1;
             }
@@ -165,6 +168,9 @@ mod tests {
                 collector_number: format!("{}", i + 1),
                 rarity,
                 weight,
+                colors: Vec::new(),
+                cmc: 0,
+                type_line: String::new(),
             })
             .collect()
     }

@@ -252,6 +252,9 @@ mod tests {
                 set_code: "TST".to_string(),
                 collector_number: format!("{i}"),
                 rarity: "common".to_string(),
+                colors: Vec::new(),
+                cmc: 0,
+                type_line: String::new(),
             })
             .collect();
 
@@ -283,6 +286,9 @@ mod tests {
                 set_code: "TST".to_string(),
                 collector_number: format!("{i}"),
                 rarity: "common".to_string(),
+                colors: Vec::new(),
+                cmc: 0,
+                type_line: String::new(),
             })
             .collect();
 
@@ -313,6 +319,9 @@ mod tests {
                     set_code: "TST".to_string(),
                     collector_number: format!("{i}"),
                     rarity: "common".to_string(),
+                    colors: Vec::new(),
+                    cmc: 0,
+                    type_line: String::new(),
                 })
                 .collect();
         }

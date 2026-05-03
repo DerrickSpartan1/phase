@@ -84,6 +84,15 @@ struct MtgjsonCard {
     booster_types: Vec<String>,
     #[serde(default)]
     supertypes: Vec<String>,
+    /// Color identity letters (e.g. ["W", "U"]). Used for bot AI color preference.
+    #[serde(default)]
+    colors: Vec<String>,
+    /// Converted mana cost. Used for bot AI curve awareness.
+    #[serde(default, alias = "manaValue")]
+    mana_value: f64,
+    /// Full type line (e.g. "Creature — Human Wizard"). Used for frontend sorting.
+    #[serde(default, rename = "type")]
+    type_line: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +147,9 @@ pub fn extract_set_pool(json_content: &str) -> Result<Option<LimitedSetPool>, Ex
                     collector_number: card.number.clone(),
                     rarity: parse_rarity(&card.rarity),
                     weight,
+                    colors: card.colors.clone(),
+                    cmc: card.mana_value as u8,
+                    type_line: card.type_line.clone(),
                 });
             } else {
                 eprintln!(

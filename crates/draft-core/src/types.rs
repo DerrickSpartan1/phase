@@ -87,6 +87,8 @@ pub enum DraftStatus {
 
 /// A single card instance in a draft pack or pool.
 /// Lightweight collation type — NOT engine CardFace.
+/// Enriched with colors/cmc/type_line for bot AI color preference (Medium+),
+/// frontend sorting (PoolPanel by color/type/CMC), and ManaCurve rendering.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DraftCardInstance {
     pub instance_id: String,
@@ -94,6 +96,15 @@ pub struct DraftCardInstance {
     pub set_code: String,
     pub collector_number: String,
     pub rarity: String,
+    /// Color identity letters, e.g. ["W", "U"]. Populated at pack generation from set pool data.
+    #[serde(default)]
+    pub colors: Vec<String>,
+    /// Converted mana cost. Populated at pack generation from set pool data.
+    #[serde(default)]
+    pub cmc: u8,
+    /// Full type line, e.g. "Creature — Human Wizard". Populated at pack generation from set pool data.
+    #[serde(default)]
+    pub type_line: String,
 }
 
 /// A pack of cards, newtype wrapper over Vec<DraftCardInstance>.

@@ -523,6 +523,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "draft-wasm"
+version = "0.1.21"
+dependencies = [
+ "console_error_panic_hook",
+ "draft-core",
+ "engine",
+ "getrandom 0.3.4",
+ "js-sys",
+ "phase-ai",
+ "rand 0.9.4",
+ "rand_chacha",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "dtoa"
 version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"

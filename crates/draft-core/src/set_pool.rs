@@ -37,6 +37,15 @@ pub struct SheetCard {
     pub collector_number: String,
     pub rarity: Rarity,
     pub weight: u32,
+    /// Color identity letters, e.g. ["W", "U"]. Populated from MTGJSON at extraction.
+    #[serde(default)]
+    pub colors: Vec<String>,
+    /// Converted mana cost. Populated from MTGJSON at extraction.
+    #[serde(default)]
+    pub cmc: u8,
+    /// Full type line, e.g. "Creature — Human Wizard". Populated from MTGJSON at extraction.
+    #[serde(default)]
+    pub type_line: String,
 }
 
 /// A named sheet of cards (e.g., "common", "uncommon", "rareMythic").
