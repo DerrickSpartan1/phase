@@ -14,24 +14,28 @@ import { PlayerIdentityBanner } from "../components/lobby/PlayerIdentityBanner";
 import { ServerOfflinePrompt } from "../components/lobby/ServerOfflinePrompt";
 import { ConnectionToast } from "../components/multiplayer/ConnectionToast";
 import { MenuParticles } from "../components/menu/MenuParticles";
-import { MenuShell } from "../components/menu/MenuShell";
+import { MenuPanel, MenuShell } from "../components/menu/MenuShell";
+import { menuButtonClass } from "../components/menu/buttonStyles";
 import { MyDecks } from "../components/menu/MyDecks";
 import { ACTIVE_DECK_KEY, loadActiveDeck, touchDeckPlayed } from "../constants/storage";
 import { parseRoomCode, stripPeerIdPrefix } from "../network/connection";
 import { evaluateDeckCompatibility } from "../services/deckCompatibility";
 import { expandParsedDeck } from "../services/deckParser";
-import type { LiveCheck } from "./multiplayerPageState";
+import type { LiveCheck, MultiplayerView } from "./multiplayerPageState";
 import { classifyCompatResult } from "./multiplayerPageState";
 import { clearWsSession } from "../services/multiplayerSession";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
+import {
+  useMultiplayerDraftStore,
+  type MultiplayerDraftPhase,
+} from "../stores/multiplayerDraftStore";
 import { useGameStore, saveActiveGame } from "../stores/gameStore";
 import type { HostSettings } from "../components/lobby/HostSetup";
 
 type ConnectionMode = "server" | "p2p";
-type MultiplayerView = "lobby" | "host-setup" | "deck-select";
 
 function parseViewParam(value: string | null): MultiplayerView {
-  if (value === "host-setup" || value === "deck-select") return value;
+  if (value === "host-setup" || value === "deck-select" || value === "draft-lobby") return value;
   return "lobby";
 }
 
@@ -60,6 +64,11 @@ export function MultiplayerPage() {
   const startHosting = useMultiplayerStore((s) => s.startHosting);
   const startP2PHostingSession = useMultiplayerStore((s) => s.startP2PHostingSession);
   const showToast = useMultiplayerStore((s) => s.showToast);
+
+  const draftPhase = useMultiplayerDraftStore((s) => s.phase);
+  const draftRoomCode = useMultiplayerDraftStore((s) => s.roomCode);
+  const joinDraft = useMultiplayerDraftStore((s) => s.joinDraft);
+  const leaveDraft = useMultiplayerDraftStore((s) => s.leave);
 
   const [view, setView] = useState<MultiplayerView>(() => (
     parseViewParam(new URLSearchParams(location.search).get("view"))
@@ -439,6 +448,27 @@ export function MultiplayerPage() {
     [connectionMode, activeDeckName, executeAction],
   );
 
+  // Navigate to draft setup page. The multiplayer draft page handles its
+  // own set selection and pod configuration — we just route the user there.
+  const handleHostDraft = useCallback(() => {
+    navigate("/draft?mode=multiplayer");
+  }, [navigate]);
+
+  // Join a draft pod from the lobby. Draft entries carry `draft_metadata`
+  // and are always P2P — the guest joins via PeerJS room code.
+  const handleJoinDraftFromLobby = useCallback(
+    async (code: string, _context?: LobbyGame) => {
+      const playerName = useMultiplayerStore.getState().displayName ?? "Player";
+      try {
+        await joinDraft({ roomCode: code, displayName: playerName });
+        setView("draft-lobby");
+      } catch {
+        showToast("Failed to join draft pod.");
+      }
+    },
+    [joinDraft, showToast],
+  );
+
   // Join from lobby → execute immediately if deck exists, otherwise prompt
   const handleJoinGame = useCallback(
     async (
@@ -447,6 +477,13 @@ export function MultiplayerPage() {
       format?: GameFormat,
       context?: LobbyGame,
     ) => {
+      // Draft entries bypass the normal join-with-deck flow entirely — draft
+      // pods handle their own deck building after the draft completes.
+      if (context?.draft_metadata) {
+        void handleJoinDraftFromLobby(code, context);
+        return;
+      }
+
       const trimmedCode = code.trim();
       const directP2PCode = parseRoomCode(trimmedCode);
 
@@ -496,7 +533,7 @@ export function MultiplayerPage() {
       setPendingAction(action);
       setView("deck-select");
     },
-    [lookupJoinTargetFromStore],
+    [lookupJoinTargetFromStore, handleJoinDraftFromLobby],
   );
 
   const handleBack = () => {
@@ -514,6 +551,11 @@ export function MultiplayerPage() {
       return;
     }
     if (view === "host-setup") {
+      setView("lobby");
+      return;
+    }
+    if (view === "draft-lobby") {
+      void leaveDraft();
       setView("lobby");
       return;
     }
@@ -538,16 +580,20 @@ export function MultiplayerPage() {
       ? "Join or host a table."
       : view === "host-setup"
         ? "Set up your table."
-        : "Choose a deck.";
+        : view === "draft-lobby"
+          ? "Draft Pod"
+          : "Choose a deck.";
 
   const description =
     view === "lobby"
       ? "Browse available tables, join by code, or host a new match."
       : view === "host-setup"
         ? "Adjust format, privacy, and timing before opening the room."
-        : selectedFormat
-          ? `Pick a deck for ${selectedFormat}.`
-          : "Pick the deck you want to bring online.";
+        : view === "draft-lobby"
+          ? "Waiting for players to join the draft pod."
+          : selectedFormat
+            ? `Pick a deck for ${selectedFormat}.`
+            : "Pick the deck you want to bring online.";
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
@@ -623,6 +669,7 @@ export function MultiplayerPage() {
             key={lobbyRetryKey}
             onHostGame={() => { setConnectionMode("server"); setView("host-setup"); }}
             onHostP2P={() => { setConnectionMode("p2p"); setView("host-setup"); }}
+            onHostDraft={handleHostDraft}
             onJoinGame={handleJoinGame}
             connectionMode={connectionMode}
             onServerOffline={() => {
@@ -649,6 +696,17 @@ export function MultiplayerPage() {
                   ? "Checking deck legality…"
                   : undefined
             }
+          />
+        )}
+
+        {view === "draft-lobby" && (
+          <DraftLobbyPanel
+            phase={draftPhase}
+            roomCode={draftRoomCode}
+            onLeave={() => {
+              void leaveDraft();
+              setView("lobby");
+            }}
           />
         )}
 
@@ -742,6 +800,88 @@ export function MultiplayerPage() {
         />
       )}
     </div>
+  );
+}
+
+// ── Draft Lobby Panel ─────────────────────────────────────────────────
+//
+// Minimal inline panel shown when the user has joined (as guest) a
+// multiplayer draft pod. Displays connection status, room code, and a
+// leave button. The full draft UI lives on the DraftPage; this panel is
+// a holding area while waiting in the pod lobby.
+
+function DraftLobbyPanel({
+  phase,
+  roomCode,
+  onLeave,
+}: {
+  phase: MultiplayerDraftPhase;
+  roomCode: string | null;
+  onLeave: () => void;
+}) {
+  const seats = useMultiplayerDraftStore((s) => s.seats);
+  const joined = useMultiplayerDraftStore((s) => s.joined);
+  const total = useMultiplayerDraftStore((s) => s.total);
+  const error = useMultiplayerDraftStore((s) => s.error);
+
+  return (
+    <MenuPanel className="relative z-10 mx-auto flex w-full max-w-xl flex-col gap-5 px-4 py-5">
+      <div className="flex items-center justify-between">
+        <div className="text-[0.68rem] uppercase tracking-[0.22em] text-slate-500">
+          Draft Pod
+        </div>
+        {roomCode && (
+          <span className="rounded-full border border-white/10 bg-black/18 px-2.5 py-0.5 font-mono text-xs tracking-wider text-purple-400">
+            {roomCode}
+          </span>
+        )}
+      </div>
+
+      {phase === "connecting" && (
+        <div className="text-sm text-slate-400">Connecting to draft pod...</div>
+      )}
+
+      {phase === "error" && (
+        <div className="rounded-[16px] border border-rose-400/20 bg-rose-500/[0.07] px-4 py-3 text-sm text-rose-200">
+          {error ?? "Connection failed."}
+        </div>
+      )}
+
+      {(phase === "lobby" || phase === "connecting") && total > 0 && (
+        <div className="flex flex-col gap-3">
+          <div className="text-sm text-slate-300">
+            {joined}/{total} players joined
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {seats.map((seat, i) => (
+              <div
+                key={i}
+                className={`rounded-lg border px-3 py-1.5 text-xs ${
+                  seat.display_name
+                    ? "border-purple-400/20 bg-purple-500/[0.07] text-purple-200"
+                    : "border-white/8 bg-black/16 text-slate-500"
+                }`}
+              >
+                {seat.display_name || `Seat ${i + 1}`}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {phase === "drafting" && (
+        <div className="text-sm text-emerald-300">
+          Draft in progress. The draft view will open automatically.
+        </div>
+      )}
+
+      <button
+        onClick={onLeave}
+        className={menuButtonClass({ tone: "neutral", size: "sm" })}
+      >
+        Leave Draft
+      </button>
+    </MenuPanel>
   );
 }
 
