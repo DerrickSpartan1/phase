@@ -10,8 +10,6 @@ pub(crate) mod subject;
 pub(crate) mod token;
 
 pub(crate) use self::token::parse_token_description;
-#[allow(unused_imports)] // Re-export for consumers; direct ast:: path used during migration.
-pub(crate) use crate::parser::oracle_ir::ast::TokenDescription;
 
 use std::str::FromStr;
 
