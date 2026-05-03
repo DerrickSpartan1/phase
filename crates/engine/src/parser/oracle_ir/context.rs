@@ -22,9 +22,12 @@ pub(crate) struct ParseContext {
     /// CR 701.21a + CR 608.2k: The actor performing the effect ("you", "an opponent").
     pub actor: Option<ControllerRef>,
     /// Resolved quantity reference ("that many", "that much").
+    #[allow(dead_code)] // Retained for future nom combinator consumers (D-02).
     pub quantity_ref: Option<QuantityRef>,
     /// Whether we are inside a trigger effect (enables event context refs).
+    #[allow(dead_code)] // Retained for future nom combinator consumers (D-02).
     pub in_trigger: bool,
     /// Whether we are inside a replacement effect.
+    #[allow(dead_code)] // Retained for future nom combinator consumers (D-02).
     pub in_replacement: bool,
 }

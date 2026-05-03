@@ -73,35 +73,8 @@ use self::sequence::{
 };
 use self::subject::{try_parse_subject_predicate_ast, try_parse_targeted_controller_gain_life};
 use crate::parser::oracle_ir::ast::*;
+pub(crate) use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_ir::effect_chain::{ClauseIr, EffectChainIr, SpecialClause};
-
-/// Context threaded through the effect parsing pipeline.
-/// Enables pronoun resolution relative to the current subject.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct ParseContext {
-    /// The trigger subject, if parsing within a trigger effect.
-    /// When Some and not SelfRef, bare pronouns ("it") resolve to TriggeringSource.
-    pub subject: Option<TargetFilter>,
-    /// The card name for self-name effect parsing (e.g. "Exile Card Name.").
-    pub card_name: Option<String>,
-    /// CR 707.9a + CR 603.1: Index of the printed trigger whose body is being
-    /// parsed, in the source object's `base_trigger_definitions` list. Set by
-    /// the trigger parser before invoking the effect chain. Consumed by the
-    /// `<subject pronoun> has this ability` arm of the BecomeCopy except-clause
-    /// parser to emit `RetainPrintedTriggerFromSource { source_trigger_index }`.
-    /// `None` for non-trigger contexts (replacements, instants, sorceries),
-    /// in which case the "has this ability" arm declines gracefully.
-    pub current_trigger_index: Option<usize>,
-    /// CR 701.21a + CR 608.2k: The actor performing the effect, when the effect
-    /// body has been stripped of an actor prefix ("you (may) ", "an opponent
-    /// (may) ", "each opponent ", "each player "). Used by targeted-action
-    /// parsers to default `TargetFilter::Typed.controller` from `None` to the
-    /// actor when the target phrase itself doesn't specify a controller (e.g.
-    /// "you may sacrifice a non-Demon creature" → `controller: Some(You)`).
-    /// CR 701.21a forbids sacrificing a permanent you don't control, so the
-    /// default must be enforced at parse time, not at resolution.
-    pub actor: Option<ControllerRef>,
-}
 
 /// CR 608.2k: True when `text` is a standalone object pronoun referring to
 /// the trigger/spell subject. Used by effect-target parsers that need to
@@ -7190,6 +7163,7 @@ pub(crate) fn parse_effect_chain_ir(
             // is per-chunk (re-derived from each chunk's stripped prefix above).
             current_trigger_index: ctx.current_trigger_index,
             actor: chunk_actor,
+            ..Default::default()
         };
         let ctx = &chunk_ctx;
 

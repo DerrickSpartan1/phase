@@ -27,7 +27,8 @@ use nom_language::error::VerboseError;
 
 use crate::types::ability::{AbilityDefinition, AbilityKind, ControllerRef, Effect};
 
-use super::oracle_effect::{parse_effect_chain_with_context, ParseContext};
+use super::oracle_effect::parse_effect_chain_with_context;
+use super::oracle_ir::context::ParseContext;
 
 /// Detect and parse the entire Council's-dilemma vote block. Returns a single
 /// `AbilityDefinition` whose `effect` is `Effect::Vote` populated with the

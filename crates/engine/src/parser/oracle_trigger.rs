@@ -6,7 +6,8 @@ use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
-use super::oracle_effect::{lower_effect_chain_ir, parse_effect_chain_ir, ParseContext};
+use super::oracle_effect::{lower_effect_chain_ir, parse_effect_chain_ir};
+use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::trigger::{TriggerBody, TriggerIr, TriggerModifiers};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::error::OracleResult;

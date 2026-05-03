@@ -36,8 +36,9 @@ use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
 use super::oracle_dispatch::{dispatch_line_nom, make_unimplemented_with_effect};
 use super::oracle_effect::{
-    lower_effect_chain_ir, parse_effect_chain, parse_effect_chain_with_context, ParseContext,
+    lower_effect_chain_ir, parse_effect_chain, parse_effect_chain_with_context,
 };
+use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::{OracleDocIr, OracleItemIr};
 pub use super::oracle_keyword::keyword_display_name;
 use super::oracle_keyword::{

@@ -10,7 +10,8 @@ use crate::types::ability::{
 };
 
 use super::oracle::find_activated_colon;
-use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context, ParseContext};
+use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context};
+use super::oracle_ir::context::ParseContext;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text};
 use crate::parser::oracle_ir::ast::{ModalHeaderAst, ModeAst, OracleBlockAst};
