@@ -23,6 +23,7 @@ export type DraftPodGuestStatus =
   | "lobby"
   | "drafting"
   | "deckbuilding"
+  | "matchInProgress"
   | "complete"
   | "kicked"
   | "hostLeft"
@@ -46,6 +47,8 @@ export type DraftPodGuestEvent =
       matchId: string;
     }
   | { type: "matchResult"; matchId: string; winnerSeat: number | null }
+  | { type: "timerSync"; remainingMs: number }
+  | { type: "matchStart"; matchId: string; round: number; opponentSeat: number; opponentName: string; matchHostPeerId: string; isMatchHost: boolean }
   | { type: "kicked"; reason: string }
   | { type: "hostLeft"; reason: string }
   | { type: "error"; message: string }
@@ -218,6 +221,21 @@ export class DraftPodGuestAdapter {
           winnerSeat: event.winnerSeat,
         });
         break;
+      case "timerSync":
+        this.emit({ type: "timerSync", remainingMs: event.remainingMs });
+        break;
+      case "matchStart":
+        this.setStatus("matchInProgress");
+        this.emit({
+          type: "matchStart",
+          matchId: event.matchId,
+          round: event.round,
+          opponentSeat: event.opponentSeat,
+          opponentName: event.opponentName,
+          matchHostPeerId: event.matchHostPeerId,
+          isMatchHost: event.isMatchHost,
+        });
+        break;
       case "kicked":
         this.setStatus("kicked");
         this.emit({ type: "kicked", reason: event.reason });
@@ -247,6 +265,9 @@ export class DraftPodGuestAdapter {
       case "Deckbuilding":
         if (this._status !== "deckbuilding") this.setStatus("deckbuilding");
         break;
+      case "MatchInProgress":
+        if (this._status !== "matchInProgress") this.setStatus("matchInProgress");
+        break;
       case "Complete":
         if (this._status !== "complete") this.setStatus("complete");
         break;
@@ -263,6 +284,11 @@ export class DraftPodGuestAdapter {
   async submitDeck(mainDeck: string[]): Promise<void> {
     if (!this.guest) throw new Error("Guest not initialized");
     await this.guest.submitDeck(mainDeck);
+  }
+
+  sendMatchResult(matchId: string, winnerSeat: number | null): void {
+    if (!this.guest) return;
+    this.guest.sendMatchResult(matchId, winnerSeat);
   }
 
   // ── Cleanup ────────────────────────────────────────────────────────

@@ -10,7 +10,7 @@
  * draft pod instead of a 2-4 player game.
  */
 
-import type { DraftPlayerView, SeatPublicView } from "./draft-adapter";
+import type { DraftPlayerView, PairingView, SeatPublicView } from "./draft-adapter";
 import { P2PDraftHost, type DraftHostEvent } from "./p2p-draft-host";
 import { hostRoom, type HostResult } from "../network/connection";
 import type { BrokerClient, RegisterHostRequest } from "../services/brokerClient";
@@ -25,6 +25,8 @@ export type DraftPodHostStatus =
   | "drafting"
   | "deckbuilding"
   | "pairing"
+  | "matchInProgress"
+  | "roundComplete"
   | "complete"
   | "error";
 
@@ -44,6 +46,10 @@ export type DraftPodHostEvent =
   | { type: "seatReconnected"; seatIndex: number }
   | { type: "seatDisconnected"; seatIndex: number }
   | { type: "seatKicked"; seatIndex: number; reason: string }
+  | { type: "pairingsGenerated"; round: number; pairings: PairingView[] }
+  | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }
+  | { type: "roundAdvanced"; newRound: number }
+  | { type: "timerExpired" }
   | { type: "error"; message: string };
 
 type DraftPodHostEventListener = (event: DraftPodHostEvent) => void;
@@ -245,6 +251,20 @@ export class DraftPodHostAdapter {
       case "viewUpdated":
         this.emit({ type: "viewUpdated", view: event.view });
         break;
+      case "pairingsGenerated":
+        this.setStatus("matchInProgress");
+        this.emit({ type: "pairingsGenerated", round: event.round, pairings: event.pairings });
+        break;
+      case "matchResultReceived":
+        this.emit({ type: "matchResultReceived", matchId: event.matchId, winnerSeat: event.winnerSeat });
+        break;
+      case "roundAdvanced":
+        this.setStatus("pairing");
+        this.emit({ type: "roundAdvanced", newRound: event.newRound });
+        break;
+      case "timerExpired":
+        this.emit({ type: "timerExpired" });
+        break;
     }
   }
 
@@ -268,6 +288,28 @@ export class DraftPodHostAdapter {
   async getHostView(): Promise<DraftPlayerView> {
     if (!this.host) throw new Error("Host not initialized");
     return this.host.getHostView();
+  }
+
+  // ── Match coordination ──────────────────────────────────────────────
+
+  async generatePairings(round: number): Promise<void> {
+    if (!this.host) throw new Error("Host not initialized");
+    await this.host.generatePairings(round);
+  }
+
+  async advanceRound(): Promise<void> {
+    if (!this.host) throw new Error("Host not initialized");
+    await this.host.advanceRound();
+  }
+
+  async overrideMatchResult(matchId: string, winnerSeat: number | null): Promise<void> {
+    if (!this.host) throw new Error("Host not initialized");
+    await this.host.overrideMatchResult(matchId, winnerSeat);
+  }
+
+  async replaceSeatWithBot(seat: number): Promise<void> {
+    if (!this.host) throw new Error("Host not initialized");
+    await this.host.replaceSeatWithBot(seat);
   }
 
   // ── Host controls ──────────────────────────────────────────────────

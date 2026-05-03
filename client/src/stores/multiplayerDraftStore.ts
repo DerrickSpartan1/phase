@@ -14,7 +14,7 @@
 
 import { create } from "zustand";
 
-import type { DraftPlayerView, SeatPublicView } from "../adapter/draft-adapter";
+import type { DraftPlayerView, PairingView, SeatPublicView, StandingEntry } from "../adapter/draft-adapter";
 import {
   DraftPodHostAdapter,
   type DraftPodHostConfig,
@@ -39,6 +39,8 @@ export type MultiplayerDraftPhase =
   | "drafting"
   | "deckbuilding"
   | "pairing"
+  | "matchInProgress"
+  | "roundComplete"
   | "complete"
   | "error"
   | "kicked"
@@ -69,6 +71,18 @@ interface MultiplayerDraftState {
   selectedCard: string | null;
   mainDeck: string[];
   landCounts: Record<string, number>;
+  timerRemainingMs: number | null;
+  standings: StandingEntry[];
+  currentRound: number;
+  pairings: PairingView[];
+  matchPairing: {
+    matchId: string;
+    opponentSeat: number;
+    opponentName: string;
+    matchHostPeerId: string;
+    isMatchHost: boolean;
+  } | null;
+  matchAdapter: unknown | null;
 }
 
 interface MultiplayerDraftActions {
@@ -102,6 +116,16 @@ interface MultiplayerDraftActions {
   leave: () => Promise<void>;
   /** Reset store to initial state (without network cleanup). */
   reset: () => void;
+  /** Both: start the match for the current pairing. */
+  startMatch: () => Promise<void>;
+  /** Both: report a match result back to the pod host. */
+  reportMatchResult: (matchId: string, winnerSeat: number | null) => void;
+  /** Host: advance to the next round (Casual mode). */
+  advanceRound: () => void;
+  /** Host: override a match result (Casual mode). */
+  overrideMatchResult: (matchId: string, winnerSeat: number | null) => void;
+  /** Host: replace a disconnected player with a bot (Casual mode). */
+  replaceSeatWithBot: (seat: number) => void;
 }
 
 // ── Module-level adapter refs ──────────────────────────────────────────
@@ -128,6 +152,12 @@ const initialState: MultiplayerDraftState = {
   selectedCard: null,
   mainDeck: [],
   landCounts: {},
+  timerRemainingMs: null,
+  standings: [],
+  currentRound: 0,
+  pairings: [],
+  matchPairing: null,
+  matchAdapter: null,
 };
 
 // ── Store ──────────────────────────────────────────────────────────────
@@ -255,6 +285,38 @@ export const useMultiplayerDraftStore = create<
     activeHostAdapter.requestResume();
   },
 
+  startMatch: async () => {
+    // Stub: full implementation in Plan 05 Task 3 (deck delivery + gameOver bridge).
+    // Sets phase to matchInProgress; the match adapter is created in Plan 05.
+    const { matchPairing } = get();
+    if (!matchPairing) return;
+    set({ phase: "matchInProgress" });
+  },
+
+  reportMatchResult: (matchId, winnerSeat) => {
+    const { role } = get();
+    if (role === "host" && activeHostAdapter) {
+      void activeHostAdapter.overrideMatchResult(matchId, winnerSeat);
+    } else if (role === "guest" && activeGuestAdapter) {
+      activeGuestAdapter.sendMatchResult(matchId, winnerSeat);
+    }
+  },
+
+  advanceRound: () => {
+    if (!activeHostAdapter) return;
+    void activeHostAdapter.advanceRound();
+  },
+
+  overrideMatchResult: (matchId, winnerSeat) => {
+    if (!activeHostAdapter) return;
+    void activeHostAdapter.overrideMatchResult(matchId, winnerSeat);
+  },
+
+  replaceSeatWithBot: (seat) => {
+    if (!activeHostAdapter) return;
+    void activeHostAdapter.replaceSeatWithBot(seat);
+  },
+
   leave: async () => {
     if (activeHostAdapter) {
       await activeHostAdapter.dispose();
@@ -288,6 +350,10 @@ function hostStatusToPhase(status: DraftPodHostStatus): MultiplayerDraftPhase {
       return "deckbuilding";
     case "pairing":
       return "pairing";
+    case "matchInProgress":
+      return "matchInProgress";
+    case "roundComplete":
+      return "roundComplete";
     case "complete":
       return "complete";
     case "error":
@@ -307,6 +373,8 @@ function guestStatusToPhase(status: DraftPodGuestStatus): MultiplayerDraftPhase 
       return "drafting";
     case "deckbuilding":
       return "deckbuilding";
+    case "matchInProgress":
+      return "matchInProgress";
     case "complete":
       return "complete";
     case "kicked":
@@ -333,7 +401,13 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       set({ roomCode: event.roomCode });
       break;
     case "viewUpdated":
-      set({ view: event.view });
+      set({
+        view: event.view,
+        timerRemainingMs: event.view.timer_remaining_ms ?? null,
+        standings: event.view.standings ?? [],
+        currentRound: event.view.current_round ?? 0,
+        pairings: event.view.pairings ?? [],
+      });
       break;
     case "lobbyUpdate":
       set({ joined: event.joined, total: event.total, seats: event.seats });
@@ -348,6 +422,17 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       break;
     case "allDecksSubmitted":
       set({ phase: "pairing" });
+      break;
+    case "pairingsGenerated":
+      set({ phase: "matchInProgress", currentRound: event.round, pairings: event.pairings });
+      break;
+    case "roundAdvanced":
+      set({ phase: "pairing", currentRound: event.newRound });
+      break;
+    case "matchResultReceived":
+      // Informational — standings update comes via viewUpdated
+      break;
+    case "timerExpired":
       break;
     case "error":
       set({ error: event.message });
@@ -380,7 +465,13 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       set({ seatIndex: event.seatIndex });
       break;
     case "viewUpdated":
-      set({ view: event.view });
+      set({
+        view: event.view,
+        timerRemainingMs: event.view.timer_remaining_ms ?? null,
+        standings: event.view.standings ?? [],
+        currentRound: event.view.current_round ?? 0,
+        pairings: event.view.pairings ?? [],
+      });
       break;
     case "pickAcknowledged":
       set({ view: event.view });
@@ -406,6 +497,21 @@ function handleGuestEvent(event: DraftPodGuestEvent, set: SetFn): void {
       });
       break;
     case "matchResult":
+      break;
+    case "timerSync":
+      set({ timerRemainingMs: event.remainingMs });
+      break;
+    case "matchStart":
+      set({
+        matchPairing: {
+          matchId: event.matchId,
+          opponentSeat: event.opponentSeat,
+          opponentName: event.opponentName,
+          matchHostPeerId: event.matchHostPeerId,
+          isMatchHost: event.isMatchHost,
+        },
+        phase: "matchInProgress",
+      });
       break;
     case "kicked":
       set({ phase: "kicked", error: event.reason });

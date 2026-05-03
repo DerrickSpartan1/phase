@@ -36,6 +36,8 @@ export type DraftGuestEvent =
   | { type: "draftResumed" }
   | { type: "pairing"; round: number; table: number; opponentName: string; matchHostPeerId: string; matchId: string }
   | { type: "matchResult"; matchId: string; winnerSeat: number | null }
+  | { type: "timerSync"; remainingMs: number }
+  | { type: "matchStart"; matchId: string; round: number; opponentSeat: number; opponentName: string; matchHostPeerId: string; isMatchHost: boolean }
   | { type: "kicked"; reason: string }
   | { type: "hostLeft"; reason: string }
   | { type: "error"; message: string }
@@ -116,6 +118,11 @@ export class P2PDraftGuest {
   async submitDeck(mainDeck: string[]): Promise<void> {
     if (!this.session) throw new Error("Not connected to draft host");
     await this.session.send({ type: "draft_submit_deck", mainDeck });
+  }
+
+  sendMatchResult(matchId: string, winnerSeat: number | null): void {
+    if (!this.session) return;
+    void this.session.send({ type: "draft_match_result", matchId, winnerSeat });
   }
 
   // ── Message handling ───────────────────────────────────────────────
@@ -233,6 +240,24 @@ export class P2PDraftGuest {
           seats: msg.seats,
           joined: msg.joined,
           total: msg.total,
+        });
+        break;
+      }
+
+      case "draft_timer_sync": {
+        this.emit({ type: "timerSync", remainingMs: msg.remainingMs });
+        break;
+      }
+
+      case "draft_match_start": {
+        this.emit({
+          type: "matchStart",
+          matchId: msg.matchId,
+          round: msg.round,
+          opponentSeat: msg.opponentSeat,
+          opponentName: msg.opponentName,
+          matchHostPeerId: msg.matchHostPeerId,
+          isMatchHost: msg.isMatchHost,
         });
         break;
       }
