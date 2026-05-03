@@ -1,0 +1,119 @@
+import type * as DraftWasm from "@wasm/draft";
+
+// ── Types (mirror Rust serde output from draft-core) ────────────────────
+
+export interface DraftCardInstance {
+  instance_id: string;
+  name: string;
+  set_code: string;
+  collector_number: string;
+  rarity: string;
+  colors: string[];
+  cmc: number;
+  type_line: string;
+}
+
+export interface SeatPublicView {
+  seat_index: number;
+  display_name: string;
+  is_bot: boolean;
+  connected: boolean;
+  has_submitted_deck: boolean;
+}
+
+export type DraftStatus =
+  | "Lobby"
+  | "Drafting"
+  | "Paused"
+  | "Deckbuilding"
+  | "Pairing"
+  | "MatchInProgress"
+  | "RoundComplete"
+  | "Complete"
+  | "Abandoned";
+
+export interface DraftPlayerView {
+  status: DraftStatus;
+  kind: "Quick" | "Premier" | "Traditional";
+  current_pack_number: number;
+  pick_number: number;
+  pass_direction: "Left" | "Right";
+  current_pack: DraftCardInstance[] | null;
+  pool: DraftCardInstance[];
+  seats: SeatPublicView[];
+  cards_per_pack: number;
+  pack_count: number;
+}
+
+export interface SuggestedDeck {
+  main_deck: string[];
+  lands: Record<string, number>;
+}
+
+// ── Lazy WASM singleton ─────────────────────────────────────────────────
+
+let wasmModule: typeof DraftWasm | null = null;
+
+async function ensureDraftWasm(): Promise<typeof DraftWasm> {
+  if (!wasmModule) {
+    const mod = await import("@wasm/draft");
+    await mod.default();
+    wasmModule = mod;
+  }
+  return wasmModule;
+}
+
+// ── DraftAdapter ────────────────────────────────────────────────────────
+
+/**
+ * Wraps draft-wasm exports with lazy loading and typed return values.
+ *
+ * Follows the WasmAdapter singleton pattern: WASM is loaded on first use,
+ * then all subsequent calls are synchronous behind the async interface.
+ * Per D-08: separate from engine-wasm, lazy-loaded only when entering draft.
+ */
+export class DraftAdapter {
+  async initialize(
+    setPoolJson: string,
+    difficulty: number,
+    seed: number,
+  ): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.start_quick_draft(setPoolJson, difficulty, seed) as DraftPlayerView;
+  }
+
+  async submitPick(cardInstanceId: string): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.submit_pick(cardInstanceId) as DraftPlayerView;
+  }
+
+  async getView(): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.get_view() as DraftPlayerView;
+  }
+
+  async submitDeck(mainDeck: string[]): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.submit_deck(JSON.stringify(mainDeck)) as DraftPlayerView;
+  }
+
+  async suggestDeck(): Promise<SuggestedDeck> {
+    const wasm = await ensureDraftWasm();
+    return wasm.suggest_deck() as SuggestedDeck;
+  }
+
+  async suggestLands(spells: string[]): Promise<Record<string, number>> {
+    const wasm = await ensureDraftWasm();
+    return wasm.suggest_lands(JSON.stringify(spells)) as Record<string, number>;
+  }
+
+  async getBotDeck(botSeat: number): Promise<SuggestedDeck> {
+    const wasm = await ensureDraftWasm();
+    return wasm.get_bot_deck(botSeat) as SuggestedDeck;
+  }
+
+  async loadCardDatabase(json: string): Promise<number> {
+    const wasm = await ensureDraftWasm();
+    return wasm.load_card_database(json);
+  }
+}
