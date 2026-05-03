@@ -27,7 +27,11 @@ pub fn parse_oracle_cost(text: &str) -> AbilityCost {
     // Split on ", " for composite costs
     let parts: Vec<&str> = split_cost_parts(text);
     if parts.len() > 1 {
-        let costs: Vec<AbilityCost> = parts.iter().map(|p| parse_single_cost(p.trim())).collect();
+        let mut costs: Vec<AbilityCost> = parts.iter().map(|p| parse_single_cost(p.trim())).collect();
+        // CR 601.2b: "Sacrifice A, B, and C" splits into ["Sacrifice A", "B", "C"].
+        // Bare noun-phrase continuations after a verb-cost are additional instances
+        // of that same cost. Applies to Sacrifice, Exile, and TapCreatures.
+        fixup_bare_noun_continuations(&mut costs);
         return AbilityCost::Composite { costs };
     }
 
@@ -70,6 +74,64 @@ fn split_cost_parts(text: &str) -> Vec<&str> {
         parts.push(last);
     }
     parts
+}
+
+/// CR 601.2b: After comma/and-splitting, bare noun-phrase segments that follow
+/// a verb-cost (Sacrifice, Exile, TapCreatures) are continuations of that verb,
+/// not independent costs. E.g., "Sacrifice a green creature, a white creature,
+/// and a blue creature" splits into three parts but only the first has the verb.
+fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
+    #[derive(Clone, Copy)]
+    enum PrecedingVerb {
+        Sacrifice,
+        Exile { zone: Option<Zone> },
+        TapCreatures,
+    }
+
+    let mut last_verb: Option<PrecedingVerb> = None;
+    #[allow(clippy::needless_range_loop)]
+    for i in 0..costs.len() {
+        match &costs[i] {
+            AbilityCost::Sacrifice { .. } => last_verb = Some(PrecedingVerb::Sacrifice),
+            AbilityCost::Exile { zone, .. } => last_verb = Some(PrecedingVerb::Exile { zone: *zone }),
+            AbilityCost::TapCreatures { .. } => last_verb = Some(PrecedingVerb::TapCreatures),
+            AbilityCost::Unimplemented { description } if last_verb.is_some() => {
+                let lower = description.to_lowercase();
+                let stripped = strip_article(description, &lower);
+                if stripped.is_empty() {
+                    continue;
+                }
+                let (filter, _) = parse_target(&format!("target {}", stripped));
+                if matches!(filter, TargetFilter::Any) {
+                    continue;
+                }
+                match last_verb.unwrap() {
+                    PrecedingVerb::Sacrifice => {
+                        costs[i] = AbilityCost::Sacrifice {
+                            target: filter,
+                            count: 1,
+                        };
+                    }
+                    PrecedingVerb::Exile { zone } => {
+                        costs[i] = AbilityCost::Exile {
+                            count: 1,
+                            zone,
+                            filter: Some(filter),
+                        };
+                    }
+                    PrecedingVerb::TapCreatures => {
+                        costs[i] = AbilityCost::TapCreatures {
+                            count: 1,
+                            filter,
+                        };
+                    }
+                }
+            }
+            _ => {
+                last_verb = None;
+            }
+        }
+    }
 }
 
 pub fn parse_single_cost(text: &str) -> AbilityCost {
