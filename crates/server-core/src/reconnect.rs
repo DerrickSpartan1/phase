@@ -80,6 +80,20 @@ impl ReconnectManager {
         expired
     }
 
+    /// Return expired entries with their player IDs (for per-seat handling like draft auto-pick).
+    pub fn check_expired_with_players(&mut self) -> Vec<(String, PlayerId)> {
+        let mut expired = Vec::new();
+        self.disconnected.retain(|_key, info| {
+            if info.disconnect_time.elapsed() > info.grace_period {
+                expired.push((info.game_code.clone(), info.player_id));
+                false
+            } else {
+                true
+            }
+        });
+        expired
+    }
+
     pub fn is_disconnected(&self, game_code: &str, player: PlayerId) -> bool {
         let key = format!("{}:{}", game_code, player.0);
         self.disconnected.contains_key(&key)

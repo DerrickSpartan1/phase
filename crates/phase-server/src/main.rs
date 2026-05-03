@@ -1,4 +1,3 @@
-#[allow(dead_code)]
 mod admin;
 mod logging;
 mod persistence;
@@ -12,7 +11,7 @@ use std::time::Instant;
 use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use clap::Parser;
 use engine::ai_support::{
@@ -46,6 +45,18 @@ type SharedLobbySubscribers = Arc<Mutex<Vec<mpsc::UnboundedSender<ServerMessage>
 type SharedPlayerCount = Arc<AtomicU32>;
 type SharedGameDb = Arc<persistence::GameDb>;
 type SharedDraftState = Arc<Mutex<DraftSessionManager>>;
+/// Spectator senders keyed by draft_code. Each spectator has a visibility + sender.
+type SharedDraftSpectators = Arc<
+    Mutex<
+        HashMap<
+            String,
+            Vec<(
+                draft_core::types::SpectatorVisibility,
+                mpsc::UnboundedSender<ServerMessage>,
+            )>,
+        >,
+    >,
+>;
 
 /// Server's advertised role, selected at startup via `--lobby-only`. Copied
 /// into every handler so the dispatch path can gate disabled messages in
@@ -152,6 +163,10 @@ struct SocketIdentity {
     draft_code: Option<String>,
     draft_seat: Option<usize>,
     draft_token: Option<String>,
+    /// Set when this socket is spectating a draft (T-60-09: action handler
+    /// checks draft_seat.is_some() before processing, rejecting spectators).
+    spectator_draft_code: Option<String>,
+    spectator_visibility: Option<draft_core::types::SpectatorVisibility>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -346,6 +361,7 @@ async fn main() {
     let state: SharedState = Arc::new(Mutex::new(SessionManager::new()));
     let draft_sessions: SharedDraftState = Arc::new(Mutex::new(DraftSessionManager::new()));
     let connections: SharedConnections = Arc::new(Mutex::new(HashMap::new()));
+    let draft_spectators: SharedDraftSpectators = Arc::new(Mutex::new(HashMap::new()));
     let lobby: SharedLobby = Arc::new(Mutex::new(LobbyManager::new()));
     let lobby_subscribers: SharedLobbySubscribers = Arc::new(Mutex::new(Vec::new()));
     let player_count: SharedPlayerCount = Arc::new(AtomicU32::new(0));
@@ -426,11 +442,41 @@ async fn main() {
                 error!(error = %e, "failed to load persisted sessions");
             }
         }
+
+        // Restore persisted draft sessions from disk
+        match game_db.load_all_drafts() {
+            Ok(persisted_drafts) => {
+                let mut dsm = draft_sessions.lock().await;
+                let mut restored_drafts = 0u32;
+                for (draft_code, json) in &persisted_drafts {
+                    match serde_json::from_str::<server_core::persist::PersistedDraftSession>(json) {
+                        Ok(ps) => {
+                            let timer_ms = ps.timer_remaining_ms;
+                            dsm.restore_session(ps);
+                            if let Some(ms) = timer_ms {
+                                info!(draft = %draft_code, remaining_ms = ms, "draft session has pending timer");
+                            }
+                            restored_drafts += 1;
+                        }
+                        Err(e) => {
+                            warn!(draft = %draft_code, error = %e, "failed to restore draft session, deleting");
+                            let _ = game_db.delete_draft_session(draft_code);
+                        }
+                    }
+                }
+                if restored_drafts > 0 {
+                    info!(count = restored_drafts, "restored draft sessions from disk");
+                }
+            }
+            Err(e) => error!(error = %e, "failed to load persisted draft sessions"),
+        }
     }
 
     // Spawn background task for grace period and lobby expiry
     let bg_state = state.clone();
+    let bg_draft_state = draft_sessions.clone();
     let bg_connections = connections.clone();
+    let bg_draft_spectators = draft_spectators.clone();
     let bg_lobby = lobby.clone();
     let bg_lobby_subs = lobby_subscribers.clone();
     let bg_game_db = game_db.clone();
@@ -497,6 +543,81 @@ async fn main() {
                     }
                 }
             }
+
+            // Check draft disconnect grace period expiry — auto-pick for disconnected seats
+            let draft_expired = {
+                let mut mgr = bg_draft_state.lock().await;
+                mgr.reconnect.check_expired_with_players()
+            };
+            if !draft_expired.is_empty() {
+                let mut mgr = bg_draft_state.lock().await;
+                for (draft_code, player_id) in &draft_expired {
+                    let seat = player_id.0;
+                    if let Some(session) = mgr.sessions.get(draft_code.as_str()) {
+                        if session.session.status == draft_core::types::DraftStatus::Drafting
+                            && !session.connected[seat as usize]
+                        {
+                            match mgr.pick_random_for_seat(draft_code, seat, None) {
+                                Ok(()) => {
+                                    info!(
+                                        draft = %draft_code,
+                                        seat,
+                                        "auto-picked for disconnected seat (grace expired)"
+                                    );
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        draft = %draft_code,
+                                        seat,
+                                        error = %e,
+                                        "auto-pick on grace expiry failed"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // Broadcast updated views + persist for any modified drafts
+                let affected_drafts: Vec<String> = draft_expired
+                    .iter()
+                    .map(|(code, _)| code.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+                drop(mgr);
+                for draft_code in &affected_drafts {
+                    // Broadcast to players
+                    let views: Vec<_> = {
+                        let mgr = bg_draft_state.lock().await;
+                        let Some(session) = mgr.sessions.get(draft_code) else {
+                            continue;
+                        };
+                        let pod_size = session.player_tokens.len();
+                        (0..pod_size).map(|i| session.view_for_seat(i)).collect()
+                    };
+                    broadcast_draft_views(
+                        draft_code,
+                        &views,
+                        &bg_connections,
+                        &bg_draft_state,
+                    )
+                    .await;
+                    // Broadcast to spectators
+                    broadcast_draft_spectator_views(
+                        draft_code,
+                        &bg_draft_state,
+                        &bg_draft_spectators,
+                    )
+                    .await;
+                    // Persist
+                    persist_draft_session_async(
+                        &bg_game_db,
+                        draft_code,
+                        &bg_draft_state,
+                    )
+                    .await;
+                }
+            }
         }
     });
 
@@ -508,11 +629,22 @@ async fn main() {
 
     // Keep references for shutdown flush (Arcs are cheap to clone)
     let shutdown_state = state.clone();
+    let shutdown_draft_state = draft_sessions.clone();
     let shutdown_game_db = game_db.clone();
 
     let app = Router::new()
         .route("/ws", get(ws_handler))
         .route("/health", get(health))
+        .route("/admin/drafts", get(admin::admin_list_drafts))
+        .route(
+            "/admin/drafts/{code}",
+            get(admin::admin_get_draft).delete(admin::admin_delete_draft),
+        )
+        .route("/p2p-draft-backup", post(admin::p2p_backup_store))
+        .route(
+            "/p2p-draft-backup/{code}",
+            get(admin::p2p_backup_get).delete(admin::p2p_backup_delete),
+        )
         .layer(cors)
         .with_state(AppState {
             sessions: state,
@@ -523,6 +655,7 @@ async fn main() {
             lobby_subscribers,
             player_count,
             game_db,
+            draft_spectators,
             mode,
         });
 
@@ -559,6 +692,31 @@ async fn main() {
             "flushed active sessions to disk on shutdown"
         );
     }
+
+    // Flush all active draft sessions to SQLite
+    let dsm = shutdown_draft_state.lock().await;
+    let mut flushed_drafts = 0u32;
+    for (draft_code, session) in &dsm.sessions {
+        let snapshot = session.to_persisted();
+        match serde_json::to_string(&snapshot) {
+            Ok(json) => {
+                if let Err(e) = shutdown_game_db.save_draft_session(draft_code, &json) {
+                    error!(draft = %draft_code, error = %e, "failed to persist draft on shutdown");
+                } else {
+                    flushed_drafts += 1;
+                }
+            }
+            Err(e) => {
+                error!(draft = %draft_code, error = %e, "failed to serialize draft for shutdown");
+            }
+        }
+    }
+    if flushed_drafts > 0 {
+        info!(
+            count = flushed_drafts,
+            "flushed draft sessions to disk on shutdown"
+        );
+    }
 }
 
 async fn shutdown_signal() {
@@ -593,6 +751,7 @@ struct AppState {
     lobby_subscribers: SharedLobbySubscribers,
     player_count: SharedPlayerCount,
     game_db: SharedGameDb,
+    draft_spectators: SharedDraftSpectators,
     mode: Mode,
 }
 
@@ -619,6 +778,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(app_state): State<AppState>) -> 
                 app_state.lobby_subscribers,
                 app_state.player_count,
                 app_state.game_db,
+                app_state.draft_spectators,
                 app_state.mode,
             )
         })
@@ -636,6 +796,7 @@ async fn handle_socket(
     lobby_subscribers: SharedLobbySubscribers,
     player_count: SharedPlayerCount,
     game_db: SharedGameDb,
+    draft_spectators: SharedDraftSpectators,
     mode: Mode,
 ) {
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMessage>();
@@ -655,6 +816,8 @@ async fn handle_socket(
         draft_code: None,
         draft_seat: None,
         draft_token: None,
+        spectator_draft_code: None,
+        spectator_visibility: None,
     };
     let mut rate_limiter = RateLimiter::new();
 
@@ -728,6 +891,7 @@ async fn handle_socket(
                             &lobby_subscribers,
                             &player_count,
                             &game_db,
+                            &draft_spectators,
                             &tx,
                             &mut identity,
                             mode,
@@ -864,6 +1028,61 @@ fn persist_session_async(
         }
         Err(e) => {
             error!(game = %code, error = %e, "failed to serialize game session");
+        }
+    });
+}
+
+/// Broadcast `DraftSpectatorView` to all spectators watching a draft.
+/// Prunes disconnected spectators (closed sender channels).
+async fn broadcast_draft_spectator_views(
+    draft_code: &str,
+    draft_state: &SharedDraftState,
+    draft_spectators: &SharedDraftSpectators,
+) {
+    let mut specs = draft_spectators.lock().await;
+    let Some(spectators) = specs.get_mut(draft_code) else {
+        return;
+    };
+
+    let mgr = draft_state.lock().await;
+    let Some(session) = mgr.sessions.get(draft_code) else {
+        return;
+    };
+
+    // Retain only live senders, sending views to each
+    spectators.retain(|(visibility, sender)| {
+        let view = draft_core::view::filter_for_spectator(&session.session, *visibility);
+        let msg = ServerMessage::DraftSpectatorView { view };
+        sender.send(msg).is_ok()
+    });
+
+    // Clean up empty entries
+    if spectators.is_empty() {
+        specs.remove(draft_code);
+    }
+}
+
+/// Fire-and-forget persistence of a draft session to SQLite.
+async fn persist_draft_session_async(
+    game_db: &SharedGameDb,
+    draft_code: &str,
+    draft_state: &SharedDraftState,
+) {
+    let mgr = draft_state.lock().await;
+    let Some(session) = mgr.sessions.get(draft_code) else {
+        return;
+    };
+    let snapshot = session.to_persisted();
+    let db = game_db.clone();
+    let code = draft_code.to_string();
+    tokio::task::spawn_blocking(move || match serde_json::to_string(&snapshot) {
+        Ok(json) => {
+            if let Err(e) = db.save_draft_session(&code, &json) {
+                error!(draft = %code, error = %e, "failed to persist draft session");
+            }
+        }
+        Err(e) => {
+            error!(draft = %code, error = %e, "failed to serialize draft session");
         }
     });
 }
@@ -1242,6 +1461,7 @@ async fn handle_client_message(
     lobby_subscribers: &SharedLobbySubscribers,
     player_count: &SharedPlayerCount,
     game_db: &SharedGameDb,
+    draft_spectators: &SharedDraftSpectators,
     tx: &mpsc::UnboundedSender<ServerMessage>,
     identity: &mut SocketIdentity,
     mode: Mode,
@@ -3286,6 +3506,13 @@ async fn handle_client_message(
                             }
                         }
                     }
+
+                    // Persist draft session after mutation
+                    persist_draft_session_async(game_db, &draft_code, draft_state).await;
+
+                    // Broadcast to spectators
+                    broadcast_draft_spectator_views(&draft_code, draft_state, draft_spectators)
+                        .await;
                 }
                 Err(reason) => {
                     let msg = ServerMessage::DraftActionRejected { reason };
@@ -3339,14 +3566,35 @@ async fn handle_client_message(
         }
 
         ClientMessage::SpectateDraft { draft_code } => {
-            // Spectator connection wiring is implemented in Plan 04.
-            // For now, acknowledge the message type exists in the protocol.
-            info!(draft = %draft_code, "SpectateDraft — spectator wiring pending Plan 04");
-            let msg = ServerMessage::Error {
-                message: "Spectator mode not yet available".to_string(),
-            };
-            if let Ok(json) = serde_json::to_string(&msg) {
-                let _ = socket.send(Message::text(json)).await;
+            let drafts = draft_state.lock().await;
+            if let Some(session) = drafts.sessions.get(&draft_code) {
+                // Derive visibility from session config (host-configured, per D-07)
+                let visibility = session.config.spectator_visibility;
+                let view =
+                    draft_core::view::filter_for_spectator(&session.session, visibility);
+                // Record spectator identity (T-60-09: prevents spectator from sending DraftAction)
+                identity.spectator_draft_code = Some(draft_code.clone());
+                identity.spectator_visibility = Some(visibility);
+                // Register spectator sender for live broadcasts
+                {
+                    let mut specs = draft_spectators.lock().await;
+                    specs
+                        .entry(draft_code.clone())
+                        .or_default()
+                        .push((visibility, tx.clone()));
+                }
+                let msg = ServerMessage::DraftSpectatorView { view };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
+                info!(draft = %draft_code, ?visibility, "spectator connected to draft");
+            } else {
+                let msg = ServerMessage::Error {
+                    message: "Draft not found".to_string(),
+                };
+                if let Ok(json) = serde_json::to_string(&msg) {
+                    let _ = socket.send(Message::text(json)).await;
+                }
             }
         }
 

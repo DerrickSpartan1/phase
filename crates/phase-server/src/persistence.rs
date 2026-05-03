@@ -98,7 +98,6 @@ impl GameDb {
     // ── Draft session persistence ──────────────────────────────────────────
 
     /// Persist a draft session (upsert).
-    #[allow(dead_code)]
     pub fn save_draft_session(&self, draft_code: &str, json: &str) -> rusqlite::Result<()> {
         let now = now_epoch();
         let conn = self.conn.lock().unwrap();
@@ -112,7 +111,6 @@ impl GameDb {
     }
 
     /// Load all persisted draft sessions. Returns (draft_code, json) pairs.
-    #[allow(dead_code)]
     pub fn load_all_drafts(&self) -> rusqlite::Result<Vec<(String, String)>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT draft_code, session_json FROM draft_sessions")?;
@@ -130,7 +128,6 @@ impl GameDb {
     }
 
     /// Delete a draft session by code.
-    #[allow(dead_code)]
     pub fn delete_draft_session(&self, draft_code: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -143,7 +140,6 @@ impl GameDb {
     // ── P2P draft backup persistence ───────────────────────────────────────
 
     /// Store a P2P draft backup snapshot (upsert).
-    #[allow(dead_code)]
     pub fn save_p2p_backup(
         &self,
         draft_code: &str,
@@ -162,7 +158,6 @@ impl GameDb {
     }
 
     /// Load a P2P draft backup by code. Returns (host_peer_id, snapshot_json, updated_at).
-    #[allow(dead_code)]
     pub fn load_p2p_backup(
         &self,
         draft_code: &str,
@@ -186,7 +181,6 @@ impl GameDb {
     }
 
     /// Delete a P2P draft backup by code.
-    #[allow(dead_code)]
     pub fn delete_p2p_backup(&self, draft_code: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
