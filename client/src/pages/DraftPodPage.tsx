@@ -13,11 +13,16 @@ import { useNavigate } from "react-router";
 
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
 import { DraftPodLobby } from "../components/draft/DraftPodLobby";
-import { PackDisplay } from "../components/draft/PackDisplay";
-import { PoolPanel } from "../components/draft/PoolPanel";
 import { DraftProgress } from "../components/draft/DraftProgress";
+import { EliminationBracket } from "../components/draft/EliminationBracket";
+import { HostControls } from "../components/draft/HostControls";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
+import { PackDisplay } from "../components/draft/PackDisplay";
+import { PickTimer } from "../components/draft/PickTimer";
+import { PoolPanel } from "../components/draft/PoolPanel";
+import { SeatStatusRing } from "../components/draft/SeatStatusRing";
 import { SetSelector } from "../components/draft/SetSelector";
+import { StandingsTable } from "../components/draft/StandingsTable";
 import { menuButtonClass } from "../components/menu/buttonStyles";
 import {
   useMultiplayerDraftStore,
@@ -286,6 +291,89 @@ function PodSetup() {
   );
 }
 
+// ── Phase Sub-Components ─────────────────────────────────────────────
+
+function FormatStandings() {
+  const tournamentFormat = useMultiplayerDraftStore(
+    (s) => s.view?.tournament_format,
+  );
+  return tournamentFormat === "SingleElimination" ? (
+    <EliminationBracket />
+  ) : (
+    <StandingsTable />
+  );
+}
+
+function PairingPhaseView() {
+  return (
+    <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
+      <h2 className="text-center text-xl font-medium text-white">
+        Tournament Pairings
+      </h2>
+      <FormatStandings />
+    </div>
+  );
+}
+
+function MatchInProgressView() {
+  const matchPairing = useMultiplayerDraftStore((s) => s.matchPairing);
+  const [showPool, setShowPool] = useState(false);
+
+  return (
+    <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
+      <h2 className="text-center text-xl font-medium text-white">
+        Matches In Progress
+      </h2>
+      {matchPairing ? (
+        <div className="rounded-xl border border-emerald-400/20 bg-emerald-400/5 p-4 text-center">
+          <div className="text-sm text-white/50">Your match</div>
+          <div className="text-lg text-white">
+            vs {matchPairing.opponentName}
+          </div>
+          <div className="mt-1 text-sm text-white/40">
+            {matchPairing.isMatchHost
+              ? "You are hosting"
+              : "Connecting to opponent..."}
+          </div>
+        </div>
+      ) : (
+        <div className="text-center text-white/50">
+          Waiting for match results...
+        </div>
+      )}
+      <FormatStandings />
+      {/* D-14: ability to review own pool/deck during match phase */}
+      <div className="border-t border-white/10 pt-4">
+        <button
+          onClick={() => setShowPool((v) => !v)}
+          className="text-sm text-emerald-400 transition-colors hover:text-emerald-300"
+        >
+          {showPool ? "Hide Pool" : "Review Pool"}
+        </button>
+        {showPool && <PoolPanel />}
+      </div>
+    </div>
+  );
+}
+
+function RoundCompleteView() {
+  const podPolicy = useMultiplayerDraftStore((s) => s.view?.pod_policy);
+
+  return (
+    <div className="mx-auto flex w-full max-w-2xl flex-col gap-6 py-8">
+      <h2 className="text-center text-xl font-medium text-white">
+        Round Complete
+      </h2>
+      <FormatStandings />
+      <p className="text-center text-sm text-white/50">
+        {podPolicy === "Casual"
+          ? "Waiting for host to start next round..."
+          : "Next round starting shortly..."}
+      </p>
+    </div>
+  );
+}
+
 // ── Phase-based Content ───────────────────────────────────────────────
 
 function phaseContent(
@@ -301,7 +389,9 @@ function phaseContent(
     case "drafting":
       return (
         <div className="flex gap-4">
-          <div className="flex-1">
+          <div className="flex min-w-0 flex-1 flex-col">
+            <SeatStatusRing />
+            <PickTimer />
             <DraftProgress />
             <PackDisplay />
           </div>
@@ -311,20 +401,16 @@ function phaseContent(
     case "deckbuilding":
       return <LimitedDeckBuilder />;
     case "pairing":
-      return (
-        <div className="flex flex-col items-center justify-center gap-4 py-24">
-          <div className="text-xl font-medium text-white">
-            Generating pairings...
-          </div>
-          <p className="text-sm text-white/50">
-            All decks submitted. Match pairings will appear shortly.
-          </p>
-        </div>
-      );
+      return <PairingPhaseView />;
+    case "matchInProgress":
+      return <MatchInProgressView />;
+    case "roundComplete":
+      return <RoundCompleteView />;
     case "complete":
       return (
-        <div className="flex flex-col items-center justify-center gap-4 py-24">
-          <div className="text-xl font-medium text-white">Draft Complete</div>
+        <div className="mx-auto flex w-full max-w-2xl flex-col items-center gap-6 py-8">
+          <div className="text-2xl font-bold text-white">Draft Complete</div>
+          <FormatStandings />
           <button
             onClick={onLeave}
             className={menuButtonClass({ tone: "emerald", size: "md" })}
@@ -387,6 +473,8 @@ export function DraftPodPage() {
       <div className="relative z-10 mx-auto flex w-full max-w-6xl flex-col px-6 py-16">
         {phaseContent(phase, handleLeave)}
       </div>
+
+      <HostControls />
     </div>
   );
 }
