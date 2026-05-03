@@ -321,6 +321,48 @@ impl DraftSessionManager {
         self.sessions.insert(draft_code, session);
     }
 
+    /// Auto-pick a random card for a disconnected seat whose grace period expired.
+    ///
+    /// Returns `Ok(())` if a pick was made. Only fires during the Drafting phase (D-02).
+    /// Called from the draft disconnect expiry path in phase-server.
+    pub fn pick_random_for_seat(
+        &mut self,
+        draft_code: &str,
+        seat: u8,
+        pack_source: Option<&dyn PackSource>,
+    ) -> Result<(), String> {
+        let session = self
+            .sessions
+            .get_mut(draft_code)
+            .ok_or_else(|| format!("draft {draft_code} not found"))?;
+
+        if session.session.status != DraftStatus::Drafting {
+            return Err("draft not in Drafting status".into());
+        }
+
+        let view = draft_core::view::filter_for_player(&session.session, seat);
+        let pack = view
+            .current_pack
+            .ok_or_else(|| format!("seat {seat} has no pending pack"))?;
+
+        if pack.is_empty() {
+            return Err(format!("seat {seat} pack is empty"));
+        }
+
+        let idx = rand::rng().random_range(0..pack.len());
+        let card_instance_id = pack[idx].instance_id.clone();
+
+        let action = DraftAction::Pick {
+            seat,
+            card_instance_id,
+        };
+        draft_core::session::apply(&mut session.session, action, pack_source)
+            .map_err(|e| format!("auto-pick failed: {e}"))?;
+
+        info!(draft = %draft_code, seat, "auto-picked random card for disconnected seat");
+        Ok(())
+    }
+
     /// Scan active_matches across all sessions to find the draft owning a game.
     pub fn draft_for_game_code(&self, game_code: &str) -> Option<String> {
         self.sessions
@@ -566,6 +608,52 @@ mod tests {
 
         // Original host token should still work
         assert_eq!(mgr2.draft_for_token(&token), Some(code.as_str()));
+    }
+
+    fn fill_and_start(mgr: &mut DraftSessionManager, code: &str) {
+        for i in 1..8 {
+            mgr.join_draft(code, format!("Player {i}"), None).unwrap();
+        }
+        let source = draft_core::pack_source::FixturePackSource {
+            set_code: "TST".to_string(),
+            cards_per_pack: 14,
+        };
+        mgr.apply_system_action(code, DraftAction::StartDraft, Some(&source))
+            .unwrap();
+    }
+
+    #[test]
+    fn pick_random_for_seat_picks_from_available_pack() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+        fill_and_start(&mut mgr, &code);
+
+        let source = draft_core::pack_source::FixturePackSource {
+            set_code: "TST".to_string(),
+            cards_per_pack: 14,
+        };
+
+        // Get seat 0's pool size before auto-pick
+        let pool_before = mgr.sessions[&code].session.pools[0].len();
+
+        // Auto-pick for seat 0
+        let result = mgr.pick_random_for_seat(&code, 0, Some(&source));
+        assert!(result.is_ok(), "auto-pick failed: {:?}", result.err());
+
+        // Pool should grow by 1
+        let pool_after = mgr.sessions[&code].session.pools[0].len();
+        assert_eq!(pool_after, pool_before + 1);
+    }
+
+    #[test]
+    fn pick_random_for_seat_fails_when_not_drafting() {
+        let mut mgr = DraftSessionManager::new();
+        let (code, _token, _) = mgr.create_draft(test_config(), "Alice".to_string());
+
+        // Session is in Lobby status, not Drafting
+        let result = mgr.pick_random_for_seat(&code, 0, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("not in Drafting status"));
     }
 
     #[test]
