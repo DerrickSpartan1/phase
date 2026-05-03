@@ -800,9 +800,9 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::CostXPaid => "X paid for this spell".into(),
         QuantityRef::KickerCount => "kicker payments for this spell".into(),
         QuantityRef::ConvokedCreatureCount => "creatures that convoked this spell".into(),
-        QuantityRef::ManaSpentOnTriggeringSpell => "mana spent on triggering spell".into(),
-        QuantityRef::ManaSpentOnSelf => "mana spent on self".into(),
-        QuantityRef::ColorsSpentOnSelf => "colors of mana spent on self".into(),
+        QuantityRef::ManaSpentToCast { scope, metric } => {
+            format!("mana spent to cast ({scope:?}, {metric:?})")
+        }
         QuantityRef::EventContextSourceCostX => "X of triggering spell".into(),
         QuantityRef::ColorsInCommandersColorIdentity => {
             "# of colors in commander's color identity".into()
@@ -966,6 +966,8 @@ fn fmt_choice_type(ct: &ChoiceType) -> String {
         ChoiceType::Opponent => "opponent",
         ChoiceType::Player => "player",
         ChoiceType::TwoColors => "two colors",
+        ChoiceType::Word => "word",
+        ChoiceType::Artist => "artist",
     }
     .into()
 }
@@ -1786,8 +1788,8 @@ fn ability_details(def: &AbilityDefinition) -> Vec<(String, String)> {
     if let Some(mt) = &def.multi_target {
         d.push((
             "targets".into(),
-            match mt.max {
-                Some(max) => format!("{}-{}", mt.min, max),
+            match &mt.max {
+                Some(max) => format!("{}-{}", mt.min, fmt_quantity(max)),
                 None => format!("{}+", mt.min),
             },
         ));
@@ -2142,7 +2144,7 @@ fn build_trigger_item(
         category: ParseCategory::Trigger,
         label: format!("{}", trig.mode),
         source_text: trig.description.clone(),
-        supported: mode_supported && children.iter().all(|c| c.is_fully_supported()),
+        supported: mode_supported,
         details: trigger_details(trig),
         children,
     }
@@ -4341,9 +4343,7 @@ fn quantity_ref_feature(qref: &QuantityRef) -> (&'static str, FeatureSupport) {
         QuantityRef::CostXPaid => ("CostXPaid", Handled),
         QuantityRef::KickerCount => ("KickerCount", Handled),
         QuantityRef::ConvokedCreatureCount => ("ConvokedCreatureCount", Handled),
-        QuantityRef::ManaSpentOnTriggeringSpell => ("ManaSpentOnTriggeringSpell", Handled),
-        QuantityRef::ManaSpentOnSelf => ("ManaSpentOnSelf", Handled),
-        QuantityRef::ColorsSpentOnSelf => ("ColorsSpentOnSelf", Handled),
+        QuantityRef::ManaSpentToCast { .. } => ("ManaSpentToCast", Handled),
         QuantityRef::EventContextSourceCostX => ("EventContextSourceCostX", Handled),
         QuantityRef::ColorsInCommandersColorIdentity => {
             ("ColorsInCommandersColorIdentity", Handled)
@@ -7466,6 +7466,28 @@ mod tests {
             category: ParseCategory::Replacement,
             label: "EntersBattlefield".to_string(),
             source_text: None,
+            supported: true,
+            details: vec![],
+            children: vec![ParsedItem {
+                category: ParseCategory::Ability,
+                label: "unknown".to_string(),
+                source_text: Some("do something".to_string()),
+                supported: false,
+                details: vec![],
+                children: vec![],
+            }],
+        }];
+        let gaps = extract_gap_details(&items);
+        assert_eq!(gaps.len(), 1);
+        assert_eq!(gaps[0].handler, "Effect:unknown");
+    }
+
+    #[test]
+    fn extract_gap_details_does_not_blame_supported_trigger_for_child_gap() {
+        let items = vec![ParsedItem {
+            category: ParseCategory::Trigger,
+            label: "ChangesZone".to_string(),
+            source_text: Some("when this enters".to_string()),
             supported: true,
             details: vec![],
             children: vec![ParsedItem {

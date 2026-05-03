@@ -343,6 +343,271 @@ fn strip_instead_suffix(text: &str) -> (String, Option<AbilityCondition>, bool) 
     (text.to_string(), None, false)
 }
 
+#[derive(Debug, Clone)]
+struct SpellResolutionLine {
+    line: String,
+    effect_text: String,
+    ability_word_condition: Option<StaticCondition>,
+    has_ability_word_prefix: bool,
+}
+
+fn prepare_spell_resolution_line(raw_line: &str) -> Option<SpellResolutionLine> {
+    let raw_line = raw_line.trim();
+    if raw_line.is_empty() {
+        return None;
+    }
+
+    let reminder_body_owned = extract_ability_word_reminder_body(raw_line);
+    let raw_line = reminder_body_owned.as_deref().unwrap_or(raw_line);
+    let line = strip_x_cant_be_zero_suffix(&strip_reminder_text(raw_line));
+    if line.is_empty() {
+        return None;
+    }
+
+    let (ability_word_condition, effect_text, has_ability_word_prefix) =
+        if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
+            (ability_word_to_condition(&aw_name), effect_text, true)
+        } else {
+            (None, line.clone(), false)
+        };
+
+    Some(SpellResolutionLine {
+        line,
+        effect_text,
+        ability_word_condition,
+        has_ability_word_prefix,
+    })
+}
+
+fn is_self_exile_cleanup_line(line: &str, card_name: &str) -> bool {
+    let normalized = normalize_card_name_refs(line, card_name);
+    let normalized_lower = normalized.to_lowercase();
+
+    nom_on_lower(&normalized, &normalized_lower, |i| {
+        value(
+            (),
+            (
+                tag::<_, _, VerboseError<&str>>("exile "),
+                tag::<_, _, VerboseError<&str>>("~"),
+                opt(tag::<_, _, VerboseError<&str>>(".")),
+            ),
+        )
+        .parse(i)
+    })
+    .is_some()
+}
+
+fn starts_with_until_duration(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    nom_on_lower(line, &lower, |i| {
+        value(
+            (),
+            alt((
+                tag("until your next turn, "),
+                tag("until the end of your next turn, "),
+                tag("until end of turn, "),
+            )),
+        )
+        .parse(i)
+    })
+    .is_some()
+}
+
+fn is_standalone_spell_keyword_action_line(line: &str) -> bool {
+    let lower = line.to_lowercase();
+    let parsed = all_consuming(value(
+        (),
+        (
+            tag::<_, _, VerboseError<&str>>("time travel"),
+            opt(tag::<_, _, VerboseError<&str>>(".")),
+        ),
+    ))
+    .parse(lower.as_str())
+    .is_ok();
+    parsed
+}
+
+fn is_semicolon_keyword_line(line: &str, mtgjson_keyword_names: &[String]) -> bool {
+    let mut saw_multiple_parts = false;
+    let mut parts = line
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty());
+    let Some(first) = parts.next() else {
+        return false;
+    };
+
+    if extract_keyword_line(first, mtgjson_keyword_names).is_none() {
+        return false;
+    }
+
+    for part in parts {
+        saw_multiple_parts = true;
+        if extract_keyword_line(part, mtgjson_keyword_names).is_none() {
+            return false;
+        }
+    }
+
+    saw_multiple_parts
+}
+
+fn is_spell_resolution_instruction_line(
+    prepared: &SpellResolutionLine,
+    card_name: &str,
+    mtgjson_keyword_names: &[String],
+    parsed_so_far: &ParsedAbilities,
+) -> bool {
+    let line = &prepared.line;
+    let lower = line.to_lowercase();
+
+    if is_semicolon_keyword_line(line, mtgjson_keyword_names) {
+        return false;
+    }
+
+    if lower == "start your engines!" || lower == "start your engines" {
+        return false;
+    }
+
+    if lower == "your speed can increase beyond 4." || lower == "your speed can increase beyond 4" {
+        return false;
+    }
+
+    if lower_starts_with(&lower, "equip")
+        && !lower_starts_with(&lower, "equipped")
+        && try_parse_equip(line).is_some()
+    {
+        return false;
+    }
+
+    if !is_ability_activate_cost_static(&lower)
+        && extract_keyword_line(line, mtgjson_keyword_names).is_some()
+    {
+        return false;
+    }
+
+    if lower_starts_with(&lower, "enchant ") && !lower_starts_with(&lower, "enchanted ") {
+        return false;
+    }
+
+    if is_commander_permission_sentence(line) || try_parse_loyalty_line(line).is_some() {
+        return false;
+    }
+
+    if is_granted_static_line(&lower) {
+        return false;
+    }
+
+    if nom_on_lower(line, &lower, |i| {
+        value((), alt((tag("to solve \u{2014} "), tag("to solve -- ")))).parse(i)
+    })
+    .is_some()
+    {
+        return false;
+    }
+
+    if nom_on_lower(line, &lower, |i| {
+        value((), alt((tag("solved \u{2014} "), tag("solved -- ")))).parse(i)
+    })
+    .is_some()
+    {
+        return false;
+    }
+
+    if nom_on_lower(line, &lower, |i| {
+        value((), alt((tag("channel \u{2014} "), tag("channel -- ")))).parse(i)
+    })
+    .is_some()
+    {
+        return false;
+    }
+
+    if find_activated_colon(line).is_some() {
+        return false;
+    }
+
+    let effect_lower = prepared.effect_text.to_lowercase();
+    if has_trigger_prefix(&effect_lower) {
+        return false;
+    }
+
+    if is_static_pattern(&effect_lower) && !should_defer_spell_to_effect(&effect_lower) {
+        return false;
+    }
+
+    if is_replacement_pattern(&effect_lower)
+        && !(scan_contains(&effect_lower, "prevent") && scan_contains(&effect_lower, "damage"))
+        && parse_replacement_line(line, card_name).is_some()
+    {
+        return false;
+    }
+
+    if is_opening_hand_begin_game(&lower) || lower_starts_with(&lower, "as an additional cost") {
+        return false;
+    }
+
+    if parsed_so_far.strive_cost.is_some() {
+        if let Some(effect_text) = strip_ability_word(line) {
+            let effect_lower = effect_text.to_lowercase();
+            if lower_starts_with(&effect_lower, "this spell costs ")
+                && scan_contains(
+                    &effect_lower,
+                    "more to cast for each target beyond the first",
+                )
+            {
+                return false;
+            }
+        }
+    }
+
+    if parse_casting_restriction_line(line).is_some()
+        || parse_spell_casting_option_line(line, card_name).is_some()
+    {
+        return false;
+    }
+
+    if is_saga_chapter(&lower)
+        || is_flashback_equal_mana_cost(&lower)
+        || lower_starts_with(&lower, "commander ninjutsu ")
+        || lower_starts_with(&lower, "escape")
+        || lower_starts_with(&lower, "cumulative upkeep")
+        || is_keyword_cost_line(&lower)
+        || is_vehicle_tier_line(&lower)
+        || lower_starts_with(&lower, "activate ")
+        || lower_starts_with(&lower, "suspend ")
+        || lower_starts_with(&lower, "harmonize ")
+        || lower_starts_with(&lower, "flashback")
+        || lower_starts_with(&lower, "buyback")
+        || lower_starts_with(&lower, "this spell costs ")
+        || alt((
+            tag::<_, _, VerboseError<&str>>("kicker"),
+            tag("multikicker"),
+            tag("replicate"),
+            tag("mayhem"),
+        ))
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return false;
+    }
+
+    let saved_warnings = take_warnings();
+    let parsed = parse_effect_chain_with_context(
+        &prepared.effect_text,
+        AbilityKind::Spell,
+        &ParseContext {
+            subject: None,
+            card_name: Some(card_name.to_string()),
+            actor: None,
+            ..Default::default()
+        },
+    );
+    let _candidate_warnings = take_warnings();
+    for warning in saved_warnings {
+        push_warning(warning);
+    }
+    !has_unimplemented(&parsed)
+}
+
 /// Map a known ability word name to a typed `StaticCondition`.
 /// Returns `None` for unrecognized ability words (Landfall, Constellation, etc.
 /// don't have implicit conditions — their trigger text encodes the condition).
@@ -1546,12 +1811,51 @@ pub fn parse_oracle_text(
         // Priority 9: Imperative verb for instants/sorceries
         if is_spell {
             // B7: Strip ability-word prefix and attach condition for spell effects.
-            let (aw_condition, effect_line) =
-                if let Some((aw_name, effect_text)) = strip_ability_word_with_name(&line) {
-                    (ability_word_to_condition(&aw_name), effect_text)
-                } else {
-                    (None, line.clone())
+            let mut spell_body_lines = Vec::new();
+            let mut spell_description_lines = Vec::new();
+            let Some(prepared_line) = prepare_spell_resolution_line(&line) else {
+                i += 1;
+                continue;
+            };
+            let aw_condition = prepared_line.ability_word_condition.clone();
+            spell_body_lines.push(prepared_line.effect_text.clone());
+            spell_description_lines.push(prepared_line.line);
+
+            let mut next_i = i + 1;
+            while next_i < lines.len() {
+                if level_consumed.contains(&next_i)
+                    || saga_consumed.contains(&next_i)
+                    || spacecraft_consumed.contains(&next_i)
+                    || parse_oracle_block(&lines, next_i).is_some()
+                {
+                    break;
+                }
+
+                let Some(next_prepared) = prepare_spell_resolution_line(lines[next_i]) else {
+                    break;
                 };
+
+                if next_prepared.has_ability_word_prefix
+                    || starts_with_until_duration(&next_prepared.effect_text)
+                    || is_self_exile_cleanup_line(&next_prepared.effect_text, card_name)
+                    || is_standalone_spell_keyword_action_line(&prepared_line.effect_text)
+                    || !is_spell_resolution_instruction_line(
+                        &next_prepared,
+                        card_name,
+                        mtgjson_keyword_names,
+                        &result,
+                    )
+                {
+                    break;
+                }
+
+                spell_body_lines.push(next_prepared.effect_text);
+                spell_description_lines.push(next_prepared.line);
+                next_i += 1;
+            }
+
+            let effect_line = spell_body_lines.join(" ");
+            let description = spell_description_lines.join("\n");
             // CR 608.2c: Pre-strip "instead if [condition]" or trailing "instead"
             // from the effect text before chain parsing. This allows
             // strip_mana_value_conditional inside the chain parser to handle
@@ -1560,9 +1864,9 @@ pub fn parse_oracle_text(
             let (effect_line_clean, instead_condition, is_instead) =
                 strip_instead_suffix(&effect_line);
             let parse_line = if is_instead {
-                &effect_line_clean
+                effect_line_clean.as_str()
             } else {
-                &effect_line
+                effect_line.as_str()
             };
             let mut def = parse_effect_chain_with_context(
                 parse_line,
@@ -1574,7 +1878,7 @@ pub fn parse_oracle_text(
                     ..Default::default()
                 },
             );
-            def.description = Some(line.to_string());
+            def.description = Some(description);
             // CR 608.2c: Compose ability word condition with chain-extracted condition.
             // When both exist (e.g., Revolt + MV ≤ 4), compose through
             // `merge_ability_condition` which dedupes structurally-equal conditions
@@ -1596,7 +1900,7 @@ pub fn parse_oracle_text(
                     instead_condition,
                 ));
             }
-            i += 1;
+            i = next_i;
             // CR 706: If the parsed chain ends with "roll a dN", consume
             // subsequent d20 table lines and attach them as die result branches.
             if has_roll_die_pattern(&lower) {
@@ -2617,8 +2921,9 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
         FilterProp, ManaSpendRestriction, ModalSelectionCondition, ModalSelectionConstraint,
-        ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, QuantityExpr, QuantityRef,
-        ReplacementCondition, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+        ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtValue, QuantityExpr,
+        QuantityRef, ReplacementCondition, RoundingMode, SharedQuality, SharedQualityRelation,
+        StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -2665,6 +2970,77 @@ mod tests {
         );
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Spell);
+    }
+
+    #[test]
+    fn nonmodal_spell_contiguous_resolution_lines_chain_once() {
+        let r = parse("Scry 1.\nDraw a card.", "Test Opt", &[], &["Instant"], &[]);
+
+        assert_eq!(r.abilities.len(), 1);
+        assert!(r.modal.is_none());
+        assert!(matches!(
+            *r.abilities[0].effect,
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+        let draw = r.abilities[0]
+            .sub_ability
+            .as_ref()
+            .expect("draw should be chained after scry");
+        assert!(matches!(
+            *draw.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn modal_spell_block_keeps_mode_branches_separate() {
+        let r = parse(
+            "Choose one —\n• Scry 1.\n• Draw a card.",
+            "Test Charm",
+            &[],
+            &["Instant"],
+            &[],
+        );
+
+        let modal = r.modal.expect("modal metadata should remain on spell face");
+        assert_eq!(modal.mode_count, 2);
+        assert_eq!(r.abilities.len(), 2);
+        assert!(matches!(
+            *r.abilities[0].effect,
+            Effect::Scry {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+        assert!(matches!(
+            *r.abilities[1].effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn non_spell_permanent_resolution_like_lines_do_not_merge() {
+        let r = parse(
+            "Target player draws a card.\nTarget player gains 3 life.",
+            "Test Permanent",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+
+        assert_eq!(r.abilities.len(), 2);
+        assert!(r.abilities[0].sub_ability.is_none());
+        assert!(matches!(*r.abilities[0].effect, Effect::Draw { .. }));
+        assert!(matches!(*r.abilities[1].effect, Effect::GainLife { .. }));
     }
 
     #[test]
@@ -2878,6 +3254,116 @@ mod tests {
             "Expected PutAtLibraryPosition(Bottom), got {:?}",
             bottom_def.effect,
         );
+    }
+
+    #[test]
+    fn blocked_wurms_beyond_first_pump_have_dynamic_quantity_no_warning() {
+        for (name, pt, expected_power_factor) in
+            [("Johtull Wurm", "-2/-1", -2), ("Jungle Wurm", "-1/-1", -1)]
+        {
+            let r = parse(
+                &format!(
+                    "Whenever this creature becomes blocked, it gets {pt} until end of turn for each creature blocking it beyond the first."
+                ),
+                name,
+                &[],
+                &["Creature"],
+                &["Wurm"],
+            );
+
+            assert_eq!(r.triggers.len(), 1);
+            assert_eq!(r.triggers[0].mode, TriggerMode::BecomesBlocked);
+            assert!(
+                r.parse_warnings
+                    .iter()
+                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                "unexpected DynamicQty warning for {name}: {:?}",
+                r.parse_warnings
+            );
+            let execute = r.triggers[0]
+                .execute
+                .as_ref()
+                .expect("trigger should have execute");
+            match execute.effect.as_ref() {
+                Effect::Pump { power, .. } => match power {
+                    PtValue::Quantity(QuantityExpr::Multiply { factor, inner }) => {
+                        assert_eq!(*factor, expected_power_factor);
+                        assert!(matches!(
+                            inner.as_ref(),
+                            QuantityExpr::Offset { offset: -1, .. }
+                        ));
+                    }
+                    other => panic!("expected dynamic power multiplier, got {other:?}"),
+                },
+                other => panic!("expected Pump, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn bhaal_myrkul_half_starting_life_static_has_typed_condition_no_dynamic_qty_warning() {
+        for (name, subject) in [
+            ("Bane, Lord of Darkness", "Bane"),
+            ("Bhaal, Lord of Murder", "Bhaal"),
+            ("Myrkul, Lord of Bones", "Myrkul"),
+        ] {
+            let r = parse(
+                &format!(
+                    "As long as your life total is less than or equal to half your starting life total, {subject} has indestructible."
+                ),
+                name,
+                &[],
+                &["Creature"],
+                &[],
+            );
+
+            assert_eq!(r.statics.len(), 1, "{name}: {r:#?}");
+            assert!(
+                r.parse_warnings
+                    .iter()
+                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                "unexpected DynamicQty warning for {name}: {:?}",
+                r.parse_warnings
+            );
+            assert!(
+                r.statics[0]
+                    .modifications
+                    .contains(&ContinuousModification::AddKeyword {
+                        keyword: Keyword::Indestructible,
+                    }),
+                "expected indestructible grant for {name}: {:?}",
+                r.statics[0].modifications
+            );
+            match r.statics[0]
+                .condition
+                .as_ref()
+                .expect("expected static condition")
+            {
+                StaticCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty:
+                                QuantityRef::LifeTotal {
+                                    player: PlayerScope::Controller,
+                                },
+                        },
+                    comparator: Comparator::LE,
+                    rhs:
+                        QuantityExpr::HalfRounded {
+                            inner,
+                            rounding: RoundingMode::Down,
+                        },
+                } => {
+                    assert!(matches!(
+                        inner.as_ref(),
+                        QuantityExpr::Ref {
+                            qty: QuantityRef::StartingLifeTotal
+                        }
+                    ));
+                }
+                other => panic!("expected typed half-starting-life comparison, got {other:?}"),
+            }
+        }
     }
 
     #[test]
@@ -3615,9 +4101,15 @@ mod tests {
         );
 
         assert_eq!(r.statics.len(), 0);
-        assert_eq!(r.abilities.len(), 2);
-        assert!(r.abilities[1].optional);
-        match &*r.abilities[1].effect {
+        assert_eq!(r.abilities.len(), 1);
+        let cast = r.abilities[0].sub_ability.as_ref().unwrap_or_else(|| {
+            panic!(
+                "free cast instruction should be chained after bounce, got {:?}",
+                r.abilities[0]
+            )
+        });
+        assert!(cast.optional);
+        match &*cast.effect {
             Effect::CastFromZone {
                 target: TargetFilter::Typed(filter),
                 without_paying_mana_cost: true,
@@ -3883,7 +4375,10 @@ mod tests {
         assert!(restrictions.iter().any(|restriction| matches!(
             restriction,
             ActivationRestriction::RequiresCondition {
-                condition: Some(ParsedCondition::GraveyardCardTypeCountAtLeast { count: 4 })
+                condition: Some(ParsedCondition::ZoneCardTypeCountAtLeast {
+                    zone: Zone::Graveyard,
+                    count: 4
+                })
             }
         )));
         assert_eq!(r.parse_warnings, Vec::<String>::new());
@@ -6186,7 +6681,7 @@ mod tests {
         let ab = &r.abilities[0];
         assert_eq!(
             ab.multi_target,
-            Some(MultiTargetSpec { min: 0, max: None }),
+            Some(MultiTargetSpec::unlimited(0)),
             "expected any-number multi_target"
         );
 
@@ -6946,6 +7441,64 @@ mod tests {
         });
         assert!(has_p, "missing SetPowerDynamic(CostXPaid) in {mods:?}");
         assert!(has_t, "missing SetToughnessDynamic(CostXPaid) in {mods:?}");
+    }
+
+    #[test]
+    fn karn_sydri_artifact_animation_has_dynamic_mana_value_pt_no_warning() {
+        for (name, text) in [
+            (
+                "Karn, Silver Golem",
+                "{1}: Target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value until end of turn.",
+            ),
+            (
+                "Sydri, Galvanic Genius",
+                "{U}: Target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value until end of turn.",
+            ),
+        ] {
+            let r = parse(text, name, &[], &["Artifact"], &[]);
+            assert!(
+                r.parse_warnings
+                    .iter()
+                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                "unexpected DynamicQty warning for {name}: {:?}",
+                r.parse_warnings
+            );
+            assert_eq!(r.abilities.len(), 1, "{name}: expected one activated ability");
+
+            let Effect::GenericEffect {
+                target: Some(TargetFilter::Typed(tf)),
+                static_abilities,
+                duration: Some(crate::types::ability::Duration::UntilEndOfTurn),
+            } = r.abilities[0].effect.as_ref()
+            else {
+                panic!("{name}: expected UEOT GenericEffect, got {:?}", r.abilities[0].effect);
+            };
+            assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+            assert!(
+                tf.type_filters
+                    .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature)))
+            );
+            assert_eq!(static_abilities.len(), 1);
+
+            let mods = &static_abilities[0].modifications;
+            let expected = QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::Recipient,
+                },
+            };
+            assert!(mods.contains(&ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Artifact,
+            }));
+            assert!(mods.contains(&ContinuousModification::AddType {
+                core_type: crate::types::card_type::CoreType::Creature,
+            }));
+            assert!(mods.contains(&ContinuousModification::SetPowerDynamic {
+                value: expected.clone(),
+            }));
+            assert!(mods.contains(&ContinuousModification::SetToughnessDynamic {
+                value: expected,
+            }));
+        }
     }
 
     #[test]
@@ -8411,6 +8964,181 @@ mod tests {
             "unexpected DynamicQty warning: {:?}",
             parsed.parse_warnings
         );
+    }
+
+    #[test]
+    fn coat_of_arms_velis_vel_static_shared_type_no_dynamic_qty_warning() {
+        for (name, types, subtypes, oracle) in [
+            (
+                "Coat of Arms",
+                &["Artifact"][..],
+                &[][..],
+                "Each creature gets +1/+1 for each other creature on the battlefield that shares at least one creature type with it. (For example, if two Goblin Warriors and a Goblin Shaman are on the battlefield, each gets +2/+2.)",
+            ),
+            (
+                "Velis Vel",
+                &["Plane"][..],
+                &[][..],
+                "Each creature gets +1/+1 for each other creature on the battlefield that shares at least one creature type with it. (For example, if two Elemental Shamans and an Elemental Spirit are on the battlefield, each gets +2/+2.)\nWhenever chaos ensues, target creature gains all creature types until end of turn.",
+            ),
+        ] {
+            let parsed = parse(oracle, name, &[], types, subtypes);
+            assert!(
+                parsed
+                    .parse_warnings
+                    .iter()
+                    .all(|warning| warning.split_whitespace().next() != Some("Swallow:DynamicQty")),
+                "unexpected DynamicQty warning for {name}: {:?}",
+                parsed.parse_warnings
+            );
+
+            let mut matching_static = None;
+            for static_def in &parsed.statics {
+                if static_def.affected == Some(TargetFilter::Typed(TypedFilter::creature())) {
+                    matching_static = Some(static_def);
+                    break;
+                }
+            }
+            let static_def = matching_static.expect("expected global creature static");
+            let expected = QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: None,
+                        properties: vec![
+                            FilterProp::Another,
+                            FilterProp::SharesQuality {
+                                quality: SharedQuality::CreatureType,
+                                reference: Some(Box::new(TargetFilter::ParentTarget)),
+                                relation: SharedQualityRelation::Shares,
+                            },
+                        ],
+                    }),
+                },
+            };
+
+            assert!(
+                static_def.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddDynamicPower { value } if value == &expected
+                )),
+                "expected dynamic power for {name}, got {:?}",
+                static_def.modifications
+            );
+            assert!(
+                static_def.modifications.iter().any(|m| matches!(
+                    m,
+                    ContinuousModification::AddDynamicToughness { value } if value == &expected
+                )),
+                "expected dynamic toughness for {name}, got {:?}",
+                static_def.modifications
+            );
+            assert!(
+                static_def.modifications.iter().all(|m| !matches!(
+                    m,
+                    ContinuousModification::AddPower { .. }
+                        | ContinuousModification::AddToughness { .. }
+                )),
+                "must not emit fixed P/T mods for {name}: {:?}",
+                static_def.modifications
+            );
+        }
+    }
+
+    #[test]
+    fn gauntlets_treefolk_umbra_assign_damage_from_toughness_no_dynamic_qty_warning() {
+        for (name, oracle) in [
+            (
+                "Gauntlets of Light",
+                "Enchant creature\nEnchanted creature gets +0/+2 and assigns combat damage equal to its toughness rather than its power.\nEnchanted creature has \"{2}{W}: Untap this creature.\"",
+            ),
+            (
+                "Treefolk Umbra",
+                "Enchant creature\nEnchanted creature gets +0/+2 and assigns combat damage equal to its toughness rather than its power.\nUmbra armor",
+            ),
+        ] {
+            let parsed = parse(oracle, name, &[], &["Enchantment"], &["Aura"]);
+            assert!(
+                parsed
+                    .parse_warnings
+                    .iter()
+                    .all(|warning| !matches!(
+                        warning.split_whitespace().next(),
+                        Some("Swallow:DynamicQty" | "Swallow:Condition_AsLongAs")
+                    )),
+                "unexpected toughness-damage warning for {name}: {:?}",
+                parsed.parse_warnings
+            );
+
+            let static_def = parsed
+                .statics
+                .iter()
+                .find(|static_def| {
+                    static_def.affected
+                        == Some(TargetFilter::Typed(
+                            TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+                        ))
+                        && static_def
+                            .modifications
+                            .contains(&ContinuousModification::AddToughness { value: 2 })
+                })
+                .expect("expected enchanted creature +0/+2 static");
+            assert!(static_def
+                .modifications
+                .contains(&ContinuousModification::AssignDamageFromToughness));
+        }
+    }
+
+    #[test]
+    fn attached_conditional_toughness_damage_cards_no_dynamic_qty_warning() {
+        for (name, types, subtypes, expected_props, oracle) in [
+            (
+                "Bark of Doran",
+                &["Artifact"][..],
+                &["Equipment"][..],
+                vec![FilterProp::EquippedBy, FilterProp::ToughnessGTPower],
+                "Equipped creature gets +0/+1.\nAs long as equipped creature's toughness is greater than its power, it assigns combat damage equal to its toughness rather than its power.\nEquip {1}",
+            ),
+            (
+                "Solid Footing",
+                &["Enchantment"][..],
+                &["Aura"][..],
+                vec![
+                    FilterProp::EnchantedBy,
+                    FilterProp::WithKeyword {
+                        value: Keyword::Vigilance,
+                    },
+                ],
+                "Flash\nEnchant creature\nEnchanted creature gets +1/+1.\nAs long as enchanted creature has vigilance, it assigns combat damage equal to its toughness rather than its power.",
+            ),
+        ] {
+            let parsed = parse(oracle, name, &[], types, subtypes);
+            assert!(
+                parsed
+                    .parse_warnings
+                    .iter()
+                    .all(|warning| !matches!(
+                        warning.split_whitespace().next(),
+                        Some("Swallow:DynamicQty" | "Swallow:Condition_AsLongAs")
+                    )),
+                "unexpected toughness-damage warning for {name}: {:?}",
+                parsed.parse_warnings
+            );
+
+            let static_def = parsed
+                .statics
+                .iter()
+                .find(|static_def| {
+                    static_def.affected
+                        == Some(TargetFilter::Typed(
+                            TypedFilter::creature().properties(expected_props.clone()),
+                        ))
+                })
+                .expect("expected attached conditional toughness-damage static");
+            assert!(static_def
+                .modifications
+                .contains(&ContinuousModification::AssignDamageFromToughness));
+        }
     }
 
     // ------------------------------------------------------------------

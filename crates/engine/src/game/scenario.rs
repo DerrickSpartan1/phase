@@ -1104,6 +1104,7 @@ impl GameRunner {
             WaitingFor::RetargetChoice { .. } => "RetargetChoice",
             WaitingFor::WardDiscardChoice { .. } => "WardDiscardChoice",
             WaitingFor::WardSacrificeChoice { .. } => "WardSacrificeChoice",
+            WaitingFor::UnlessBounceChoice { .. } => "UnlessBounceChoice",
             WaitingFor::LearnChoice { .. } => "LearnChoice",
             WaitingFor::CrewVehicle { .. } => "CrewVehicle",
             WaitingFor::StationTarget { .. } => "StationTarget",

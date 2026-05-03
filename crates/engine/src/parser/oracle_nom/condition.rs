@@ -15,8 +15,9 @@ use super::primitives::{parse_article, parse_mana_cost, parse_number};
 use super::quantity as nom_quantity;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
-    AggregateFunction, Comparator, ControllerRef, FilterProp, PlayerScope, QuantityExpr,
-    QuantityRef, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+    AggregateFunction, CastManaObjectScope, CastManaSpentMetric, Comparator, ControllerRef,
+    FilterProp, PlayerScope, QuantityExpr, QuantityRef, StaticCondition, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::counter::{CounterMatch, CounterType};
 use crate::types::game_state::DayNight;
@@ -57,11 +58,15 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_entered_this_turn,
         parse_youve_this_turn,
         parse_event_state_conditions,
+    ))
+    .or(alt((
+        parse_source_qualified_mana_spent_condition,
+        parse_source_qualified_mana_spent_threshold,
         parse_mana_spent_vs_source_pt,
         parse_mana_spent_threshold,
         parse_combat_context_conditions,
         parse_unless_pay_condition,
-    ))
+    )))
     .parse(input)
 }
 
@@ -922,11 +927,32 @@ fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
     }
 }
 
-/// Parse "your life total is N or less/greater" conditions.
-///
-/// Note: "you have N or more life" is handled by `parse_you_have_conditions`.
+/// CR 119: Parse "your life total is N or less/greater" and
+/// "your life total is [comparator] [quantity]" conditions. Fractional RHS
+/// quantities such as "half your starting life total" compose through
+/// `parse_quantity` (CR 107.1a). Note: "you have N or more life" is handled by
+/// `parse_you_have_conditions`.
 fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("your life total is ").parse(input)?;
+
+    if let Ok((rest, comparator)) = parse_life_total_comparator(rest) {
+        // Comparator phrases and numeric "N or less/greater" phrases are disjoint:
+        // after matching a comparator, an unparseable RHS should be a hard parser error.
+        let (rest, rhs) = nom_quantity::parse_quantity(rest)?;
+        return Ok((
+            rest,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                comparator,
+                rhs,
+            },
+        ));
+    }
+
     let (rest, n) = parse_number(rest)?;
     // Try "or less" then "or greater"
     if let Ok((rest, _)) =
@@ -958,6 +984,22 @@ fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
             rhs: QuantityExpr::Fixed { value: n as i32 },
         },
     ))
+}
+
+/// CR 119: Comparator phrase for current life total checks. Longest
+/// alternatives must precede their prefixes ("less than or equal to" before
+/// "less than").
+fn parse_life_total_comparator(input: &str) -> OracleResult<'_, Comparator> {
+    alt((
+        value(
+            Comparator::LE,
+            tag::<_, _, nom_language::error::VerboseError<&str>>("less than or equal to "),
+        ),
+        value(Comparator::GE, tag("greater than or equal to ")),
+        value(Comparator::LT, tag("less than ")),
+        value(Comparator::GT, tag("greater than ")),
+    ))
+    .parse(input)
 }
 
 /// CR 113.6b: Parse zone-based source conditions.
@@ -1202,6 +1244,58 @@ fn parse_event_state_conditions(input: &str) -> OracleResult<'_, StaticCondition
     .parse(input)
 }
 
+/// CR 106.3 + CR 601.2h + CR 603.4: Parse
+/// "mana from [a/an] <source-filter> [source] was spent to cast <self>" as a
+/// positive quantity check over the source-qualified spent-mana snapshots.
+fn parse_source_qualified_mana_spent_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("mana from ").parse(input)?;
+    let (rest, source_filter) = nom_quantity::parse_mana_source_filter(rest)?;
+    let (rest, _) = tag(" was spent to cast ").parse(rest)?;
+    let (rest, _) = nom_quantity::parse_mana_spent_self_subject(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::TriggeringSpell,
+                    metric: CastManaSpentMetric::FromSource { source_filter },
+                },
+            },
+            comparator: Comparator::GT,
+            rhs: QuantityExpr::Fixed { value: 0 },
+        },
+    ))
+}
+
+/// CR 106.3 + CR 601.2h + CR 603.4: Parse
+/// "[N] or more mana from <source-filter> was spent to cast <self>".
+fn parse_source_qualified_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, n) = parse_number(input)?;
+    let (rest, comparator) = alt((
+        value(Comparator::GE, tag(" or more")),
+        value(Comparator::LE, tag(" or fewer")),
+        value(Comparator::LE, tag(" or less")),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag(" mana from ").parse(rest)?;
+    let (rest, source_filter) = nom_quantity::parse_mana_source_filter(rest)?;
+    let (rest, _) = tag(" was spent to cast ").parse(rest)?;
+    let (rest, _) = nom_quantity::parse_mana_spent_self_subject(rest)?;
+    Ok((
+        rest,
+        StaticCondition::QuantityComparison {
+            lhs: QuantityExpr::Ref {
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: CastManaObjectScope::TriggeringSpell,
+                    metric: CastManaSpentMetric::FromSource { source_filter },
+                },
+            },
+            comparator,
+            rhs: QuantityExpr::Fixed { value: n as i32 },
+        },
+    ))
+}
+
 /// CR 601.2h + CR 603.4: Intervening-if comparing mana spent on the triggering
 /// spell against this creature's power and/or toughness.
 ///
@@ -1267,7 +1361,10 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
     .parse(rest)?;
 
     let lhs = QuantityExpr::Ref {
-        qty: QuantityRef::ManaSpentOnTriggeringSpell,
+        qty: QuantityRef::ManaSpentToCast {
+            scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+            metric: crate::types::ability::CastManaSpentMetric::Total,
+        },
     };
     let build = |qty: QuantityRef| StaticCondition::QuantityComparison {
         lhs: lhs.clone(),
@@ -1289,7 +1386,7 @@ fn parse_mana_spent_vs_source_pt(input: &str) -> OracleResult<'_, StaticConditio
 /// Recognizes "[N] or more mana was spent to cast [that/this] spell/it/~" and
 /// the inverse "[N] or less mana was spent to cast …". Produces a
 /// `StaticCondition::QuantityComparison` with LHS
-/// `ManaSpentOnTriggeringSpell` that bridges to `TriggerCondition::QuantityComparison`
+/// triggering-spell spent-mana ref that bridges to `TriggerCondition::QuantityComparison`
 /// via the existing `static_condition_to_trigger_condition` path.
 ///
 /// Used by Expressive Firedancer's conditional rider ("If five or more mana
@@ -1323,7 +1420,10 @@ fn parse_mana_spent_threshold(input: &str) -> OracleResult<'_, StaticCondition> 
         rest,
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
-                qty: QuantityRef::ManaSpentOnTriggeringSpell,
+                qty: QuantityRef::ManaSpentToCast {
+                    scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                    metric: crate::types::ability::CastManaSpentMetric::Total,
+                },
             },
             comparator,
             rhs: QuantityExpr::Fixed { value: n as i32 },
@@ -2133,7 +2233,7 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::ability::{CardTypeSetSource, TypeFilter, TypedFilter};
+    use crate::types::ability::{CardTypeSetSource, RoundingMode, TypeFilter, TypedFilter};
     use crate::types::mana::ManaCost;
 
     #[test]
@@ -3135,6 +3235,85 @@ mod tests {
     }
 
     #[test]
+    fn test_your_life_total_le_half_starting_life_total() {
+        let (rest, c) = parse_inner_condition(
+            "your life total is less than or equal to half your starting life total",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player: PlayerScope::Controller,
+                            },
+                    },
+                comparator: Comparator::LE,
+                rhs:
+                    QuantityExpr::HalfRounded {
+                        inner,
+                        rounding: RoundingMode::Down,
+                    },
+            } => {
+                assert!(matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::StartingLifeTotal
+                    }
+                ));
+            }
+            other => panic!("expected LifeTotal LE HalfRounded(StartingLifeTotal), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_your_life_total_comparator_variants() {
+        for (text, expected_comparator, expected_rhs) in [
+            (
+                "your life total is less than 7",
+                Comparator::LT,
+                QuantityExpr::Fixed { value: 7 },
+            ),
+            (
+                "your life total is greater than your starting life total",
+                Comparator::GT,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::StartingLifeTotal,
+                },
+            ),
+            (
+                "your life total is greater than or equal to your starting life total",
+                Comparator::GE,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::StartingLifeTotal,
+                },
+            ),
+        ] {
+            let (rest, c) = parse_inner_condition(text).unwrap();
+            assert_eq!(rest, "");
+            match c {
+                StaticCondition::QuantityComparison {
+                    lhs:
+                        QuantityExpr::Ref {
+                            qty:
+                                QuantityRef::LifeTotal {
+                                    player: PlayerScope::Controller,
+                                },
+                        },
+                    comparator,
+                    rhs,
+                } => {
+                    assert_eq!(comparator, expected_comparator);
+                    assert_eq!(rhs, expected_rhs);
+                }
+                other => panic!("expected life total comparison for {text}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn test_you_have_fewer_cards_in_hand() {
         let (rest, c) = parse_inner_condition("you have two or fewer cards in hand").unwrap();
         assert_eq!(rest, "");
@@ -3624,7 +3803,10 @@ mod tests {
             StaticCondition::Or { conditions } => {
                 assert_eq!(conditions.len(), 2, "expected two disjuncts");
                 let expected_lhs = QuantityExpr::Ref {
-                    qty: QuantityRef::ManaSpentOnTriggeringSpell,
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                        metric: crate::types::ability::CastManaSpentMetric::Total,
+                    },
                 };
                 let pt_refs: Vec<QuantityRef> = conditions
                     .iter()
@@ -3658,6 +3840,72 @@ mod tests {
     /// Single-property form ("greater than this creature's power") parses as
     /// a single `QuantityComparison`, not an `Or`.
     #[test]
+    fn test_parse_source_qualified_mana_spent_condition() {
+        let (rest, c) = parse_inner_condition("mana from a treasure was spent to cast it").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(comparator, Comparator::GT);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 0 });
+                match lhs {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ManaSpentToCast {
+                                scope: CastManaObjectScope::TriggeringSpell,
+                                metric: CastManaSpentMetric::FromSource { source_filter },
+                            },
+                    } => match source_filter {
+                        TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                            assert_eq!(type_filters, vec![TypeFilter::Subtype("Treasure".into())]);
+                        }
+                        other => panic!("expected typed source filter, got {other:?}"),
+                    },
+                    other => panic!("expected source-qualified mana spent lhs, got {other:?}"),
+                }
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_source_qualified_mana_spent_threshold() {
+        let (rest, c) =
+            parse_inner_condition("three or more mana from creatures was spent to cast it")
+                .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs,
+                comparator,
+                rhs,
+            } => {
+                assert_eq!(comparator, Comparator::GE);
+                assert_eq!(rhs, QuantityExpr::Fixed { value: 3 });
+                match lhs {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ManaSpentToCast {
+                                scope: CastManaObjectScope::TriggeringSpell,
+                                metric: CastManaSpentMetric::FromSource { source_filter },
+                            },
+                    } => match source_filter {
+                        TargetFilter::Typed(TypedFilter { type_filters, .. }) => {
+                            assert_eq!(type_filters, vec![TypeFilter::Creature]);
+                        }
+                        other => panic!("expected typed source filter, got {other:?}"),
+                    },
+                    other => panic!("expected source-qualified mana spent lhs, got {other:?}"),
+                }
+            }
+            other => panic!("expected QuantityComparison, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_parse_condition_mana_spent_vs_self_power_only() {
         let (rest, c) = parse_condition(
             "if the amount of mana you spent is greater than this creature's power",
@@ -3673,7 +3921,10 @@ mod tests {
                 assert_eq!(
                     lhs,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::ManaSpentOnTriggeringSpell
+                        qty: QuantityRef::ManaSpentToCast {
+                            scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                            metric: crate::types::ability::CastManaSpentMetric::Total
+                        }
                     }
                 );
                 assert_eq!(comparator, Comparator::GT);
@@ -3708,7 +3959,10 @@ mod tests {
                 assert_eq!(
                     lhs,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::ManaSpentOnTriggeringSpell
+                        qty: QuantityRef::ManaSpentToCast {
+                            scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                            metric: crate::types::ability::CastManaSpentMetric::Total
+                        }
                     }
                 );
                 assert_eq!(comparator, Comparator::GE);

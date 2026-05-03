@@ -915,6 +915,11 @@ fn parse_unless_alt_cost(after_unless: &str) -> Option<UnlessCost> {
         return parse_unless_sacrifice_filter(rest);
     }
 
+    // CR 118.12: "you return [count] [filter] [you control] to its/their owner's hand"
+    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("you return ").parse(after_unless) {
+        return parse_unless_return_to_hand(rest);
+    }
+
     None
 }
 
@@ -970,6 +975,66 @@ fn parse_unless_sacrifice_filter(rest: &str) -> Option<UnlessCost> {
     }
 
     Some(UnlessCost::Sacrifice { count, filter })
+}
+
+/// CR 118.12: Parse "you return [count] [filter] [you control] to its/their
+/// owner's hand" into `UnlessCost::ReturnToHand`. Expects lowercased text after
+/// "you return ". Handles patterns like:
+/// - "an artifact you control to its owner's hand"
+/// - "two forests you control to their owner's hand"
+/// - "another creature you control to its owner's hand"
+/// - "an untapped island you control to its owner's hand"
+/// - "a non-lair land you control to its owner's hand"
+fn parse_unless_return_to_hand(rest: &str) -> Option<UnlessCost> {
+    let to_pos = rest.find(" to ")?; // allow-noncombinator: delimiter split on pre-tokenized unless clause text
+    let filter_part = rest[..to_pos].trim().trim_end_matches('.').trim();
+    if filter_part.is_empty() {
+        return None;
+    }
+
+    // Extract count: leading numeric word > 1 keeps as count, otherwise count=1.
+    let (count, filter_text) = if let Some((n, after_num)) = parse_number(filter_part) {
+        if n > 1 {
+            (n, after_num.trim().to_string())
+        } else {
+            (1u32, after_num.trim().to_string())
+        }
+    } else {
+        (1u32, filter_part.to_string())
+    };
+
+    if filter_text.is_empty() {
+        return None;
+    }
+
+    // Delegate to parse_target which handles "another", articles, type phrases,
+    // "you control" (controller suffix), and "from your graveyard" (zone suffix).
+    let target_phrase = format!("target {}", filter_text);
+    let (filter, remainder) = super::oracle_target::parse_target(&target_phrase);
+    if matches!(filter, TargetFilter::Any) {
+        return None;
+    }
+    if !remainder.trim().is_empty() {
+        return None;
+    }
+
+    // Derive from_zone from FilterProp::InZone that parse_target absorbed from zone suffixes.
+    let from_zone = filter.extract_in_zone();
+
+    // Ensure controller scoping — parse_target sets it from "you control" but
+    // some forms omit it (e.g., "a basic land card from your graveyard").
+    let filter = match &filter {
+        TargetFilter::Typed(tf) if tf.controller.is_some() => filter,
+        _ => TargetFilter::And {
+            filters: vec![TargetFilter::Controller, filter],
+        },
+    };
+
+    Some(UnlessCost::ReturnToHand {
+        count,
+        filter,
+        from_zone,
+    })
 }
 
 /// Parse "where X is ~'s power" / "where X is this creature's power" etc.
@@ -5961,6 +6026,21 @@ mod tests {
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
 
+    fn blocking_source_beyond_first_expr() -> QuantityExpr {
+        QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter {
+                        type_filters: vec![TypeFilter::Creature],
+                        controller: None,
+                        properties: vec![FilterProp::BlockingSource],
+                    }),
+                },
+            }),
+            offset: -1,
+        }
+    }
+
     #[test]
     fn trigger_etb_self() {
         let def = parse_trigger_line(
@@ -7354,6 +7434,43 @@ mod tests {
     }
 
     #[test]
+    fn trigger_becomes_blocked_pump_scales_with_blockers_beyond_first() {
+        let def = parse_trigger_line(
+            "Whenever this creature becomes blocked, it gets -2/-1 until end of turn for each creature blocking it beyond the first.",
+            "Johtull Wurm",
+        );
+
+        assert_eq!(def.mode, TriggerMode::BecomesBlocked);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        assert_eq!(execute.duration, Some(Duration::UntilEndOfTurn));
+        match execute.effect.as_ref() {
+            Effect::Pump {
+                power,
+                toughness,
+                target,
+            } => {
+                assert_eq!(target, &TargetFilter::SelfRef);
+                assert_eq!(
+                    power,
+                    &PtValue::Quantity(QuantityExpr::Multiply {
+                        factor: -2,
+                        inner: Box::new(blocking_source_beyond_first_expr()),
+                    })
+                );
+                assert_eq!(
+                    toughness,
+                    &PtValue::Quantity(QuantityExpr::Multiply {
+                        factor: -1,
+                        inner: Box::new(blocking_source_beyond_first_expr()),
+                    })
+                );
+            }
+            other => panic!("expected Pump, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn trigger_is_dealt_damage() {
         let def = parse_trigger_line(
             "Whenever Spitemare is dealt damage, it deals that much damage to any target.",
@@ -8533,6 +8650,161 @@ mod tests {
             "typed discard should fall through (UnlessCost::DiscardCard has no filter), got {:?}",
             def.unless_pay
         );
+    }
+
+    #[test]
+    fn trigger_unless_you_return_artifact_to_hand() {
+        // CR 118.12: Glint Hawk — "sacrifice it unless you return an artifact
+        // you control to its owner's hand."
+        let def = parse_trigger_line(
+            "When ~ enters, sacrifice it unless you return an artifact you control to its owner's hand.",
+            "Glint Hawk",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        match &unless_pay.cost {
+            UnlessCost::ReturnToHand {
+                count,
+                filter,
+                from_zone,
+            } => {
+                assert_eq!(*count, 1);
+                assert!(
+                    from_zone.is_none(),
+                    "battlefield source should have no from_zone"
+                );
+                let has_artifact = match filter {
+                    TargetFilter::And { filters } => filters.iter().any(|f| matches!(f,
+                        TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Artifact)
+                    )),
+                    TargetFilter::Typed(tf) => tf.type_filters.contains(&TypeFilter::Artifact),
+                    _ => false,
+                };
+                assert!(
+                    has_artifact,
+                    "filter should include Artifact, got {:?}",
+                    filter
+                );
+            }
+            other => panic!("cost should be ReturnToHand, got {:?}", other),
+        }
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(
+            matches!(*execute.effect, Effect::Sacrifice { .. }),
+            "execute should be Sacrifice, got {:?}",
+            execute.effect
+        );
+    }
+
+    #[test]
+    fn trigger_unless_you_return_another_creature_to_hand() {
+        // CR 118.12: Faerie Impostor / Quickling — "sacrifice it unless you
+        // return another creature you control to its owner's hand."
+        let def = parse_trigger_line(
+            "When ~ enters, sacrifice it unless you return another creature you control to its owner's hand.",
+            "Faerie Impostor",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            UnlessCost::ReturnToHand { count, filter, .. } => {
+                assert_eq!(*count, 1);
+                let has_another_creature = match filter {
+                    TargetFilter::And { filters } => filters.iter().any(|f| {
+                        matches!(f,
+                            TargetFilter::Typed(tf) if tf.properties.contains(&FilterProp::Another)
+                                && tf.type_filters.contains(&TypeFilter::Creature)
+                        )
+                    }),
+                    TargetFilter::Typed(tf) => {
+                        tf.properties.contains(&FilterProp::Another)
+                            && tf.type_filters.contains(&TypeFilter::Creature)
+                    }
+                    _ => false,
+                };
+                assert!(
+                    has_another_creature,
+                    "filter should include Another+Creature, got {:?}",
+                    filter
+                );
+            }
+            other => panic!("cost should be ReturnToHand, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_unless_you_return_two_forests_to_hand() {
+        // CR 118.12: Bull Elephant — "sacrifice it unless you return two
+        // Forests you control to their owner's hand."
+        let def = parse_trigger_line(
+            "When ~ enters, sacrifice it unless you return two Forests you control to their owner's hand.",
+            "Bull Elephant",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            UnlessCost::ReturnToHand {
+                count, from_zone, ..
+            } => {
+                assert_eq!(*count, 2);
+                assert!(from_zone.is_none());
+            }
+            other => panic!("cost should be ReturnToHand, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_unless_you_return_non_lair_land_to_hand() {
+        // CR 118.12: Crosis's Catacombs — "sacrifice it unless you return a
+        // non-Lair land you control to its owner's hand."
+        let def = parse_trigger_line(
+            "When ~ enters, sacrifice it unless you return a non-Lair land you control to its owner's hand.",
+            "Crosis's Catacombs",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            UnlessCost::ReturnToHand {
+                count, from_zone, ..
+            } => {
+                assert_eq!(*count, 1);
+                assert!(from_zone.is_none());
+            }
+            other => panic!("cost should be ReturnToHand, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn trigger_unless_you_return_from_graveyard() {
+        // CR 118.12: Harvest Wurm — "sacrifice it unless you return a basic
+        // land card from your graveyard to your hand."
+        let def = parse_trigger_line(
+            "When ~ enters, sacrifice it unless you return a basic land card from your graveyard to your hand.",
+            "Harvest Wurm",
+        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            UnlessCost::ReturnToHand {
+                count,
+                from_zone,
+                filter,
+            } => {
+                assert_eq!(*count, 1);
+                assert_eq!(
+                    *from_zone,
+                    Some(crate::types::zones::Zone::Graveyard),
+                    "should be from graveyard"
+                );
+                let has_land = match filter {
+                    TargetFilter::And { filters } => filters.iter().any(|f| {
+                        matches!(f,
+                            TargetFilter::Typed(tf) if tf.type_filters.contains(&TypeFilter::Land)
+                        )
+                    }),
+                    TargetFilter::Typed(tf) => tf.type_filters.contains(&TypeFilter::Land),
+                    _ => false,
+                };
+                assert!(has_land, "filter should include Land, got {:?}", filter);
+            }
+            other => panic!("cost should be ReturnToHand, got {:?}", other),
+        }
     }
 
     #[test]

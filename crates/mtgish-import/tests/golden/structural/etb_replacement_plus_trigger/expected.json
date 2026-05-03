@@ -27,25 +27,12 @@
           "forward_result": false
         },
         "valid_card": {
-          "type": "And",
-          "filters": [
-            {
-              "type": "Typed",
-              "type_filters": [
-                "Creature"
-              ],
-              "controller": null,
-              "properties": []
-            },
-            {
-              "type": "Typed",
-              "type_filters": [
-                "Permanent"
-              ],
-              "controller": "Opponent",
-              "properties": []
-            }
-          ]
+          "type": "Typed",
+          "type_filters": [
+            "Creature"
+          ],
+          "controller": "Opponent",
+          "properties": []
         },
         "origin": null,
         "destination": "Battlefield",
@@ -71,25 +58,12 @@
           "effect": {
             "type": "Tap",
             "target": {
-              "type": "And",
-              "filters": [
-                {
-                  "type": "Typed",
-                  "type_filters": [
-                    "Creature"
-                  ],
-                  "controller": null,
-                  "properties": []
-                },
-                {
-                  "type": "Typed",
-                  "type_filters": [
-                    "Permanent"
-                  ],
-                  "controller": "Opponent",
-                  "properties": []
-                }
-              ]
+              "type": "Typed",
+              "type_filters": [
+                "Creature"
+              ],
+              "controller": "Opponent",
+              "properties": []
             }
           },
           "cost": null,
@@ -107,25 +81,12 @@
           "type": "Mandatory"
         },
         "valid_card": {
-          "type": "And",
-          "filters": [
-            {
-              "type": "Typed",
-              "type_filters": [
-                "Creature"
-              ],
-              "controller": null,
-              "properties": []
-            },
-            {
-              "type": "Typed",
-              "type_filters": [
-                "Permanent"
-              ],
-              "controller": "Opponent",
-              "properties": []
-            }
-          ]
+          "type": "Typed",
+          "type_filters": [
+            "Creature"
+          ],
+          "controller": "Opponent",
+          "properties": []
         },
         "description": null,
         "condition": null,

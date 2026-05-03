@@ -29,9 +29,9 @@ use super::oracle_util::{
 };
 use crate::parser::oracle_warnings::push_warning;
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, BasicLandType, CardPlayMode, ChosenSubtypeKind, Comparator,
-    ContinuousModification, ControllerRef, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
-    StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    AbilityDefinition, AbilityKind, AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind,
+    Comparator, ContinuousModification, ControllerRef, FilterProp, ObjectScope, QuantityExpr,
+    QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{parse_counter_type, CounterMatch};
@@ -417,6 +417,14 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
     let lower = text.to_lowercase();
     let tp = TextPair::new(&text, &lower);
 
+    // CR 510.1c: Attached-object conditional variants must precede the generic
+    // inverted "As long as ..." rewrite so the condition binds to the
+    // enchanted/equipped creature rather than becoming an unrecognized SelfRef
+    // condition.
+    if let Some(def) = parse_attached_assigns_damage_from_toughness(&tp, &text) {
+        return Some(def);
+    }
+
     // CR 611.3a: An inverted static of the form "As long as <condition>, <effect>"
     // is semantically equivalent to the canonical "<effect> as long as <condition>".
     // Rewrite to canonical form and re-dispatch so the existing conditional-continuous
@@ -451,6 +459,13 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
                     .description(text.to_string()),
             );
         }
+    }
+
+    // --- "[Type] spells you cast [from zone] have [keyword]" (CR 702.51a) ---
+    // Dispatch before generic "has/have" continuous parsing; spell keyword
+    // grants function during casting, not as battlefield continuous grants.
+    if let Some(def) = parse_spells_have_keyword(&tp, &text) {
+        return Some(def);
     }
 
     if tp.lower == "your speed can increase beyond 4."
@@ -2292,6 +2307,10 @@ fn parse_typed_you_control(text: &str, lower: &str, is_other: bool) -> Option<St
                 // No combat-status prefix — use original dispatch path
                 if let Some(filter) = parse_modified_creature_subject_filter(full_subject) {
                     filter
+                } else if let Some(filter) =
+                    parse_attachment_creatures_you_control_descriptor(descriptor)
+                {
+                    filter
                 } else if let Some(color) = parse_named_color(descriptor) {
                     TargetFilter::Typed(
                         TypedFilter::creature()
@@ -2535,6 +2554,65 @@ fn parse_assigns_damage_from_toughness(lower: &str, text: &str) -> Option<Static
     Some(
         StaticDefinition::continuous()
             .affected(TargetFilter::Typed(filter))
+            .modifications(vec![ContinuousModification::AssignDamageFromToughness])
+            .description(text.to_string()),
+    )
+}
+
+fn parse_attached_assigns_damage_from_toughness(
+    tp: &TextPair<'_>,
+    text: &str,
+) -> Option<StaticDefinition> {
+    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+
+    #[derive(Clone, Copy)]
+    enum AttachedSubject {
+        Enchanted,
+        Equipped,
+    }
+
+    let lower = tp.lower.trim_end_matches('.');
+    let (rest, subject) = preceded(
+        tag::<_, _, VE<'_>>("as long as "),
+        alt((
+            value(AttachedSubject::Enchanted, tag("enchanted creature")),
+            value(AttachedSubject::Equipped, tag("equipped creature")),
+        )),
+    )
+    .parse(lower)
+    .ok()?;
+
+    let (rest, condition_prop) = if let Ok((rest, _)) =
+        tag::<_, _, VE<'_>>("'s toughness is greater than its power").parse(rest)
+    {
+        (rest, FilterProp::ToughnessGTPower)
+    } else {
+        let (after_has, _) = tag::<_, _, VE<'_>>(" has ").parse(rest).ok()?;
+        let (rest, keyword_text) = take_until::<_, _, VE<'_>>(", it assigns")
+            .parse(after_has)
+            .ok()?;
+        let keyword = map_keyword(keyword_text.trim())?;
+        (rest, FilterProp::WithKeyword { value: keyword })
+    };
+    let (rest, _) = tag::<_, _, VE<'_>>(
+        ", it assigns combat damage equal to its toughness rather than its power",
+    )
+    .parse(rest)
+    .ok()?;
+    if !rest.is_empty() {
+        return None;
+    }
+
+    let attachment_prop = match subject {
+        AttachedSubject::Enchanted => FilterProp::EnchantedBy,
+        AttachedSubject::Equipped => FilterProp::EquippedBy,
+    };
+
+    Some(
+        StaticDefinition::continuous()
+            .affected(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![attachment_prop, condition_prop]),
+            ))
             .modifications(vec![ContinuousModification::AssignDamageFromToughness])
             .description(text.to_string()),
     )
@@ -3481,22 +3559,67 @@ fn find_continuous_predicate_start(lower: &str) -> Option<usize> {
     .min()
 }
 
+fn parse_keyword_with_where_x(input: &str) -> Option<(Keyword, Option<QuantityRef>)> {
+    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+
+    let input = input.trim().trim_end_matches('.');
+    let (rest, keyword_text) = nom::bytes::complete::take_till::<_, _, VE<'_>>(|c| c == ',')
+        .parse(input)
+        .ok()?;
+    let keyword = Keyword::from_str(keyword_text.trim()).ok()?;
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Some((keyword, None));
+    }
+
+    let (_, qty_text) = preceded(tag::<_, _, VE<'_>>(", where x is "), nom::combinator::rest)
+        .parse(rest)
+        .ok()?;
+    let qty = parse_quantity_ref(qty_text.trim())?;
+    Some((keyword, Some(qty)))
+}
+
+#[cfg(test)]
+fn parse_spells_have_keyword_for_test(text: &str) -> Option<StaticDefinition> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    parse_spells_have_keyword(&tp, text)
+}
+
+fn bind_where_x_in_quantity_expr(
+    value: QuantityExpr,
+    where_x: &QuantityRef,
+) -> Option<QuantityExpr> {
+    match value {
+        QuantityExpr::Fixed { .. } => Some(value),
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name },
+        } if name == "X" => Some(QuantityExpr::Ref {
+            qty: where_x.clone(),
+        }),
+        _ => None,
+    }
+}
+
 /// Parse "[Type] spells you cast [from zone] have [keyword]" patterns.
 /// CR 702.51a: Grants a keyword (typically convoke) to spells matching a filter during casting.
 /// Also handles "Creature cards you own that aren't on the battlefield have flash."
 fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefinition> {
     type VE<'a> = nom_language::error::VerboseError<&'a str>;
 
+    let scoped_tp = nom_tag_tp(tp, "during your turn, ");
+    let condition = scoped_tp.as_ref().map(|_| StaticCondition::DuringYourTurn);
+    let tp = scoped_tp.as_ref().unwrap_or(tp);
+
     // Pattern 1: "[type] spells you cast [from zone] have [keyword]."
     // Find " have " to split subject from keyword
-    let have_pos = tp.lower.rfind(" have ")?;
+    let have_pos = tp.lower.match_indices(" have ").next()?.0;
     let subject = &tp.lower[..have_pos];
-    let keyword_str = tp.lower[have_pos + " have ".len()..]
-        .trim()
-        .trim_end_matches('.');
+    let keyword_str = tp.lower[have_pos + " have ".len()..].trim();
 
-    // Parse the keyword — must be a valid keyword
-    let keyword = Keyword::from_str(keyword_str).ok()?;
+    // Parse the keyword — must be a valid keyword. A trailing "where X is …"
+    // clause binds an earlier variable-X mana-value qualifier on the subject.
+    let (keyword, where_x) = parse_keyword_with_where_x(keyword_str)?;
 
     // Find "spells you cast" in the subject — may be preceded by a type descriptor
     let spells_marker = "spells you cast";
@@ -3510,39 +3633,35 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
         let mut cursor = after_spells;
 
         // Parse optional zone qualifier: "from exile", "from your graveyard"
-        let zone_filter = if let Ok((rest, _)) = tag::<_, _, VE<'_>>("from exile").parse(cursor) {
+        let zone_filter = if let Ok((rest, zone)) = alt((
+            value(Zone::Exile, tag::<_, _, VE<'_>>("from exile")),
+            value(Zone::Hand, tag("from your hand")),
+        ))
+        .parse(cursor)
+        {
             cursor = rest.trim_start();
-            Some(FilterProp::InZone { zone: Zone::Exile })
+            Some(FilterProp::InZone { zone })
         } else {
             None
         };
 
         // CR 202.3: Optional "with mana value N or greater/less" qualifier
         // (Imoti, Celebrant of Bounty: "Spells you cast with mana value 6 or
-        // greater have cascade."). Restricted to fixed-value variants — the
-        // dynamic Ref/Offset variants (e.g. "less than that creature's mana
-        // value") presume a triggering source object that doesn't exist in a
-        // CastWithKeyword grant evaluation.
+        // greater have cascade."). Variable-X thresholds may be bound by the
+        // keyword clause's trailing "where X is …" quantity (Abaddon class).
         let mv_filter = parse_mana_value_suffix(cursor).and_then(|(prop, consumed)| {
-            let is_fixed = matches!(
-                &prop,
-                FilterProp::Cmc {
-                    comparator: Comparator::GE,
-                    value: QuantityExpr::Fixed { .. }
-                } | FilterProp::Cmc {
-                    comparator: Comparator::LE,
-                    value: QuantityExpr::Fixed { .. }
-                } | FilterProp::Cmc {
-                    comparator: Comparator::EQ,
-                    value: QuantityExpr::Fixed { .. }
+            let FilterProp::Cmc { comparator, value } = prop else {
+                return None;
+            };
+            let value = match where_x.as_ref() {
+                Some(qty) => bind_where_x_in_quantity_expr(value, qty)?,
+                None => match value {
+                    QuantityExpr::Fixed { .. } => value,
+                    _ => return None,
                 },
-            );
-            if is_fixed {
-                cursor = cursor[consumed..].trim_start();
-                Some(prop)
-            } else {
-                None
-            }
+            };
+            cursor = cursor[consumed..].trim_start();
+            Some(FilterProp::Cmc { comparator, value })
         });
         let _ = cursor; // qualifiers are optional; remaining slice is unused
 
@@ -3567,11 +3686,13 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
             typed.properties.push(mv_prop);
         }
 
-        return Some(
-            StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
-                .affected(TargetFilter::Typed(typed))
-                .description(text.to_string()),
-        );
+        let mut def = StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
+            .affected(TargetFilter::Typed(typed))
+            .description(text.to_string());
+        if let Some(condition) = condition.clone() {
+            def = def.condition(condition);
+        }
+        return Some(def);
     }
 
     // Pattern 2: "Creature cards you own that aren't on the battlefield have flash"
@@ -3592,11 +3713,13 @@ fn parse_spells_have_keyword(tp: &TextPair<'_>, text: &str) -> Option<StaticDefi
             }
             _ => base_filter,
         };
-        return Some(
-            StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
-                .affected(affected)
-                .description(text.to_string()),
-        );
+        let mut def = StaticDefinition::new(StaticMode::CastWithKeyword { keyword })
+            .affected(affected)
+            .description(text.to_string());
+        if let Some(condition) = condition.clone() {
+            def = def.condition(condition);
+        }
+        return Some(def);
     }
 
     None
@@ -3714,6 +3837,14 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
         }
     }
 
+    // CR 205.3m: "creature [you control] that's a Wolf or a Werewolf" — relative
+    // clause restricting a base creature/permanent phrase to a subtype disjunction.
+    // Split on " that's a " / " that is a ", parse the base phrase (with controller
+    // suffix) via recursive call, then compose with the subtype filter.
+    if let Some(filter) = parse_thats_a_subject_filter(trimmed, &lower) {
+        return Some(filter);
+    }
+
     if let Some(filter) = parse_modified_creature_subject_filter(trimmed) {
         return Some(filter);
     }
@@ -3738,6 +3869,102 @@ fn parse_continuous_subject_filter(subject: &str) -> Option<TargetFilter> {
     parse_rule_static_subject_filter(trimmed)
 }
 
+/// CR 205.3m: Parse "creature [you control] that's a Wolf or a Werewolf" subjects.
+/// Splits on "that's a " / "that is a ", parses the base phrase (with controller/zone
+/// suffix) via `parse_type_phrase`, then parses a comma/or/and-separated subtype list
+/// and composes with `TargetFilter::And`.
+fn parse_thats_a_subject_filter(text: &str, lower: &str) -> Option<TargetFilter> {
+    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+
+    let (before, subtype_lower, _) = nom_primitives::scan_preceded(lower, |i| {
+        preceded(
+            alt((tag::<_, _, VE>("that's a "), tag::<_, _, VE>("that is a "))),
+            nom::combinator::rest,
+        )
+        .parse(i)
+    })?;
+    let base_text = text[..before.len()].trim();
+    let subtype_text = text[text.len() - subtype_lower.len()..].trim();
+
+    let (base_filter, base_rest) = parse_type_phrase(base_text);
+    if !base_rest.trim().is_empty() || matches!(base_filter, TargetFilter::Any) {
+        return None;
+    }
+
+    let subtype_filter = parse_subtype_or_list(subtype_text)?;
+
+    Some(TargetFilter::And {
+        filters: vec![base_filter, subtype_filter],
+    })
+}
+
+/// CR 205.3m: Parse a comma/or/and/and-or-separated list of capitalized subtypes.
+/// Handles: "Wolf or a Werewolf", "Barbarian, a Warrior, or a Berserker",
+/// "Cleric, Rogue, Warrior, and/or Wizard", "Cat, Elemental, Nightmare, Dinosaur, or Beast".
+/// Returns `TargetFilter::Or` for multiple subtypes, single `TargetFilter::Typed` for one.
+fn parse_subtype_or_list(input: &str) -> Option<TargetFilter> {
+    fn parse_subtype_word(
+        input: &str,
+    ) -> nom::IResult<&str, &str, nom_language::error::VerboseError<&str>> {
+        use nom::bytes::complete::take_while1;
+        let (rest, word) = take_while1(|c: char| c.is_alphabetic() || c == '-').parse(input)?;
+        if !word.chars().next().is_some_and(|c| c.is_uppercase()) {
+            return Err(nom::Err::Error(VerboseError {
+                errors: vec![(
+                    input,
+                    nom_language::error::VerboseErrorKind::Context("expected capitalized subtype"),
+                )],
+            }));
+        }
+        Ok((rest, word))
+    }
+
+    fn parse_list_separator(
+        input: &str,
+    ) -> nom::IResult<&str, &str, nom_language::error::VerboseError<&str>> {
+        alt((
+            tag(", and/or a "),
+            tag(", and/or "),
+            tag(", or a "),
+            tag(", and a "),
+            tag(", or "),
+            tag(", and "),
+            tag(", a "),
+            tag(", "),
+            tag(" and/or a "),
+            tag(" and/or "),
+            tag(" or a "),
+            tag(" and a "),
+            tag(" or "),
+            tag(" and "),
+        ))
+        .parse(input)
+    }
+
+    use nom::multi::separated_list1;
+    let (rest, words): (&str, Vec<&str>) =
+        separated_list1(parse_list_separator, parse_subtype_word)
+            .parse(input)
+            .ok()?;
+    if !rest.is_empty() && !rest.starts_with(' ') && !rest.starts_with('.') {
+        return None;
+    }
+    let filters: Vec<TargetFilter> = words
+        .iter()
+        .map(|w| {
+            let canonical = parse_subtype(w)
+                .map(|(c, _)| c)
+                .unwrap_or_else(|| w.to_string());
+            TargetFilter::Typed(typed_filter_for_subtype(&canonical))
+        })
+        .collect();
+    if filters.len() == 1 {
+        filters.into_iter().next()
+    } else {
+        Some(TargetFilter::Or { filters })
+    }
+}
+
 /// Try to strip a leading "with [counter] counter(s) on it/them" clause from `text`,
 /// returning the `FilterProp` and the remaining text after the clause.
 /// CR 613.1 + CR 613.7: Used to parse conditional static keyword grants in layer 6.
@@ -3757,11 +3984,15 @@ fn parse_modified_creature_subject_filter(subject: &str) -> Option<TargetFilter>
             TypedFilter::creature().properties(vec![FilterProp::EquippedBy]),
         ));
     }
+    if tp.lower == "equipped creatures you control" {
+        return Some(attachment_creatures_you_control_filter(
+            AttachmentKind::Equipment,
+        ));
+    }
 
     let controlled_patterns = [
         ("tapped creatures you control", FilterProp::Tapped),
         ("attacking creatures you control", FilterProp::Attacking),
-        ("equipped creatures you control", FilterProp::EquippedBy),
         // CR 700.9: "modified creatures you control" — permanents with
         // counters, equipped, or enchanted by own-controlled Aura.
         ("modified creatures you control", FilterProp::Modified),
@@ -3817,6 +4048,34 @@ fn parse_modified_creature_subject_filter(subject: &str) -> Option<TargetFilter>
     }
 
     None
+}
+
+fn parse_attachment_creatures_you_control_descriptor(descriptor: &str) -> Option<TargetFilter> {
+    // CR 303.4b + CR 301.5a: plural/global "enchanted/equipped creatures you
+    // control" is not source-relative. It means creatures with a qualifying
+    // Aura/Equipment attached, unlike Aura/Equipment text such as "Enchanted
+    // creature gets ..." where `EnchantedBy`/`EquippedBy` intentionally points
+    // at the static ability's source.
+    let kind = if descriptor.eq_ignore_ascii_case("enchanted") {
+        AttachmentKind::Aura
+    } else if descriptor.eq_ignore_ascii_case("equipped") {
+        AttachmentKind::Equipment
+    } else {
+        return None;
+    };
+
+    Some(attachment_creatures_you_control_filter(kind))
+}
+
+fn attachment_creatures_you_control_filter(kind: AttachmentKind) -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::creature()
+            .controller(ControllerRef::You)
+            .properties(vec![FilterProp::HasAttachment {
+                kind,
+                controller: None,
+            }]),
+    )
 }
 
 /// CR 903.3d: Parse "commander(s) [you control | your opponents control]"
@@ -5831,6 +6090,16 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
             modifications.push(ContinuousModification::AddPower { value: p });
             modifications.push(ContinuousModification::AddToughness { value: t });
         }
+    }
+
+    // CR 510.1c: Aura/Equipment-style compound statics can attach the
+    // toughness-combat-damage rule to the same affected object as a P/T
+    // modification ("Enchanted creature gets +0/+2 and assigns...").
+    if nom_primitives::scan_contains(
+        lower,
+        "assigns combat damage equal to its toughness rather than its power",
+    ) {
+        modifications.push(ContinuousModification::AssignDamageFromToughness);
     }
 
     // CR 613.4c: Scan for "get +X/+X" / "gets +X/+X" anywhere in the text
@@ -9671,7 +9940,10 @@ mod tests {
             Some(TargetFilter::Typed(
                 TypedFilter::creature()
                     .controller(ControllerRef::You)
-                    .properties(vec![FilterProp::EquippedBy]),
+                    .properties(vec![FilterProp::HasAttachment {
+                        kind: AttachmentKind::Equipment,
+                        controller: None,
+                    }]),
             ))
         );
         assert!(def
@@ -9901,6 +10173,63 @@ mod tests {
         assert!(def
             .modifications
             .contains(&ContinuousModification::AssignDamageFromToughness));
+    }
+
+    #[test]
+    fn static_enchanted_creature_gets_pt_and_assigns_damage_from_toughness() {
+        let def = parse_static_line(
+            "Enchanted creature gets +0/+2 and assigns combat damage equal to its toughness rather than its power.",
+        )
+        .expect("Gauntlets of Light static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().properties(vec![FilterProp::EnchantedBy]),
+            ))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 0 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AssignDamageFromToughness));
+    }
+
+    #[test]
+    fn static_attached_conditional_assigns_damage_from_toughness() {
+        let cases = [
+            (
+                "As long as equipped creature's toughness is greater than its power, it assigns combat damage equal to its toughness rather than its power.",
+                vec![FilterProp::EquippedBy, FilterProp::ToughnessGTPower],
+            ),
+            (
+                "As long as enchanted creature has vigilance, it assigns combat damage equal to its toughness rather than its power.",
+                vec![
+                    FilterProp::EnchantedBy,
+                    FilterProp::WithKeyword {
+                        value: Keyword::Vigilance,
+                    },
+                ],
+            ),
+        ];
+
+        for (text, properties) in cases {
+            let def = parse_static_line(text).expect("attached toughness-damage static must parse");
+            assert_eq!(def.mode, StaticMode::Continuous);
+            assert_eq!(
+                def.affected,
+                Some(TargetFilter::Typed(
+                    TypedFilter::creature().properties(properties),
+                ))
+            );
+            assert!(def
+                .modifications
+                .contains(&ContinuousModification::AssignDamageFromToughness));
+        }
     }
 
     // --- Conditional counter-based keyword grants (CR 613.7) ---
@@ -11187,6 +11516,52 @@ mod tests {
                 value: QuantityExpr::Multiply { factor: 2, .. }
             }
         )));
+        assert!(
+            !def.modifications.iter().any(|m| matches!(
+                m,
+                ContinuousModification::AddPower { .. }
+                    | ContinuousModification::AddToughness { .. }
+            )),
+            "must not emit flat P/T modifications alongside dynamic ones: {:?}",
+            def.modifications
+        );
+    }
+
+    #[test]
+    fn static_each_creature_shares_at_least_one_type_emits_dynamic_pt() {
+        let def = parse_static_line(
+            "Each creature gets +1/+1 for each other creature on the battlefield that shares at least one creature type with it.",
+        )
+        .expect("Coat of Arms static must parse");
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(TypedFilter::creature()))
+        );
+
+        let expected = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectCount {
+                filter: TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Creature],
+                    controller: None,
+                    properties: vec![
+                        FilterProp::Another,
+                        FilterProp::SharesQuality {
+                            quality: SharedQuality::CreatureType,
+                            reference: Some(Box::new(TargetFilter::ParentTarget)),
+                            relation: SharedQualityRelation::Shares,
+                        },
+                    ],
+                }),
+            },
+        };
+
+        assert!(def.modifications.iter().any(
+            |m| matches!(m, ContinuousModification::AddDynamicPower { value } if value == &expected)
+        ));
+        assert!(def.modifications.iter().any(
+            |m| matches!(m, ContinuousModification::AddDynamicToughness { value } if value == &expected)
+        ));
         assert!(
             !def.modifications.iter().any(|m| matches!(
                 m,
@@ -13621,6 +13996,50 @@ mod tests {
     }
 
     #[test]
+    fn static_spells_from_hand_with_dynamic_mana_value_have_cascade() {
+        let text = "During your turn, spells you cast from your hand with mana value X or less have cascade, where X is the total amount of life your opponents have lost this turn.";
+        assert!(
+            parse_spells_have_keyword_for_test(text).is_some(),
+            "CastWithKeyword parser should own the Abaddon shape"
+        );
+        let def = parse_static_line(text).unwrap();
+
+        assert_eq!(
+            def.mode,
+            StaticMode::CastWithKeyword {
+                keyword: Keyword::Cascade,
+            }
+        );
+        assert_eq!(def.condition, Some(StaticCondition::DuringYourTurn));
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(
+                    tf.properties
+                        .contains(&FilterProp::InZone { zone: Zone::Hand }),
+                    "Expected InZone(Hand), got {:?}",
+                    tf.properties
+                );
+                assert!(
+                    tf.properties.contains(&FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::LifeLostThisTurn {
+                                player: PlayerScope::Opponent {
+                                    aggregate: AggregateFunction::Sum,
+                                },
+                            },
+                        },
+                    }),
+                    "Expected dynamic CmcLE(opponents life lost), got {:?}",
+                    tf.properties
+                );
+            }
+            other => panic!("Expected Some(Typed filter), got {other:?}"),
+        }
+    }
+
+    #[test]
     fn static_creature_spells_with_mana_value_ge_have_keyword() {
         // Type-prefixed + MV qualifier: confirms the type filter and the
         // CmcGE prop coexist on the same affected filter.
@@ -13877,6 +14296,29 @@ mod tests {
                 TypedFilter::creature().properties(vec![FilterProp::EnchantedBy])
             ))
         );
+    }
+
+    #[test]
+    fn static_enchanted_creatures_you_control_uses_attachment_predicate() {
+        let def = parse_static_line("Enchanted creatures you control get +2/+2.").unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        assert_eq!(
+            def.affected,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::HasAttachment {
+                        kind: AttachmentKind::Aura,
+                        controller: None,
+                    }])
+            ))
+        );
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddPower { value: 2 }));
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddToughness { value: 2 }));
     }
 
     #[test]
@@ -14950,5 +15392,100 @@ mod tests {
             "cast that card without paying its mana cost.",
         )
         .is_none());
+    }
+
+    #[test]
+    fn subtype_or_list_single() {
+        let f = parse_subtype_or_list("Wolf").unwrap();
+        assert!(matches!(f, TargetFilter::Typed(ref t) if t.get_subtype() == Some("Wolf")));
+    }
+
+    #[test]
+    fn subtype_or_list_two_with_article() {
+        let f = parse_subtype_or_list("Wolf or a Werewolf").unwrap();
+        match f {
+            TargetFilter::Or { filters } => {
+                assert_eq!(filters.len(), 2);
+            }
+            other => panic!("expected Or, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn subtype_or_list_three_with_commas() {
+        let f = parse_subtype_or_list("Barbarian, a Warrior, or a Berserker").unwrap();
+        match f {
+            TargetFilter::Or { filters } => assert_eq!(filters.len(), 3),
+            other => panic!("expected Or, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn subtype_or_list_and_or() {
+        let f = parse_subtype_or_list("Cleric, Rogue, Warrior, and/or Wizard").unwrap();
+        match f {
+            TargetFilter::Or { filters } => assert_eq!(filters.len(), 4),
+            other => panic!("expected Or, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn subtype_or_list_five() {
+        let f = parse_subtype_or_list("Cat, Elemental, Nightmare, Dinosaur, or Beast").unwrap();
+        match f {
+            TargetFilter::Or { filters } => assert_eq!(filters.len(), 5),
+            other => panic!("expected Or, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn thats_a_subject_creature_you_control_two_types() {
+        let text = "creature you control that's a Wolf or a Werewolf";
+        let lower = text.to_lowercase();
+        let f = parse_thats_a_subject_filter(text, &lower).unwrap();
+        match f {
+            TargetFilter::And { filters } => {
+                assert_eq!(filters.len(), 2);
+                assert!(
+                    matches!(&filters[0], TargetFilter::Typed(t) if t.controller == Some(ControllerRef::You))
+                );
+                assert!(matches!(&filters[1], TargetFilter::Or { filters } if filters.len() == 2));
+            }
+            other => panic!("expected And, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn thats_a_subject_no_controller() {
+        let text = "creature that's a Barbarian, a Warrior, or a Berserker";
+        let lower = text.to_lowercase();
+        let f = parse_thats_a_subject_filter(text, &lower).unwrap();
+        match f {
+            TargetFilter::And { filters } => {
+                assert_eq!(filters.len(), 2);
+                assert!(matches!(&filters[0], TargetFilter::Typed(t) if t.controller.is_none()));
+            }
+            other => panic!("expected And, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn static_line_each_other_wolf_werewolf() {
+        let def = parse_static_line(
+            "Each other creature you control that's a Wolf or a Werewolf gets +1/+1.",
+        )
+        .expect("should parse Immerwolf line");
+        assert!(matches!(def.mode, StaticMode::Continuous));
+        assert_eq!(def.modifications.len(), 2);
+    }
+
+    #[test]
+    fn static_line_lovisa_coldeyes() {
+        let def = parse_static_line(
+            "Each creature that's a Barbarian, a Warrior, or a Berserker gets +2/+2 and has haste.",
+        )
+        .expect("should parse Lovisa Coldeyes line");
+        assert!(matches!(def.mode, StaticMode::Continuous));
+        assert_eq!(def.modifications.len(), 3);
     }
 }

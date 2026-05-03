@@ -517,12 +517,13 @@ fn granted_spell_keywords(
         };
 
         let matches = def.affected.as_ref().is_none_or(|filter| {
-            super::filter::spell_object_matches_filter_from(
+            super::filter::spell_object_matches_filter_from_state(
+                state,
                 spell_obj,
                 origin_zone,
                 caster,
                 filter,
-                source_obj.controller,
+                source_obj.id,
                 &state.all_creature_types,
             )
         });
@@ -2746,7 +2747,7 @@ fn continue_with_prepared(
             }];
             if let Some(targets) = auto_select_targets(&target_slots, &[])? {
                 let mut resolved = resolved;
-                assign_targets_in_chain(&mut resolved, &targets)?;
+                assign_targets_in_chain(state, &mut resolved, &targets)?;
                 return check_additional_cost_or_pay(
                     state,
                     player,
@@ -2788,7 +2789,7 @@ fn continue_with_prepared(
             auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
         {
             let mut resolved = resolved;
-            assign_targets_in_chain(&mut resolved, &targets)?;
+            assign_targets_in_chain(state, &mut resolved, &targets)?;
             return check_additional_cost_or_pay(
                 state,
                 player,
@@ -3228,15 +3229,37 @@ pub(super) fn pay_mana_cost_with_choices(
     apply_mana_spell_grants(state, source_id, &spent_units);
 
     // CR 601.2h: Track whether mana was actually spent to cast this spell,
-    // and the per-color breakdown for Adamant-style intervening-if checks
-    // (CR 207.2c).
+    // the per-color breakdown for Adamant-style intervening-if checks
+    // (CR 207.2c), and source snapshots for "mana from <source>" queries.
+    if let Some(obj) = state.objects.get_mut(&source_id) {
+        obj.mana_spent_to_cast = false;
+        obj.mana_spent_to_cast_amount = 0;
+        obj.colors_spent_to_cast = crate::types::mana::ColoredManaCount::default();
+        obj.mana_spent_source_snapshots.clear();
+    }
+
     if !spent_units.is_empty() {
+        let source_snapshots: Vec<_> = spent_units
+            .iter()
+            .filter_map(|unit| {
+                state
+                    .objects
+                    .get(&unit.source_id)
+                    .map(|source| source.snapshot_for_mana_spent())
+                    .or_else(|| state.lki_cache.get(&unit.source_id).cloned())
+                    .map(|lki| crate::types::game_state::ManaSpentSourceSnapshot {
+                        source_id: unit.source_id,
+                        lki,
+                    })
+            })
+            .collect();
         if let Some(obj) = state.objects.get_mut(&source_id) {
             obj.mana_spent_to_cast = true;
             obj.mana_spent_to_cast_amount = spent_units.len() as u32;
             for unit in &spent_units {
                 obj.colors_spent_to_cast.add_unit(unit);
             }
+            obj.mana_spent_source_snapshots = source_snapshots;
         }
     }
 
@@ -4307,7 +4330,7 @@ pub fn handle_activate_ability(
             auto_select_targets_for_ability(state, &resolved, &target_slots, &[])?
         {
             let mut resolved = resolved;
-            assign_targets_in_chain(&mut resolved, &targets)?;
+            assign_targets_in_chain(state, &mut resolved, &targets)?;
 
             if let Some(ref cost) = ability_def.cost {
                 if variable_speed_payment_range(cost, effective_speed(state, player)).is_some() {
@@ -5285,6 +5308,47 @@ mod tests {
         assert!(
             !castable,
             "later spell abilities with unresolved targets must still gate castability"
+        );
+    }
+
+    /// CR 107.4f + CR 118.3: Phyrexian Metamorph with 3 Islands — cost {3}{U/P}
+    /// is payable by tapping all 3 for generic and paying 2 life for {U/P}.
+    #[test]
+    fn can_cast_phyrexian_cost_spell_when_life_covers_phyrexian_shard() {
+        let mut state = setup_game_at_main_phase();
+        state.turn_number = 2;
+        // Give player 20 life (default, but explicit for clarity)
+        state
+            .players
+            .iter_mut()
+            .find(|p| p.id == PlayerId(0))
+            .unwrap()
+            .life = 20;
+
+        // 3 Islands on the battlefield
+        add_basic_land(&mut state, CardId(501), "Island", "Island");
+        add_basic_land(&mut state, CardId(502), "Island", "Island");
+        add_basic_land(&mut state, CardId(503), "Island", "Island");
+
+        // Phyrexian Metamorph in hand: {3}{U/P} artifact creature
+        let obj_id = create_object(
+            &mut state,
+            CardId(504),
+            PlayerId(0),
+            "Phyrexian Metamorph".to_string(),
+            Zone::Hand,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Artifact);
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::PhyrexianBlue],
+            generic: 3,
+        };
+
+        assert!(
+            can_cast_object_now(&state, PlayerId(0), obj_id),
+            "Phyrexian Metamorph should be castable with 3 Islands + life for {{U/P}}"
         );
     }
 
@@ -10203,6 +10267,116 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn escape_phyrexian_cost_deducts_life_after_exile() {
+        let mut state = setup_game_at_main_phase();
+        let card_id_counter = state.next_object_id;
+        let obj_id = create_object(
+            &mut state,
+            CardId(card_id_counter),
+            PlayerId(0),
+            "Gitaxian Probe".to_string(),
+            Zone::Graveyard,
+        );
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.card_types.core_types.push(CoreType::Sorcery);
+        obj.base_card_types = obj.card_types.clone();
+        obj.mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::PhyrexianBlue],
+            generic: 0,
+        };
+        Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        ));
+        Arc::make_mut(&mut obj.base_abilities).push(obj.abilities.last().unwrap().clone());
+
+        let source_id = create_object(
+            &mut state,
+            CardId(card_id_counter + 100),
+            PlayerId(0),
+            "Underworld Breach".to_string(),
+            Zone::Battlefield,
+        );
+        let parsed = crate::parser::oracle::parse_oracle_text(
+            "Each nonland card in your graveyard has escape.\nThe escape cost is equal to the card's mana cost plus exile three other cards from your graveyard.",
+            "Underworld Breach",
+            &[],
+            &[String::from("Enchantment")],
+            &[],
+        );
+        let source = state.objects.get_mut(&source_id).unwrap();
+        source.card_types.core_types.push(CoreType::Enchantment);
+        source.base_card_types = source.card_types.clone();
+        source.static_definitions = parsed.statics.clone().into();
+        source.base_static_definitions = Arc::new(parsed.statics);
+
+        let mut filler_ids = Vec::new();
+        for idx in 0..3u64 {
+            let filler_id = create_object(
+                &mut state,
+                CardId(card_id_counter + 200 + idx),
+                PlayerId(0),
+                format!("Filler {idx}"),
+                Zone::Graveyard,
+            );
+            let filler = state.objects.get_mut(&filler_id).unwrap();
+            filler.card_types.core_types.push(CoreType::Sorcery);
+            filler.base_card_types = filler.card_types.clone();
+            filler_ids.push(filler_id);
+        }
+
+        let life_before = state.players[0].life;
+        let card_id = state.objects.get(&obj_id).unwrap().card_id;
+        let mut events = Vec::new();
+
+        let waiting = handle_cast_spell(&mut state, PlayerId(0), obj_id, card_id, &mut events)
+            .expect("escape cast should begin");
+        let (exile_cards, pending_cast) = match waiting {
+            WaitingFor::ExileForCost {
+                cards,
+                pending_cast,
+                count: 3,
+                ..
+            } => (cards, pending_cast),
+            other => panic!("expected ExileForCost, got {other:?}"),
+        };
+
+        let chosen: Vec<ObjectId> = exile_cards.iter().copied().take(3).collect();
+        let _waiting2 = super::casting_costs::handle_exile_for_cost(
+            &mut state,
+            PlayerId(0),
+            crate::types::zones::ExileCostSourceZone::Graveyard,
+            *pending_cast,
+            3,
+            &exile_cards,
+            &chosen,
+            &mut events,
+        )
+        .expect("exile cost payment should succeed");
+
+        // After exile cost, the flow should auto-resolve the Phyrexian mana
+        // cost ({U/P}) by paying 2 life (no mana available).
+        assert_eq!(
+            state.players[0].life,
+            life_before - 2,
+            "CR 107.4f: Phyrexian mana paid with life must deduct 2 life"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                GameEvent::LifeChanged {
+                    player_id,
+                    amount: -2
+                } if *player_id == PlayerId(0)
+            )),
+            "must emit LifeChanged -2 for Phyrexian life payment"
+        );
     }
 
     #[test]

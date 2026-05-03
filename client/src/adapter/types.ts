@@ -256,7 +256,8 @@ export type UnlessCost =
   | { type: "DynamicGeneric"; quantity: unknown }
   | { type: "PayLife"; amount: number }
   | { type: "DiscardCard" }
-  | { type: "Sacrifice"; count: number; filter: TargetFilter };
+  | { type: "Sacrifice"; count: number; filter: TargetFilter }
+  | { type: "ReturnToHand"; count: number; filter: TargetFilter };
 
 // ── Card Types ───────────────────────────────────────────────────────────
 
@@ -663,6 +664,7 @@ export type WaitingFor =
   | { type: "AdventureCastChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
   | { type: "ModalFaceChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId } }
   | { type: "WarpCostChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; normal_cost: ManaCost; warp_cost: ManaCost } }
+  | { type: "EvokeCostChoice"; data: { player: PlayerId; object_id: ObjectId; card_id: CardId; normal_cost: ManaCost; evoke_cost: ManaCost } }
   | { type: "MiracleReveal"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
   | { type: "MiracleCastOffer"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
   | { type: "MadnessCastOffer"; data: { player: PlayerId; object_id: ObjectId; cost: ManaCost } }
@@ -681,6 +683,7 @@ export type WaitingFor =
   | { type: "UnlessPayment"; data: { player: PlayerId; cost: UnlessCost; pending_effect: unknown; trigger_event?: unknown; effect_description?: string } }
   | { type: "WardDiscardChoice"; data: { player: PlayerId; cards: ObjectId[]; pending_effect: unknown } }
   | { type: "WardSacrificeChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
+  | { type: "UnlessBounceChoice"; data: { player: PlayerId; permanents: ObjectId[]; pending_effect: unknown; remaining: number } }
   | { type: "ChooseRingBearer"; data: { player: PlayerId; candidates: ObjectId[] } }
   | { type: "DiscoverChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[] } }
   | { type: "CascadeChoice"; data: { player: PlayerId; hit_card: ObjectId; exiled_misses: ObjectId[]; source_mv: number } }
@@ -825,6 +828,7 @@ export type GameAction =
   | { type: "ChooseAdventureFace"; data: { creature: boolean } }
   | { type: "ChooseModalFace"; data: { back_face: boolean } }
   | { type: "ChooseWarpCost"; data: { use_warp: boolean } }
+  | { type: "ChooseEvokeCost"; data: { use_evoke: boolean } }
   | { type: "CastSpellAsMiracle"; data: { object_id: ObjectId; card_id: CardId } }
   | { type: "CastSpellAsMadness"; data: { object_id: ObjectId; card_id: CardId } }
   // CR 702.190a: Cast a spell from hand via the Sneak alternative cost during

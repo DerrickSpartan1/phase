@@ -283,6 +283,52 @@ pub(super) fn handle_unless_payment(
                     return Ok(action_result(events, state.waiting_for.clone()));
                 }
             }
+            UnlessCost::ReturnToHand {
+                count,
+                ref filter,
+                ref from_zone,
+            } => {
+                let source = pending_effect.source_id;
+                let ctx =
+                    crate::game::filter::FilterContext::from_source_with_controller(source, player);
+                let zone_objects: Vec<ObjectId> = match from_zone {
+                    Some(Zone::Graveyard) => state
+                        .players
+                        .iter()
+                        .find(|p| p.id == player)
+                        .map(|p| p.graveyard.iter().copied().collect())
+                        .unwrap_or_default(),
+                    _ => state.battlefield.iter().copied().collect(),
+                };
+                let eligible: Vec<ObjectId> = zone_objects
+                    .iter()
+                    .filter(|id| {
+                        state
+                            .objects
+                            .get(id)
+                            .map(|obj| {
+                                obj.controller == player
+                                    && !obj.is_emblem
+                                    && crate::game::filter::matches_target_filter(
+                                        state, **id, filter, &ctx,
+                                    )
+                            })
+                            .unwrap_or(false)
+                    })
+                    .copied()
+                    .collect();
+                if eligible.len() < count as usize {
+                    payment_failed = true;
+                } else {
+                    state.waiting_for = WaitingFor::UnlessBounceChoice {
+                        player,
+                        permanents: eligible,
+                        pending_effect: pending_effect.clone(),
+                        remaining: count,
+                    };
+                    return Ok(action_result(events, state.waiting_for.clone()));
+                }
+            }
         }
 
         if !payment_failed {
@@ -503,6 +549,57 @@ pub(super) fn handle_ward_sacrifice_choice(
             .filter(|&id| id != chosen[0] && state.objects.contains_key(&id))
             .collect();
         state.waiting_for = WaitingFor::WardSacrificeChoice {
+            player,
+            permanents: eligible,
+            pending_effect,
+            remaining: remaining - 1,
+        };
+        return Ok(state.waiting_for.clone());
+    }
+
+    events.push(GameEvent::EffectResolved {
+        kind: EffectKind::from(&pending_effect.effect),
+        source_id: pending_effect.source_id,
+    });
+
+    set_active_priority(state);
+    resume_pending_continuation_if_priority(state, events)?;
+    Ok(state.waiting_for.clone())
+}
+
+/// CR 118.12: Handle player's selection of a permanent to return to hand as unless cost.
+pub(super) fn handle_unless_bounce_choice(
+    state: &mut GameState,
+    waiting_for: WaitingFor,
+    chosen: Vec<ObjectId>,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let WaitingFor::UnlessBounceChoice {
+        player,
+        permanents,
+        pending_effect,
+        remaining,
+    } = waiting_for
+    else {
+        return Err(EngineError::InvalidAction(
+            "Not waiting for unless bounce choice".to_string(),
+        ));
+    };
+
+    if chosen.len() != 1 || !permanents.contains(&chosen[0]) {
+        return Err(EngineError::InvalidAction(
+            "Must select exactly one permanent to return to hand".to_string(),
+        ));
+    }
+
+    zones::move_to_zone(state, chosen[0], Zone::Hand, events);
+
+    if remaining > 1 {
+        let eligible: Vec<ObjectId> = permanents
+            .into_iter()
+            .filter(|&id| id != chosen[0] && state.objects.contains_key(&id))
+            .collect();
+        state.waiting_for = WaitingFor::UnlessBounceChoice {
             player,
             permanents: eligible,
             pending_effect,

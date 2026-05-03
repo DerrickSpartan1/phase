@@ -3,14 +3,30 @@ import { PLAYER_ID } from "../constants/game";
 import { useGameStore } from "../stores/gameStore";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
 
+function currentLocalPlayerId(): PlayerId {
+  const gameMode = useGameStore.getState().gameMode;
+  if (gameMode && (gameMode === "online" || gameMode === "p2p-host" || gameMode === "p2p-join")) {
+    return useMultiplayerStore.getState().activePlayerId ?? PLAYER_ID;
+  }
+
+  return PLAYER_ID;
+}
+
 /** React hook: returns the current player's game-assigned ID (0 or 1). Falls back to PLAYER_ID (0) for AI/local mode. */
 export function usePlayerId(): PlayerId {
-  return useMultiplayerStore((s) => s.activePlayerId) ?? PLAYER_ID;
+  const gameMode = useGameStore((s) => s.gameMode);
+  const activePlayerId = useMultiplayerStore((s) => s.activePlayerId);
+
+  if (gameMode && (gameMode === "online" || gameMode === "p2p-host" || gameMode === "p2p-join")) {
+    return activePlayerId ?? PLAYER_ID;
+  }
+
+  return PLAYER_ID;
 }
 
 /** Non-React getter for use in plain functions (autoPass, gameLoopController). */
 export function getPlayerId(): PlayerId {
-  return useMultiplayerStore.getState().activePlayerId ?? PLAYER_ID;
+  return currentLocalPlayerId();
 }
 
 function waitingPlayer(waitingFor: ReturnType<typeof useGameStore.getState>["waitingFor"]): PlayerId | null {

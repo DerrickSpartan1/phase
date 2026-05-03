@@ -337,6 +337,7 @@ const REPLACEMENT_CONTAINS_PATTERNS: &[&str] = &[
     "enters tapped",
     "enters untapped",
     "enter as a copy of",
+    "enter tapped as a copy of",
     // CR 614.1c: "As ~ enters, you may have it become a copy of …" (Cursed Mirror
     // class). Shares parser/runtime with the "enter as a copy of" class but uses
     // a different verb; classify as replacement so the line routes through

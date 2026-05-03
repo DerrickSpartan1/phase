@@ -103,7 +103,7 @@ fn handle_activated_mode_choice(
             auto_select_targets_for_ability(state, &resolved, &target_slots, &target_constraints)?
         {
             let mut resolved = resolved;
-            assign_targets_in_chain(&mut resolved, &targets)?;
+            assign_targets_in_chain(state, &mut resolved, &targets)?;
 
             if let Some(cost) = &ability_cost {
                 casting::pay_ability_cost(state, player, source_id, cost, events)?;
@@ -236,7 +236,7 @@ fn handle_triggered_mode_choice(
             &target_constraints,
         )? {
             let mut resolved = trigger.ability.clone();
-            assign_targets_in_chain(&mut resolved, &targets)?;
+            assign_targets_in_chain(state, &mut resolved, &targets)?;
             engine_stack::finalize_trigger_target_selection(state, trigger, resolved, events);
         } else {
             let description = trigger.description.clone();

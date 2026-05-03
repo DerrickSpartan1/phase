@@ -4514,10 +4514,7 @@ pub(super) fn lower_imperative_family_ast(ast: ImperativeFamilyAst) -> ParsedEff
                 count: QuantityExpr::Fixed { value: 1 },
                 target,
             });
-            clause.multi_target = Some(MultiTargetSpec {
-                min: 0,
-                max: Some(count as usize),
-            });
+            clause.multi_target = Some(MultiTargetSpec::fixed(0, count as usize));
             clause
         }
         // All other arms produce a bare Effect with no sub_ability chain.
@@ -6019,13 +6016,7 @@ mod tests {
             "Expected PutCounter P1P1, got {:?}",
             clause.effect
         );
-        assert_eq!(
-            clause.multi_target,
-            Some(MultiTargetSpec {
-                min: 0,
-                max: Some(2)
-            })
-        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 2)));
         // Spell support should NOT have Another property
         if let Effect::PutCounter {
             target: TargetFilter::Typed(tf),
@@ -6073,13 +6064,7 @@ mod tests {
                 "Permanent support should use 'other'"
             );
         }
-        assert_eq!(
-            clause.multi_target,
-            Some(MultiTargetSpec {
-                min: 0,
-                max: Some(3)
-            })
-        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 3)));
     }
 
     #[test]

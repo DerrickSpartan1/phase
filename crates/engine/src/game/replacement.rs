@@ -2104,7 +2104,7 @@ enum ReplacementBranch {
 ///
 /// `event` scopes the quantity resolution: for a `ZoneChange` to the battlefield
 /// the entering object is threaded through `QuantityContext::entering`, so
-/// self-scoped spell refs (`ColorsSpentOnSelf`, `ManaSpentOnTriggeringSpell`-style
+/// self-scoped spell refs (`ManaSpentToCast` with self/trigger scopes
 /// lookups) resolve against the spell that is ETB'ing rather than the static
 /// replacement source. CR 614.1c treats these as replacement effects; CR 601.2h
 /// guarantees `colors_spent_to_cast` is still populated at this point (the clear
@@ -2132,7 +2132,7 @@ fn extract_etb_counters(
         } => {
             // CR 107.3m + CR 614.1c: Resolve dynamic counts against the entering
             // object for ETB replacements. `CostXPaid` reads the spell's paid X
-            // (stashed by `finalize_cast`); `ColorsSpentOnSelf` reads the spell's
+            // (stashed by `finalize_cast`); self-scoped spent-mana refs read the spell's
             // per-color mana tally; other dynamic refs resolve against current
             // state.
             let entering = match event {
@@ -2179,23 +2179,18 @@ fn extract_etb_counters(
 /// onto the ProposedEvent, and by `find_applicable_replacements` to detect Optional
 /// replacements whose decline branch would be a no-op (CR 614.7).
 #[derive(Debug, Clone, Default)]
-struct EventModifiers {
+pub(super) struct EventModifiers {
     etb_tap_state: EtbTapState,
     etb_counters: Vec<(String, u32)>,
     redirect_zone: Option<Zone>,
 }
 
 impl EventModifiers {
-    /// True if this ability has any effect on the ProposedEvent beyond the event-modifier
-    /// fields tracked here (i.e., it still needs to run as a post-replacement side effect).
-    /// An ability that is *purely* a Tap SelfRef / PutCounter-SelfRef / ChangeZone has no
-    /// remaining work after its modifiers are applied to the event.
-    fn has_only_event_modifier(ability: Option<&AbilityDefinition>) -> bool {
-        let Some(def) = ability else {
-            return false;
-        };
+    /// True if this single effect (ignoring sub_ability chain) is purely a
+    /// ProposedEvent modifier with no additional resolution work.
+    fn is_event_modifier_effect(effect: &Effect) -> bool {
         matches!(
-            &*def.effect,
+            effect,
             Effect::Tap {
                 target: TargetFilter::SelfRef,
             } | Effect::Untap {
@@ -2209,31 +2204,71 @@ impl EventModifiers {
             } | Effect::ChangeZone { .. }
         )
     }
+
+    /// True if this ability has any effect on the ProposedEvent beyond the event-modifier
+    /// fields tracked here (i.e., it still needs to run as a post-replacement side effect).
+    /// An ability that is *purely* a Tap SelfRef / PutCounter-SelfRef / ChangeZone has no
+    /// remaining work after its modifiers are applied to the event.
+    fn has_only_event_modifier(ability: Option<&AbilityDefinition>) -> bool {
+        let Some(def) = ability else {
+            return false;
+        };
+        Self::is_event_modifier_effect(&def.effect) && def.sub_ability.is_none()
+    }
+
+    /// CR 614.1c: Walk the ability's sub_ability chain and find the first effect
+    /// that is NOT a pure event modifier. Returns `None` when the entire chain is
+    /// modifiers (shock land class) or when there is no ability at all.
+    pub(super) fn first_non_modifier_ability(
+        ability: Option<&AbilityDefinition>,
+    ) -> Option<&AbilityDefinition> {
+        let mut current = ability?;
+        loop {
+            if !Self::is_event_modifier_effect(&current.effect) {
+                return Some(current);
+            }
+            current = current.sub_ability.as_deref()?;
+        }
+    }
 }
 
-/// Compute the ProposedEvent modifications an ability would introduce.
+/// CR 614.1c: Compute the ProposedEvent modifications an ability would introduce.
+/// Walks the sub_ability chain so composed replacements (e.g., Tap { SelfRef } →
+/// BecomeCopy for Vesuva's "enter tapped as a copy") accumulate all modifier
+/// effects onto the event, while non-modifier work is handled separately via
+/// `apply_post_replacement_effect`.
 fn event_modifiers_for_ability(
     ability: Option<&AbilityDefinition>,
     state: &GameState,
     source_id: ObjectId,
     event: &ProposedEvent,
 ) -> EventModifiers {
-    let etb_tap_state = ability
-        .map(|def| match &*def.effect {
-            Effect::Tap {
-                target: TargetFilter::SelfRef,
-            } => EtbTapState::Tapped,
-            Effect::Untap {
-                target: TargetFilter::SelfRef,
-            } => EtbTapState::Untapped,
-            _ => EtbTapState::Unspecified,
-        })
-        .unwrap_or(EtbTapState::Unspecified);
+    let mut etb_tap_state = EtbTapState::Unspecified;
+    let mut redirect = None;
+    let mut current = ability;
+    while let Some(def) = current {
+        if etb_tap_state == EtbTapState::Unspecified {
+            etb_tap_state = match &*def.effect {
+                Effect::Tap {
+                    target: TargetFilter::SelfRef,
+                } => EtbTapState::Tapped,
+                Effect::Untap {
+                    target: TargetFilter::SelfRef,
+                } => EtbTapState::Untapped,
+                _ => EtbTapState::Unspecified,
+            };
+        }
+        if redirect.is_none() {
+            if let Effect::ChangeZone { destination, .. } = &*def.effect {
+                redirect = Some(*destination);
+            }
+        }
+        if !EventModifiers::is_event_modifier_effect(&def.effect) {
+            break;
+        }
+        current = def.sub_ability.as_deref();
+    }
     let counters = extract_etb_counters(ability, state, source_id, event);
-    let redirect = ability.and_then(|def| match &*def.effect {
-        Effect::ChangeZone { destination, .. } => Some(*destination),
-        _ => None,
-    });
     EventModifiers {
         etb_tap_state,
         etb_counters: counters,
@@ -2367,25 +2402,23 @@ fn apply_single_replacement(
                     // apply to Damage events, where there is no `etb_counters`
                     // slot to absorb the counters into.
                     let is_damage = matches!(proposed, ProposedEvent::Damage { .. });
-                    repl_def
-                        .execute
-                        .as_deref()
-                        .and_then(|def| match &*def.effect {
-                            // CR 614.6: a top-level ChangeZone is absorbed as a
-                            // destination redirect by `event_modifiers_for_ability`.
-                            // Its sub_ability (if any) is the real post-resolution
-                            // work — e.g., Reveal → Shuffle for Nexus of Fate-style
-                            // shuffle-back. `has_only_event_modifier` would classify
-                            // the whole def as fully absorbed and silently drop the
-                            // chain, so we take the sub_ability explicitly here.
-                            Effect::ChangeZone { .. } => def.sub_ability.clone(),
-                            _ if !is_damage
+                    repl_def.execute.as_deref().and_then(|def| {
+                        // CR 614.1c: Walk past modifier-only effects (Tap/Untap/
+                        // PutCounter/ChangeZone) in the sub_ability chain to find
+                        // the first non-modifier work. Covers both the existing
+                        // ChangeZone → sub_ability pattern (Nexus of Fate shuffle-
+                        // back) and composed replacements like Tap → BecomeCopy
+                        // (Vesuva "enter tapped as a copy").
+                        match EventModifiers::first_non_modifier_ability(Some(def)) {
+                            Some(real_work) => Some(Box::new(real_work.clone())),
+                            None if !is_damage
                                 && EventModifiers::has_only_event_modifier(Some(def)) =>
                             {
                                 None
                             }
                             _ => Some(Box::new(def.clone())),
-                        })
+                        }
+                    })
                 }
                 _ => None,
             };
@@ -2621,8 +2654,20 @@ pub fn continue_replacement(
         };
 
         let (branch, post_effect) = if chosen_index == 0 && paid_may_cost {
-            // Accept: `execute` runs post-zone-change (e.g., shock lands pay 2 life).
-            (ReplacementBranch::Execute, accept_effect)
+            // CR 614.1c: Accept path — walk past modifier-only effects (already
+            // applied to ProposedEvent by event_modifiers_for_ability) to find the
+            // first non-modifier as the real post-replacement work. Covers composed
+            // replacements like Tap → BecomeCopy (Vesuva "enter tapped as a copy").
+            let real_work = accept_effect.as_deref().and_then(|def| {
+                EventModifiers::first_non_modifier_ability(Some(def))
+                    .map(|work| Box::new(work.clone()))
+            });
+            let post = if real_work.is_some() {
+                real_work
+            } else {
+                accept_effect
+            };
+            (ReplacementBranch::Execute, post)
         } else {
             // CR 614.1c + CR 614.12: Decline's ProposedEvent modifications (enter_tapped,
             // counters, zone redirect) must flow through the replacement pipeline so the
@@ -5025,7 +5070,10 @@ mod tests {
                 target: TargetFilter::SelfRef,
                 counter_type: "P1P1".to_string(),
                 count: QuantityExpr::Ref {
-                    qty: QuantityRef::ColorsSpentOnSelf,
+                    qty: QuantityRef::ManaSpentToCast {
+                        scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                        metric: crate::types::ability::CastManaSpentMetric::DistinctColors,
+                    },
                 },
             },
         );
@@ -5078,7 +5126,7 @@ mod tests {
         }
     }
 
-    /// Regression: when `QuantityRef::ColorsSpentOnSelf` is used outside an ETB
+    /// Regression: when a self-scoped spent-mana quantity is used outside an ETB
     /// context (no entering object), it resolves against the static source. This
     /// keeps `CountersOnSelf`-style refs working for static abilities that inspect
     /// their own source without reach-around via the replacement pipeline.
@@ -5101,7 +5149,10 @@ mod tests {
         state.objects.insert(source, obj);
 
         let expr = QuantityExpr::Ref {
-            qty: QuantityRef::ColorsSpentOnSelf,
+            qty: QuantityRef::ManaSpentToCast {
+                scope: crate::types::ability::CastManaObjectScope::SelfObject,
+                metric: crate::types::ability::CastManaSpentMetric::DistinctColors,
+            },
         };
         // No entering object — resolves against `source` directly.
         let n = crate::game::quantity::resolve_quantity(&state, &expr, PlayerId(0), source);

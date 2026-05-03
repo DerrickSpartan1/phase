@@ -45,6 +45,7 @@ import { BattleProtectorModal } from "../components/modal/BattleProtectorModal.t
 import { TributeModal } from "../components/modal/TributeModal.tsx";
 import { CombatTaxModal } from "../components/modal/CombatTaxModal.tsx";
 import { DialogHost } from "../components/modal/DialogHost.tsx";
+import { EvokeCostModal } from "../components/modal/EvokeCostModal.tsx";
 import { StackDisplay } from "../components/stack/StackDisplay.tsx";
 import { TargetingOverlay } from "../components/targeting/TargetingOverlay.tsx";
 import { PlayerHud } from "../components/hud/PlayerHud.tsx";
@@ -1137,6 +1138,7 @@ function GamePageContent({
         <BattleProtectorModal />
         <TributeModal />
         <CombatTaxModal />
+        <EvokeCostModal />
         <ModeChoiceModal />
         <AdventureCastModal />
         <CascadeChoiceModal />
@@ -1901,6 +1903,7 @@ function AbilityChoiceModal() {
       title={obj.name}
       subtitle={subtitle}
       previewCardName={obj.name}
+      previewCardTypes={obj.card_types}
       options={pending.actions.map((action, i) => {
         const { label, description } = abilityChoiceLabel(
           action,
@@ -2024,6 +2027,10 @@ function formatUnlessCost(cost: { type: string; cost?: { type: string; shards?: 
     case "Sacrifice": {
       const n = (cost as { count?: number }).count ?? 1;
       return n > 1 ? `sacrifice ${n} permanents` : "sacrifice a permanent";
+    }
+    case "ReturnToHand": {
+      const n = (cost as { count?: number }).count ?? 1;
+      return n > 1 ? `return ${n} permanents to hand` : "return a permanent to hand";
     }
     default:
       return "a cost";

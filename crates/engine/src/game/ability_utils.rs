@@ -1,6 +1,7 @@
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ControllerRef, Effect, ModalChoice,
-    ModalSelectionConstraint, ResolvedAbility, TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    ModalSelectionConstraint, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
+    TypeFilter, TypedFilter,
 };
 use crate::types::game_state::{
     GameState, TargetSelectionConstraint, TargetSelectionProgress, TargetSelectionSlot,
@@ -9,6 +10,7 @@ use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 
 use super::engine::EngineError;
+use super::quantity::resolve_quantity_with_targets;
 use super::targeting;
 use super::triggers;
 
@@ -428,7 +430,7 @@ pub fn has_legal_target_assignment_for_ability(
     target_slots: &[TargetSelectionSlot],
     constraints: &[TargetSelectionConstraint],
 ) -> bool {
-    let specs = target_slot_specs(ability);
+    let specs = target_slot_specs(state, ability);
     has_legal_completion_with_specs(state, ability, &specs, target_slots, constraints, 0, &[])
 }
 
@@ -509,6 +511,7 @@ pub fn generate_target_assignments(
 
 /// CR 601.2c: Assign chosen targets to the correct effects in the ability chain.
 pub fn assign_targets_in_chain(
+    state: &GameState,
     ability: &mut ResolvedAbility,
     targets: &[TargetRef],
 ) -> Result<(), EngineError> {
@@ -517,7 +520,7 @@ pub fn assign_targets_in_chain(
         return Ok(());
     }
     let mut next_target = 0usize;
-    assign_targets_recursive(ability, targets, &mut next_target)?;
+    assign_targets_recursive(state, ability, targets, &mut next_target)?;
     if next_target != targets.len() {
         return Err(EngineError::InvalidAction(
             "Unused selected targets".to_string(),
@@ -680,21 +683,18 @@ fn collect_target_slots(
                 ));
             }
             if let Some(spec) = ability.multi_target.as_ref() {
-                match spec.max {
-                    Some(max_targets) => {
-                        for slot_index in 0..max_targets {
-                            slots.push(TargetSelectionSlot {
-                                legal_targets: legal_targets.clone(),
-                                optional: slot_index >= spec.min,
-                            });
-                        }
-                    }
-                    // CR 115.1d: "any number" (unbounded max) requires a stop-on-None UI
-                    // flow not yet implemented; fall back to a single optional slot.
-                    None => slots.push(TargetSelectionSlot {
-                        legal_targets,
-                        optional: true,
-                    }),
+                if multi_target_max_needs_quantity_choice(state, ability, spec) {
+                    return Err(EngineError::ActionNotAllowed(
+                        "Target count requires a resolved quantity before target selection"
+                            .to_string(),
+                    ));
+                }
+                let slot_count = multi_target_slot_count(state, ability, spec, legal_targets.len());
+                for slot_index in 0..slot_count {
+                    slots.push(TargetSelectionSlot {
+                        legal_targets: legal_targets.clone(),
+                        optional: slot_index >= spec.min,
+                    });
                 }
             } else {
                 slots.push(TargetSelectionSlot {
@@ -708,8 +708,7 @@ fn collect_target_slots(
         return Ok(());
     }
     if let Some(sub_ability) = ability.sub_ability.as_deref() {
-        // CR 603.12: Sub-abilities with reflexive trigger conditions (WhenYouDo,
-        // QuantityCheck) represent deferred triggers whose targets are chosen at
+        // Conditional ability targets are selected only if the condition is true at
         // resolution time, not when the parent ability goes on the stack.
         // Skip target pre-collection for these — they'll be handled during
         // resolve_ability_chain when the condition is evaluated.
@@ -718,6 +717,63 @@ fn collect_target_slots(
         }
     }
     Ok(())
+}
+
+fn resolve_multi_target_max(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    spec: &crate::types::ability::MultiTargetSpec,
+) -> Option<usize> {
+    spec.max
+        .as_ref()
+        .map(|expr| resolve_quantity_with_targets(state, expr, ability).max(0) as usize)
+}
+
+fn multi_target_max_needs_quantity_choice(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    spec: &crate::types::ability::MultiTargetSpec,
+) -> bool {
+    spec.max
+        .as_ref()
+        .is_some_and(|expr| quantity_expr_has_unresolved_variable(state, ability, expr))
+}
+
+fn quantity_expr_has_unresolved_variable(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    expr: &QuantityExpr,
+) -> bool {
+    match expr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { name },
+        } if name == "X" => ability.chosen_x.is_none(),
+        QuantityExpr::Ref {
+            qty: QuantityRef::Variable { .. },
+        } => state.last_named_choice.is_none(),
+        QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::HalfRounded { inner, .. }
+        | QuantityExpr::UpTo { max: inner } => {
+            quantity_expr_has_unresolved_variable(state, ability, inner)
+        }
+        QuantityExpr::Sum { exprs } => exprs
+            .iter()
+            .any(|expr| quantity_expr_has_unresolved_variable(state, ability, expr)),
+        QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => false,
+    }
+}
+
+fn multi_target_slot_count(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    spec: &crate::types::ability::MultiTargetSpec,
+    legal_target_count: usize,
+) -> usize {
+    resolve_multi_target_max(state, ability, spec)
+        .map(|max_targets| max_targets.max(spec.min))
+        .unwrap_or(legal_target_count)
+        .min(legal_target_count)
 }
 
 /// CR 109.4 + CR 115.1: Returns true if any filter inside `effect` references
@@ -782,7 +838,11 @@ fn filter_references_target_player(filter: &TargetFilter) -> bool {
     }
 }
 
-fn collect_target_slot_specs(ability: &ResolvedAbility, specs: &mut Vec<TargetSlotSpec>) {
+fn collect_target_slot_specs(
+    state: &GameState,
+    ability: &ResolvedAbility,
+    specs: &mut Vec<TargetSlotSpec>,
+) {
     // CR 701.12a: Mirror the ExchangeControl branch in `collect_target_slots`
     // so per-slot specs match the surfaced TargetSelectionSlots one-for-one
     // (SelfRef slots are auto-resolved and not surfaced).
@@ -820,19 +880,13 @@ fn collect_target_slot_specs(ability: &ResolvedAbility, specs: &mut Vec<TargetSl
         }
         if let Some(filter) = triggers::extract_target_filter_from_effect(&ability.effect) {
             if let Some(spec) = ability.multi_target.as_ref() {
-                match spec.max {
-                    Some(max_targets) => {
-                        for slot_index in 0..max_targets {
-                            specs.push(TargetSlotSpec {
-                                filter: filter.clone(),
-                                optional: slot_index >= spec.min,
-                            });
-                        }
-                    }
-                    None => specs.push(TargetSlotSpec {
+                let legal_targets = legal_targets_for_ability_filter(state, ability, filter, &[]);
+                let slot_count = multi_target_slot_count(state, ability, spec, legal_targets.len());
+                for slot_index in 0..slot_count {
+                    specs.push(TargetSlotSpec {
                         filter: filter.clone(),
-                        optional: true,
-                    }),
+                        optional: slot_index >= spec.min,
+                    });
                 }
             } else {
                 specs.push(TargetSlotSpec {
@@ -847,7 +901,7 @@ fn collect_target_slot_specs(ability: &ResolvedAbility, specs: &mut Vec<TargetSl
     }
     if let Some(sub_ability) = ability.sub_ability.as_deref() {
         if !defers_conditional_target_selection(sub_ability) {
-            collect_target_slot_specs(sub_ability, specs);
+            collect_target_slot_specs(state, sub_ability, specs);
         }
     }
 }
@@ -975,9 +1029,9 @@ fn rewrite_relative_controller(
     }
 }
 
-fn target_slot_specs(ability: &ResolvedAbility) -> Vec<TargetSlotSpec> {
+fn target_slot_specs(state: &GameState, ability: &ResolvedAbility) -> Vec<TargetSlotSpec> {
     let mut specs = Vec::new();
-    collect_target_slot_specs(ability, &mut specs);
+    collect_target_slot_specs(state, ability, &mut specs);
     specs
 }
 
@@ -1114,7 +1168,7 @@ fn build_target_assignments_for_ability(
     target_slots: &[TargetSelectionSlot],
     constraints: &[TargetSelectionConstraint],
 ) -> Vec<Vec<TargetRef>> {
-    let specs = target_slot_specs(ability);
+    let specs = target_slot_specs(state, ability);
     let view = AbilityTargetingView {
         state,
         ability,
@@ -1253,7 +1307,7 @@ fn build_target_selection_progress_for_ability(
         });
     }
 
-    let specs = target_slot_specs(ability);
+    let specs = target_slot_specs(state, ability);
     let current_legal_targets = legal_targets_for_slot_with_specs(
         state,
         ability,
@@ -1510,7 +1564,7 @@ fn validate_target_prefix_for_ability(
     targets: &[TargetRef],
     constraints: &[TargetSelectionConstraint],
 ) -> Result<(), EngineError> {
-    let specs = target_slot_specs(ability);
+    let specs = target_slot_specs(state, ability);
     validate_target_prefix_with_specs(state, ability, &specs, target_slots, targets, constraints)
 }
 
@@ -1546,7 +1600,7 @@ fn validate_selected_slots_for_ability(
     selected_slots: &[Option<TargetRef>],
     constraints: &[TargetSelectionConstraint],
 ) -> Result<(), EngineError> {
-    let specs = target_slot_specs(ability);
+    let specs = target_slot_specs(state, ability);
     validate_selected_slots_with_specs(
         state,
         ability,
@@ -1608,6 +1662,7 @@ fn validate_selected_slots_with_specs(
 }
 
 fn assign_targets_recursive(
+    state: &GameState,
     ability: &mut ResolvedAbility,
     targets: &[TargetRef],
     next_target: &mut usize,
@@ -1629,7 +1684,7 @@ fn assign_targets_recursive(
             return Ok(());
         }
         if let Some(sub_ability) = ability.sub_ability.as_mut() {
-            assign_targets_recursive(sub_ability, targets, next_target)?;
+            assign_targets_recursive(state, sub_ability, targets, next_target)?;
         }
         return Ok(());
     }
@@ -1652,40 +1707,33 @@ fn assign_targets_recursive(
     }
     if triggers::extract_target_filter_from_effect(&ability.effect).is_some() {
         if let Some(spec) = ability.multi_target.as_ref() {
-            match spec.max {
-                Some(max_targets) => {
-                    let remaining_minimum = ability
-                        .sub_ability
-                        .as_deref()
-                        .map(minimum_targets_in_chain)
-                        .unwrap_or(0);
-                    let remaining_after_current = targets.len().saturating_sub(*next_target);
-                    let current_count = remaining_after_current.saturating_sub(remaining_minimum);
-                    if current_count < spec.min || current_count > max_targets {
-                        return Err(EngineError::InvalidAction(
-                            "Incorrect number of multi-target selections".to_string(),
-                        ));
-                    }
-                    // CR 109.4: Use `extend_from_slice` so a companion player target
-                    // pushed by the `effect_references_target_player` branch above
-                    // survives — both slots live on this node's `targets`.
-                    ability
-                        .targets
-                        .extend_from_slice(&targets[*next_target..*next_target + current_count]);
-                    *next_target += current_count;
-                }
-                // CR 115.1d: unbounded multi-target — fall through to single-target path.
-                None => {
-                    if let Some(target) = targets.get(*next_target) {
-                        ability.targets.push(target.clone());
-                        *next_target += 1;
-                    } else if !ability.optional_targeting {
-                        return Err(EngineError::InvalidAction(
-                            "Missing required target".to_string(),
-                        ));
-                    }
-                }
+            if multi_target_max_needs_quantity_choice(state, ability, spec) {
+                return Err(EngineError::InvalidAction(
+                    "Target count requires a resolved quantity before target selection".to_string(),
+                ));
             }
+            let remaining_minimum = ability
+                .sub_ability
+                .as_deref()
+                .map(minimum_targets_in_chain)
+                .unwrap_or(0);
+            let remaining_after_current = targets.len().saturating_sub(*next_target);
+            let current_count = remaining_after_current.saturating_sub(remaining_minimum);
+            if current_count < spec.min
+                || resolve_multi_target_max(state, ability, spec)
+                    .is_some_and(|max_targets| current_count > max_targets.max(spec.min))
+            {
+                return Err(EngineError::InvalidAction(
+                    "Incorrect number of multi-target selections".to_string(),
+                ));
+            }
+            // CR 109.4: Use `extend_from_slice` so a companion player target
+            // pushed by the `effect_references_target_player` branch above
+            // survives — both slots live on this node's `targets`.
+            ability
+                .targets
+                .extend_from_slice(&targets[*next_target..*next_target + current_count]);
+            *next_target += current_count;
         } else if let Some(target) = targets.get(*next_target) {
             ability.targets.push(target.clone());
             *next_target += 1;
@@ -1699,7 +1747,7 @@ fn assign_targets_recursive(
         return Ok(());
     }
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
-        assign_targets_recursive(sub_ability, targets, next_target)?;
+        assign_targets_recursive(state, sub_ability, targets, next_target)?;
     }
     Ok(())
 }
@@ -1760,41 +1808,26 @@ fn assign_selected_slots_recursive(
     }
     if triggers::extract_target_filter_from_effect(&ability.effect).is_some() {
         if let Some(spec) = ability.multi_target.as_ref() {
-            match spec.max {
-                Some(max_targets) => {
-                    let end_slot = *next_slot + max_targets;
-                    let Some(window) = selected_slots.get(*next_slot..end_slot) else {
-                        return Err(EngineError::InvalidAction(
-                            "Missing required target".to_string(),
-                        ));
-                    };
-                    if window[..spec.min].iter().any(Option::is_none) {
-                        return Err(EngineError::InvalidAction(
-                            "Missing required target".to_string(),
-                        ));
-                    }
-                    ability.targets.extend(window.iter().flatten().cloned());
-                    *next_slot = end_slot;
-                }
-                // CR 115.1d: unbounded multi-target — fall through to single-target path.
-                None => {
-                    let Some(selected_slot) = selected_slots.get(*next_slot) else {
-                        return Err(EngineError::InvalidAction(
-                            "Missing target selection".to_string(),
-                        ));
-                    };
-                    match selected_slot {
-                        Some(target) => ability.targets.push(target.clone()),
-                        None if ability.optional_targeting => {}
-                        None => {
-                            return Err(EngineError::InvalidAction(
-                                "Missing required target".to_string(),
-                            ));
-                        }
-                    }
-                    *next_slot += 1;
-                }
+            let remaining_minimum = ability
+                .sub_ability
+                .as_deref()
+                .map(minimum_targets_in_chain)
+                .unwrap_or(0);
+            let remaining_after_current = selected_slots.len().saturating_sub(*next_slot);
+            let current_slots = remaining_after_current.saturating_sub(remaining_minimum);
+            let end_slot = *next_slot + current_slots;
+            let Some(window) = selected_slots.get(*next_slot..end_slot) else {
+                return Err(EngineError::InvalidAction(
+                    "Missing required target".to_string(),
+                ));
+            };
+            if window.len() < spec.min || window[..spec.min].iter().any(Option::is_none) {
+                return Err(EngineError::InvalidAction(
+                    "Missing required target".to_string(),
+                ));
             }
+            ability.targets.extend(window.iter().flatten().cloned());
+            *next_slot = end_slot;
         } else {
             let Some(selected_slot) = selected_slots.get(*next_slot) else {
                 return Err(EngineError::InvalidAction(
@@ -2199,7 +2232,8 @@ mod tests {
 
         let p_a = TargetRef::Player(PlayerId(0));
         let p_b = TargetRef::Player(PlayerId(1));
-        let result = assign_targets_in_chain(&mut chain, &[p_a.clone(), p_b.clone()]);
+        let state = GameState::new_two_player(42);
+        let result = assign_targets_in_chain(&state, &mut chain, &[p_a.clone(), p_b.clone()]);
         assert!(
             result.is_ok(),
             "assigning two player targets to [Draw{{Player}}, DamageAll{{TargetPlayer}}] \
@@ -2265,7 +2299,8 @@ mod tests {
 
         let p_a = TargetRef::Player(PlayerId(0));
         let p_b = TargetRef::Player(PlayerId(1));
-        let result = assign_targets_in_chain(&mut chain, &[p_a.clone(), p_b.clone()]);
+        let state = GameState::new_two_player(42);
+        let result = assign_targets_in_chain(&state, &mut chain, &[p_a.clone(), p_b.clone()]);
         assert!(
             result.is_ok(),
             "assigning two player targets to [Token{{Player}}, DamageAll{{TargetPlayer}}] \
@@ -3245,15 +3280,131 @@ mod tests {
             ObjectId(10),
             PlayerId(0),
         );
-        ability.multi_target = Some(crate::types::ability::MultiTargetSpec {
-            min: 0,
-            max: Some(2),
-        });
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec::fixed(0, 2));
 
         let slots = build_target_slots(&state, &ability).expect("multi-target slots should build");
 
         assert_eq!(slots.len(), 2);
         assert!(slots.iter().all(|slot| slot.optional));
+    }
+
+    #[test]
+    fn build_target_slots_resolves_dynamic_multi_target_max() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        for index in 0..3 {
+            let creature = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(index + 1),
+                PlayerId(0),
+                format!("Creature {index}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Tap {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec::up_to(
+            QuantityExpr::Ref {
+                qty: QuantityRef::ObjectCount {
+                    filter: TargetFilter::Typed(TypedFilter::creature()),
+                },
+            },
+        ));
+
+        let slots = build_target_slots(&state, &ability).expect("multi-target slots should build");
+
+        assert_eq!(slots.len(), 3);
+        assert!(slots.iter().all(|slot| slot.optional));
+    }
+
+    #[test]
+    fn build_target_slots_for_unlimited_multi_target_caps_at_legal_targets() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        for index in 0..3 {
+            let creature = crate::game::zones::create_object(
+                &mut state,
+                crate::types::identifiers::CardId(index + 1),
+                PlayerId(0),
+                format!("Creature {index}"),
+                Zone::Battlefield,
+            );
+            state
+                .objects
+                .get_mut(&creature)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Tap {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec::unlimited(0));
+
+        let slots = build_target_slots(&state, &ability).expect("multi-target slots should build");
+
+        assert_eq!(slots.len(), 3);
+        assert!(slots.iter().all(|slot| slot.optional));
+    }
+
+    #[test]
+    fn build_target_slots_rejects_unannounced_x_multi_target_max() {
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let creature = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Creature);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Tap {
+                target: TargetFilter::Typed(TypedFilter::creature()),
+            },
+            vec![],
+            ObjectId(10),
+            PlayerId(0),
+        );
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec::up_to(
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string(),
+                },
+            },
+        ));
+
+        assert!(build_target_slots(&state, &ability).is_err());
+        ability.chosen_x = Some(1);
+
+        let slots = build_target_slots(&state, &ability).expect("chosen X should resolve max");
+        assert_eq!(slots.len(), 1);
     }
 
     #[test]
@@ -3284,10 +3435,7 @@ mod tests {
             ObjectId(10),
             PlayerId(0),
         );
-        ability.multi_target = Some(crate::types::ability::MultiTargetSpec {
-            min: 0,
-            max: Some(4),
-        });
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec::fixed(0, 4));
 
         let slots = build_target_slots(&state, &ability).expect("multi-target slots should build");
 
@@ -3311,10 +3459,7 @@ mod tests {
             ObjectId(10),
             PlayerId(0),
         );
-        ability.multi_target = Some(crate::types::ability::MultiTargetSpec {
-            min: 0,
-            max: Some(2),
-        });
+        ability.multi_target = Some(crate::types::ability::MultiTargetSpec::fixed(0, 2));
 
         assign_selected_slots_in_chain(
             &mut ability,

@@ -86,6 +86,7 @@ describe("BattleProtectorModal", () => {
     useMultiplayerStore.setState({ activePlayerId: 0 });
     const state = makeState();
     useGameStore.setState({
+      gameMode: "online",
       gameState: state,
       waitingFor: state.waiting_for,
     });

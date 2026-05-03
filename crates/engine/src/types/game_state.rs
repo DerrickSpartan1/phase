@@ -155,6 +155,18 @@ pub struct LKISnapshot {
     pub counters: HashMap<CounterType, u32>,
 }
 
+/// CR 106.3 + CR 601.2h: Snapshot of the source of one mana spent to cast a spell.
+///
+/// Mana remembers the source that produced it, and source-qualified Oracle text
+/// ("mana from a Treasure", "mana from an artifact source") needs the source's
+/// characteristics as they existed when the mana was paid, not a post-hoc lookup
+/// after the source may have left the battlefield or changed characteristics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManaSpentSourceSnapshot {
+    pub source_id: ObjectId,
+    pub lki: LKISnapshot,
+}
+
 /// Snapshot of a spell's characteristics at cast time for per-turn history queries.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpellCastRecord {
@@ -1399,6 +1411,14 @@ pub enum WaitingFor {
         #[serde(default = "default_remaining_one")]
         remaining: u32,
     },
+    /// CR 118.12: Player must choose permanent(s) to return to hand as unless cost.
+    UnlessBounceChoice {
+        player: PlayerId,
+        permanents: Vec<ObjectId>,
+        pending_effect: Box<ResolvedAbility>,
+        #[serde(default = "default_remaining_one")]
+        remaining: u32,
+    },
     /// CR 701.54: Player must choose which creature becomes their ring-bearer.
     ChooseRingBearer {
         player: PlayerId,
@@ -1938,6 +1958,7 @@ impl WaitingFor {
             | WaitingFor::RetargetChoice { player, .. }
             | WaitingFor::WardDiscardChoice { player, .. }
             | WaitingFor::WardSacrificeChoice { player, .. }
+            | WaitingFor::UnlessBounceChoice { player, .. }
             | WaitingFor::ConniveDiscard { player, .. }
             | WaitingFor::CombatTaxPayment { player, .. }
             | WaitingFor::PhyrexianPayment { player, .. }

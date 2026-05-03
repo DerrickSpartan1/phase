@@ -455,6 +455,10 @@ fn filter_inner_for_object(
             // All properties must match
             let source_obj = state.objects.get(&source_id);
             let source_attached_to = source_obj.and_then(|s| s.attached_to);
+            let source_is_aura =
+                source_obj.is_some_and(|s| s.card_types.subtypes.iter().any(|s| s == "Aura"));
+            let source_is_equipment =
+                source_obj.is_some_and(|s| s.card_types.subtypes.iter().any(|s| s == "Equipment"));
             let source_chosen_creature_type =
                 source_obj.and_then(|s| s.chosen_creature_type().map(|t| t.to_string()));
             let empty_attrs: Vec<crate::types::ability::ChosenAttribute> = Vec::new();
@@ -465,6 +469,8 @@ fn filter_inner_for_object(
                 id: source_id,
                 controller: source_controller,
                 attached_to: source_attached_to,
+                source_is_aura,
+                source_is_equipment,
                 chosen_creature_type: source_chosen_creature_type.as_deref(),
                 chosen_attributes: source_chosen_attributes,
                 ability,
@@ -686,6 +692,10 @@ fn zone_change_filter_inner(
 
             let source_obj = state.objects.get(&source_id);
             let source_attached_to = source_obj.and_then(|s| s.attached_to);
+            let source_is_aura =
+                source_obj.is_some_and(|s| s.card_types.subtypes.iter().any(|s| s == "Aura"));
+            let source_is_equipment =
+                source_obj.is_some_and(|s| s.card_types.subtypes.iter().any(|s| s == "Equipment"));
             let source_chosen_creature_type =
                 source_obj.and_then(|s| s.chosen_creature_type().map(|t| t.to_string()));
             let empty_attrs: Vec<crate::types::ability::ChosenAttribute> = Vec::new();
@@ -696,6 +706,8 @@ fn zone_change_filter_inner(
                 id: source_id,
                 controller: source_controller,
                 attached_to: source_attached_to,
+                source_is_aura,
+                source_is_equipment,
                 chosen_creature_type: source_chosen_creature_type.as_deref(),
                 chosen_attributes: source_chosen_attributes,
                 ability,
@@ -1011,15 +1023,7 @@ pub fn spell_object_matches_filter_from(
     source_controller: PlayerId,
     all_creature_types: &[String],
 ) -> bool {
-    let record = SpellCastRecord {
-        core_types: spell_obj.card_types.core_types.clone(),
-        supertypes: spell_obj.card_types.supertypes.clone(),
-        subtypes: spell_obj.card_types.subtypes.clone(),
-        keywords: spell_obj.keywords.clone(),
-        colors: spell_obj.color.clone(),
-        mana_value: spell_obj.mana_cost.mana_value(),
-        has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
-    };
+    let record = spell_cast_record_from_object(spell_obj);
     spell_object_matches_filter_inner(
         &record,
         origin_zone,
@@ -1027,7 +1031,58 @@ pub fn spell_object_matches_filter_from(
         filter,
         source_controller,
         all_creature_types,
+        None,
     )
+}
+
+/// State-aware variant of [`spell_object_matches_filter_from`] for live cast
+/// evaluation. Dynamic CMC thresholds on battlefield statics resolve against
+/// the static source's controller and source object.
+pub fn spell_object_matches_filter_from_state(
+    state: &GameState,
+    spell_obj: &GameObject,
+    origin_zone: Zone,
+    caster: PlayerId,
+    filter: &TargetFilter,
+    source_id: ObjectId,
+    all_creature_types: &[String],
+) -> bool {
+    let Some(source_obj) = state.objects.get(&source_id) else {
+        return false;
+    };
+    let record = spell_cast_record_from_object(spell_obj);
+    spell_object_matches_filter_inner(
+        &record,
+        origin_zone,
+        caster,
+        filter,
+        source_obj.controller,
+        all_creature_types,
+        Some(SpellFilterContext {
+            state,
+            source_id,
+            source_controller: source_obj.controller,
+        }),
+    )
+}
+
+fn spell_cast_record_from_object(spell_obj: &GameObject) -> SpellCastRecord {
+    SpellCastRecord {
+        core_types: spell_obj.card_types.core_types.clone(),
+        supertypes: spell_obj.card_types.supertypes.clone(),
+        subtypes: spell_obj.card_types.subtypes.clone(),
+        keywords: spell_obj.keywords.clone(),
+        colors: spell_obj.color.clone(),
+        mana_value: spell_obj.mana_cost.mana_value(),
+        has_x_in_cost: crate::game::casting_costs::cost_has_x(&spell_obj.mana_cost),
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SpellFilterContext<'a> {
+    state: &'a GameState,
+    source_id: ObjectId,
+    source_controller: PlayerId,
 }
 
 fn spell_object_matches_filter_inner(
@@ -1037,6 +1092,7 @@ fn spell_object_matches_filter_inner(
     filter: &TargetFilter,
     source_controller: PlayerId,
     all_creature_types: &[String],
+    context: Option<SpellFilterContext<'_>>,
 ) -> bool {
     match filter {
         TargetFilter::Any => true,
@@ -1061,7 +1117,7 @@ fn spell_object_matches_filter_inner(
                 spell_record_matches_type_filter(record, type_filter, all_creature_types)
             }) && properties
                 .iter()
-                .all(|prop| spell_object_matches_property(record, zone, prop))
+                .all(|prop| spell_object_matches_property(record, zone, prop, context))
         }
         TargetFilter::Or { filters } => filters.iter().any(|inner| {
             spell_object_matches_filter_inner(
@@ -1071,6 +1127,7 @@ fn spell_object_matches_filter_inner(
                 inner,
                 source_controller,
                 all_creature_types,
+                context,
             )
         }),
         TargetFilter::And { filters } => filters.iter().all(|inner| {
@@ -1081,6 +1138,7 @@ fn spell_object_matches_filter_inner(
                 inner,
                 source_controller,
                 all_creature_types,
+                context,
             )
         }),
         TargetFilter::Not { filter: inner } => !spell_object_matches_filter_inner(
@@ -1090,6 +1148,7 @@ fn spell_object_matches_filter_inner(
             inner,
             source_controller,
             all_creature_types,
+            context,
         ),
         TargetFilter::None
         | TargetFilter::Player
@@ -1119,10 +1178,32 @@ fn spell_object_matches_filter_inner(
     }
 }
 
-fn spell_object_matches_property(record: &SpellCastRecord, zone: Zone, prop: &FilterProp) -> bool {
+fn spell_object_matches_property(
+    record: &SpellCastRecord,
+    zone: Zone,
+    prop: &FilterProp,
+    context: Option<SpellFilterContext<'_>>,
+) -> bool {
     match prop {
         FilterProp::InZone { zone: required } => zone == *required,
         FilterProp::InAnyZone { zones } => zones.contains(&zone),
+        FilterProp::Cmc { comparator, value } => {
+            let threshold = match value {
+                QuantityExpr::Fixed { value } => *value,
+                _ => {
+                    let Some(context) = context else {
+                        return false;
+                    };
+                    resolve_quantity(
+                        context.state,
+                        value,
+                        context.source_controller,
+                        context.source_id,
+                    )
+                }
+            };
+            comparator.evaluate(record.mana_value as i32, threshold)
+        }
         _ => spell_record_matches_property(record, prop),
     }
 }
@@ -1276,6 +1357,11 @@ struct SourceContext<'a> {
     /// (`EnchantedBy`, `EquippedBy`) can route on Object vs Player. The
     /// `FilterContext` snapshot mirrors this shape — see `FilterContext`.
     attached_to: Option<crate::game::game_object::AttachTarget>,
+    /// CR 301.5f + CR 303.4: Whether the source is an attachment-capable subtype.
+    /// Disambiguates `attached_to == None`: an unattached Equipment/Aura matches
+    /// nothing, while a non-attachment source triggers "has any" fallback semantics.
+    source_is_aura: bool,
+    source_is_equipment: bool,
     chosen_creature_type: Option<&'a str>,
     chosen_attributes: &'a [crate::types::ability::ChosenAttribute],
     /// CR 107.3a + CR 601.2b: The resolving ability, when one is in scope.
@@ -1504,17 +1590,19 @@ fn matches_filter_prop(
                     .is_some_and(|pid| pid == obj.owner)
             }
         },
-        // CR 303.4: `EnchantedBy` is source-relative when the source is an Aura
-        // ("enchanted creature gets +1/+1" on Gift of Estates). When the source is
-        // NOT an Aura (e.g. Hateful Eidolon's "whenever an enchanted creature
-        // dies"), `source.attached_to` is None and the same `FilterProp` is
-        // understood as "has at least one Aura attached" — the common Oracle-text
-        // use of "enchanted creature" on a non-Aura trigger source.
+        // CR 303.4 + CR 301.5f: `EnchantedBy` is source-relative when the
+        // source is an Aura ("enchanted creature gets +1/+1"). When the source
+        // is NOT an Aura (e.g. Hateful Eidolon's "whenever an enchanted creature
+        // dies"), `FilterProp` means "has at least one Aura attached". An Aura
+        // that exists but is unattached matches nothing.
         FilterProp::EnchantedBy => {
             if source.attached_to.is_some() {
                 // CR 303.4: An Aura attached to a player never matches an object
                 // filter ("enchanted creature"); only Object hosts qualify.
                 source.attached_to.and_then(|t| t.as_object()) == Some(object_id)
+            } else if source.source_is_aura {
+                // CR 303.4: Unattached Aura — no creature is "enchanted by" it.
+                false
             } else {
                 obj.attachments.iter().any(|att_id| {
                     state
@@ -1524,15 +1612,19 @@ fn matches_filter_prop(
                 })
             }
         }
-        // CR 301.5: Same reasoning as `EnchantedBy` — source-relative for Equipment
-        // sources (which always set `attached_to` when attached), falling back to
-        // "has at least one Equipment attached" for non-Equipment trigger sources.
+        // CR 301.5 + CR 301.5f: Same reasoning as `EnchantedBy` — source-relative
+        // for Equipment sources, falling back to "has at least one Equipment
+        // attached" for non-Equipment trigger sources. Unattached Equipment
+        // matches nothing.
         FilterProp::EquippedBy => {
             if source.attached_to.is_some() {
                 // CR 301.5: Equipment can attach only to creatures (objects), so
                 // a Player host is structurally impossible here — but routing
                 // through `as_object` is the typed way to express that.
                 source.attached_to.and_then(|t| t.as_object()) == Some(object_id)
+            } else if source.source_is_equipment {
+                // CR 301.5f: Unattached Equipment — no creature is "equipped by" it.
+                false
             } else {
                 obj.attachments.iter().any(|att_id| {
                     state
@@ -2429,13 +2521,14 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ChosenAttribute, Comparator, ControllerRef, FilterProp, TargetFilter,
+        AggregateFunction, ChosenAttribute, Comparator, ControllerRef, FilterProp, PlayerScope,
+        QuantityExpr, QuantityRef, TargetFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
-    use crate::types::mana::ManaColor;
+    use crate::types::mana::{ManaColor, ManaCost};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -3847,6 +3940,92 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn spell_object_filter_state_resolves_dynamic_cmc_threshold() {
+        let mut state = setup();
+        state.players[1].life_lost_this_turn = 3;
+
+        let source_id = add_creature(&mut state, PlayerId(0), "Abaddon");
+        let small_id = create_object(
+            &mut state,
+            CardId(301),
+            PlayerId(0),
+            "Small Spell".to_string(),
+            Zone::Hand,
+        );
+        let large_id = create_object(
+            &mut state,
+            CardId(302),
+            PlayerId(0),
+            "Large Spell".to_string(),
+            Zone::Hand,
+        );
+        let exile_id = create_object(
+            &mut state,
+            CardId(303),
+            PlayerId(0),
+            "Exiled Spell".to_string(),
+            Zone::Exile,
+        );
+
+        for (id, mana_value) in [(small_id, 3), (large_id, 4), (exile_id, 3)] {
+            let spell = state.objects.get_mut(&id).unwrap();
+            spell.card_types.core_types.push(CoreType::Sorcery);
+            spell.mana_cost = ManaCost::generic(mana_value);
+        }
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::card()
+                .controller(ControllerRef::You)
+                .properties(vec![
+                    FilterProp::InZone { zone: Zone::Hand },
+                    FilterProp::Cmc {
+                        comparator: Comparator::LE,
+                        value: QuantityExpr::Ref {
+                            qty: QuantityRef::LifeLostThisTurn {
+                                player: PlayerScope::Opponent {
+                                    aggregate: AggregateFunction::Sum,
+                                },
+                            },
+                        },
+                    },
+                ]),
+        );
+
+        let small = state.objects.get(&small_id).unwrap();
+        assert!(spell_object_matches_filter_from_state(
+            &state,
+            small,
+            Zone::Hand,
+            PlayerId(0),
+            &filter,
+            source_id,
+            &[],
+        ));
+
+        let large = state.objects.get(&large_id).unwrap();
+        assert!(!spell_object_matches_filter_from_state(
+            &state,
+            large,
+            Zone::Hand,
+            PlayerId(0),
+            &filter,
+            source_id,
+            &[],
+        ));
+
+        let exiled = state.objects.get(&exile_id).unwrap();
+        assert!(!spell_object_matches_filter_from_state(
+            &state,
+            exiled,
+            Zone::Exile,
+            PlayerId(0),
+            &filter,
+            source_id,
+            &[],
+        ));
+    }
+
     fn add_battlefield_creature_with_cmc(
         state: &mut GameState,
         owner: PlayerId,
@@ -4846,6 +5025,8 @@ mod tests {
             id: ObjectId(1),
             controller: Some(PlayerId(0)),
             attached_to: None,
+            source_is_aura: false,
+            source_is_equipment: false,
             chosen_creature_type: None,
             chosen_attributes: &[],
             ability: None,
@@ -4973,6 +5154,8 @@ mod tests {
             id: ObjectId(1),
             controller: Some(PlayerId(0)),
             attached_to: None,
+            source_is_aura: false,
+            source_is_equipment: false,
             chosen_creature_type: None,
             chosen_attributes: &[],
             ability: None,
@@ -5016,6 +5199,8 @@ mod tests {
             id: ObjectId(1),
             controller: Some(PlayerId(0)),
             attached_to: None,
+            source_is_aura: false,
+            source_is_equipment: false,
             chosen_creature_type: None,
             chosen_attributes: &[],
             ability: None,

@@ -1717,6 +1717,16 @@ fn apply_action(
             chosen,
             &mut events,
         )?,
+        // CR 118.12: Player selected a permanent to return to hand as unless cost.
+        (
+            waiting_for @ WaitingFor::UnlessBounceChoice { .. },
+            GameAction::SelectCards { cards: chosen },
+        ) => engine_payment_choices::handle_unless_bounce_choice(
+            state,
+            waiting_for.clone(),
+            chosen,
+            &mut events,
+        )?,
         (WaitingFor::ManaPayment { player, .. }, GameAction::CancelCast) => {
             // CR 601.2i: Cancelling at mana payment rolls back the cast — pop
             // the stack entry placed at announcement and return the object to

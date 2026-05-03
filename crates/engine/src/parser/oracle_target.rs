@@ -2767,7 +2767,7 @@ pub(crate) fn parse_shared_quality_clause(
         },
     ))
     .parse(rest)?;
-    let (rest, _) = opt(tag::<_, _, Vbe>("a ")).parse(rest)?;
+    let (rest, _) = opt(alt((tag::<_, _, Vbe>("a "), tag("at least one ")))).parse(rest)?;
     let (rest, quality) = parse_shared_quality(rest)?;
     let (rest, reference) = opt(nom::sequence::preceded(
         tag::<_, _, Vbe>(" with "),

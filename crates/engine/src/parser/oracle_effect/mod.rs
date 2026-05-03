@@ -18,7 +18,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::value;
+use nom::combinator::{opt, value};
 use nom::multi::many1;
 use nom::sequence::preceded;
 use nom::Parser;
@@ -26,6 +26,7 @@ use nom_language::error::VerboseError;
 
 use super::oracle_nom::bridge::nom_on_lower;
 use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_quantity::{
     parse_cda_quantity, parse_for_each_clause, parse_for_each_clause_expr,
 };
@@ -1631,9 +1632,10 @@ fn parse_effect_clause(text: &str, ctx: &ParseContext) -> ParsedEffectClause {
     // Duration: route through `with_clause_duration` so
     // GenericEffect/GrantCastingPermission's embedded duration field
     // is patched alongside `clause.duration`. Skip when the body parser
-    // already populated `clause.duration` (some specialized parsers set
-    // it themselves and we must not clobber).
-    if clause.duration.is_none() {
+    // already populated a non-default `clause.duration` (some specialized
+    // parsers set it themselves and we must not clobber). A default
+    // `Permanent` from a body parser yields to the explicit peeled duration.
+    if clause.duration.is_none() || matches!(clause.duration, Some(Duration::Permanent)) {
         if let Some(duration) = peel_ctx.duration().cloned() {
             clause = with_clause_duration(clause, duration);
         }
@@ -1895,10 +1897,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &ParseContext) -> ParsedEffectClau
     // Strip the count, recursively parse the remainder, and attach MultiTargetSpec.
     if let Some((count, rest)) = strip_numeric_target_prefix(tp.lower) {
         let mut clause = parse_effect_clause(rest, ctx);
-        clause.multi_target = Some(MultiTargetSpec {
-            min: count,
-            max: Some(count),
-        });
+        clause.multi_target = Some(MultiTargetSpec::fixed(count, count));
         return clause;
     }
 
@@ -5992,6 +5991,10 @@ pub(crate) fn try_parse_named_choice(lower: &str) -> Option<ChoiceType> {
         Some(ChoiceType::Player)
     } else if tag::<_, _, E>("two colors").parse(rest).is_ok() {
         Some(ChoiceType::TwoColors)
+    } else if tag::<_, _, E>("a word").parse(rest).is_ok() {
+        Some(ChoiceType::Word)
+    } else if tag::<_, _, E>("an artist").parse(rest).is_ok() {
+        Some(ChoiceType::Artist)
     } else {
         // Generic "X or Y" pattern — must come AFTER all specific patterns above
         try_parse_binary_choice(rest).map(|options| ChoiceType::Labeled { options })
@@ -7021,9 +7024,20 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         let (is_optional, opponent_may_scope, implicit_player_scope, text) =
             strip_optional_effect_prefix(&text);
         let (repeat_for, text) = strip_for_each_prefix(&text);
+        let (text_without_where_x, local_where_x_expression) = {
+            let text_where_x_lower = text.to_lowercase();
+            let (without_where_x, where_x_expression) =
+                strip_trailing_where_x(TextPair::new(&text, &text_where_x_lower));
+            (without_where_x.original.to_string(), where_x_expression)
+        };
         // CR 609.3: "twice" / "N times" suffix — same mechanism as "for each" prefix.
         let (repeat_count, text) = if repeat_for.is_none() {
-            strip_repeat_count_suffix(&text)
+            let (repeat_count, stripped_text) = strip_repeat_count_suffix(&text_without_where_x);
+            if repeat_count.is_some() {
+                (repeat_count, stripped_text)
+            } else {
+                (None, text)
+            }
         } else {
             (None, text)
         };
@@ -7073,9 +7087,6 @@ fn parse_effect_chain_impl(text: &str, kind: AbilityKind, ctx: &ParseContext) ->
         // CR 603.7a: Check for temporal prefix before suffix. When present, parse the
         // inner effect through the full pipeline and wrap in CreateDelayedTrigger.
         let (text_after_prefix, prefix_delayed) = strip_temporal_prefix(&text);
-        let text_where_x_lower = text.to_lowercase();
-        let (_, local_where_x_expression) =
-            strip_trailing_where_x(TextPair::new(&text, &text_where_x_lower));
         // CR 107.3i: If this chunk has no local "where X is" but a sibling clause
         // in the same sentence binds X, propagate the sibling binding so "target
         // player loses X life" and "you gain X life" in the same sentence share
@@ -8584,12 +8595,8 @@ fn extract_put_counter_multi_target(text: &str) -> Option<MultiTargetSpec> {
     ]
     .into_iter()
     .find_map(|marker| strip_after(&lower, marker))?;
-    // Delegate to nom combinator (input already lowercase).
-    let (_, n) = nom_primitives::parse_number.parse(after).ok()?;
-    Some(MultiTargetSpec {
-        min: 0,
-        max: Some(n as usize),
-    })
+    let (_, max) = parse_multi_target_count_expr(after).ok()?;
+    Some(MultiTargetSpec::up_to(max))
 }
 
 /// Post-parse fixup for "exile N target" multi_target.
@@ -8600,10 +8607,7 @@ fn extract_exile_multi_target(text: &str) -> Option<MultiTargetSpec> {
         .parse(lower.as_str())
         .ok()?;
     let (count, _) = strip_numeric_target_prefix(after_verb)?;
-    Some(MultiTargetSpec {
-        min: count,
-        max: Some(count),
-    })
+    Some(MultiTargetSpec::fixed(count, count))
 }
 
 /// Verbs where "any number of" / "up to N" modifies the target set (CR 115.1d),
@@ -8651,8 +8655,7 @@ pub(super) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTar
     else {
         return (text, None);
     };
-    // Delegate to nom combinator (input already lowercase).
-    let Ok((remainder, n)) = nom_primitives::parse_number.parse(after_up_to) else {
+    let Ok((remainder, max)) = parse_multi_target_count_expr(after_up_to) else {
         return (text, None);
     };
     let consumed = lower.len() - remainder.len();
@@ -8668,13 +8671,17 @@ pub(super) fn strip_optional_target_prefix(text: &str) -> (&str, Option<MultiTar
     {
         return (text, None);
     }
-    (
-        rest,
-        Some(MultiTargetSpec {
-            min: 0,
-            max: Some(n as usize),
-        }),
-    )
+    (rest, Some(MultiTargetSpec::up_to(max)))
+}
+
+pub(super) fn parse_multi_target_count_expr(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, QuantityExpr> {
+    alt((
+        nom_quantity::parse_quantity_expr_number,
+        nom_quantity::parse_quantity,
+    ))
+    .parse(input)
 }
 
 /// CR 115.1d: Strip "any number of" or "up to N" quantifier from imperative text.
@@ -8696,7 +8703,7 @@ fn strip_any_number_quantifier(text: &str) -> (String, Option<MultiTargetSpec>) 
         })
     {
         let rebuilt = format!("{}{}", verb_tp.original, rest_orig);
-        return (rebuilt, Some(MultiTargetSpec { min: 0, max: None }));
+        return (rebuilt, Some(MultiTargetSpec::unlimited(0)));
     }
     if let Some((_, after_up_to_orig)) =
         super::oracle_nom::bridge::nom_on_lower(after_verb_tp.original, after_verb_tp.lower, |i| {
@@ -8706,18 +8713,11 @@ fn strip_any_number_quantifier(text: &str) -> (String, Option<MultiTargetSpec>) 
         let after_up_to_lower =
             &after_verb_tp.lower[after_verb_tp.lower.len() - after_up_to_orig.len()..];
         let after_up_to = TextPair::new(after_up_to_orig, after_up_to_lower);
-        // Delegate to nom combinator (input already lowercase from TextPair.lower).
-        if let Ok((remainder, n)) = nom_primitives::parse_number.parse(after_up_to.lower) {
+        if let Ok((remainder, max)) = parse_multi_target_count_expr(after_up_to.lower) {
             let consumed_len = after_up_to.lower.len() - remainder.len();
             let (_, rest) = after_up_to.split_at(consumed_len);
             let rebuilt = format!("{}{}", verb_tp.original, rest.original.trim_start());
-            return (
-                rebuilt,
-                Some(MultiTargetSpec {
-                    min: 0,
-                    max: Some(n as usize),
-                }),
-            );
+            return (rebuilt, Some(MultiTargetSpec::up_to(max)));
         }
     }
     (text.to_string(), None)
@@ -8988,7 +8988,7 @@ fn try_parse_distribute_damage(lower: &str, text: &str) -> Option<ParsedEffectCl
         (
             &target_text[skip..],
             // CR 601.2d: min: 1 because each target must receive at least 1.
-            Some(MultiTargetSpec { min: 1, max: None }),
+            Some(MultiTargetSpec::unlimited(1)),
         )
     } else {
         (target_text, None)
@@ -9056,7 +9056,7 @@ fn try_parse_distribute_counters(lower: &str, text: &str) -> Option<ParsedEffect
         (
             &target_text[skip..],
             // CR 601.2d: min: 1 because each target must receive at least 1.
-            Some(MultiTargetSpec { min: 1, max: None }),
+            Some(MultiTargetSpec::unlimited(1)),
         )
     } else {
         (target_text, None)
@@ -9429,7 +9429,8 @@ fn parse_pump_clause(predicate: &str) -> Option<(PtValue, PtValue, Option<Durati
     let predicate_tp = TextPair::new(predicate, &predicate_lower);
     let (without_where, where_x_expression) = strip_trailing_where_x(predicate_tp);
     // Strip "for each [clause]" suffix before duration extraction.
-    let (without_for_each, for_each_qty) = strip_trailing_for_each_clause(without_where.original);
+    let (without_for_each, for_each_qty) =
+        strip_trailing_for_each_clause_expr(without_where.original);
     let (without_duration, duration) = strip_trailing_duration(without_for_each);
     let lower = without_duration.to_lowercase();
 
@@ -9455,8 +9456,7 @@ fn parse_pump_clause(predicate: &str) -> Option<(PtValue, PtValue, Option<Durati
     let toughness = apply_where_x_expression(toughness, where_x_expression.as_deref());
 
     // CR 613.4c: Compose with "for each" quantity to produce dynamic PtValue.
-    let (power, toughness) = if let Some(qty) = for_each_qty {
-        let quantity = QuantityExpr::Ref { qty };
+    let (power, toughness) = if let Some(quantity) = for_each_qty {
         (
             compose_pt_with_for_each(power, &quantity),
             compose_pt_with_for_each(toughness, &quantity),
@@ -9469,14 +9469,14 @@ fn parse_pump_clause(predicate: &str) -> Option<(PtValue, PtValue, Option<Durati
 }
 
 /// Strip a trailing "for each [clause]" from pump text, returning the remaining text
-/// and the parsed QuantityRef (if any). Handles both "until end of turn for each X"
+/// and the parsed QuantityExpr (if any). Handles both "until end of turn for each X"
 /// (duration already stripped) and bare "for each X".
-fn strip_trailing_for_each_clause(text: &str) -> (&str, Option<QuantityRef>) {
+fn strip_trailing_for_each_clause_expr(text: &str) -> (&str, Option<QuantityExpr>) {
     let lower = text.to_lowercase();
     if let Some(pos) = lower.rfind(" for each ") {
         let clause_text = lower[pos + " for each ".len()..].trim_end_matches('.');
-        if let Some(qty) = parse_for_each_clause(clause_text) {
-            return (text[..pos].trim(), Some(qty));
+        if let Some(quantity) = parse_for_each_clause_expr(clause_text) {
+            return (text[..pos].trim(), Some(quantity));
         }
     }
     (text, None)
@@ -9598,7 +9598,107 @@ fn apply_where_x_expression(value: PtValue, where_x_expression: Option<&str>) ->
 }
 
 fn parse_where_x_quantity_expression(where_x_expression: &str) -> Option<QuantityExpr> {
+    let expression = where_x_expression.trim().trim_end_matches('.');
+    let expression_lower = expression.to_ascii_lowercase();
+    if let Ok((rest_lower, (n, sign))) = (
+        nom_primitives::parse_number,
+        alt((
+            value(1i32, tag::<_, _, VerboseError<&str>>(" plus ")),
+            value(-1i32, tag(" minus ")),
+        )),
+    )
+        .parse(expression_lower.as_str())
+    {
+        let consumed = expression_lower.len() - rest_lower.len();
+        if let Some(inner) = parse_where_x_quantity_expression(&expression[consumed..]) {
+            let inner = if sign < 0 {
+                QuantityExpr::Multiply {
+                    factor: -1,
+                    inner: Box::new(inner),
+                }
+            } else {
+                inner
+            };
+            return Some(QuantityExpr::Offset {
+                inner: Box::new(inner),
+                offset: n as i32,
+            });
+        }
+    }
+    if let Some(expr) = parse_where_x_cards_named_in_all_graveyards(expression) {
+        return Some(expr);
+    }
+    if let Some(expr) = parse_where_x_kicker_count(expression) {
+        return Some(expr);
+    }
+    let lower = expression.to_ascii_lowercase();
+    if tag::<_, _, VerboseError<&str>>("the number of times ")
+        .parse(lower.as_str())
+        .is_ok()
+    {
+        return None;
+    }
     parse_cda_quantity(where_x_expression)
+}
+
+fn parse_where_x_cards_named_in_all_graveyards(where_x_expression: &str) -> Option<QuantityExpr> {
+    let lower = where_x_expression.to_ascii_lowercase();
+    let (rest, name_lower) = preceded(
+        tag::<_, _, VerboseError<&str>>("the number of cards named "),
+        take_until(" in all graveyards"),
+    )
+    .parse(lower.as_str())
+    .ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" in all graveyards")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = opt(tag::<_, _, VerboseError<&str>>(" as you cast this spell"))
+        .parse(rest)
+        .ok()?;
+    if !rest.is_empty() || name_lower.trim().is_empty() {
+        return None;
+    }
+    let name_offset = lower.find(name_lower)?;
+    let name = where_x_expression[name_offset..name_offset + name_lower.len()].trim();
+    Some(QuantityExpr::Ref {
+        qty: QuantityRef::ObjectCount {
+            filter: TargetFilter::Typed(TypedFilter {
+                type_filters: vec![TypeFilter::Card],
+                controller: None,
+                properties: vec![
+                    FilterProp::Named {
+                        name: name.to_string(),
+                    },
+                    FilterProp::InZone {
+                        zone: Zone::Graveyard,
+                    },
+                ],
+            }),
+        },
+    })
+}
+
+fn parse_where_x_kicker_count(where_x_expression: &str) -> Option<QuantityExpr> {
+    let lower = where_x_expression.to_ascii_lowercase();
+    let (rest, _) = tag::<_, _, VerboseError<&str>>("the number of times ")
+        .parse(lower.as_str())
+        .ok()?;
+    let rest = alt((
+        preceded(
+            take_until::<_, _, VerboseError<&str>>(" was kicked"),
+            tag(" was kicked"),
+        ),
+        preceded(
+            take_until::<_, _, VerboseError<&str>>(" kicked"),
+            tag(" kicked"),
+        ),
+    ))
+    .parse(rest)
+    .ok()?
+    .0;
+    rest.is_empty().then_some(QuantityExpr::Ref {
+        qty: QuantityRef::KickerCount,
+    })
 }
 
 fn apply_where_x_quantity_expression(
@@ -9655,7 +9755,8 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
         | Effect::PutCounterAll { count: amount, .. }
         | Effect::Token { count: amount, .. }
         | Effect::Dig { count: amount, .. }
-        | Effect::ExileTop { count: amount, .. } => {
+        | Effect::ExileTop { count: amount, .. }
+        | Effect::Incubate { count: amount } => {
             *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
         }
         Effect::Pump {
@@ -9672,6 +9773,17 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
 }
 
 fn apply_where_x_ability_expression(def: &mut AbilityDefinition, where_x_expression: Option<&str>) {
+    if let Some(repeat_for) = def.repeat_for.take() {
+        def.repeat_for = Some(apply_where_x_quantity_expression(
+            repeat_for,
+            where_x_expression,
+        ));
+    }
+    if let Some(spec) = def.multi_target.as_mut() {
+        if let Some(max) = spec.max.take() {
+            spec.max = Some(apply_where_x_quantity_expression(max, where_x_expression));
+        }
+    }
     apply_where_x_effect_expression(def.effect.as_mut(), where_x_expression);
     if let Some(sub) = def.sub_ability.as_mut() {
         apply_where_x_ability_expression(sub, where_x_expression);
@@ -10259,7 +10371,8 @@ mod tests {
     use crate::types::ability::{
         CardTypeSetSource, CastVariantPaid, ChoiceType, Comparator, ContinuousModification,
         ControllerRef, CountScope, DoublePTMode, Duration, FilterProp, GainLifePlayer,
-        LinkedExileScope, ManaContribution, ManaProduction, PaymentCost, TypeFilter, ZoneRef,
+        LinkedExileScope, ManaContribution, ManaProduction, ObjectScope, PaymentCost, QuantityExpr,
+        QuantityRef, TypeFilter, ZoneRef,
     };
     use crate::types::card_type::Supertype;
     use crate::types::keywords::Keyword;
@@ -10452,6 +10565,86 @@ mod tests {
             },
             other => panic!("expected GainLife, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn where_x_applies_to_incubate_count() {
+        let def = parse_effect_chain(
+            "Mill two cards, then incubate X, where X is the number of creature cards in your graveyard.",
+            AbilityKind::Spell,
+        );
+        assert!(
+            matches!(&*def.effect, Effect::Mill { .. }),
+            "expected Mill root effect, got {:?}",
+            def.effect
+        );
+        let sub = def.sub_ability.as_ref().expect("incubate sub-ability");
+        match &*sub.effect {
+            Effect::Incubate {
+                count:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ZoneCardCount {
+                                zone: ZoneRef::Graveyard,
+                                card_types,
+                                scope: CountScope::Controller,
+                            },
+                    },
+            } => assert_eq!(card_types, &vec![TypeFilter::Creature]),
+            other => panic!("expected dynamic Incubate count, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn where_x_named_cards_in_all_graveyards_uses_named_graveyard_count() {
+        let expr = parse_where_x_quantity_expression(
+            "one plus the number of cards named Aether Burst in all graveyards as you cast this spell",
+        )
+        .expect("where-X quantity");
+
+        match expr {
+            QuantityExpr::Offset { inner, offset } => {
+                assert_eq!(offset, 1);
+                match *inner {
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::ObjectCount {
+                                filter: TargetFilter::Typed(filter),
+                            },
+                    } => {
+                        assert!(filter.type_filters.contains(&TypeFilter::Card));
+                        assert!(filter.properties.iter().any(
+                            |prop| matches!(prop, FilterProp::Named { name } if name == "Aether Burst")
+                        ));
+                        assert!(filter.properties.iter().any(
+                            |prop| matches!(prop, FilterProp::InZone { zone } if *zone == Zone::Graveyard)
+                        ));
+                    }
+                    other => panic!("expected ObjectCount inner, got {other:?}"),
+                }
+            }
+            other => panic!("expected offset quantity, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn where_x_times_kicked_uses_kicker_count() {
+        let expr = parse_where_x_quantity_expression("the number of times Zethi was kicked")
+            .expect("where-X quantity");
+        assert_eq!(
+            expr,
+            QuantityExpr::Ref {
+                qty: QuantityRef::KickerCount
+            }
+        );
+    }
+
+    #[test]
+    fn where_x_unknown_times_clause_remains_unparsed() {
+        assert_eq!(
+            parse_where_x_quantity_expression("the number of times this creature has mutated"),
+            None
+        );
     }
 
     #[test]
@@ -12334,13 +12527,7 @@ mod tests {
     fn effect_up_to_one_target_creature_explores_sets_multi_target() {
         let def = parse_effect_chain("Up to one target creature explores", AbilityKind::Spell);
         assert!(matches!(*def.effect, Effect::TargetOnly { .. }));
-        assert_eq!(
-            def.multi_target,
-            Some(MultiTargetSpec {
-                min: 0,
-                max: Some(1),
-            })
-        );
+        assert_eq!(def.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
         assert!(matches!(
             *def.sub_ability
                 .expect("expected explore sub ability")
@@ -12384,6 +12571,22 @@ mod tests {
             def.repeat_for,
             Some(QuantityExpr::Ref {
                 qty: QuantityRef::Variable { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn effect_proliferate_x_times_applies_where_x_repeat_for() {
+        let def = parse_effect_chain(
+            "Proliferate X times, where X is the number of nontoken creatures you control that entered this turn",
+            AbilityKind::Activated,
+        );
+        assert!(matches!(*def.effect, Effect::Proliferate));
+        assert!(def.duration.is_none());
+        assert!(matches!(
+            def.repeat_for,
+            Some(QuantityExpr::Ref {
+                qty: QuantityRef::EnteredThisTurn { .. },
             })
         ));
     }
@@ -13302,6 +13505,48 @@ mod tests {
     }
 
     #[test]
+    fn effect_target_noncreature_artifact_becomes_dynamic_artifact_creature_until_eot() {
+        let e = parse_effect(
+            "Target noncreature artifact becomes an artifact creature with power and toughness each equal to its mana value until end of turn",
+        );
+        let Effect::GenericEffect {
+            target: Some(TargetFilter::Typed(tf)),
+            static_abilities,
+            duration: Some(Duration::UntilEndOfTurn),
+        } = e
+        else {
+            panic!("expected UEOT GenericEffect, got {e:?}");
+        };
+
+        assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+        assert!(tf
+            .type_filters
+            .contains(&TypeFilter::Non(Box::new(TypeFilter::Creature))));
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::ParentTarget)
+        );
+
+        let mods = &static_abilities[0].modifications;
+        let expected = QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue {
+                scope: ObjectScope::Recipient,
+            },
+        };
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: crate::types::card_type::CoreType::Artifact,
+        }));
+        assert!(mods.contains(&ContinuousModification::AddType {
+            core_type: crate::types::card_type::CoreType::Creature,
+        }));
+        assert!(mods.contains(&ContinuousModification::SetPowerDynamic {
+            value: expected.clone(),
+        }));
+        assert!(mods.contains(&ContinuousModification::SetToughnessDynamic { value: expected }));
+    }
+
+    #[test]
     fn effect_becomes_color_and_attacks_if_able_chains_requirement() {
         let def = parse_effect_chain(
             "Target creature becomes red until end of turn and attacks this turn if able.",
@@ -13475,7 +13720,7 @@ mod tests {
         }
         let spec = multi.expect("should have multi_target");
         assert_eq!(spec.min, 0);
-        assert_eq!(spec.max, Some(1));
+        assert_eq!(spec, MultiTargetSpec::fixed(0, 1));
     }
 
     #[test]
@@ -13496,13 +13741,7 @@ mod tests {
             "put a +1/+1 counter on each of up to two target creatures",
             &ParseContext::default(),
         );
-        assert_eq!(
-            clause.multi_target,
-            Some(MultiTargetSpec {
-                min: 0,
-                max: Some(2),
-            })
-        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 2)));
         assert!(
             matches!(
                 clause.effect,
@@ -13898,7 +14137,7 @@ mod tests {
     /// - sub_ability's effect is `CreateDelayedTrigger` with
     ///   `AtNextPhaseForPlayer { PreCombatMain, PlayerId(0) /* placeholder */ }`,
     /// - delayed trigger's inner effect is `Mana { Colorless { count:
-    ///   Ref(ManaSpentOnTriggeringSpell) } }`.
+    ///   Ref(triggering-spell spent-mana) } }`.
     #[test]
     fn mana_sculpt_full_parse_tree() {
         let def = parse_effect_chain(
@@ -13963,7 +14202,7 @@ mod tests {
             "expected AtNextPhaseForPlayer(PreCombatMain), got {delayed_cond:?}"
         );
 
-        // Inner delayed effect: Mana(Colorless, Ref(ManaSpentOnTriggeringSpell)).
+        // Inner delayed effect: Mana(Colorless, Ref(triggering-spell spent-mana)).
         let Effect::Mana { produced, .. } = &*delayed_effect_def.effect else {
             panic!(
                 "expected Mana effect on delayed trigger, got {:?}",
@@ -13975,7 +14214,10 @@ mod tests {
                 assert_eq!(
                     *count,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::ManaSpentOnTriggeringSpell
+                        qty: QuantityRef::ManaSpentToCast {
+                            scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                            metric: crate::types::ability::CastManaSpentMetric::Total
+                        }
                     },
                     "Colorless count must reference mana spent on triggering spell"
                 );
@@ -14179,7 +14421,7 @@ mod tests {
         );
         assert_eq!(
             clause.multi_target,
-            Some(MultiTargetSpec { min: 0, max: None }),
+            Some(MultiTargetSpec::unlimited(0)),
             "should have unlimited multi_target"
         );
     }
@@ -14195,10 +14437,7 @@ mod tests {
             "expected PhaseOut, got {:?}",
             clause.effect
         );
-        assert_eq!(
-            clause.multi_target,
-            Some(MultiTargetSpec { min: 0, max: None }),
-        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::unlimited(0)),);
     }
 
     #[test]
@@ -14215,10 +14454,7 @@ mod tests {
             "expected Mill or TargetOnly, got {:?}",
             clause.effect
         );
-        assert_eq!(
-            clause.multi_target,
-            Some(MultiTargetSpec { min: 0, max: None }),
-        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::unlimited(0)),);
     }
 
     // CR 115.1d: Scrollboost — "One or two target creatures each get +2/+2
@@ -14236,13 +14472,7 @@ mod tests {
             "expected parsed pump effect, got {:?}",
             clause.effect
         );
-        assert_eq!(
-            clause.multi_target,
-            Some(MultiTargetSpec {
-                min: 1,
-                max: Some(2)
-            }),
-        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(1, 2)),);
     }
 
     #[test]
@@ -14256,13 +14486,7 @@ mod tests {
             "expected parsed pump effect, got {:?}",
             clause.effect
         );
-        assert_eq!(
-            clause.multi_target,
-            Some(MultiTargetSpec {
-                min: 1,
-                max: Some(3)
-            }),
-        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(1, 3)),);
     }
 
     #[test]
@@ -15512,10 +15736,7 @@ mod tests {
         );
         assert_eq!(
             def.multi_target,
-            Some(MultiTargetSpec {
-                min: 2,
-                max: Some(2),
-            }),
+            Some(MultiTargetSpec::fixed(2, 2)),
             "Expected multi_target with min=2, max=2"
         );
     }
@@ -15838,12 +16059,20 @@ mod tests {
         let (rest, multi_target) =
             strip_optional_target_prefix("up to one other target creature or spell");
         assert_eq!(rest, "other target creature or spell");
+        assert_eq!(multi_target, Some(MultiTargetSpec::fixed(0, 1)));
+    }
+
+    #[test]
+    fn strip_optional_target_prefix_up_to_x_target() {
+        let (rest, multi_target) = strip_optional_target_prefix("up to X target creatures");
+        assert_eq!(rest, "target creatures");
         assert_eq!(
             multi_target,
-            Some(MultiTargetSpec {
-                min: 0,
-                max: Some(1),
-            })
+            Some(MultiTargetSpec::up_to(QuantityExpr::Ref {
+                qty: QuantityRef::Variable {
+                    name: "X".to_string()
+                }
+            }))
         );
     }
 
@@ -18113,13 +18342,7 @@ mod tests {
             "airbend up to one other target creature or spell",
             &ParseContext::default(),
         );
-        assert_eq!(
-            clause.multi_target,
-            Some(MultiTargetSpec {
-                min: 0,
-                max: Some(1),
-            })
-        );
+        assert_eq!(clause.multi_target, Some(MultiTargetSpec::fixed(0, 1)));
         match clause.effect {
             Effect::ChangeZone {
                 target: TargetFilter::Or { filters },
@@ -18406,6 +18629,36 @@ mod tests {
                     PtValue::Fixed(0),
                     "toughness should stay Fixed(0)"
                 );
+            }
+            other => panic!("expected Pump, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn for_each_pump_beyond_first_offsets_quantity_before_scaling() {
+        let def = parse_effect_chain(
+            "~ gets -2/-1 until end of turn for each creature blocking it beyond the first",
+            AbilityKind::Spell,
+        );
+        match &*def.effect {
+            Effect::Pump {
+                power, toughness, ..
+            } => {
+                assert_eq!(def.duration, Some(Duration::UntilEndOfTurn));
+                assert!(matches!(
+                    power,
+                    PtValue::Quantity(QuantityExpr::Multiply {
+                        factor: -2,
+                        inner,
+                    }) if matches!(inner.as_ref(), QuantityExpr::Offset { offset: -1, .. })
+                ));
+                assert!(matches!(
+                    toughness,
+                    PtValue::Quantity(QuantityExpr::Multiply {
+                        factor: -1,
+                        inner,
+                    }) if matches!(inner.as_ref(), QuantityExpr::Offset { offset: -1, .. })
+                ));
             }
             other => panic!("expected Pump, got {:?}", other),
         }
@@ -18704,11 +18957,14 @@ mod tests {
                 e,
                 Effect::GainEnergy {
                     amount: QuantityExpr::Ref {
-                        qty: QuantityRef::ManaSpentOnTriggeringSpell,
+                        qty: QuantityRef::ManaSpentToCast {
+                            scope: crate::types::ability::CastManaObjectScope::TriggeringSpell,
+                            metric: crate::types::ability::CastManaSpentMetric::Total
+                        },
                     },
                 }
             ),
-            "expected dynamic GainEnergy ManaSpentOnTriggeringSpell, got: {e:?}"
+            "expected dynamic GainEnergy triggering-spell spent-mana ref, got: {e:?}"
         );
     }
 

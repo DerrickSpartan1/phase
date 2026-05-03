@@ -375,7 +375,7 @@ pub(super) fn parse_subject_application(
         {
             let (filter, _) = parse_target(target_text);
             let mut application = subject_filter_application(filter, true)?;
-            application.multi_target = Some(MultiTargetSpec { min: 0, max: None });
+            application.multi_target = Some(MultiTargetSpec::unlimited(0));
             return Some(application);
         }
     }
@@ -398,10 +398,7 @@ pub(super) fn parse_subject_application(
                 let target_text = &subject[consumed..];
                 let (filter, _) = parse_target(target_text);
                 let mut application = subject_filter_application(filter, true)?;
-                application.multi_target = Some(MultiTargetSpec {
-                    min,
-                    max: Some(max),
-                });
+                application.multi_target = Some(MultiTargetSpec::fixed(min, max));
                 return Some(application);
             }
         }
@@ -2313,7 +2310,7 @@ mod tests {
         assert!(app.target.is_some(), "should be targeted");
         assert_eq!(
             app.multi_target,
-            Some(MultiTargetSpec { min: 0, max: None }),
+            Some(MultiTargetSpec::unlimited(0)),
             "should have unlimited multi_target"
         );
     }
@@ -2331,10 +2328,7 @@ mod tests {
             "should parse creature + controller, got {:?}",
             app.affected
         );
-        assert_eq!(
-            app.multi_target,
-            Some(MultiTargetSpec { min: 0, max: None }),
-        );
+        assert_eq!(app.multi_target, Some(MultiTargetSpec::unlimited(0)),);
     }
 
     #[test]
@@ -2343,10 +2337,7 @@ mod tests {
         let result = parse_subject_application("any number of target players", &ctx);
         assert!(result.is_some());
         let app = result.unwrap();
-        assert_eq!(
-            app.multi_target,
-            Some(MultiTargetSpec { min: 0, max: None }),
-        );
+        assert_eq!(app.multi_target, Some(MultiTargetSpec::unlimited(0)),);
     }
 
     #[test]
