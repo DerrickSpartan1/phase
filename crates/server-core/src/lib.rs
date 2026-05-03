@@ -1,6 +1,8 @@
 pub mod deck_resolve;
 pub mod draft_session;
 pub mod filter;
+#[cfg(test)]
+mod harness;
 pub mod lobby;
 pub mod persist;
 pub mod protocol;

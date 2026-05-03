@@ -144,8 +144,7 @@ impl DraftSessionManager {
             })
             .collect();
 
-        let inner =
-            draft_core::types::DraftSession::new(config.clone(), seats, draft_code.clone());
+        let inner = draft_core::types::DraftSession::new(config.clone(), seats, draft_code.clone());
 
         let session = DraftSession {
             draft_code: draft_code.clone(),
@@ -224,8 +223,8 @@ impl DraftSessionManager {
             .seat_for_token(token)
             .ok_or_else(|| "Invalid player token".to_string())?;
 
-        let _deltas =
-            draft_core::session::apply(&mut session.session, action, pack_source).map_err(|e| {
+        let _deltas = draft_core::session::apply(&mut session.session, action, pack_source)
+            .map_err(|e| {
                 warn!(draft = %draft_code, error = %e, "draft action rejected");
                 format!("Draft error: {}", e)
             })?;
@@ -251,8 +250,8 @@ impl DraftSessionManager {
             .get_mut(draft_code)
             .ok_or_else(|| format!("Draft not found: {}", draft_code))?;
 
-        let _deltas =
-            draft_core::session::apply(&mut session.session, action, pack_source).map_err(|e| {
+        let _deltas = draft_core::session::apply(&mut session.session, action, pack_source)
+            .map_err(|e| {
                 warn!(draft = %draft_code, error = %e, "system draft action rejected");
                 format!("Draft error: {}", e)
             })?;
@@ -494,12 +493,7 @@ mod tests {
         let mut mgr = DraftSessionManager::new();
         let (code, _token, _) = mgr.create_draft(test_config(), "Alice".to_string());
 
-        let result = mgr.handle_draft_action(
-            &code,
-            "invalid-token",
-            DraftAction::StartDraft,
-            None,
-        );
+        let result = mgr.handle_draft_action(&code, "invalid-token", DraftAction::StartDraft, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("Invalid player token"));
     }
@@ -523,10 +517,7 @@ mod tests {
         assert!(result.is_ok());
 
         // Verify session transitioned to Drafting
-        assert_eq!(
-            mgr.sessions[&code].session.status,
-            DraftStatus::Drafting
-        );
+        assert_eq!(mgr.sessions[&code].session.status, DraftStatus::Drafting);
     }
 
     #[test]
@@ -564,8 +555,7 @@ mod tests {
         let session = &mgr.sessions[&code];
         let persisted = session.to_persisted();
         let json = serde_json::to_string(&persisted).expect("serialize");
-        let restored: PersistedDraftSession =
-            serde_json::from_str(&json).expect("deserialize");
+        let restored: PersistedDraftSession = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(restored.draft_code, persisted.draft_code);
         assert_eq!(restored.player_tokens, persisted.player_tokens);
