@@ -57,20 +57,14 @@ pub fn apply(
             seat,
             card_instance_id,
         } => pick_pass::apply_pick(session, seat, card_instance_id),
-        DraftAction::SubmitDeck { seat, main_deck } => {
-            apply_submit_deck(session, seat, main_deck)
-        }
-        DraftAction::GeneratePairings { round } => {
-            apply_generate_pairings(session, round)
-        }
+        DraftAction::SubmitDeck { seat, main_deck } => apply_submit_deck(session, seat, main_deck),
+        DraftAction::GeneratePairings { round } => apply_generate_pairings(session, round),
         DraftAction::ReportMatchResult {
             match_id,
             winner_seat,
         } => apply_report_match_result(session, match_id, winner_seat),
         DraftAction::AdvanceRound => apply_advance_round(session),
-        DraftAction::ReplaceSeatWithBot { seat } => {
-            apply_replace_seat_with_bot(session, seat)
-        }
+        DraftAction::ReplaceSeatWithBot { seat } => apply_replace_seat_with_bot(session, seat),
     }
 }
 
@@ -186,12 +180,7 @@ fn generate_swiss_pairings(
     let prior_pairs: HashSet<(PlayerId, PlayerId)> = session
         .pairings
         .iter()
-        .flat_map(|p| {
-            [
-                (p.players[0], p.players[1]),
-                (p.players[1], p.players[0]),
-            ]
-        })
+        .flat_map(|p| [(p.players[0], p.players[1]), (p.players[1], p.players[0])])
         .collect();
 
     // Greedy pair within brackets, carrying unpaired to next bracket
@@ -488,8 +477,7 @@ fn apply_submit_deck(
         .map(|c| c.name.clone())
         .collect();
 
-    if let Err(errors) = validate_limited_deck(&main_deck, &pool_names, STANDARD_BASIC_LANDS, 40)
-    {
+    if let Err(errors) = validate_limited_deck(&main_deck, &pool_names, STANDARD_BASIC_LANDS, 40) {
         return Err(DraftError::ValidationFailed { errors });
     }
 
@@ -499,13 +487,9 @@ fn apply_submit_deck(
         DraftSeat::Bot { .. } => PlayerId(seat),
     };
 
-    session.submitted_decks.insert(
-        player_id,
-        DraftDeckSubmission {
-            seat,
-            main_deck,
-        },
-    );
+    session
+        .submitted_decks
+        .insert(player_id, DraftDeckSubmission { seat, main_deck });
 
     let mut deltas = vec![DraftDelta::DeckSubmitted { seat }];
 
@@ -613,7 +597,10 @@ mod tests {
         let result = apply(&mut session, DraftAction::StartDraft, Some(&source));
         assert!(matches!(
             result,
-            Err(DraftError::InvalidTransition { from: DraftStatus::Drafting, .. })
+            Err(DraftError::InvalidTransition {
+                from: DraftStatus::Drafting,
+                ..
+            })
         ));
     }
 
@@ -640,10 +627,7 @@ mod tests {
 
         let deltas = apply(
             &mut session,
-            DraftAction::SubmitDeck {
-                seat: 0,
-                main_deck,
-            },
+            DraftAction::SubmitDeck { seat: 0, main_deck },
             None,
         )
         .unwrap();
@@ -672,10 +656,7 @@ mod tests {
         let main_deck: Vec<String> = (0..10).map(|i| format!("Card {i}")).collect();
         let result = apply(
             &mut session,
-            DraftAction::SubmitDeck {
-                seat: 0,
-                main_deck,
-            },
+            DraftAction::SubmitDeck { seat: 0, main_deck },
             None,
         );
 
@@ -724,10 +705,7 @@ mod tests {
 
         let deltas = apply(
             &mut session,
-            DraftAction::SubmitDeck {
-                seat: 0,
-                main_deck,
-            },
+            DraftAction::SubmitDeck { seat: 0, main_deck },
             None,
         )
         .unwrap();
@@ -803,7 +781,10 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(DraftError::InvalidTransition { from: DraftStatus::Lobby, .. })
+            Err(DraftError::InvalidTransition {
+                from: DraftStatus::Lobby,
+                ..
+            })
         ));
     }
 
@@ -901,7 +882,10 @@ mod tests {
                 }
             }
         }
-        assert_eq!(rematch_count, 0, "round 2 should avoid rematches with 8 players");
+        assert_eq!(
+            rematch_count, 0,
+            "round 2 should avoid rematches with 8 players"
+        );
     }
 
     #[test]
@@ -969,7 +953,11 @@ mod tests {
         assert_eq!(winner_record.match_wins, 1);
 
         // Find the loser (the other player in the pairing)
-        let pairing = session.pairings.iter().find(|p| p.match_id == "r1-t0").unwrap();
+        let pairing = session
+            .pairings
+            .iter()
+            .find(|p| p.match_id == "r1-t0")
+            .unwrap();
         let loser_pid = if pairing.players[0] == PlayerId(0) {
             pairing.players[1]
         } else {
@@ -1028,7 +1016,10 @@ mod tests {
         let result = apply(&mut session, DraftAction::AdvanceRound, None);
         assert!(matches!(
             result,
-            Err(DraftError::InvalidTransition { from: DraftStatus::MatchInProgress, .. })
+            Err(DraftError::InvalidTransition {
+                from: DraftStatus::MatchInProgress,
+                ..
+            })
         ));
     }
 
@@ -1061,7 +1052,10 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(DraftError::SeatOutOfRange { seat: 10, pod_size: 8 })
+            Err(DraftError::SeatOutOfRange {
+                seat: 10,
+                pod_size: 8
+            })
         ));
     }
 
@@ -1076,7 +1070,10 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(DraftError::InvalidTransition { from: DraftStatus::Lobby, .. })
+            Err(DraftError::InvalidTransition {
+                from: DraftStatus::Lobby,
+                ..
+            })
         ));
     }
 
@@ -1093,9 +1090,6 @@ mod tests {
             },
             None,
         );
-        assert!(matches!(
-            result,
-            Err(DraftError::PairingNotFound { .. })
-        ));
+        assert!(matches!(result, Err(DraftError::PairingNotFound { .. })));
     }
 }

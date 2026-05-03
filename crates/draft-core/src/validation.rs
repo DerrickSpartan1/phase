@@ -178,7 +178,10 @@ mod tests {
         let deck = pool_of(&["A", "Not In Pool"]); // too few + not in pool
         let result = validate_limited_deck(&deck, &pool, STANDARD_BASIC_LANDS, 40);
         let errors = result.unwrap_err();
-        assert!(errors.len() >= 2, "expected at least 2 errors, got {errors:?}");
+        assert!(
+            errors.len() >= 2,
+            "expected at least 2 errors, got {errors:?}"
+        );
         assert!(errors
             .iter()
             .any(|e| matches!(e, LimitedDeckError::TooFewCards { .. })));

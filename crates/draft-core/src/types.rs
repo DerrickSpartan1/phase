@@ -331,14 +331,8 @@ mod tests {
 
     #[test]
     fn draft_kind_match_config() {
-        assert_eq!(
-            DraftKind::Quick.match_config().match_type,
-            MatchType::Bo1
-        );
-        assert_eq!(
-            DraftKind::Premier.match_config().match_type,
-            MatchType::Bo1
-        );
+        assert_eq!(DraftKind::Quick.match_config().match_type, MatchType::Bo1);
+        assert_eq!(DraftKind::Premier.match_config().match_type, MatchType::Bo1);
         assert_eq!(
             DraftKind::Traditional.match_config().match_type,
             MatchType::Bo3
