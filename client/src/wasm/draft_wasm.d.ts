@@ -55,12 +55,6 @@ export function suggest_lands(spells_json: string): any;
  */
 export function get_bot_deck(bot_seat: number): any;
 
-// ── Multi-seat draft API (P2P Tournament Host) ─────────────────────
-
-/**
- * Start a multiplayer draft session (Premier or Traditional).
- * Returns the DraftPlayerView for seat 0 (the host).
- */
 export function start_multiplayer_draft(
   set_pool_json: string,
   kind: string,
@@ -68,38 +62,31 @@ export function start_multiplayer_draft(
   seed: number,
 ): any;
 
-/**
- * Submit a pick for any seat (host proxies guest picks).
- * Returns the DraftPlayerView for the specified seat after the pick.
- */
 export function submit_pick_for_seat(seat: number, card_instance_id: string): any;
 
-/**
- * Submit a deck for any seat.
- * Returns the DraftPlayerView for the specified seat.
- */
 export function submit_deck_for_seat(seat: number, main_deck_json: string): any;
 
-/**
- * Get the filtered DraftPlayerView for any seat.
- */
 export function get_view_for_seat(seat: number): any;
 
-/**
- * Serialize the full DraftSession to JSON for host persistence.
- */
 export function export_draft_session(): string;
 
-/**
- * Restore a DraftSession from a persisted JSON snapshot.
- * Returns the DraftPlayerView for seat 0.
- */
 export function import_draft_session(json: string): any;
 
-/**
- * Check whether all seats with pending packs have submitted their picks.
- */
 export function all_picks_submitted(): boolean;
+
+export function create_multiplayer_draft(
+  set_pool_json: string,
+  seats_json: string,
+  kind: number,
+  seed: number,
+  draft_code: string,
+): any;
+
+export function apply_draft_action(action_json: string): any;
+
+export function get_draft_view_for_seat(seat_index: number): any;
+
+export function get_draft_status(): any;
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
