@@ -1615,9 +1615,11 @@ version = "0.1.21"
 dependencies = [
  "axum",
  "clap",
+ "draft-core",
  "engine",
  "http",
  "phase-ai",
+ "rand 0.9.4",
  "rusqlite",
  "seat-reducer",
  "serde",
@@ -2328,6 +2330,7 @@ dependencies = [
 name = "server-core"
 version = "0.1.21"
 dependencies = [
+ "draft-core",
  "engine",
  "phase-ai",
  "proptest",
