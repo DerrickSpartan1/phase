@@ -20,6 +20,7 @@ import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
 import { PackDisplay } from "../components/draft/PackDisplay";
 import { PickTimer } from "../components/draft/PickTimer";
 import { PoolPanel } from "../components/draft/PoolPanel";
+import { ScoreBadge } from "../components/draft/ScoreBadge";
 import { SeatStatusRing } from "../components/draft/SeatStatusRing";
 import { SetSelector } from "../components/draft/SetSelector";
 import { StandingsTable } from "../components/draft/StandingsTable";
@@ -374,6 +375,108 @@ function RoundCompleteView() {
   );
 }
 
+// ── Between Games View (Bo3) ─────────────────────────────────────────
+
+function BetweenGamesView() {
+  const sideboardPrompt = useMultiplayerDraftStore((s) => s.sideboardPrompt);
+  const playDrawPrompt = useMultiplayerDraftStore((s) => s.playDrawPrompt);
+  const sideboardSubmitted = useMultiplayerDraftStore((s) => s.sideboardSubmitted);
+  const seatIndex = useMultiplayerDraftStore((s) => s.seatIndex);
+  const submitSideboard = useMultiplayerDraftStore((s) => s.submitSideboard);
+  const choosePlayDraw = useMultiplayerDraftStore((s) => s.choosePlayDraw);
+  const timerRemainingMs = useMultiplayerDraftStore((s) => s.timerRemainingMs);
+  const mainDeck = useMultiplayerDraftStore((s) => s.mainDeck);
+  const submittedDeck = useMultiplayerDraftStore((s) => s.submittedDeck);
+
+  // Play/draw choice prompt (shown to the loser of the previous game)
+  if (playDrawPrompt) {
+    const timerSec = timerRemainingMs != null ? Math.ceil(timerRemainingMs / 1000) : null;
+    return (
+      <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 py-8">
+        <h2 className="text-xl font-medium text-white">Game {playDrawPrompt.gameNumber}</h2>
+        <ScoreBadge score={playDrawPrompt.score} player={seatIndex === 0 ? 0 : 1} size="md" />
+        <p className="text-sm text-white/60">You lost the previous game. Choose:</p>
+        {timerSec != null && (
+          <span className="text-xs tabular-nums text-amber-300">{timerSec}s</span>
+        )}
+        <div className="flex gap-4">
+          <button
+            onClick={() => choosePlayDraw(playDrawPrompt.matchId, true)}
+            className={menuButtonClass({ tone: "emerald", size: "md" })}
+          >
+            Play First
+          </button>
+          <button
+            onClick={() => choosePlayDraw(playDrawPrompt.matchId, false)}
+            className={menuButtonClass({ tone: "blue", size: "md" })}
+          >
+            Draw First
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // Sideboard submitted — waiting for opponent
+  if (sideboardSubmitted) {
+    return (
+      <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 py-8">
+        <h2 className="text-xl font-medium text-white">Sideboarding</h2>
+        {sideboardPrompt && (
+          <ScoreBadge score={sideboardPrompt.score} player={seatIndex === 0 ? 0 : 1} size="md" />
+        )}
+        <p className="text-sm text-white/60">
+          Waiting for opponent to submit sideboard...
+        </p>
+        <div className="h-6 w-6 animate-spin rounded-full border-2 border-white/20 border-t-emerald-400" />
+      </div>
+    );
+  }
+
+  // Sideboard editing (reuse deck from submitted or current mainDeck)
+  if (sideboardPrompt) {
+    const timerSec = timerRemainingMs != null ? Math.ceil(timerRemainingMs / 1000) : null;
+    const currentDeck = submittedDeck.length > 0 ? submittedDeck : mainDeck;
+
+    return (
+      <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 py-8">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <h2 className="text-xl font-medium text-white">
+              Sideboard — Game {sideboardPrompt.gameNumber}
+            </h2>
+            <ScoreBadge score={sideboardPrompt.score} player={seatIndex === 0 ? 0 : 1} size="md" />
+          </div>
+          {timerSec != null && (
+            <span className="text-sm tabular-nums text-amber-300">{timerSec}s remaining</span>
+          )}
+        </div>
+        <p className="text-sm text-white/50">
+          Make sideboard changes, then submit. Your pool is available below.
+        </p>
+        {/* Reuse the LimitedDeckBuilder for sideboard editing */}
+        <LimitedDeckBuilder />
+        <button
+          onClick={() => {
+            // Submit current deck state as sideboard submission
+            submitSideboard(sideboardPrompt.matchId, currentDeck, []);
+          }}
+          className={menuButtonClass({ tone: "emerald", size: "md" })}
+        >
+          Submit Sideboard
+        </button>
+      </div>
+    );
+  }
+
+  // Fallback — should not reach here
+  return (
+    <div className="mx-auto flex w-full max-w-md flex-col items-center gap-6 py-8">
+      <p className="text-sm text-white/60">Preparing next game...</p>
+    </div>
+  );
+}
+
 // ── Phase-based Content ───────────────────────────────────────────────
 
 function phaseContent(
@@ -400,6 +503,8 @@ function phaseContent(
       );
     case "deckbuilding":
       return <LimitedDeckBuilder />;
+    case "betweenGames":
+      return <BetweenGamesView />;
     case "pairing":
       return <PairingPhaseView />;
     case "matchInProgress":
