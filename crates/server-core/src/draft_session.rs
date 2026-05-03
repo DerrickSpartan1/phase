@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use draft_core::pack_source::PackSource;
-use draft_core::types::{DraftAction, DraftConfig, DraftSeat, DraftStatus};
+use draft_core::types::{DraftAction, DraftConfig, DraftSeat};
 use draft_core::view::DraftPlayerView;
 use engine::types::player::PlayerId;
 use rand::Rng;
@@ -298,7 +298,7 @@ pub fn generate_draft_code() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use draft_core::types::{DraftKind, PodPolicy, TournamentFormat};
+    use draft_core::types::{DraftKind, DraftStatus, PodPolicy, TournamentFormat};
 
     fn test_config() -> DraftConfig {
         DraftConfig {
