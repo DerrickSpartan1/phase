@@ -13,7 +13,8 @@ import type Peer from "peerjs";
 import type { DataConnection } from "peerjs";
 
 import { DraftAdapter } from "./draft-adapter";
-import type { DraftPlayerView, SeatPublicView } from "./draft-adapter";
+import type { DraftPlayerView, PairingView, SeatPublicView } from "./draft-adapter";
+import type { PodPolicy } from "./draft-adapter";
 import {
   createDraftPeerSession,
   type DraftPeerSession,
@@ -42,12 +43,26 @@ export type DraftHostEvent =
   | { type: "deckSubmitted"; seatIndex: number }
   | { type: "allDecksSubmitted" }
   | { type: "error"; message: string }
-  | { type: "viewUpdated"; view: DraftPlayerView };
+  | { type: "viewUpdated"; view: DraftPlayerView }
+  | { type: "pairingsGenerated"; round: number; pairings: PairingView[] }
+  | { type: "matchResultReceived"; matchId: string; winnerSeat: number | null }
+  | { type: "roundAdvanced"; newRound: number }
+  | { type: "timerExpired" };
 
 type DraftHostEventListener = (event: DraftHostEvent) => void;
 
 /** Default grace window for guest reconnect during draft. */
 const DRAFT_GRACE_PERIOD_MS = 60_000;
+
+/** Arena-style escalating pick timer durations (ms). Index = pick number (0-based). */
+const PICK_TIMER_DURATIONS_MS: readonly number[] = [
+  75_000, 70_000, 65_000, 58_000, 52_000, 46_000,
+  40_000, 34_000, 28_000, 23_000, 20_000, 18_000, 16_000, 15_000,
+];
+
+function pickTimerDurationMs(pickNumber: number): number {
+  return PICK_TIMER_DURATIONS_MS[Math.min(pickNumber, PICK_TIMER_DURATIONS_MS.length - 1)];
+}
 
 // ── P2PDraftHost ───────────────────────────────────────────────────────
 
@@ -59,6 +74,7 @@ export class P2PDraftHost {
   private seatTokens = new Map<number, string>();
   private seatNames = new Map<number, string>();
   private kickedTokens = new Set<string>();
+  private seatPeerIds = new Map<number, string>();
   private disconnectedSeats = new Map<
     number,
     { disconnectedAt: number; timer: ReturnType<typeof setTimeout> | null }
@@ -69,6 +85,10 @@ export class P2PDraftHost {
   private draftCode = "";
   private hostConnectionUnsub: (() => void) | null = null;
   private paused = false;
+  private timerInterval: ReturnType<typeof setInterval> | null = null;
+  private timerRemainingMs = 0;
+  private timerEndAt = 0;
+  private podPolicy: PodPolicy = "Competitive";
 
   constructor(
     private readonly hostPeer: Peer,
@@ -114,6 +134,7 @@ export class P2PDraftHost {
   // ── Connection handling ────────────────────────────────────────────
 
   private handleNewConnection(conn: DataConnection): void {
+    const remotePeerId = conn.peer;
     const session = createDraftPeerSession(conn, {
       onSessionEnd: () => {
         for (const [seat, s] of this.guestSessions.entries()) {
@@ -132,9 +153,9 @@ export class P2PDraftHost {
       unsub();
 
       if (msg.type === "draft_join") {
-        this.handleNewGuest(session, msg.displayName);
+        this.handleNewGuest(session, msg.displayName, remotePeerId);
       } else if (msg.type === "draft_reconnect") {
-        this.handleReconnect(session, msg.draftToken);
+        this.handleReconnect(session, msg.draftToken, remotePeerId);
       } else {
         session.send({
           type: "draft_reconnect_rejected",
@@ -145,7 +166,7 @@ export class P2PDraftHost {
     });
   }
 
-  private handleNewGuest(session: DraftPeerSession, displayName: string): void {
+  private handleNewGuest(session: DraftPeerSession, displayName: string, remotePeerId: string): void {
     if (this.draftStarted) {
       session.send({ type: "draft_kicked", reason: "Draft already in progress" });
       session.close("Draft in progress");
@@ -163,6 +184,7 @@ export class P2PDraftHost {
     this.seatTokens.set(seat, token);
     this.guestSessions.set(seat, session);
     this.seatNames.set(seat, displayName);
+    this.seatPeerIds.set(seat, remotePeerId);
 
     session.onMessage((msg) => this.handleGuestMessage(seat, msg));
 
@@ -187,7 +209,7 @@ export class P2PDraftHost {
     }
   }
 
-  private handleReconnect(session: DraftPeerSession, draftToken: string): void {
+  private handleReconnect(session: DraftPeerSession, draftToken: string, remotePeerId: string): void {
     if (this.kickedTokens.has(draftToken)) {
       session.send({ type: "draft_reconnect_rejected", reason: "Player kicked" });
       session.close("Kicked");
@@ -221,6 +243,7 @@ export class P2PDraftHost {
     if (grace.timer !== null) clearTimeout(grace.timer);
     this.disconnectedSeats.delete(seat);
     this.guestSessions.set(seat, session);
+    this.seatPeerIds.set(seat, remotePeerId);
 
     session.onMessage((msg) => this.handleGuestMessage(seat!, msg));
 
@@ -288,6 +311,15 @@ export class P2PDraftHost {
         await this.handleDeckSubmission(seat, msg.mainDeck);
         break;
       }
+      case "draft_match_result": {
+        // T-57-06: validate matchId exists before processing
+        await this.reportMatchResult(msg.matchId, msg.winnerSeat);
+        break;
+      }
+      case "draft_request_advance": {
+        // T-57-07: ignore from guests — only host UI triggers round advance
+        break;
+      }
       default:
         break;
     }
@@ -318,6 +350,7 @@ export class P2PDraftHost {
     this.draftStarted = true;
     this.draftCode = `draft-${seed.toString(16).padStart(8, "0")}`;
     this.picksThisRound.clear();
+    this.podPolicy = hostView.pod_policy;
 
     // Send each guest their filtered view
     for (const [seat, session] of this.guestSessions) {
@@ -331,6 +364,7 @@ export class P2PDraftHost {
 
     this.persistSession();
     this.emit({ type: "draftStarted", view: hostView });
+    this.startPickTimer(0);
   }
 
   /**
@@ -365,6 +399,7 @@ export class P2PDraftHost {
       const allPicked = await this.adapter.allPicksSubmitted();
       if (allPicked) {
         this.picksThisRound.clear();
+        this.clearPickTimer();
         this.emit({ type: "roundComplete" });
 
         // Broadcast updated views to all players
@@ -373,7 +408,10 @@ export class P2PDraftHost {
         // Check if draft is complete (deckbuilding)
         const hostView = await this.adapter.getViewForSeat(0);
         if (hostView.status === "Deckbuilding") {
+          this.clearPickTimer();
           this.emit({ type: "draftComplete" });
+        } else if (hostView.status === "Drafting") {
+          this.startPickTimer(hostView.pick_number);
         }
       }
 
@@ -501,6 +539,181 @@ export class P2PDraftHost {
     this.emit({ type: "seatDisconnected", seatIndex: seat });
   }
 
+  // ── Pick timer management ───────────────────────────────────────────
+
+  private startPickTimer(pickNumber: number): void {
+    this.clearPickTimer();
+    if (this.podPolicy !== "Competitive") return;
+    const duration = pickTimerDurationMs(pickNumber);
+    this.timerRemainingMs = duration;
+    this.timerEndAt = Date.now() + duration;
+    this.timerInterval = setInterval(() => {
+      this.onTimerTick();
+    }, 1_000);
+  }
+
+  private onTimerTick(): void {
+    this.timerRemainingMs = Math.max(0, this.timerEndAt - Date.now());
+    this.broadcastToGuests({ type: "draft_timer_sync", remainingMs: this.timerRemainingMs });
+    if (this.timerRemainingMs <= 0) {
+      this.clearPickTimer();
+      this.emit({ type: "timerExpired" });
+      void this.autoPickAllPending();
+    }
+  }
+
+  private clearPickTimer(): void {
+    if (this.timerInterval !== null) {
+      clearInterval(this.timerInterval);
+      this.timerInterval = null;
+    }
+  }
+
+  private async autoPickAllPending(): Promise<void> {
+    // For each seat that still has a current_pack (hasn't picked), auto-pick a random card (D-02)
+    for (let seat = 0; seat < this.podSize; seat++) {
+      try {
+        const view = await this.adapter.getViewForSeat(seat);
+        if (view.current_pack && view.current_pack.length > 0) {
+          const randomIndex = Math.floor(Math.random() * view.current_pack.length);
+          const card = view.current_pack[randomIndex];
+          await this.handlePick(seat, card.instance_id);
+        }
+      } catch (err) {
+        console.error(`[P2PDraftHost] auto-pick failed for seat ${seat}:`, err);
+      }
+    }
+  }
+
+  // ── Match coordination ────────────────────────────────────────────────
+
+  /**
+   * Generate pairings for a given round and dispatch match start messages.
+   * Called after all decks are submitted or after round advancement.
+   */
+  async generatePairings(round: number): Promise<void> {
+    try {
+      const view = await this.adapter.generatePairings(round);
+      this.podPolicy = view.pod_policy;
+
+      // Send draft_match_start to each guest with their opponent info
+      for (const pairing of view.pairings) {
+        if (pairing.round !== round) continue;
+        if (pairing.status !== "Pending" && pairing.status !== "InProgress") continue;
+
+        const seatA = pairing.seat_a;
+        const seatB = pairing.seat_b;
+        // Lower seat# is match host
+        const matchHostSeat = Math.min(seatA, seatB);
+        const matchHostPeerId = this.getPeerIdForSeat(matchHostSeat);
+
+        // Send to seat A
+        this.sendToSeat(seatA, {
+          type: "draft_match_start",
+          matchId: pairing.match_id,
+          round: pairing.round,
+          opponentSeat: seatB,
+          opponentName: pairing.name_b,
+          matchHostPeerId,
+          isMatchHost: seatA === matchHostSeat,
+        });
+
+        // Send to seat B
+        this.sendToSeat(seatB, {
+          type: "draft_match_start",
+          matchId: pairing.match_id,
+          round: pairing.round,
+          opponentSeat: seatA,
+          opponentName: pairing.name_a,
+          matchHostPeerId,
+          isMatchHost: seatB === matchHostSeat,
+        });
+      }
+
+      // Broadcast updated views
+      await this.broadcastViews();
+      this.emit({ type: "pairingsGenerated", round, pairings: view.pairings });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.emit({ type: "error", message: `Failed to generate pairings: ${message}` });
+    }
+  }
+
+  /**
+   * Report a match result. Called when a guest sends draft_match_result.
+   * T-57-06: validates matchId exists in current round pairings.
+   */
+  async reportMatchResult(matchId: string, winnerSeat: number | null): Promise<void> {
+    try {
+      const view = await this.adapter.reportMatchResult(matchId, winnerSeat);
+      this.emit({ type: "matchResultReceived", matchId, winnerSeat });
+
+      // Broadcast updated views with new standings
+      await this.broadcastViews();
+
+      // Check if the reducer auto-advanced (Competitive mode)
+      if (view.status === "RoundComplete" || view.status === "Complete") {
+        const hostView = await this.adapter.getViewForSeat(0);
+        this.emit({ type: "viewUpdated", view: hostView });
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[P2PDraftHost] reportMatchResult failed:`, message);
+    }
+  }
+
+  /**
+   * Advance to the next round (Casual mode, host-only).
+   * T-57-07: only callable from host UI; guests sending draft_request_advance are ignored.
+   */
+  async advanceRound(): Promise<void> {
+    try {
+      const view = await this.adapter.advanceRound();
+      const newRound = view.current_round;
+      this.emit({ type: "roundAdvanced", newRound });
+      await this.generatePairings(newRound);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.emit({ type: "error", message: `Failed to advance round: ${message}` });
+    }
+  }
+
+  /**
+   * Replace a disconnected player with a bot (Casual mode, host-only).
+   */
+  async replaceSeatWithBot(seat: number): Promise<void> {
+    try {
+      await this.adapter.replaceSeatWithBot(seat);
+      await this.broadcastViews();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.emit({ type: "error", message: `Failed to replace seat ${seat}: ${message}` });
+    }
+  }
+
+  /**
+   * Override a match result (Casual mode, host-only).
+   */
+  async overrideMatchResult(matchId: string, winnerSeat: number | null): Promise<void> {
+    await this.reportMatchResult(matchId, winnerSeat);
+  }
+
+  private sendToSeat(seat: number, msg: DraftP2PMessage): void {
+    if (seat === 0) {
+      // Host is seat 0 — emit event directly instead of sending over network
+      return;
+    }
+    const session = this.guestSessions.get(seat);
+    if (session && !this.disconnectedSeats.has(seat)) {
+      session.send(msg);
+    }
+  }
+
+  private getPeerIdForSeat(seat: number): string {
+    if (seat === 0) return this.hostPeer.id;
+    return this.seatPeerIds.get(seat) ?? "";
+  }
+
   // ── Host controls ──────────────────────────────────────────────────
 
   kickPlayer(seat: number, reason: string = "Kicked by host"): void {
@@ -528,6 +741,7 @@ export class P2PDraftHost {
 
   requestPause(): void {
     if (!this.paused) {
+      this.clearPickTimer();
       this.paused = true;
       this.broadcastToGuests({ type: "draft_paused", reason: "Paused by host" });
     }
@@ -537,6 +751,17 @@ export class P2PDraftHost {
     if (this.paused && this.disconnectedSeats.size === 0) {
       this.paused = false;
       this.broadcastToGuests({ type: "draft_resumed" });
+      // Restart timer if still in drafting phase
+      if (this.draftStarted && this.podPolicy === "Competitive") {
+        void (async () => {
+          try {
+            const view = await this.adapter.getViewForSeat(0);
+            if (view.status === "Drafting") {
+              this.startPickTimer(view.pick_number);
+            }
+          } catch { /* best-effort */ }
+        })();
+      }
     }
   }
 
@@ -616,6 +841,7 @@ export class P2PDraftHost {
   // ── Cleanup ────────────────────────────────────────────────────────
 
   dispose(): void {
+    this.clearPickTimer();
     if (this.hostConnectionUnsub) this.hostConnectionUnsub();
     for (const { timer } of this.disconnectedSeats.values()) {
       if (timer !== null) clearTimeout(timer);

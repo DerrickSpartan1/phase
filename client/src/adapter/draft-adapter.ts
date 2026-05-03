@@ -201,4 +201,42 @@ export class DraftAdapter {
     const wasm = await ensureDraftWasm();
     return wasm.all_picks_submitted();
   }
+
+  // ── Tournament actions (WASM bridge stubs — exports not yet wired) ──
+
+  async generatePairings(round: number): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    const fn = (wasm as Record<string, unknown>).generate_pairings;
+    if (typeof fn !== "function") {
+      throw new Error(`generate_pairings WASM export not available (round ${round})`);
+    }
+    return fn(round) as DraftPlayerView;
+  }
+
+  async reportMatchResult(matchId: string, winnerSeat: number | null): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    const fn = (wasm as Record<string, unknown>).report_match_result;
+    if (typeof fn !== "function") {
+      throw new Error("report_match_result WASM export not available");
+    }
+    return fn(matchId, winnerSeat) as DraftPlayerView;
+  }
+
+  async advanceRound(): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    const fn = (wasm as Record<string, unknown>).advance_round;
+    if (typeof fn !== "function") {
+      throw new Error("advance_round WASM export not available");
+    }
+    return fn() as DraftPlayerView;
+  }
+
+  async replaceSeatWithBot(seat: number): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    const fn = (wasm as Record<string, unknown>).replace_seat_with_bot;
+    if (typeof fn !== "function") {
+      throw new Error(`replace_seat_with_bot WASM export not available (seat ${seat})`);
+    }
+    return fn(seat) as DraftPlayerView;
+  }
 }
