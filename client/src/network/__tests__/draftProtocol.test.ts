@@ -114,7 +114,7 @@ describe("draftProtocol", () => {
       };
       const msg: DraftP2PMessage = {
         type: "draft_state_update",
-        view: longView as any,
+        view: longView as unknown as DraftP2PMessage & { type: "draft_state_update" } extends { view: infer V } ? V : never,
       };
 
       const encoded = await encodeDraftWireMessage(msg);
