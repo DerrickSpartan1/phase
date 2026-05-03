@@ -116,4 +116,51 @@ export class DraftAdapter {
     const wasm = await ensureDraftWasm();
     return wasm.load_card_database(json);
   }
+
+  // ── Multi-seat API (P2P Tournament Host) ─────────────────────────────
+
+  async startMultiplayerDraft(
+    setPoolJson: string,
+    kind: "Premier" | "Traditional",
+    seatNames: string[],
+    seed: number,
+  ): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.start_multiplayer_draft(
+      setPoolJson,
+      kind,
+      JSON.stringify(seatNames),
+      seed,
+    ) as DraftPlayerView;
+  }
+
+  async submitPickForSeat(seat: number, cardInstanceId: string): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.submit_pick_for_seat(seat, cardInstanceId) as DraftPlayerView;
+  }
+
+  async submitDeckForSeat(seat: number, mainDeck: string[]): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.submit_deck_for_seat(seat, JSON.stringify(mainDeck)) as DraftPlayerView;
+  }
+
+  async getViewForSeat(seat: number): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.get_view_for_seat(seat) as DraftPlayerView;
+  }
+
+  async exportSession(): Promise<string> {
+    const wasm = await ensureDraftWasm();
+    return wasm.export_draft_session();
+  }
+
+  async importSession(json: string): Promise<DraftPlayerView> {
+    const wasm = await ensureDraftWasm();
+    return wasm.import_draft_session(json) as DraftPlayerView;
+  }
+
+  async allPicksSubmitted(): Promise<boolean> {
+    const wasm = await ensureDraftWasm();
+    return wasm.all_picks_submitted();
+  }
 }

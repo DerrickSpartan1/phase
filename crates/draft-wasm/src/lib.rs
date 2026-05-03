@@ -287,6 +287,171 @@ pub fn suggest_lands(spells_json: &str) -> Result<JsValue, JsValue> {
     })
 }
 
+// ── Multi-seat draft API (P2P Tournament Host) ─────────────────────────
+//
+// These exports support the P2P draft host running an authoritative
+// DraftSession for 8 human players. Unlike Quick Draft (single human +
+// bots), the host calls `start_multiplayer_draft` with human seat names,
+// then proxies picks/decks per-seat as guests submit them over the
+// DataChannel.
+
+/// Start a multiplayer draft session (Premier or Traditional).
+///
+/// - `set_pool_json`: serialized LimitedSetPool
+/// - `kind`: "Premier" or "Traditional"
+/// - `seat_names_json`: JSON array of display names, one per seat (length = pod size)
+/// - `seed`: RNG seed for deterministic pack generation
+///
+/// Returns the DraftPlayerView for seat 0 (the host).
+#[wasm_bindgen]
+pub fn start_multiplayer_draft(
+    set_pool_json: &str,
+    kind: &str,
+    seat_names_json: &str,
+    seed: u32,
+) -> Result<JsValue, JsValue> {
+    let set_pool: LimitedSetPool = serde_json::from_str(set_pool_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse set pool: {e}")))?;
+
+    let seat_names: Vec<String> = serde_json::from_str(seat_names_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse seat names: {e}")))?;
+
+    let draft_kind = match kind {
+        "Premier" => DraftKind::Premier,
+        "Traditional" => DraftKind::Traditional,
+        other => return Err(JsValue::from_str(&format!("Unknown draft kind: {other}"))),
+    };
+
+    let set_code = set_pool.code.clone();
+    let config = DraftConfig {
+        set_code,
+        kind: draft_kind,
+        cards_per_pack: 14,
+        pack_count: 3,
+        rng_seed: seed as u64,
+    };
+
+    let seats: Vec<DraftSeat> = seat_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| DraftSeat::Human {
+            player_id: engine::types::player::PlayerId(i as u8),
+            display_name: name.clone(),
+            connected: true,
+        })
+        .collect();
+
+    let draft_code = format!("draft-{seed:08x}");
+    let mut draft_session = DraftSession::new(config, seats, draft_code);
+    let pack_gen = PackGenerator::new(set_pool);
+
+    session::apply(&mut draft_session, DraftAction::StartDraft, Some(&pack_gen))
+        .map_err(|e| JsValue::from_str(&format!("Failed to start draft: {e}")))?;
+
+    let view = filter_for_player(&draft_session, 0);
+
+    DRAFT_SESSION.with(|cell| cell.set(Some(draft_session)));
+    PACK_GEN.with(|cell| cell.set(Some(pack_gen)));
+    RNG.with(|cell| cell.set(Some(ChaCha20Rng::seed_from_u64(seed as u64))));
+
+    Ok(to_js(&view))
+}
+
+/// Submit a pick for any seat (host proxies guest picks).
+///
+/// Returns the DraftPlayerView for the specified seat after the pick.
+#[wasm_bindgen]
+pub fn submit_pick_for_seat(seat: u8, card_instance_id: &str) -> Result<JsValue, JsValue> {
+    let card_id = card_instance_id.to_string();
+
+    with_draft_mut(|draft_session| {
+        session::apply(
+            draft_session,
+            DraftAction::Pick {
+                seat,
+                card_instance_id: card_id,
+            },
+            None,
+        )
+        .map_err(|e| JsValue::from_str(&format!("Pick failed for seat {seat}: {e}")))?;
+
+        Ok(to_js(&filter_for_player(draft_session, seat)))
+    })
+}
+
+/// Submit a deck for any seat.
+///
+/// `main_deck_json`: JSON array of card name strings.
+/// Returns the DraftPlayerView for the specified seat.
+#[wasm_bindgen]
+pub fn submit_deck_for_seat(seat: u8, main_deck_json: &str) -> Result<JsValue, JsValue> {
+    let main_deck: Vec<String> = serde_json::from_str(main_deck_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to parse deck: {e}")))?;
+
+    with_draft_mut(|session| {
+        session::apply(
+            session,
+            DraftAction::SubmitDeck {
+                seat,
+                main_deck,
+            },
+            None,
+        )
+        .map_err(|e| JsValue::from_str(&format!("Deck submission failed for seat {seat}: {e}")))?;
+
+        Ok(to_js(&filter_for_player(session, seat)))
+    })
+}
+
+/// Get the filtered DraftPlayerView for any seat.
+#[wasm_bindgen]
+pub fn get_view_for_seat(seat: u8) -> Result<JsValue, JsValue> {
+    with_draft(|session| to_js(&filter_for_player(session, seat)))
+}
+
+/// Serialize the full DraftSession to JSON for host persistence.
+///
+/// The host persists this after every authoritative mutation so a
+/// crashed/reloaded host can restore the draft state.
+#[wasm_bindgen]
+pub fn export_draft_session() -> Result<String, JsValue> {
+    with_draft(|session| {
+        serde_json::to_string(session)
+            .map_err(|e| JsValue::from_str(&format!("Failed to serialize draft session: {e}")))
+    })?
+}
+
+/// Restore a DraftSession from a persisted JSON snapshot.
+///
+/// After calling this, subsequent `submit_pick_for_seat`, `get_view_for_seat`,
+/// etc. operate on the restored session.
+#[wasm_bindgen]
+pub fn import_draft_session(json: &str) -> Result<JsValue, JsValue> {
+    let session: DraftSession = serde_json::from_str(json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize draft session: {e}")))?;
+
+    let view = filter_for_player(&session, 0);
+    DRAFT_SESSION.with(|cell| cell.set(Some(session)));
+
+    Ok(to_js(&view))
+}
+
+/// Check whether all seats with pending packs have submitted their picks.
+///
+/// Returns true when the draft can advance (all seats picked or no packs pending).
+/// The P2P host uses this to know when to broadcast state updates after a round.
+#[wasm_bindgen]
+pub fn all_picks_submitted() -> Result<bool, JsValue> {
+    with_draft(|session| {
+        if session.status != DraftStatus::Drafting {
+            return true;
+        }
+        // A pick round is "complete" when every seat's current_pack is None
+        // (all picks have been applied and packs passed).
+        session.current_pack.iter().all(|p| p.is_none())
+    })
+}
+
 /// Get a bot's auto-built deck for match play.
 ///
 /// `bot_seat`: seat index 1-7 for the bot opponent.
