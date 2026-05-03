@@ -10,8 +10,8 @@ import type { DraftP2PMessage } from "../draftProtocol";
 
 describe("draftProtocol", () => {
   describe("DRAFT_PROTOCOL_VERSION", () => {
-    it("is version 1", () => {
-      expect(DRAFT_PROTOCOL_VERSION).toBe(1);
+    it("is version 3", () => {
+      expect(DRAFT_PROTOCOL_VERSION).toBe(3);
     });
   });
 
