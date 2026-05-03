@@ -29,12 +29,14 @@ pub fn clear_diagnostics() {
 /// Snapshot the current diagnostics buffer length. Pair with `truncate_diagnostics`
 /// to roll back any diagnostics emitted during a trial parse that ends up being
 /// rejected.
+#[allow(dead_code)] // Plan 03 deletes oracle_warnings.rs entirely
 pub fn snapshot_diagnostics() -> usize {
     DIAGNOSTICS.with(|v| v.borrow().len())
 }
 
 /// Truncate the diagnostics buffer back to the given snapshot length, discarding
 /// any diagnostics pushed since the snapshot. Used for trial-parse rollback.
+#[allow(dead_code)] // Plan 03 deletes oracle_warnings.rs entirely
 pub fn truncate_diagnostics(snapshot: usize) {
     DIAGNOSTICS.with(|v| {
         let mut buf = v.borrow_mut();
