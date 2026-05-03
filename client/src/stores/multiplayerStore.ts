@@ -736,6 +736,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
               formatConfig: settings.formatConfig,
               aiSeats: [],
               roomName: opts.roomName ?? null,
+              draftMetadata: null,
             });
             brokerGameCode = registered.gameCode;
             activeBroker = broker;

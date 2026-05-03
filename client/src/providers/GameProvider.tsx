@@ -525,6 +525,7 @@ export function GameProvider({
                 formatConfig: formatConfig ?? null,
                 aiSeats: [],
                 roomName: roomName ?? null,
+                draftMetadata: null,
               });
               signal.throwIfAborted();
               if (result) {
