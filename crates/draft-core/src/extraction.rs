@@ -189,7 +189,10 @@ pub fn extract_set_pool(json_content: &str) -> Result<Option<LimitedSetPool>, Ex
     let prints: Vec<LimitedCardPrint> = data
         .cards
         .iter()
-        .filter(|c| c.booster_types.contains(&"play".to_string()) || uuids_in_sheets.contains(c.uuid.as_str()))
+        .filter(|c| {
+            c.booster_types.contains(&"play".to_string())
+                || uuids_in_sheets.contains(c.uuid.as_str())
+        })
         .map(|c| LimitedCardPrint {
             print_id: c.uuid.clone(),
             name: c.name.clone(),
@@ -251,11 +254,7 @@ pub fn extract_all_set_pools(
     let entries: Vec<_> = std::fs::read_dir(sets_dir)
         .map_err(|e| ExtractionError::Other(format!("cannot read directory: {e}")))?
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "json")
-        })
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
         .collect();
 
     let total = entries.len();
@@ -395,7 +394,10 @@ mod tests {
     fn test_extract_set_without_booster_play() {
         let json = minimal_set_without_booster();
         let result = extract_set_pool(&json).unwrap();
-        assert!(result.is_none(), "set without booster.play should return None");
+        assert!(
+            result.is_none(),
+            "set without booster.play should return None"
+        );
     }
 
     #[test]
