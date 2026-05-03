@@ -9619,3 +9619,85 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod pipeline_snapshot_tests {
+    use super::*;
+
+    fn pipeline_parse(
+        oracle_text: &str,
+        card_name: &str,
+        types: &[&str],
+        subtypes: &[&str],
+    ) -> ParsedAbilities {
+        let types: Vec<String> = types.iter().map(|s| s.to_string()).collect();
+        let subtypes: Vec<String> = subtypes.iter().map(|s| s.to_string()).collect();
+        parse_oracle_text(oracle_text, card_name, &[], &types, &subtypes)
+    }
+
+    #[test]
+    fn pipeline_simple_spell() {
+        let result = pipeline_parse(
+            "Deal 3 damage to any target.",
+            "Test Card",
+            &["Sorcery"],
+            &[],
+        );
+        insta::assert_json_snapshot!(result);
+    }
+
+    #[test]
+    fn pipeline_creature_with_keywords_and_trigger() {
+        let result = pipeline_parse(
+            "Flying\nWhen Test Card enters, draw a card.",
+            "Test Card",
+            &["Creature"],
+            &[],
+        );
+        insta::assert_json_snapshot!(result);
+    }
+
+    #[test]
+    fn pipeline_enchantment_with_static_and_replacement() {
+        let result = pipeline_parse(
+            "Creatures you control get +1/+1.\nIf a creature you control would die, exile it instead.",
+            "Test Card",
+            &["Enchantment"],
+            &[],
+        );
+        insta::assert_json_snapshot!(result);
+    }
+
+    #[test]
+    fn pipeline_saga_card() {
+        let result = pipeline_parse(
+            "I — You draw a card and you lose 1 life.\nII — Create a 2/2 black Zombie creature token.\nIII — Target opponent discards a card.",
+            "Test Card",
+            &["Enchantment"],
+            &["Saga"],
+        );
+        insta::assert_json_snapshot!(result);
+    }
+
+    #[test]
+    fn pipeline_class_card() {
+        let result = pipeline_parse(
+            "Creatures you control get +1/+0.\n{1}{R}: Level 2\nWhenever you attack, target creature you control gains first strike until end of turn.",
+            "Test Card",
+            &["Enchantment"],
+            &["Class"],
+        );
+        insta::assert_json_snapshot!(result);
+    }
+
+    #[test]
+    fn pipeline_modal_spell() {
+        let result = pipeline_parse(
+            "Choose one —\n• Destroy target artifact.\n• Destroy target enchantment.",
+            "Test Card",
+            &["Instant"],
+            &[],
+        );
+        insta::assert_json_snapshot!(result);
+    }
+}
