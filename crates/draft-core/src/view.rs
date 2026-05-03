@@ -1,6 +1,32 @@
+use engine::types::player::PlayerId;
 use serde::{Deserialize, Serialize};
 
 use crate::types::*;
+
+/// A single entry in the standings table.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StandingEntry {
+    pub seat_index: u8,
+    pub display_name: String,
+    pub match_wins: u8,
+    pub match_losses: u8,
+    pub game_wins: u8,
+    pub game_losses: u8,
+}
+
+/// A pairing visible to all players for the current round.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairingView {
+    pub round: u8,
+    pub table: u8,
+    pub seat_a: u8,
+    pub name_a: String,
+    pub seat_b: u8,
+    pub name_b: String,
+    pub match_id: String,
+    pub status: PairingStatus,
+    pub winner_seat: Option<u8>,
+}
 
 /// Public seat info visible to all players.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,6 +36,7 @@ pub struct SeatPublicView {
     pub is_bot: bool,
     pub connected: bool,
     pub has_submitted_deck: bool,
+    pub pick_status: PickStatus,
 }
 
 /// Filtered draft state for a specific player. Built from scratch (not a reference
@@ -36,6 +63,19 @@ pub struct DraftPlayerView {
     pub cards_per_pack: u8,
     /// Total pack count (for UI progress display)
     pub pack_count: u8,
+    /// Milliseconds remaining on the pick timer. Always None from the reducer;
+    /// the P2P host injects the authoritative value on the wire.
+    pub timer_remaining_ms: Option<u32>,
+    /// Tournament standings, sorted by match_wins descending. Empty before pairings.
+    pub standings: Vec<StandingEntry>,
+    /// Current tournament round (0 = not started).
+    pub current_round: u8,
+    /// Tournament format from config.
+    pub tournament_format: TournamentFormat,
+    /// Pod policy from config.
+    pub pod_policy: PodPolicy,
+    /// Pairings for the current round.
+    pub pairings: Vec<PairingView>,
 }
 
 /// Produce a filtered view of the draft session for a specific seat.
@@ -54,9 +94,15 @@ pub struct DraftPlayerView {
 pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerView {
     let idx = seat_index as usize;
 
-    let current_pack = session.current_pack.get(idx).and_then(|p| p.as_ref()).map(|p| p.0.clone());
+    let current_pack = session
+        .current_pack
+        .get(idx)
+        .and_then(|p| p.as_ref())
+        .map(|p| p.0.clone());
 
     let pool = session.pools.get(idx).cloned().unwrap_or_default();
+
+    let is_drafting = session.status == DraftStatus::Drafting;
 
     let seats = session
         .seats
@@ -67,6 +113,15 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
                 DraftSeat::Human { player_id, .. } => Some(*player_id),
                 DraftSeat::Bot { .. } => None,
             };
+
+            let pick_status = if !is_drafting {
+                PickStatus::NotDrafting
+            } else if session.current_pack[i].is_some() {
+                PickStatus::Pending
+            } else {
+                PickStatus::Picked
+            };
+
             SeatPublicView {
                 seat_index: i as u8,
                 display_name: match seat {
@@ -81,9 +136,16 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
                 has_submitted_deck: player_id_for_seat
                     .map(|pid| session.submitted_decks.contains_key(&pid))
                     .unwrap_or(false),
+                pick_status,
             }
         })
         .collect();
+
+    // Compute standings from match records
+    let standings = compute_standings(session);
+
+    // Compute pairings for the current round
+    let pairings = compute_pairing_views(session);
 
     DraftPlayerView {
         status: session.status,
@@ -96,7 +158,117 @@ pub fn filter_for_player(session: &DraftSession, seat_index: u8) -> DraftPlayerV
         seats,
         cards_per_pack: session.config.cards_per_pack,
         pack_count: session.config.pack_count,
+        timer_remaining_ms: None,
+        standings,
+        current_round: session.current_round,
+        tournament_format: session.config.tournament_format,
+        pod_policy: session.config.pod_policy,
+        pairings,
     }
+}
+
+fn compute_standings(session: &DraftSession) -> Vec<StandingEntry> {
+    if session.pairings.is_empty() {
+        return Vec::new();
+    }
+
+    let mut entries: Vec<StandingEntry> = session
+        .seats
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| matches!(s, DraftSeat::Human { .. }))
+        .map(|(i, seat)| {
+            let pid = match seat {
+                DraftSeat::Human { player_id, .. } => *player_id,
+                DraftSeat::Bot { .. } => unreachable!(),
+            };
+            let record = session.match_records.get(&pid);
+            StandingEntry {
+                seat_index: i as u8,
+                display_name: match seat {
+                    DraftSeat::Human { display_name, .. } => display_name.clone(),
+                    DraftSeat::Bot { .. } => unreachable!(),
+                },
+                match_wins: record.map_or(0, |r| r.match_wins),
+                match_losses: record.map_or(0, |r| r.match_losses),
+                game_wins: record.map_or(0, |r| r.wins),
+                game_losses: record.map_or(0, |r| r.losses),
+            }
+        })
+        .collect();
+
+    entries.sort_by_key(|e| std::cmp::Reverse(e.match_wins));
+    entries
+}
+
+fn compute_pairing_views(session: &DraftSession) -> Vec<PairingView> {
+    let current_round = session.current_round;
+    if current_round == 0 {
+        return Vec::new();
+    }
+
+    // Build a PlayerId -> (seat_index, name) lookup
+    let player_seat_map: std::collections::HashMap<PlayerId, (u8, String)> = session
+        .seats
+        .iter()
+        .enumerate()
+        .map(|(i, seat)| {
+            let (pid, name) = match seat {
+                DraftSeat::Human {
+                    player_id,
+                    display_name,
+                    ..
+                } => (*player_id, display_name.clone()),
+                DraftSeat::Bot { name } => (PlayerId(i as u8), name.clone()),
+            };
+            (pid, (i as u8, name))
+        })
+        .collect();
+
+    session
+        .pairings
+        .iter()
+        .filter(|p| p.round == current_round)
+        .map(|p| {
+            let (seat_a, name_a) = player_seat_map
+                .get(&p.players[0])
+                .cloned()
+                .unwrap_or((0, "Unknown".to_string()));
+            let (seat_b, name_b) = player_seat_map
+                .get(&p.players[1])
+                .cloned()
+                .unwrap_or((0, "Unknown".to_string()));
+
+            // Determine winner seat from the match status + records
+            let winner_seat = if p.status == PairingStatus::Complete {
+                let r0 = session.match_records.get(&p.players[0]);
+                let r1 = session.match_records.get(&p.players[1]);
+                let w0 = r0.map_or(0, |r| r.match_wins);
+                let w1 = r1.map_or(0, |r| r.match_wins);
+                if w0 > w1 {
+                    Some(seat_a)
+                } else if w1 > w0 {
+                    Some(seat_b)
+                } else {
+                    None // draw or equal
+                }
+            } else {
+                None
+            };
+
+            PairingView {
+                round: p.round,
+                table: p.table,
+                seat_a,
+                name_a,
+                seat_b,
+                name_b,
+                match_id: p.match_id.clone(),
+                status: p.status,
+                winner_seat,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -114,6 +286,8 @@ mod tests {
             cards_per_pack: 14,
             pack_count: 3,
             rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
         };
         let seats: Vec<DraftSeat> = (0..pod_size)
             .map(|i| DraftSeat::Human {
@@ -133,10 +307,7 @@ mod tests {
     fn start_and_pick(session: &mut DraftSession, source: &FixturePackSource) {
         session::apply(session, DraftAction::StartDraft, Some(source)).unwrap();
         // Make a pick for seat 0 so they have something in their pool
-        let card_id = session.current_pack[0]
-            .as_ref()
-            .unwrap()
-            .0[0]
+        let card_id = session.current_pack[0].as_ref().unwrap().0[0]
             .instance_id
             .clone();
         session::apply(
@@ -218,10 +389,7 @@ mod tests {
         start_and_pick(&mut session, &source);
 
         // Make a pick for seat 1 too
-        let card_id = session.current_pack[1]
-            .as_ref()
-            .unwrap()
-            .0[0]
+        let card_id = session.current_pack[1].as_ref().unwrap().0[0]
             .instance_id
             .clone();
         session::apply(
@@ -352,6 +520,8 @@ mod tests {
             cards_per_pack: 14,
             pack_count: 3,
             rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
         };
         let mut seats = vec![DraftSeat::Human {
             player_id: PlayerId(0),
@@ -371,6 +541,124 @@ mod tests {
         for i in 1..8 {
             assert!(view.seats[i].is_bot);
             assert!(view.seats[i].connected); // bots always connected
+        }
+    }
+
+    #[test]
+    fn view_pick_status_during_drafting() {
+        let (mut session, source) = test_session(8);
+        session::apply(&mut session, DraftAction::StartDraft, Some(&source)).unwrap();
+
+        // During drafting, all seats with packs show as Pending
+        let view = filter_for_player(&session, 0);
+        for seat in &view.seats {
+            assert_eq!(seat.pick_status, PickStatus::Pending);
+        }
+
+        // After seat 0 picks, the pack still exists (with one fewer card).
+        // Picks only resolve when ALL seats pick, so individual pick status
+        // during a round is tracked by the P2P host, not the session reducer.
+        let card_id = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
+        session::apply(
+            &mut session,
+            DraftAction::Pick {
+                seat: 0,
+                card_instance_id: card_id,
+            },
+            None,
+        )
+        .unwrap();
+
+        let view = filter_for_player(&session, 0);
+        // Seat 0 still has a current_pack (13 cards remain), so shows as Pending
+        assert_eq!(view.seats[0].pick_status, PickStatus::Pending);
+    }
+
+    #[test]
+    fn view_pick_status_not_drafting() {
+        let (session, _) = test_session(8);
+        // Lobby status
+        let view = filter_for_player(&session, 0);
+        for seat in &view.seats {
+            assert_eq!(seat.pick_status, PickStatus::NotDrafting);
+        }
+    }
+
+    #[test]
+    fn view_standings_after_pairings() {
+        let (mut session, _) = test_session(8);
+        session.status = DraftStatus::Deckbuilding;
+
+        // Generate pairings
+        session::apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        )
+        .unwrap();
+
+        // Report seat 0 wins
+        session::apply(
+            &mut session,
+            DraftAction::ReportMatchResult {
+                match_id: "r1-t0".to_string(),
+                winner_seat: Some(0),
+            },
+            None,
+        )
+        .unwrap();
+
+        let view = filter_for_player(&session, 0);
+        assert!(!view.standings.is_empty());
+
+        // Player 0 should have match_wins = 1
+        let p0_standing = view.standings.iter().find(|s| s.seat_index == 0).unwrap();
+        assert_eq!(p0_standing.match_wins, 1);
+        assert_eq!(p0_standing.match_losses, 0);
+
+        // Standings should be sorted by match_wins descending
+        for window in view.standings.windows(2) {
+            assert!(window[0].match_wins >= window[1].match_wins);
+        }
+    }
+
+    #[test]
+    fn view_standings_empty_before_pairings() {
+        let (session, _) = test_session(8);
+        let view = filter_for_player(&session, 0);
+        assert!(view.standings.is_empty());
+    }
+
+    #[test]
+    fn view_has_config_fields() {
+        let (session, _) = test_session(8);
+        let view = filter_for_player(&session, 0);
+        assert_eq!(view.tournament_format, TournamentFormat::Swiss);
+        assert_eq!(view.pod_policy, PodPolicy::Competitive);
+        assert_eq!(view.current_round, 0);
+        assert!(view.timer_remaining_ms.is_none());
+    }
+
+    #[test]
+    fn view_pairings_for_current_round() {
+        let (mut session, _) = test_session(8);
+        session.status = DraftStatus::Deckbuilding;
+
+        session::apply(
+            &mut session,
+            DraftAction::GeneratePairings { round: 1 },
+            None,
+        )
+        .unwrap();
+
+        let view = filter_for_player(&session, 0);
+        assert_eq!(view.pairings.len(), 4);
+        for pv in &view.pairings {
+            assert_eq!(pv.round, 1);
+            assert_eq!(pv.status, PairingStatus::Pending);
+            assert!(pv.winner_seat.is_none());
         }
     }
 }

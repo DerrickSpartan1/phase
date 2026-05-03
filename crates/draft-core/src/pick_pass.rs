@@ -61,14 +61,12 @@ pub fn apply_pick(
                 });
             } else {
                 // Start new pack round
-                session.pass_direction =
-                    PassDirection::for_pack(session.current_pack_number);
+                session.pass_direction = PassDirection::for_pack(session.current_pack_number);
                 session.pick_number = 0;
 
                 for s in 0..pod_size as usize {
                     if !session.packs_by_seat[s].is_empty() {
-                        session.current_pack[s] =
-                            Some(session.packs_by_seat[s].remove(0));
+                        session.current_pack[s] = Some(session.packs_by_seat[s].remove(0));
                     }
                 }
 
@@ -108,6 +106,8 @@ mod tests {
             cards_per_pack: 14,
             pack_count: 3,
             rng_seed: 42,
+            tournament_format: TournamentFormat::Swiss,
+            pod_policy: PodPolicy::Competitive,
         };
         let seats: Vec<DraftSeat> = (0..pod_size)
             .map(|i| DraftSeat::Human {
@@ -130,10 +130,7 @@ mod tests {
 
     /// Pick the first card from the specified seat's current pack.
     fn pick_first(session: &mut DraftSession, seat: u8) -> Vec<DraftDelta> {
-        let card_id = session.current_pack[seat as usize]
-            .as_ref()
-            .unwrap()
-            .0[0]
+        let card_id = session.current_pack[seat as usize].as_ref().unwrap().0[0]
             .instance_id
             .clone();
         session::apply(
@@ -177,7 +174,9 @@ mod tests {
         let (mut session, source) = test_session(8);
         start_draft(&mut session, &source);
 
-        let card_id = session.current_pack[0].as_ref().unwrap().0[0].instance_id.clone();
+        let card_id = session.current_pack[0].as_ref().unwrap().0[0]
+            .instance_id
+            .clone();
         let deltas = session::apply(
             &mut session,
             DraftAction::Pick {
@@ -245,7 +244,10 @@ mod tests {
         );
         assert!(matches!(
             result,
-            Err(DraftError::InvalidTransition { from: DraftStatus::Lobby, .. })
+            Err(DraftError::InvalidTransition {
+                from: DraftStatus::Lobby,
+                ..
+            })
         ));
     }
 
