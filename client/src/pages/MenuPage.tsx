@@ -155,6 +155,14 @@ export function MenuPage() {
         icon: <CrownIcon />,
       },
       {
+        key: "draft",
+        title: "Quick Draft",
+        description: "Draft against bots, build a deck, play a match.",
+        accent: "ember" as const,
+        onClick: () => navigate("/draft"),
+        icon: <DraftIcon />,
+      },
+      {
         key: "decks",
         title: "Decks",
         description: "Open saved decks, switch your active list, and edit builds.",
@@ -341,6 +349,14 @@ function KoFiIcon() {
   return (
     <svg aria-hidden="true" viewBox="0 0 24 24" className="h-3.5 w-3.5 fill-current">
       <path d="M22.5 8.5c-.3-2-1.9-3.5-3.9-3.8-.6-.1-1.2-.1-1.9-.1H4.8c-1 0-1.8.7-1.9 1.7-.2 1.7-.2 5.5.7 8.2.6 1.7 2 3 3.8 3.4.9.2 1.9.3 2.8.3h4c.9 0 1.8-.1 2.7-.3 1.4-.3 2.5-1.2 3.1-2.5h.2c2.4 0 4.3-2 4.3-4.3 0-1.4-.7-2.7-2-3.4v.8ZM9.4 13.3c-1.2-1.1-2.7-2.3-2.7-4 0-1 .8-1.8 1.8-1.8.6 0 1.2.3 1.6.8.4-.5.9-.8 1.6-.8 1 0 1.8.8 1.8 1.8 0 1.7-1.5 2.9-2.7 4l-.7.6-.7-.6Zm10.7-1.6c-.3.4-.8.6-1.3.7V9c.4 0 .7.1 1 .3.4.3.7.8.7 1.3s-.1.9-.4 1.1Z" />
+    </svg>
+  );
+}
+
+function DraftIcon() {
+  return (
+    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-7 w-7 fill-current">
+      <path d="M4 4h6v6H4V4Zm10 0h6v6h-6V4ZM4 14h6v6H4v-6Zm10 0h6v6h-6v-6Z" />
     </svg>
   );
 }
