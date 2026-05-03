@@ -75,6 +75,8 @@ interface MultiplayerDraftState {
   standings: StandingEntry[];
   currentRound: number;
   pairings: PairingView[];
+  /** Full deck submitted during deckbuilding (mainDeck + lands). */
+  submittedDeck: string[];
   matchPairing: {
     matchId: string;
     opponentSeat: number;
@@ -133,6 +135,16 @@ interface MultiplayerDraftActions {
 let activeHostAdapter: DraftPodHostAdapter | null = null;
 let activeGuestAdapter: DraftPodGuestAdapter | null = null;
 
+/** Dispose the active match adapter (P2PHostAdapter or P2PGuestAdapter). */
+function disposeMatchAdapter(set: SetFn): void {
+  const state = useMultiplayerDraftStore.getState();
+  if (state.matchAdapter) {
+    const adapter = state.matchAdapter as { dispose?: () => void };
+    adapter.dispose?.();
+    set({ matchAdapter: null, matchPairing: null });
+  }
+}
+
 // ── Initial state ──────────────────────────────────────────────────────
 
 const initialState: MultiplayerDraftState = {
@@ -156,6 +168,7 @@ const initialState: MultiplayerDraftState = {
   standings: [],
   currentRound: 0,
   pairings: [],
+  submittedDeck: [],
   matchPairing: null,
   matchAdapter: null,
 };
@@ -262,6 +275,8 @@ export const useMultiplayerDraftStore = create<
     }
     const fullDeck = [...mainDeck, ...landCards];
 
+    set({ submittedDeck: fullDeck });
+
     if (role === "host" && activeHostAdapter) {
       const view = await activeHostAdapter.submitDeck(fullDeck);
       set({ view });
@@ -286,11 +301,81 @@ export const useMultiplayerDraftStore = create<
   },
 
   startMatch: async () => {
-    // Stub: full implementation in Plan 05 Task 3 (deck delivery + gameOver bridge).
-    // Sets phase to matchInProgress; the match adapter is created in Plan 05.
-    const { matchPairing } = get();
-    if (!matchPairing) return;
-    set({ phase: "matchInProgress" });
+    const { matchPairing, submittedDeck, seatIndex } = get();
+    if (!matchPairing || submittedDeck.length === 0) return;
+
+    const deckPayload = {
+      player: { main_deck: submittedDeck, sideboard: [] as string[], commander: [] as string[] },
+      opponent: { main_deck: [] as string[], sideboard: [] as string[], commander: [] as string[] },
+      ai_decks: [] as Array<{ main_deck: string[]; sideboard: string[]; commander: string[] }>,
+    };
+
+    try {
+      if (matchPairing.isMatchHost) {
+        // Lower seat# hosts the match (D-09).
+        const [{ hostRoom }, { P2PHostAdapter }] = await Promise.all([
+          import("../network/connection"),
+          import("../adapter/p2p-adapter"),
+        ]);
+
+        const host = await hostRoom(undefined, {
+          preferredRoomCode: matchPairing.matchId,
+        });
+
+        const matchAdapter = new P2PHostAdapter(
+          deckPayload,
+          host.peer,
+          host.onGuestConnected,
+          2, // 1v1 match
+        );
+
+        // Wire gameOver to report result back to pod host (Pitfall 4).
+        matchAdapter.onEvent((event) => {
+          if (event.type === "gameOver") {
+            const winnerSeat =
+              event.winner === 0 ? seatIndex : matchPairing.opponentSeat;
+            get().reportMatchResult(matchPairing.matchId, winnerSeat);
+          }
+        });
+
+        await matchAdapter.initialize();
+        set({ matchAdapter, phase: "matchInProgress" });
+      } else {
+        // Higher seat# joins as guest.
+        const [{ joinRoom }, { P2PGuestAdapter }] = await Promise.all([
+          import("../network/connection"),
+          import("../adapter/p2p-adapter"),
+        ]);
+
+        const { conn, peer } = await joinRoom(matchPairing.matchId);
+        const hostPeerId = `phase-${matchPairing.matchId}`;
+
+        const matchAdapter = new P2PGuestAdapter(
+          deckPayload,
+          peer,
+          hostPeerId,
+          conn,
+        );
+
+        // Guest also reports gameOver as backup — only match host's report
+        // is authoritative, but both sides send to ensure delivery.
+        matchAdapter.onEvent((event) => {
+          if (event.type === "gameOver") {
+            const winnerSeat =
+              event.winner === 0
+                ? matchPairing.opponentSeat
+                : seatIndex;
+            get().reportMatchResult(matchPairing.matchId, winnerSeat);
+          }
+        });
+
+        await matchAdapter.initialize();
+        set({ matchAdapter, phase: "matchInProgress" });
+      }
+    } catch (err) {
+      console.error("[multiplayerDraftStore] startMatch failed:", err);
+      set({ error: err instanceof Error ? err.message : String(err) });
+    }
   },
 
   reportMatchResult: (matchId, winnerSeat) => {
@@ -318,6 +403,13 @@ export const useMultiplayerDraftStore = create<
   },
 
   leave: async () => {
+    // Dispose match adapter first (game P2P connection)
+    const { matchAdapter } = get();
+    if (matchAdapter) {
+      const adapter = matchAdapter as { dispose?: () => void };
+      adapter.dispose?.();
+    }
+
     if (activeHostAdapter) {
       await activeHostAdapter.dispose();
       activeHostAdapter = null;
@@ -427,7 +519,11 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
       set({ phase: "matchInProgress", currentRound: event.round, pairings: event.pairings });
       break;
     case "roundAdvanced":
+      disposeMatchAdapter(set);
       set({ phase: "pairing", currentRound: event.newRound });
+      break;
+    case "roundComplete":
+      disposeMatchAdapter(set);
       break;
     case "matchResultReceived":
       // Informational — standings update comes via viewUpdated
@@ -443,7 +539,6 @@ function handleHostEvent(event: DraftPodHostEvent, set: SetFn): void {
     case "seatDisconnected":
     case "seatKicked":
     case "pickReceived":
-    case "roundComplete":
     case "deckSubmitted":
       break;
   }
