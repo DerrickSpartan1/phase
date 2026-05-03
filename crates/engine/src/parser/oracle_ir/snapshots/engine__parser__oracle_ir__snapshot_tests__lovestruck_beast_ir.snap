@@ -1,0 +1,33 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&ir"
+---
+{
+  "items": [
+    {
+      "PreLoweredStatic": {
+        "mode": "CantAttack",
+        "affected": {
+          "type": "SelfRef"
+        },
+        "modifications": [],
+        "condition": null,
+        "affected_zone": null,
+        "effect_zone": null,
+        "active_zones": [],
+        "characteristic_defining": false,
+        "description": "~ can't attack unless you control a 1/1 creature."
+      }
+    }
+  ],
+  "source_text": "This creature can't attack unless you control a 1/1 creature.",
+  "card_name": "Lovestruck Beast",
+  "diagnostics": [
+    {
+      "type": "SwallowedClause",
+      "detector": "Condition_Unless",
+      "description": "This creature can't attack unless you control a 1/1 creature.",
+      "line_index": 0
+    }
+  ]
+}

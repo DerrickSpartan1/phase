@@ -1,0 +1,103 @@
+---
+source: crates/engine/src/parser/oracle_ir/snapshot_tests.rs
+expression: "&lowered"
+---
+{
+  "abilities": [
+    {
+      "kind": "Spell",
+      "effect": {
+        "type": "Unimplemented",
+        "name": "unknown",
+        "description": "Flying"
+      },
+      "cost": null,
+      "sub_ability": null,
+      "duration": null,
+      "description": "Flying",
+      "target_prompt": null,
+      "sorcery_speed": false,
+      "condition": null,
+      "optional_targeting": false,
+      "optional": false,
+      "forward_result": false
+    }
+  ],
+  "triggers": [
+    {
+      "mode": "AttacksOrBlocks",
+      "execute": {
+        "kind": "Spell",
+        "effect": {
+          "type": "Draw",
+          "count": {
+            "type": "Fixed",
+            "value": 1
+          },
+          "target": {
+            "type": "Controller"
+          }
+        },
+        "cost": null,
+        "sub_ability": {
+          "kind": "Spell",
+          "effect": {
+            "type": "Discard",
+            "count": {
+              "type": "Fixed",
+              "value": 1
+            },
+            "target": {
+              "type": "Controller"
+            }
+          },
+          "cost": null,
+          "sub_ability": null,
+          "duration": null,
+          "description": null,
+          "target_prompt": null,
+          "sorcery_speed": false,
+          "condition": {
+            "type": "IfYouDo"
+          },
+          "optional_targeting": false,
+          "optional": false,
+          "forward_result": false
+        },
+        "duration": null,
+        "description": null,
+        "target_prompt": null,
+        "sorcery_speed": false,
+        "condition": null,
+        "optional_targeting": false,
+        "optional": true,
+        "forward_result": false
+      },
+      "valid_card": {
+        "type": "SelfRef"
+      },
+      "origin": null,
+      "destination": null,
+      "trigger_zones": [
+        "Battlefield"
+      ],
+      "phase": null,
+      "optional": true,
+      "damage_kind": "Any",
+      "secondary": false,
+      "valid_target": null,
+      "valid_source": null,
+      "description": "Whenever ~ attacks or blocks, you may draw a card. If you do, discard a card.",
+      "constraint": null,
+      "condition": null,
+      "batched": false
+    }
+  ],
+  "statics": [],
+  "replacements": [],
+  "extractedKeywords": [
+    {
+      "Crew": 1
+    }
+  ]
+}
