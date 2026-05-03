@@ -6,8 +6,13 @@
 
 use std::cell::RefCell;
 
+use super::oracle_ir::diagnostic::OracleDiagnostic;
+
 thread_local! {
     static WARNINGS: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
+    /// Typed diagnostics accumulated in parallel with string warnings (D-11 dual-emit).
+    /// Temporary scaffolding — Plan 3 removes the string WARNINGS and promotes this.
+    static TYPED_DIAGNOSTICS: RefCell<Vec<OracleDiagnostic>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Push a diagnostic warning for the card currently being parsed.
@@ -40,6 +45,38 @@ pub fn snapshot_warnings() -> usize {
 pub fn truncate_warnings(snapshot: usize) {
     WARNINGS.with(|w| {
         let mut buf = w.borrow_mut();
+        if snapshot < buf.len() {
+            buf.truncate(snapshot);
+        }
+    });
+}
+
+// ── Typed diagnostic thread-local (D-11 dual-emit scaffolding) ───────────
+
+/// Push a typed diagnostic alongside the existing string warning.
+pub fn push_typed_diagnostic(d: OracleDiagnostic) {
+    TYPED_DIAGNOSTICS.with(|v| v.borrow_mut().push(d));
+}
+
+/// Drain all typed diagnostics (returns them and clears the buffer).
+pub fn take_typed_diagnostics() -> Vec<OracleDiagnostic> {
+    TYPED_DIAGNOSTICS.with(|v| v.borrow_mut().drain(..).collect())
+}
+
+/// Discard any typed diagnostics (called at the start of each card parse).
+pub fn clear_typed_diagnostics() {
+    TYPED_DIAGNOSTICS.with(|v| v.borrow_mut().clear());
+}
+
+/// Snapshot the current typed diagnostics buffer length.
+pub fn snapshot_typed_diagnostics() -> usize {
+    TYPED_DIAGNOSTICS.with(|v| v.borrow().len())
+}
+
+/// Truncate the typed diagnostics buffer back to the given snapshot length.
+pub fn truncate_typed_diagnostics(snapshot: usize) {
+    TYPED_DIAGNOSTICS.with(|v| {
+        let mut buf = v.borrow_mut();
         if snapshot < buf.len() {
             buf.truncate(snapshot);
         }

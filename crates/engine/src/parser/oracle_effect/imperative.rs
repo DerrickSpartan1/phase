@@ -15,12 +15,13 @@ use super::{
     attach_controller_if_absent, is_bare_object_pronoun, resolve_it_pronoun, ParseContext,
 };
 use crate::parser::oracle_ir::ast::*;
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::parser::oracle_nom::bridge::nom_on_lower;
 use crate::parser::oracle_nom::primitives as nom_primitives;
 use crate::parser::oracle_static::{
     parse_continuous_modifications, parse_quoted_ability_modifications,
 };
-use crate::parser::oracle_warnings::push_warning;
+use crate::parser::oracle_warnings::{push_typed_diagnostic, push_warning};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CategoryChooserScope, ChoiceType, Chooser,
     ContinuousModification, ControllerRef, Duration, Effect, GainLifePlayer, LibraryPosition,
@@ -1478,6 +1479,11 @@ pub(super) fn parse_hand_reveal_ast(text: &str, lower: &str) -> Option<HandRevea
                     "target-fallback: unrecognized look-at target in '{}'",
                     lower
                 ));
+                push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+                    context: "unrecognized look-at target".into(),
+                    text: lower.trim().into(),
+                    line_index: 0,
+                });
                 TargetFilter::Any
             };
             return Some(HandRevealImperativeAst::LookAt { target });
@@ -2535,6 +2541,11 @@ fn parse_remove_from_combat_ast(lower: &str) -> Option<TargetFilter> {
                     "target-fallback: 'target' prefix but unrecognized filter in '{}'",
                     subject
                 ));
+                push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+                    context: "'target' prefix but unrecognized filter".into(),
+                    text: subject.into(),
+                    line_index: 0,
+                });
             }
             tf
         }

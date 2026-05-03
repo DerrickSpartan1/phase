@@ -19,7 +19,10 @@ use crate::types::zones::Zone;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
 use super::oracle_nom::condition::parse_inner_condition;
 use super::oracle_nom::primitives::scan_contains;
-use super::oracle_warnings::{clear_warnings, push_warning, take_warnings};
+use super::oracle_warnings::{
+    clear_typed_diagnostics, clear_warnings, push_typed_diagnostic, push_warning,
+    take_typed_diagnostics, take_warnings,
+};
 
 use super::oracle_casting::{
     parse_additional_cost_line, parse_casting_restriction_line, parse_spell_casting_option_line,
@@ -583,6 +586,7 @@ fn is_spell_resolution_instruction_line(
     }
 
     let saved_warnings = take_warnings();
+    let saved_typed = take_typed_diagnostics();
     let parsed = parse_effect_chain_with_context(
         &prepared.effect_text,
         AbilityKind::Spell,
@@ -594,8 +598,12 @@ fn is_spell_resolution_instruction_line(
         },
     );
     let _candidate_warnings = take_warnings();
+    let _candidate_typed = take_typed_diagnostics();
     for warning in saved_warnings {
         push_warning(warning);
+    }
+    for d in saved_typed {
+        push_typed_diagnostic(d);
     }
     !has_unimplemented(&parsed)
 }
@@ -2220,7 +2228,7 @@ fn parsed_abilities_to_doc_ir(
         items,
         source_text: oracle_text.to_string(),
         card_name: card_name.to_string(),
-        diagnostics: vec![],
+        diagnostics: take_typed_diagnostics(),
     }
 }
 
@@ -2242,6 +2250,7 @@ pub fn parse_oracle_text(
     subtypes: &[String],
 ) -> ParsedAbilities {
     clear_warnings();
+    clear_typed_diagnostics();
     let ir = parse_oracle_ir(
         oracle_text,
         card_name,
@@ -2992,9 +3001,11 @@ pub(super) fn parse_activated_with_self_ref_fallback(
     card_name: &str,
 ) -> AbilityDefinition {
     let pre_warnings = take_warnings();
+    let pre_typed = take_typed_diagnostics();
 
     let def = parse_effect_chain(effect_text, AbilityKind::Activated);
     let first_warnings = take_warnings();
+    let first_typed = take_typed_diagnostics();
     let first_has_target_fallback = first_warnings
         .iter()
         .any(|w| w.starts_with("target-fallback"));
@@ -3004,8 +3015,14 @@ pub(super) fn parse_activated_with_self_ref_fallback(
         for w in pre_warnings {
             push_warning(w);
         }
+        for d in pre_typed {
+            push_typed_diagnostic(d);
+        }
         for w in first_warnings {
             push_warning(w);
+        }
+        for d in first_typed {
+            push_typed_diagnostic(d);
         }
         return def;
     }
@@ -3015,14 +3032,21 @@ pub(super) fn parse_activated_with_self_ref_fallback(
         for w in pre_warnings {
             push_warning(w);
         }
+        for d in pre_typed {
+            push_typed_diagnostic(d);
+        }
         for w in first_warnings {
             push_warning(w);
+        }
+        for d in first_typed {
+            push_typed_diagnostic(d);
         }
         return def;
     }
 
     let alt = parse_effect_chain(&normalized, AbilityKind::Activated);
     let alt_warnings = take_warnings();
+    let alt_typed = take_typed_diagnostics();
     let alt_has_target_fallback = alt_warnings
         .iter()
         .any(|w| w.starts_with("target-fallback"));
@@ -3031,10 +3055,16 @@ pub(super) fn parse_activated_with_self_ref_fallback(
     for w in pre_warnings {
         push_warning(w);
     }
+    for d in pre_typed {
+        push_typed_diagnostic(d);
+    }
     if alt_clean {
         // Normalized pass is strictly better — keep only its (empty) warnings.
         for w in alt_warnings {
             push_warning(w);
+        }
+        for d in alt_typed {
+            push_typed_diagnostic(d);
         }
         alt
     } else {
@@ -3043,8 +3073,14 @@ pub(super) fn parse_activated_with_self_ref_fallback(
         for w in first_warnings {
             push_warning(w);
         }
+        for d in first_typed {
+            push_typed_diagnostic(d);
+        }
         for w in alt_warnings {
             push_warning(w);
+        }
+        for d in alt_typed {
+            push_typed_diagnostic(d);
         }
         def
     }
@@ -9790,6 +9826,51 @@ mod tests {
             "unexpected Defiler warnings: {:?}",
             r.parse_warnings
         );
+    }
+
+    /// D-11 parity test: verify that typed diagnostics and thread-local string warnings
+    /// produce matching output for cards known to trigger target-fallback warnings.
+    #[test]
+    fn typed_diagnostics_parity_with_thread_local() {
+        use crate::parser::oracle_warnings::{
+            clear_typed_diagnostics, clear_warnings, take_typed_diagnostics, take_warnings,
+        };
+
+        // Cards whose Oracle text is known to produce target-fallback warnings.
+        let test_cases = [
+            // parse_target cannot classify "any target" without the "target" keyword prefix
+            (
+                "Lightning Helix deals 3 damage to any target.",
+                "Lightning Helix",
+                &["Instant"][..],
+            ),
+        ];
+
+        for (oracle, name, type_strs) in &test_cases {
+            clear_warnings();
+            clear_typed_diagnostics();
+            let types: Vec<String> = type_strs.iter().map(|s| s.to_string()).collect();
+            let _ir = parse_oracle_ir(oracle, name, &[], &types, &[]);
+            let string_warnings = take_warnings();
+            let typed_diagnostics = take_typed_diagnostics();
+
+            // Every typed diagnostic should have a corresponding string warning
+            // (since we dual-emit at every site). The typed count should equal
+            // the number of target-fallback/ignored-remainder string warnings
+            // (swallow-check warnings are thread-local only in this plan).
+            let typed_count = typed_diagnostics.len();
+            let string_target_fallback_count = string_warnings
+                .iter()
+                // allow-noncombinator: test assertion filtering on warning prefix labels, not parsing dispatch
+                .filter(|w| w.starts_with("target-fallback") || w.starts_with("ignored-remainder"))
+                .count();
+            assert_eq!(
+                typed_count, string_target_fallback_count,
+                "parity mismatch for {name}: typed={typed_count}, string_tf={string_target_fallback_count}\n\
+                 string_warnings={string_warnings:?}\n\
+                 typed_diagnostics={typed_diagnostics:?}"
+            );
+        }
     }
 }
 

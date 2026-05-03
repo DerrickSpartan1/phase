@@ -28,7 +28,8 @@ use super::oracle_util::{
     parse_mana_symbols, parse_number, parse_subtype, strip_after, strip_reminder_text, TextPair,
     SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
 };
-use crate::parser::oracle_warnings::push_warning;
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_warnings::{push_typed_diagnostic, push_warning};
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind,
     Comparator, ContinuousModification, ControllerRef, FilterProp, ObjectScope, QuantityExpr,
@@ -1557,6 +1558,11 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
                 "target-fallback: no zones parsed for casting prohibition, defaulting to Any"
                     .to_string(),
             );
+            push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+                context: "no zones parsed for casting prohibition".into(),
+                text: String::new(),
+                line_index: 0,
+            });
             TargetFilter::Any
         } else {
             TargetFilter::Typed(TypedFilter {
@@ -7256,6 +7262,11 @@ fn try_parse_cast_free_permission(text: &str, lower: &str) -> Option<StaticDefin
             "ignored-remainder: '{}' after type parse in cast-free-permission",
             remainder.trim()
         ));
+        push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+            text: remainder.trim().into(),
+            parser: "cast-free-permission".into(),
+            line_index: 0,
+        });
     }
 
     Some(

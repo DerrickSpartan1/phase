@@ -16,6 +16,7 @@ use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::ManaColor;
 use crate::types::zones::Zone;
 
+use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_nom::filter as nom_filter;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
@@ -26,7 +27,7 @@ use super::oracle_util::{
     merge_or_filters, parse_subtype, strip_possessive, TextPair, SELF_REF_PARSE_ONLY_PHRASES,
     SELF_REF_TYPE_PHRASES,
 };
-use super::oracle_warnings::push_warning;
+use super::oracle_warnings::{push_typed_diagnostic, push_warning};
 
 /// Run a nom combinator on lowercased text, returning the result and
 /// remainder from the original (mixed-case) text.
@@ -804,6 +805,11 @@ pub fn parse_target(text: &str) -> (TargetFilter, &str) {
             "target-fallback: parse_target could not classify '{}'",
             text.trim()
         ));
+        push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+            context: "parse_target could not classify".into(),
+            text: text.trim().into(),
+            line_index: 0,
+        });
         (TargetFilter::Any, text)
     }
 }

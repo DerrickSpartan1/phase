@@ -37,7 +37,10 @@ use super::oracle_util::{
 };
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::parser::oracle_effect::subject::parse_subject_application;
-use crate::parser::oracle_warnings::push_warning;
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_warnings::{
+    push_typed_diagnostic, push_warning, snapshot_typed_diagnostics, truncate_typed_diagnostics,
+};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, ConjureCard, ContinuousModification,
@@ -760,6 +763,11 @@ fn parse_delayed_subject_filter(condition_text: &str) -> TargetFilter {
             "target-fallback: unrecognized delayed subject '{}'",
             condition_text
         ));
+        push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+            context: "unrecognized delayed subject".into(),
+            text: condition_text.trim().into(),
+            line_index: 0,
+        });
         TargetFilter::Any
     })
 }
@@ -1397,6 +1405,7 @@ fn try_parse_choose_one_of_inline(
     // gaps from a malformed branch (e.g., "return a red" left half from
     // splitting "return a red or green creature" at the wrong " or ").
     let warnings_snapshot = super::oracle_warnings::snapshot_warnings();
+    let typed_snapshot = snapshot_typed_diagnostics();
     let left_clause = parse_effect_clause(left_orig, ctx);
     let right_clause = parse_effect_clause(right_orig, ctx);
 
@@ -1407,6 +1416,7 @@ fn try_parse_choose_one_of_inline(
         || matches!(right_clause.effect, Effect::Unimplemented { .. })
     {
         super::oracle_warnings::truncate_warnings(warnings_snapshot);
+        truncate_typed_diagnostics(typed_snapshot);
         return None;
     }
 
@@ -1417,6 +1427,7 @@ fn try_parse_choose_one_of_inline(
         || matches!(right_clause.effect, Effect::TargetOnly { .. })
     {
         super::oracle_warnings::truncate_warnings(warnings_snapshot);
+        truncate_typed_diagnostics(typed_snapshot);
         return None;
     }
 
@@ -2377,6 +2388,11 @@ fn try_parse_mass_forced_block(tp: TextPair) -> Option<ParsedEffectClause> {
             "ignored-remainder: '{}' after target parse in must-block",
             remainder.trim()
         ));
+        push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+            text: remainder.trim().into(),
+            parser: "must-block".into(),
+            line_index: 0,
+        });
     }
 
     Some(ParsedEffectClause {
@@ -2620,6 +2636,11 @@ fn try_parse_put_on_top_or_bottom(tp: TextPair) -> Option<ParsedEffectClause> {
                 "ignored-remainder: '{}' after target parse in owner-puts-it",
                 remainder.trim()
             ));
+            push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                text: remainder.trim().into(),
+                parser: "owner-puts-it".into(),
+                line_index: 0,
+            });
         }
         return Some(parsed_clause(Effect::PutOnTopOrBottom { target: filter }));
     }
@@ -2640,6 +2661,11 @@ fn try_parse_put_on_top_or_bottom(tp: TextPair) -> Option<ParsedEffectClause> {
                     "ignored-remainder: '{}' after target parse in owner-puts-it",
                     remainder.trim()
                 ));
+                push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                    text: remainder.trim().into(),
+                    parser: "owner-puts-it".into(),
+                    line_index: 0,
+                });
             }
             return Some(parsed_clause(Effect::PutOnTopOrBottom { target: filter }));
         }
@@ -2717,6 +2743,11 @@ fn extract_owner_of_target(tp: TextPair) -> Option<TargetFilter> {
                 "ignored-remainder: '{}' after target parse in owner-of-target",
                 remainder.trim()
             ));
+            push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                text: remainder.trim().into(),
+                parser: "owner-of-target".into(),
+                line_index: 0,
+            });
         }
         return Some(filter);
     }
@@ -2737,6 +2768,11 @@ fn extract_owner_of_target(tp: TextPair) -> Option<TargetFilter> {
                         "ignored-remainder: '{}' after target parse in owner-of-target",
                         remainder.trim()
                     ));
+                    push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                        text: remainder.trim().into(),
+                        parser: "owner-of-target".into(),
+                        line_index: 0,
+                    });
                 }
                 return Some(filter);
             }
@@ -3236,6 +3272,11 @@ fn try_parse_for_each_effect(text: &str) -> Option<ParsedEffectClause> {
                     "target-fallback: unrecognized counter target '{}'",
                     after_counter_on
                 ));
+                push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+                    context: "unrecognized counter target".into(),
+                    text: after_counter_on.trim().into(),
+                    line_index: 0,
+                });
                 TargetFilter::Any
             });
         return Some(parsed_clause(Effect::PutCounter {
@@ -6116,6 +6157,11 @@ fn parse_choose_filter(lower: &str) -> TargetFilter {
         "target-fallback: unrecognized type string '{}'",
         cleaned
     ));
+    push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+        context: "unrecognized type string".into(),
+        text: cleaned.into(),
+        line_index: 0,
+    });
     TargetFilter::Any
 }
 
@@ -6232,6 +6278,11 @@ fn parse_choose_filter_from_sentence(lower: &str) -> TargetFilter {
                 "target-fallback: choose-from-sentence missing 'card from' in '{}'",
                 lower.trim()
             ));
+            push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+                context: "choose-from-sentence missing 'card from'".into(),
+                text: lower.trim().into(),
+                line_index: 0,
+            });
             return TargetFilter::Any;
         }
     };
@@ -6251,6 +6302,11 @@ fn parse_choose_filter_from_sentence(lower: &str) -> TargetFilter {
             "target-fallback: unrecognized choose-from-sentence type '{}'",
             word
         ));
+        push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+            context: "unrecognized choose-from-sentence type".into(),
+            text: word.into(),
+            line_index: 0,
+        });
         TargetFilter::Any
     })
 }
@@ -9802,6 +9858,11 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
                         push_warning(format!(
                             "ignored-remainder: '{leftover}' after target parse in damage-all"
                         ));
+                        push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                            text: leftover.into(),
+                            parser: "damage-all".into(),
+                            line_index: 0,
+                        });
                     }
                     return Some((
                         Effect::DamageAll {
@@ -9831,6 +9892,11 @@ fn try_parse_damage_with_remainder<'a>(text: &'a str, lower: &'a str) -> Option<
                             "ignored-remainder: '{}' after target parse in deal-damage",
                             remainder.trim()
                         ));
+                        push_typed_diagnostic(OracleDiagnostic::IgnoredRemainder {
+                            text: remainder.trim().into(),
+                            parser: "deal-damage".into(),
+                            line_index: 0,
+                        });
                     }
                     return Some((
                         Effect::DealDamage {

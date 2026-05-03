@@ -15,7 +15,8 @@ use super::super::oracle_target::parse_type_phrase;
 use super::super::oracle_util::{parse_comparison_suffix, TextPair};
 use super::counter::normalize_counter_type;
 use super::{parse_effect_chain, scan_contains_phrase};
-use crate::parser::oracle_warnings::push_warning;
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_warnings::{push_typed_diagnostic, push_warning};
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CastVariantPaid, Comparator, ControllerRef,
     Duration, Effect, FilterProp, ObjectScope, QuantityExpr, QuantityRef, StaticCondition,
@@ -1506,6 +1507,11 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
                 push_warning(
                     "bare-filter: IsPresent condition has no filter, defaulting to Any".to_string(),
                 );
+                push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+                    context: "IsPresent condition has no filter".into(),
+                    text: String::new(),
+                    line_index: 0,
+                });
                 TargetFilter::Any
             });
             Some(AbilityCondition::QuantityCheck {
@@ -1538,6 +1544,11 @@ fn static_condition_to_ability_condition(sc: &StaticCondition) -> Option<Ability
                         "bare-filter: NegatedIsPresent has no filter, defaulting to Any"
                             .to_string(),
                     );
+                    push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+                        context: "NegatedIsPresent has no filter".into(),
+                        text: String::new(),
+                        line_index: 0,
+                    });
                     TargetFilter::Any
                 });
                 Some(AbilityCondition::QuantityCheck {

@@ -15,7 +15,8 @@ use super::super::oracle_util::{
 };
 use super::{capitalize, scan_contains_phrase};
 use crate::parser::oracle_ir::ast::{SearchLibraryDetails, SeekDetails};
-use crate::parser::oracle_warnings::push_warning;
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_warnings::{push_typed_diagnostic, push_warning};
 use crate::types::ability::{
     ControllerRef, FilterProp, QuantityExpr, SearchSelectionConstraint, SharedQuality,
     SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
@@ -686,6 +687,11 @@ fn parse_search_specialized_type_word(type_word: &str) -> TargetFilter {
         "target-fallback: unrecognized search filter '{}'",
         type_word
     ));
+    push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+        context: "unrecognized search filter".into(),
+        text: type_word.into(),
+        line_index: 0,
+    });
     TargetFilter::Any
 }
 
@@ -1216,6 +1222,11 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
                         "target-fallback: unrecognized inner type '{}' in different-name filter",
                         inner_type
                     ));
+                    push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+                        context: "unrecognized inner type in different-name filter".into(),
+                        text: inner_type.into(),
+                        line_index: 0,
+                    });
                     TargetFilter::Any
                 }
             };
@@ -1236,6 +1247,11 @@ fn parse_search_filter_suffixes(text: &str, suffix: &mut SearchSuffixConstraints
             "target-fallback: search-filter-suffix unmatched: '{}'",
             remaining
         ));
+        push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+            context: "search-filter-suffix unmatched".into(),
+            text: remaining.into(),
+            line_index: 0,
+        });
         break;
     }
 }

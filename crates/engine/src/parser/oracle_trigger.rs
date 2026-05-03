@@ -22,7 +22,10 @@ use super::oracle_util::{
     normalize_card_name_refs, parse_number, parse_ordinal, parse_subtype, strip_after,
     strip_reminder_text, TextPair, SELF_REF_PARSE_ONLY_PHRASES,
 };
-use crate::parser::oracle_warnings::{push_warning, take_warnings};
+use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+use crate::parser::oracle_warnings::{
+    push_typed_diagnostic, push_warning, take_typed_diagnostics, take_warnings,
+};
 use crate::types::ability::{
     AbilityKind, AttachmentKind, CastVariantPaid, Comparator, ControllerRef, DamageKindFilter,
     FilterProp, PlayerFilter, QuantityExpr, QuantityRef, StaticCondition, TargetFilter,
@@ -1216,6 +1219,11 @@ fn static_condition_to_trigger_condition(sc: &StaticCondition) -> Option<Trigger
                         "bare-filter: NegatedIsPresent has no filter, defaulting to Any"
                             .to_string(),
                     );
+                    push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+                        context: "NegatedIsPresent has no filter".into(),
+                        text: String::new(),
+                        line_index: 0,
+                    });
                     TargetFilter::Any
                 });
                 Some(TriggerCondition::QuantityComparison {
@@ -2385,11 +2393,16 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
     // Only re-emit warnings when the event verb parses successfully (meaning the trigger
     // works but has a degraded subject filter).
     let pre_warnings = take_warnings();
+    let pre_typed = take_typed_diagnostics();
     let (subject, rest) = parse_trigger_subject(after_keyword);
     let subject_warnings = take_warnings();
+    let subject_typed = take_typed_diagnostics();
     // Restore pre-existing warnings
     for w in pre_warnings {
         push_warning(w);
+    }
+    for d in pre_typed {
+        push_typed_diagnostic(d);
     }
 
     // Parse event verb from the remaining text.
@@ -2400,6 +2413,9 @@ pub(crate) fn parse_trigger_condition(condition: &str) -> (TriggerMode, TriggerD
         // Re-emit subject warnings — the trigger parsed but the subject degraded to Any.
         for w in subject_warnings {
             push_warning(w);
+        }
+        for d in subject_typed {
+            push_typed_diagnostic(d);
         }
         if is_batched {
             def.batched = true;
@@ -2479,10 +2495,15 @@ fn extract_trigger_subject_for_context(condition_text: &str) -> TargetFilter {
     // warnings it emits, then restore the originals. This avoids maintaining
     // a parallel list of "subjectless" trigger patterns.
     let pre = take_warnings();
+    let pre_typed = take_typed_diagnostics();
     let (subject, _) = parse_trigger_subject(after_keyword);
     let _discarded = take_warnings();
+    let _discarded_typed = take_typed_diagnostics();
     for w in pre {
         push_warning(w);
+    }
+    for d in pre_typed {
+        push_typed_diagnostic(d);
     }
     subject
 }
@@ -2669,6 +2690,11 @@ fn parse_single_subject(text: &str) -> (TargetFilter, &str) {
         "target-fallback: trigger subject parse fell back to Any for '{}'",
         text.trim()
     ));
+    push_typed_diagnostic(OracleDiagnostic::TargetFallback {
+        context: "trigger subject parse fell back to Any".into(),
+        text: text.trim().into(),
+        line_index: 0,
+    });
     (TargetFilter::Any, text)
 }
 
