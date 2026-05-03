@@ -1,0 +1,30 @@
+//! Unified parsing context for pronoun and reference resolution.
+//!
+//! Flat superset of the former effect-chain and nom ParseContext structs.
+//! All parser branches import from this single location (Phase 50, D-01).
+
+use crate::types::ability::{ControllerRef, QuantityRef, TargetFilter};
+
+/// Unified parsing context — threaded through all parser branches for
+/// pronoun/reference resolution ("it", "that creature", "that many").
+///
+/// Callers set only the fields they need; all fields are Default-able (D-02).
+/// Diagnostics are NOT carried here — they accumulate on OracleDocIr (D-03).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ParseContext {
+    /// The current subject (resolved target — "it", "that creature").
+    pub subject: Option<TargetFilter>,
+    /// Card name for self-reference (~) normalization.
+    pub card_name: Option<String>,
+    /// CR 707.9a + CR 603.1: Index of the printed trigger whose body is being
+    /// parsed. Consumed by BecomeCopy "has this ability" arm.
+    pub current_trigger_index: Option<usize>,
+    /// CR 701.21a + CR 608.2k: The actor performing the effect ("you", "an opponent").
+    pub actor: Option<ControllerRef>,
+    /// Resolved quantity reference ("that many", "that much").
+    pub quantity_ref: Option<QuantityRef>,
+    /// Whether we are inside a trigger effect (enables event context refs).
+    pub in_trigger: bool,
+    /// Whether we are inside a replacement effect.
+    pub in_replacement: bool,
+}
