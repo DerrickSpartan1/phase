@@ -25,6 +25,17 @@ impl GameDb {
                 game_code TEXT PRIMARY KEY,
                 session_json TEXT NOT NULL,
                 updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS draft_sessions (
+                draft_code TEXT PRIMARY KEY,
+                session_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS p2p_draft_backups (
+                draft_code TEXT PRIMARY KEY,
+                host_peer_id TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
             );",
         )?;
         info!("Game database opened at {}", path.display());
@@ -83,6 +94,107 @@ impl GameDb {
         )?;
         Ok(deleted)
     }
+
+    // ── Draft session persistence ──────────────────────────────────────────
+
+    /// Persist a draft session (upsert).
+    #[allow(dead_code)]
+    pub fn save_draft_session(&self, draft_code: &str, json: &str) -> rusqlite::Result<()> {
+        let now = now_epoch();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO draft_sessions (draft_code, session_json, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(draft_code) DO UPDATE SET session_json = ?2, updated_at = ?3",
+            params![draft_code, json, now],
+        )?;
+        Ok(())
+    }
+
+    /// Load all persisted draft sessions. Returns (draft_code, json) pairs.
+    #[allow(dead_code)]
+    pub fn load_all_drafts(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT draft_code, session_json FROM draft_sessions")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut results = Vec::new();
+        for row in rows {
+            match row {
+                Ok(pair) => results.push(pair),
+                Err(e) => error!("Failed to read persisted draft session row: {}", e),
+            }
+        }
+        Ok(results)
+    }
+
+    /// Delete a draft session by code.
+    #[allow(dead_code)]
+    pub fn delete_draft_session(&self, draft_code: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM draft_sessions WHERE draft_code = ?1",
+            params![draft_code],
+        )?;
+        Ok(())
+    }
+
+    // ── P2P draft backup persistence ───────────────────────────────────────
+
+    /// Store a P2P draft backup snapshot (upsert).
+    #[allow(dead_code)]
+    pub fn save_p2p_backup(
+        &self,
+        draft_code: &str,
+        host_peer_id: &str,
+        snapshot_json: &str,
+    ) -> rusqlite::Result<()> {
+        let now = now_epoch();
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO p2p_draft_backups (draft_code, host_peer_id, snapshot_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(draft_code) DO UPDATE SET host_peer_id = ?2, snapshot_json = ?3, updated_at = ?4",
+            params![draft_code, host_peer_id, snapshot_json, now],
+        )?;
+        Ok(())
+    }
+
+    /// Load a P2P draft backup by code. Returns (host_peer_id, snapshot_json, updated_at).
+    #[allow(dead_code)]
+    pub fn load_p2p_backup(
+        &self,
+        draft_code: &str,
+    ) -> rusqlite::Result<Option<(String, String, u64)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT host_peer_id, snapshot_json, updated_at FROM p2p_draft_backups WHERE draft_code = ?1",
+        )?;
+        let result = stmt.query_row(params![draft_code], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, u64>(2)?,
+            ))
+        });
+        match result {
+            Ok(r) => Ok(Some(r)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Delete a P2P draft backup by code.
+    #[allow(dead_code)]
+    pub fn delete_p2p_backup(&self, draft_code: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM p2p_draft_backups WHERE draft_code = ?1",
+            params![draft_code],
+        )?;
+        Ok(())
+    }
 }
 
 fn now_epoch() -> u64 {
@@ -130,6 +242,72 @@ mod tests {
         db.delete_session("ABC123").unwrap();
         let all = db.load_all().unwrap();
         assert!(all.is_empty());
+    }
+
+    #[test]
+    fn save_and_load_draft_roundtrip() {
+        let db = test_db();
+        db.save_draft_session("DRAF01", r#"{"draft_code":"DRAF01"}"#)
+            .unwrap();
+        let all = db.load_all_drafts().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, "DRAF01");
+        assert!(all[0].1.contains("DRAF01"));
+    }
+
+    #[test]
+    fn draft_upsert_overwrites() {
+        let db = test_db();
+        db.save_draft_session("DRAF01", "v1").unwrap();
+        db.save_draft_session("DRAF01", "v2").unwrap();
+        let all = db.load_all_drafts().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].1, "v2");
+    }
+
+    #[test]
+    fn delete_draft_session_removes_row() {
+        let db = test_db();
+        db.save_draft_session("DRAF01", "data").unwrap();
+        db.delete_draft_session("DRAF01").unwrap();
+        let all = db.load_all_drafts().unwrap();
+        assert!(all.is_empty());
+    }
+
+    #[test]
+    fn save_and_load_p2p_backup_roundtrip() {
+        let db = test_db();
+        db.save_p2p_backup("BACK01", "peer-abc", r#"{"snapshot":"data"}"#)
+            .unwrap();
+        let result = db.load_p2p_backup("BACK01").unwrap();
+        assert!(result.is_some());
+        let (peer_id, snapshot, _updated_at) = result.unwrap();
+        assert_eq!(peer_id, "peer-abc");
+        assert!(snapshot.contains("snapshot"));
+    }
+
+    #[test]
+    fn p2p_backup_upsert_overwrites() {
+        let db = test_db();
+        db.save_p2p_backup("BACK01", "peer-1", "v1").unwrap();
+        db.save_p2p_backup("BACK01", "peer-2", "v2").unwrap();
+        let (peer_id, snapshot, _) = db.load_p2p_backup("BACK01").unwrap().unwrap();
+        assert_eq!(peer_id, "peer-2");
+        assert_eq!(snapshot, "v2");
+    }
+
+    #[test]
+    fn delete_p2p_backup_removes_row() {
+        let db = test_db();
+        db.save_p2p_backup("BACK01", "peer-1", "data").unwrap();
+        db.delete_p2p_backup("BACK01").unwrap();
+        assert!(db.load_p2p_backup("BACK01").unwrap().is_none());
+    }
+
+    #[test]
+    fn load_p2p_backup_not_found() {
+        let db = test_db();
+        assert!(db.load_p2p_backup("NOPE01").unwrap().is_none());
     }
 
     #[test]
