@@ -95,40 +95,35 @@ impl OracleDiagnostic {
     }
 }
 
-/// Display impl produces backward-compatible string format matching
-/// the legacy `push_warning` format strings, so dual-emit parity
-/// verification (D-11) can compare stringified typed diagnostics to
-/// the thread-local output.
+/// Display impl uses structured [severity:category] prefix format (D-11).
 impl fmt::Display for OracleDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let severity = match self.severity() {
+            DiagnosticSeverity::Error => "error",
+            DiagnosticSeverity::Warning => "warning",
+            DiagnosticSeverity::Info => "info",
+        };
+        let category = self.category_name();
         match self {
             Self::TargetFallback { context, text, .. } => {
-                write!(f, "target-fallback: {context} '{text}'")
+                write!(f, "[{severity}:{category}] {context} '{text}'")
             }
             Self::IgnoredRemainder { text, parser, .. } => {
-                write!(f, "ignored-remainder({parser}): '{text}'")
+                write!(f, "[{severity}:{category}] ({parser}) '{text}'")
             }
             Self::SwallowedClause {
                 detector,
                 description,
                 ..
             } => {
-                write!(f, "Swallow:{detector} — {description}")
+                write!(f, "[{severity}:{category}] {detector} — {description}")
             }
             Self::CascadeLoss {
                 slot, effect_name, ..
             } => {
-                let slot_name = match slot {
-                    CascadeSlot::Optional => "CascadeOptional",
-                    CascadeSlot::OpponentMay => "CascadeOpponentMay",
-                    CascadeSlot::Condition => "CascadeCondition",
-                    CascadeSlot::RepeatFor => "CascadeRepeatFor",
-                    CascadeSlot::PlayerScope => "CascadePlayerScope",
-                    CascadeSlot::Duration => "CascadeDuration",
-                };
                 write!(
                     f,
-                    "Swallow:{slot_name} — cascade slot lost (effect={effect_name})"
+                    "[{severity}:{category}] {slot:?} lost (effect={effect_name})"
                 )
             }
         }
@@ -154,29 +149,6 @@ mod tests {
             line_index: 0,
         };
         assert_eq!(diag.severity(), DiagnosticSeverity::Info);
-    }
-
-    #[test]
-    fn display_backward_compat() {
-        let diag = OracleDiagnostic::TargetFallback {
-            context: "parse_target could not classify".into(),
-            text: "some creature".into(),
-            line_index: 2,
-        };
-        assert_eq!(
-            diag.to_string(),
-            "target-fallback: parse_target could not classify 'some creature'"
-        );
-
-        let diag = OracleDiagnostic::IgnoredRemainder {
-            text: "extra stuff".into(),
-            parser: "must-block".into(),
-            line_index: 0,
-        };
-        assert_eq!(
-            diag.to_string(),
-            "ignored-remainder(must-block): 'extra stuff'"
-        );
     }
 
     #[test]

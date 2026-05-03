@@ -3,13 +3,13 @@
 //! Flat superset of the former effect-chain and nom ParseContext structs.
 //! All parser branches import from this single location (Phase 50, D-01).
 
+use super::diagnostic::OracleDiagnostic;
 use crate::types::ability::{ControllerRef, QuantityRef, TargetFilter};
 
 /// Unified parsing context — threaded through all parser branches for
 /// pronoun/reference resolution ("it", "that creature", "that many").
 ///
 /// Callers set only the fields they need; all fields are Default-able (D-02).
-/// Diagnostics are NOT carried here — they accumulate on OracleDocIr (D-03).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ParseContext {
     /// The current subject (resolved target — "it", "that creature").
@@ -30,4 +30,16 @@ pub(crate) struct ParseContext {
     /// Whether we are inside a replacement effect.
     #[allow(dead_code)] // Retained for future nom combinator consumers (D-02).
     pub in_replacement: bool,
+    /// Accumulated diagnostics for the current card parse (Phase 52, D-07).
+    /// Replaces thread-local oracle_warnings accumulator.
+    #[allow(dead_code)] // Wired in Plan 02 when call sites migrate from thread-local.
+    pub diagnostics: Vec<OracleDiagnostic>,
+}
+
+impl ParseContext {
+    /// Push a diagnostic (replaces oracle_warnings::push_diagnostic).
+    #[allow(dead_code)] // Wired in Plan 02 when call sites migrate from thread-local.
+    pub fn push_diagnostic(&mut self, d: OracleDiagnostic) {
+        self.diagnostics.push(d);
+    }
 }
