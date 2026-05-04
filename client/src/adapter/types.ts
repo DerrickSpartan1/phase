@@ -1157,6 +1157,13 @@ export interface ViewerSnapshot {
   legalActionsByObject?: Record<string, GameAction[]>;
 }
 
+export interface BatchResolveResult {
+  events: GameEvent[];
+  waitingFor: WaitingFor;
+  logEntries?: GameLogEntry[];
+  itemsResolved: number;
+}
+
 export interface EngineAdapter {
   initialize(): Promise<void>;
   initializeGame(
@@ -1177,6 +1184,11 @@ export interface EngineAdapter {
   getState(): Promise<GameState>;
   getLegalActions(): Promise<LegalActionsResult>;
   getAiAction(difficulty: string, playerId: number): Promise<GameAction | null> | GameAction | null;
+  resolveAll?(
+    requester: number,
+    aiSeats: { playerId: number; difficulty: string }[],
+    maxResolutions?: number,
+  ): Promise<BatchResolveResult>;
   restoreState(state: GameState): void | Promise<void>;
   dispose(): void;
 }

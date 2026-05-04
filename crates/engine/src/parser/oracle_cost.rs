@@ -27,7 +27,8 @@ pub fn parse_oracle_cost(text: &str) -> AbilityCost {
     // Split on ", " for composite costs
     let parts: Vec<&str> = split_cost_parts(text);
     if parts.len() > 1 {
-        let mut costs: Vec<AbilityCost> = parts.iter().map(|p| parse_single_cost(p.trim())).collect();
+        let mut costs: Vec<AbilityCost> =
+            parts.iter().map(|p| parse_single_cost(p.trim())).collect();
         // CR 601.2b: "Sacrifice A, B, and C" splits into ["Sacrifice A", "B", "C"].
         // Bare noun-phrase continuations after a verb-cost are additional instances
         // of that same cost. Applies to Sacrifice, Exile, and TapCreatures.
@@ -93,7 +94,9 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
     for i in 0..costs.len() {
         match &costs[i] {
             AbilityCost::Sacrifice { .. } => last_verb = Some(PrecedingVerb::Sacrifice),
-            AbilityCost::Exile { zone, .. } => last_verb = Some(PrecedingVerb::Exile { zone: *zone }),
+            AbilityCost::Exile { zone, .. } => {
+                last_verb = Some(PrecedingVerb::Exile { zone: *zone })
+            }
             AbilityCost::TapCreatures { .. } => last_verb = Some(PrecedingVerb::TapCreatures),
             AbilityCost::Unimplemented { description } if last_verb.is_some() => {
                 let lower = description.to_lowercase();
@@ -120,10 +123,7 @@ fn fixup_bare_noun_continuations(costs: &mut [AbilityCost]) {
                         };
                     }
                     PrecedingVerb::TapCreatures => {
-                        costs[i] = AbilityCost::TapCreatures {
-                            count: 1,
-                            filter,
-                        };
+                        costs[i] = AbilityCost::TapCreatures { count: 1, filter };
                     }
                 }
             }
@@ -569,11 +569,15 @@ pub fn parse_single_cost(text: &str) -> AbilityCost {
     // activation costs are structurally identical to effects ("Put a -1/-1
     // counter on ~", "Return a land you control to its owner's hand") and
     // the effect parser already handles them.
-    let def = super::oracle_effect::parse_effect_chain(text, crate::types::ability::AbilityKind::Activated);
-    if !matches!(def.effect.as_ref(), crate::types::ability::Effect::Unimplemented { .. }) {
-        return AbilityCost::EffectCost {
-            effect: def.effect,
-        };
+    let def = super::oracle_effect::parse_effect_chain(
+        text,
+        crate::types::ability::AbilityKind::Activated,
+    );
+    if !matches!(
+        def.effect.as_ref(),
+        crate::types::ability::Effect::Unimplemented { .. }
+    ) {
+        return AbilityCost::EffectCost { effect: def.effect };
     }
 
     AbilityCost::Unimplemented {

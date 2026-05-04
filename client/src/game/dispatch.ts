@@ -1,4 +1,4 @@
-import type { GameAction, GameEvent, GameState, LegalActionsResult } from "../adapter/types";
+import type { BatchResolveResult, GameAction, GameEvent, GameState, LegalActionsResult } from "../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../adapter/types";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "./engineRecovery";
 import { normalizeEvents } from "../animation/eventNormalizer";
@@ -547,4 +547,60 @@ export async function restoreGameState(state: GameState): Promise<string | null>
   }
 
   return null;
+}
+
+const BATCH_CHUNK_SIZE = 5;
+const BATCH_CHUNK_BASE_DELAY_MS = 150;
+let batchResolveInProgress = false;
+
+export async function dispatchResolveAll(
+  requester: number,
+  aiSeats: { playerId: number; difficulty: string }[],
+): Promise<void> {
+  if (batchResolveInProgress) return;
+  const { adapter } = useGameStore.getState();
+  if (!adapter || !adapter.resolveAll) {
+    debugLog("dispatchResolveAll: adapter missing or no resolveAll support");
+    return;
+  }
+
+  batchResolveInProgress = true;
+  const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
+
+  try {
+    for (;;) {
+      const batchResult: BatchResolveResult = await adapter.resolveAll(
+        requester, aiSeats, BATCH_CHUNK_SIZE,
+      );
+
+      const newState = await adapter.getState();
+      const legalResult = await adapter.getLegalActions();
+
+      useGameStore.setState({
+        gameState: newState,
+        waitingFor: batchResult.waitingFor,
+        ...legalResultState(legalResult),
+      });
+
+      const done =
+        batchResult.itemsResolved === 0 ||
+        newState.stack.length === 0 ||
+        batchResult.waitingFor.type === "GameOver" ||
+        batchResult.waitingFor.type !== "Priority";
+      if (done) break;
+
+      const chunkDelay = Math.round(BATCH_CHUNK_BASE_DELAY_MS * multiplier);
+      if (chunkDelay > 0) {
+        await new Promise<void>((r) => setTimeout(r, chunkDelay));
+      } else {
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+      }
+    }
+
+    const { gameId } = useGameStore.getState();
+    const newState = useGameStore.getState().gameState;
+    if (gameId && newState) saveGame(gameId, newState);
+  } finally {
+    batchResolveInProgress = false;
+  }
 }

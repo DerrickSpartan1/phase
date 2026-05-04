@@ -42,11 +42,11 @@ const CARD_SIZES: CardSizePreference[] = ["small", "medium", "large"];
 const LOG_DEFAULTS: LogDefaultState[] = ["open", "closed"];
 const VFX_QUALITIES: VfxQuality[] = ["full", "reduced", "minimal"];
 
-/** Format a multiplier as a user-facing label. `0` is a meaningful sentinel
- *  (skip animations entirely), so call it out explicitly rather than showing
- *  "0.00×" which reads like a typo. */
-function formatMultiplier(value: number): string {
-  if (value <= 0) return "Instant";
+/** Format a speed value as a user-facing label. The slider goes 0→max where
+ *  max = instant (skip animations). `0` = slowest, `1` = normal. */
+function formatSpeed(value: number, max: number): string {
+  if (value >= max) return "Instant";
+  if (value <= 0) return "Slowest";
   return `${value.toFixed(2)}×`;
 }
 const SETTINGS_TABS = [
@@ -631,7 +631,7 @@ function MultiplierSlider({
           {label}
         </label>
         <span className="font-mono text-xs tabular-nums text-slate-300">
-          {formatMultiplier(value)}
+          {formatSpeed(value, max)}
         </span>
       </div>
       <div className="flex items-center gap-2">
@@ -725,13 +725,13 @@ function PacingSection({
       <div className="flex flex-col gap-5">
         <MultiplierSlider
           label="Animation Speed"
-          description="Master multiplier — scales every animation duration. 0× skips animations entirely."
-          value={animationSpeedMultiplier}
-          defaultValue={ANIMATION_SPEED_DEFAULT}
+          description="Master speed — higher is faster. Full-right skips animations entirely."
+          value={ANIMATION_SPEED_MAX - animationSpeedMultiplier}
+          defaultValue={ANIMATION_SPEED_MAX - ANIMATION_SPEED_DEFAULT}
           min={ANIMATION_SPEED_MIN}
           max={ANIMATION_SPEED_MAX}
           step={ANIMATION_SPEED_STEP}
-          onChange={setAnimationSpeedMultiplier}
+          onChange={(speed) => setAnimationSpeedMultiplier(ANIMATION_SPEED_MAX - speed)}
         />
 
         {PACING_CATEGORIES.map((category) => (
@@ -739,12 +739,12 @@ function PacingSection({
             key={category}
             label={PACING_LABELS[category]}
             description={PACING_DESCRIPTIONS[category]}
-            value={pacingMultipliers[category]}
-            defaultValue={PACING_DEFAULT}
+            value={PACING_MAX - pacingMultipliers[category]}
+            defaultValue={PACING_MAX - PACING_DEFAULT}
             min={PACING_MIN}
             max={PACING_MAX}
             step={PACING_STEP}
-            onChange={(n) => setPacingMultiplier(category, n)}
+            onChange={(speed) => setPacingMultiplier(category, PACING_MAX - speed)}
           />
         ))}
       </div>

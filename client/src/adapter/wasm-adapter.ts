@@ -1,4 +1,5 @@
 import type {
+  BatchResolveResult,
   EngineAdapter,
   FormatConfig,
   GameAction,
@@ -314,6 +315,18 @@ export class WasmAdapter implements EngineAdapter {
     const seat = aiSeats.find((s) => s.playerId === activePlayer);
     if (!seat) return Promise.resolve(null);
     return this.getAiAction(seat.difficulty, seat.playerId);
+  }
+
+  async resolveAll(
+    requester: number,
+    aiSeats: { playerId: number; difficulty: string }[],
+    maxResolutions: number = 0,
+  ): Promise<BatchResolveResult> {
+    this.assertInitialized();
+    if (this.engine) {
+      return this.engine.resolveAll(requester, aiSeats, maxResolutions);
+    }
+    throw new Error("resolveAll requires worker-based engine");
   }
 
   restoreState(state: GameState): void | Promise<void> {

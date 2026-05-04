@@ -24,6 +24,7 @@ import init, {
   export_game_state_json,
   clear_game_state,
   set_multiplayer_mode,
+  resolve_all,
 } from "@wasm/engine";
 
 import type { GameAction } from "./types";
@@ -72,7 +73,8 @@ type EngineRequest =
   | { type: "setMultiplayerMode"; id: number; enabled: boolean }
   | { type: "ping"; id: number }
   | { type: "takeLastPanic"; id: number }
-  | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string };
+  | { type: "applySeatMutation"; id: number; stateJson: string; mutationJson: string }
+  | { type: "resolveAll"; id: number; requester: number; aiSeatsJson: string; maxResolutions: number };
 
 type EngineResponse =
   | { type: "ready" }
@@ -311,6 +313,16 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       case "applySeatMutation": {
         const delta = apply_seat_mutation(msg.stateJson, msg.mutationJson);
         result(msg.id, delta ?? null);
+        break;
+      }
+
+      case "resolveAll": {
+        const r = resolve_all(msg.requester, msg.aiSeatsJson, msg.maxResolutions);
+        if (typeof r === "string") {
+          error(msg.id, r);
+          break;
+        }
+        result(msg.id, r);
         break;
       }
 

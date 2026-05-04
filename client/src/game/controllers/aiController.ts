@@ -2,6 +2,7 @@ import { AI_BASE_DELAY_MS, AI_DELAY_VARIANCE_MS, PLAYER_ID } from "../../constan
 import { useGameStore } from "../../stores/gameStore";
 import type { GameAction } from "../../adapter/types";
 import { AdapterError, AdapterErrorCode } from "../../adapter/types";
+import { STACK_PRESSURE_ELEVATED } from "../../utils/stackPressure";
 import { debugLog } from "../debugLog";
 import { dispatchAction } from "../dispatch";
 import { attemptStateRehydrate, isEnginePanic, notifyEngineLost, routePanic } from "../engineRecovery";
@@ -79,6 +80,9 @@ export function createAIController(config: AIControllerConfig): AIController {
     if (!("data" in waitingFor) || !waitingFor.data || !("player" in waitingFor.data)) return;
     const waitingPlayerId = waitingFor.data.player;
     if (waitingPlayerId === PLAYER_ID) return;
+
+    const stackLen = state.stack?.length ?? 0;
+    if (stackLen >= STACK_PRESSURE_ELEVATED) return;
 
     // Reset failure counters when the WaitingFor state changes (type or player).
     // `consecutiveFailures` gates normal→fallback escalation; `totalFailures`

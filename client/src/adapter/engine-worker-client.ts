@@ -5,6 +5,7 @@
  * then resolve the corresponding promise when the worker responds.
  */
 import type {
+  BatchResolveResult,
   FormatConfig,
   GameAction,
   GameState,
@@ -212,6 +213,19 @@ export class EngineWorkerClient {
       type: "applySeatMutation",
       stateJson,
       mutationJson,
+    });
+  }
+
+  async resolveAll(
+    requester: number,
+    aiSeats: { playerId: number; difficulty: string }[],
+    maxResolutions: number = 0,
+  ): Promise<BatchResolveResult> {
+    return this.request<BatchResolveResult>({
+      type: "resolveAll",
+      requester,
+      aiSeatsJson: JSON.stringify(aiSeats),
+      maxResolutions,
     });
   }
 
