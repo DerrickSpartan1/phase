@@ -39,7 +39,7 @@ export function StandingsTable() {
   });
 
   return (
-    <div className="rounded-xl border border-white/10 bg-black/30 p-4">
+    <div className="rounded-[20px] border border-white/10 bg-black/18 p-4 shadow-[0_18px_54px_rgba(0,0,0,0.22)] backdrop-blur-md">
       <h3 className="text-lg font-medium text-white mb-3">
         Standings — Round {currentRound + 1}
       </h3>

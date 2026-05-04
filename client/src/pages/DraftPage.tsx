@@ -10,6 +10,7 @@ import { PoolPanel } from "../components/draft/PoolPanel";
 import { DraftProgress } from "../components/draft/DraftProgress";
 import { LimitedDeckBuilder } from "../components/draft/LimitedDeckBuilder";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { menuButtonClass } from "../components/menu/buttonStyles";
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -140,7 +141,7 @@ export function DraftPage() {
             </div>
             <button
               onClick={handleLaunchMatch}
-              className="rounded-lg bg-emerald-600 px-8 py-3 text-lg font-semibold text-white transition-colors hover:bg-emerald-500"
+              className={menuButtonClass({ tone: "emerald", size: "lg" })}
             >
               Start Match
             </button>

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { useDraftStore } from "../../stores/draftStore";
+import { menuButtonClass } from "../menu/buttonStyles";
+import type { MenuButtonTone } from "../menu/buttonStyles";
 
 // ── Types ───────────────────────────────────────────────────────────────
 
@@ -30,13 +32,13 @@ const DIFFICULTY_LABELS = [
   "Very Hard",
 ] as const;
 
-const DIFFICULTY_COLORS = [
-  "bg-green-600 hover:bg-green-500",
-  "bg-blue-600 hover:bg-blue-500",
-  "bg-yellow-600 hover:bg-yellow-500",
-  "bg-orange-600 hover:bg-orange-500",
-  "bg-red-600 hover:bg-red-500",
-] as const;
+const DIFFICULTY_TONES: MenuButtonTone[] = [
+  "emerald",
+  "blue",
+  "amber",
+  "red",
+  "purple",
+];
 
 // ── Component ───────────────────────────────────────────────────────────
 
@@ -97,19 +99,18 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
     <div className="flex flex-col gap-6">
       {/* Difficulty selector */}
       <div className="flex flex-col gap-2">
-        <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wider">
+        <h3 className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
           Bot Difficulty
         </h3>
-        <div className="flex gap-2 flex-wrap">
+        <div className="flex flex-wrap gap-2">
           {DIFFICULTY_LABELS.map((label, idx) => (
             <button
               key={label}
               onClick={() => setDifficulty(idx)}
-              className={`px-3 py-1.5 rounded text-sm font-medium transition-colors ${
-                difficulty === idx
-                  ? `${DIFFICULTY_COLORS[idx]} text-white ring-2 ring-white/30`
-                  : "bg-gray-700 text-gray-300 hover:bg-gray-600"
-              }`}
+              className={menuButtonClass({
+                tone: difficulty === idx ? DIFFICULTY_TONES[idx] : "neutral",
+                size: "sm",
+              })}
             >
               {label}
             </button>
@@ -119,32 +120,32 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
 
       {/* Set grid */}
       <div className="flex flex-col gap-2">
-        <h3 className="text-sm font-medium text-gray-400 uppercase tracking-wider">
+        <h3 className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
           Choose a Set
         </h3>
 
         {loading && (
-          <div className="text-gray-400 text-sm py-8 text-center">
+          <div className="py-8 text-center text-sm text-white/40">
             Loading available sets...
           </div>
         )}
 
         {error && (
-          <div className="text-red-400 text-sm py-4 text-center">{error}</div>
+          <div className="py-4 text-center text-sm text-red-300">{error}</div>
         )}
 
         {!loading && !error && sets.length === 0 && (
-          <div className="text-gray-400 text-sm py-8 text-center">
+          <div className="py-8 text-center text-sm text-white/40">
             No draft pools available. Run the draft data pipeline first.
           </div>
         )}
 
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
           {sets.map(({ code, name, icon }) => (
             <button
               key={code}
               onClick={() => handleSetClick(code)}
-              className="flex flex-col items-center gap-2 p-4 rounded-lg bg-gray-800 hover:bg-gray-700 border border-gray-700 hover:border-gray-500 transition-colors cursor-pointer"
+              className="flex cursor-pointer flex-col items-center gap-2 rounded-[16px] border border-white/10 bg-black/18 p-4 backdrop-blur-md transition-colors hover:border-white/20 hover:bg-white/8"
             >
               {icon ? (
                 <img
@@ -153,11 +154,11 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
                   className="h-10 w-10 invert opacity-80"
                 />
               ) : (
-                <span className="text-2xl font-bold text-white tracking-wider">
+                <span className="text-2xl font-bold tracking-wider text-white">
                   {code}
                 </span>
               )}
-              <span className="text-xs text-gray-400 text-center leading-tight">
+              <span className="text-center text-xs leading-tight text-white/50">
                 {name}
               </span>
             </button>

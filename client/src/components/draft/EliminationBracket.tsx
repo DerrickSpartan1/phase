@@ -9,7 +9,7 @@ const ROUND_LABELS = ["Quarterfinals", "Semifinals", "Final"] as const;
 
 function MatchCard({ pairing }: { pairing: PairingView }) {
   return (
-    <div className="border border-white/10 bg-black/50 rounded-lg px-3 py-2 text-sm">
+    <div className="rounded-[14px] border border-white/10 bg-black/18 px-3 py-2 text-sm">
       <div
         className={
           pairing.winner_seat === pairing.seat_a
@@ -53,7 +53,7 @@ export function EliminationBracket() {
   }
 
   return (
-    <div className="rounded-xl border border-white/10 bg-black/30 p-4">
+    <div className="rounded-[20px] border border-white/10 bg-black/18 p-4 shadow-[0_18px_54px_rgba(0,0,0,0.22)] backdrop-blur-md">
       <h3 className="text-lg font-medium text-white mb-4">Bracket</h3>
       <div className="grid grid-cols-3 gap-8">
         {ROUND_LABELS.map((label, round) => (

@@ -21,6 +21,7 @@ import {
   useGameStore,
 } from "../stores/gameStore";
 import type { ActiveGameMeta } from "../stores/gameStore";
+import { usePreferencesStore } from "../stores/preferencesStore";
 
 interface FormatCoverageSummary {
   total_cards: number;
@@ -46,6 +47,7 @@ export function MenuPage() {
   const [, setDeckCount] = useState(0);
   const [, setActiveDeckName] = useState<string | null>(null);
   const [formatCoverage, setFormatCoverage] = useState<[string, FormatCoverageSummary][]>([]);
+  const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
   useAudioContext("menu");
 
   useEffect(() => {
@@ -154,22 +156,28 @@ export function MenuPage() {
         onClick: () => navigate("/multiplayer"),
         icon: <CrownIcon />,
       },
-      {
-        key: "draft",
-        title: "Quick Draft",
-        description: "Draft against bots, build a deck, play a match.",
-        accent: "ember" as const,
-        onClick: () => navigate("/draft"),
-        icon: <DraftIcon />,
-      },
-      {
-        key: "pod-draft",
-        title: "Pod Draft",
-        description: "Host or join a P2P draft pod with up to 8 players.",
-        accent: "jade" as const,
-        onClick: () => navigate("/draft-pod"),
-        icon: <PodDraftIcon />,
-      },
+    );
+    if (experimentalFeatures) {
+      actions.push(
+        {
+          key: "draft",
+          title: "Quick Draft",
+          description: "Draft against bots, build a deck, play a match.",
+          accent: "ember" as const,
+          onClick: () => navigate("/draft"),
+          icon: <DraftIcon />,
+        },
+        {
+          key: "pod-draft",
+          title: "Pod Draft",
+          description: "Host or join a P2P draft pod with up to 8 players.",
+          accent: "jade" as const,
+          onClick: () => navigate("/draft-pod"),
+          icon: <PodDraftIcon />,
+        },
+      );
+    }
+    actions.push(
       {
         key: "decks",
         title: "Decks",
@@ -180,7 +188,7 @@ export function MenuPage() {
       },
     );
     return actions;
-  }, [hasSavedGame, navigate, handleResumeGame]);
+  }, [hasSavedGame, experimentalFeatures, navigate, handleResumeGame]);
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">

@@ -2,7 +2,6 @@ import { useDraftStore } from "../../stores/draftStore";
 
 // ── Component ───────────────────────────────────────────────────────────
 
-/** Displays current pack number, pick number, and pass direction. Per D-06: no timer. */
 export function DraftProgress() {
   const view = useDraftStore((s) => s.view);
 
@@ -14,23 +13,23 @@ export function DraftProgress() {
   const directionLabel = view.pass_direction === "Left" ? "Pass Left" : "Pass Right";
 
   return (
-    <div className="flex items-center justify-between px-4 py-2 rounded-lg bg-gray-800/80 border border-gray-700">
+    <div className="flex items-center justify-between rounded-[16px] border border-white/10 bg-black/18 px-4 py-2 backdrop-blur-md">
       <div className="flex items-center gap-4 text-sm">
-        <span className="text-gray-400">
+        <span className="text-white/50">
           Pack{" "}
-          <span className="text-white font-semibold">{packDisplay}</span>
+          <span className="font-semibold text-white">{packDisplay}</span>
           {" "}of{" "}
           <span className="text-white">{view.pack_count}</span>
         </span>
-        <span className="text-gray-600">|</span>
-        <span className="text-gray-400">
+        <span className="text-white/15">|</span>
+        <span className="text-white/50">
           Pick{" "}
-          <span className="text-white font-semibold">{pickDisplay}</span>
+          <span className="font-semibold text-white">{pickDisplay}</span>
           {" "}of{" "}
           <span className="text-white">{view.cards_per_pack}</span>
         </span>
       </div>
-      <div className="flex items-center gap-1.5 text-sm text-gray-400">
+      <div className="flex items-center gap-1.5 text-sm text-white/50">
         <span className="text-lg">{directionArrow}</span>
         <span>{directionLabel}</span>
       </div>

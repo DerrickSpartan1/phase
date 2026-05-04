@@ -67,7 +67,7 @@ function SeatCard({
 
   return (
     <div
-      className={`relative flex flex-col items-center gap-2 rounded-xl border p-4 ${borderColor} ${bgColor}`}
+      className={`relative flex flex-col items-center gap-2 rounded-[16px] border p-4 backdrop-blur-md ${borderColor} ${bgColor}`}
     >
       {/* Seat number */}
       <div className="text-xs font-medium text-white/40">

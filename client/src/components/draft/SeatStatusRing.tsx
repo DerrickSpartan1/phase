@@ -33,7 +33,7 @@ function SeatBadge({ seat, isLocal }: SeatBadgeProps) {
 
   return (
     <div
-      className={`flex items-center gap-1.5 rounded-lg border bg-black/30 px-2 py-1 ${borderColor}`}
+      className={`flex items-center gap-1.5 rounded-[12px] border bg-black/18 px-2 py-1 backdrop-blur-md ${borderColor}`}
     >
       <div className={`h-1.5 w-1.5 rounded-full ${PICK_STATUS_DOT[seat.pick_status]}`} />
       <span className="truncate text-xs text-white/70">

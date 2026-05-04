@@ -56,6 +56,7 @@ const SETTINGS_TABS = [
   { id: "audio", label: "Audio" },
   { id: "multiplayer", label: "Multiplayer" },
   { id: "data", label: "Data" },
+  { id: "experimental", label: "Experimental" },
 ] as const;
 
 export type SettingsTabId = (typeof SETTINGS_TABS)[number]["id"];
@@ -449,6 +450,8 @@ export function PreferencesModal({
               )}
 
               {activeTab === "data" && <DataSection />}
+
+              {activeTab === "experimental" && <ExperimentalSection />}
             </div>
             <ResetAllFooter resetAllPreferences={resetAllPreferences} />
           </div>
@@ -481,6 +484,37 @@ function ResetAllFooter({
         Reset all preferences
       </button>
     </div>
+  );
+}
+
+function ExperimentalSection() {
+  const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
+  const setExperimentalFeatures = usePreferencesStore((s) => s.setExperimentalFeatures);
+
+  return (
+    <SettingsSection title="Experimental">
+      <p className="text-xs text-slate-400">
+        These features are still in development. They may be incomplete, buggy,
+        or change without notice. Enable them to try things out early.
+      </p>
+
+      <SettingGroup label="Draft Mode">
+        <label className="flex min-h-11 items-center gap-3">
+          <input
+            type="checkbox"
+            checked={experimentalFeatures}
+            onChange={(e) => setExperimentalFeatures(e.target.checked)}
+            className="accent-cyan-500"
+          />
+          <div className="flex flex-col">
+            <span className="text-sm text-slate-200">Enable draft</span>
+            <span className="text-xs text-slate-500">
+              Unlocks Quick Draft and Pod Draft on the main menu.
+            </span>
+          </div>
+        </label>
+      </SettingGroup>
+    </SettingsSection>
   );
 }
 

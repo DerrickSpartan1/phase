@@ -66,16 +66,16 @@ export function LobbyDraftRooms({ draftRooms, onJoinP2P }: LobbyDraftRoomsProps)
             </span>
             {room.draft_metadata && (
               <>
-                <span className="text-sm font-medium text-gray-200">
+                <span className="text-sm font-medium text-white/80">
                   {room.draft_metadata.setCode}
                 </span>
-                <span className="text-xs text-gray-400">
+                <span className="text-xs text-white/50">
                   {room.draft_metadata.draftKind}
                 </span>
               </>
             )}
             {room.max_players != null && (
-              <span className="text-xs text-gray-400">
+              <span className="text-xs text-white/50">
                 {room.current_players ?? 1}/{room.max_players}
               </span>
             )}
@@ -175,23 +175,23 @@ export function CreateServerDraftForm({ onClose }: CreateServerDraftFormProps) {
       <div className="flex flex-wrap gap-3">
         {/* Set code */}
         <label className="flex flex-col gap-1">
-          <span className="text-[0.62rem] uppercase tracking-wider text-gray-500">Set</span>
+          <span className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">Set</span>
           <input
             type="text"
             value={setCode}
             onChange={(e) => setSetCode(e.target.value)}
             maxLength={5}
-            className="w-20 rounded-lg bg-gray-800 px-2 py-1.5 font-mono text-sm text-white outline-none ring-1 ring-gray-700 focus:ring-cyan-500"
+            className="w-20 rounded-lg border border-white/10 bg-black/18 px-2 py-1.5 font-mono text-sm text-white outline-none focus:border-cyan-400/40"
           />
         </label>
 
         {/* Kind */}
         <label className="flex flex-col gap-1">
-          <span className="text-[0.62rem] uppercase tracking-wider text-gray-500">Kind</span>
+          <span className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">Kind</span>
           <select
             value={kind}
             onChange={(e) => setKind(e.target.value as "Premier" | "Traditional")}
-            className="rounded-lg bg-gray-800 px-2 py-1.5 text-sm text-white outline-none ring-1 ring-gray-700 focus:ring-cyan-500"
+            className="rounded-lg border border-white/10 bg-black/18 px-2 py-1.5 text-sm text-white outline-none focus:border-cyan-400/40"
           >
             <option value="Premier">Premier</option>
             <option value="Traditional">Traditional</option>
@@ -200,34 +200,34 @@ export function CreateServerDraftForm({ onClose }: CreateServerDraftFormProps) {
 
         {/* Pod size */}
         <label className="flex flex-col gap-1">
-          <span className="text-[0.62rem] uppercase tracking-wider text-gray-500">Pod size</span>
+          <span className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">Pod size</span>
           <input
             type="number"
             min={2}
             max={8}
             value={podSize}
             onChange={(e) => setPodSize(Number(e.target.value))}
-            className="w-16 rounded-lg bg-gray-800 px-2 py-1.5 text-sm text-white outline-none ring-1 ring-gray-700 focus:ring-cyan-500"
+            className="w-16 rounded-lg border border-white/10 bg-black/18 px-2 py-1.5 text-sm text-white outline-none focus:border-cyan-400/40"
           />
         </label>
 
         {/* Timer */}
         <label className="flex flex-col gap-1">
-          <span className="text-[0.62rem] uppercase tracking-wider text-gray-500">Timer (s)</span>
+          <span className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">Timer (s)</span>
           <input
             type="number"
             min={15}
             max={300}
             value={timerSeconds}
             onChange={(e) => setTimerSeconds(Number(e.target.value))}
-            className="w-20 rounded-lg bg-gray-800 px-2 py-1.5 text-sm text-white outline-none ring-1 ring-gray-700 focus:ring-cyan-500"
+            className="w-20 rounded-lg border border-white/10 bg-black/18 px-2 py-1.5 text-sm text-white outline-none focus:border-cyan-400/40"
           />
         </label>
       </div>
 
       {/* Password */}
       <label className="flex flex-col gap-1">
-        <span className="text-[0.62rem] uppercase tracking-wider text-gray-500">
+        <span className="text-[0.68rem] uppercase tracking-[0.18em] text-slate-500">
           Password (optional)
         </span>
         <input
@@ -235,7 +235,7 @@ export function CreateServerDraftForm({ onClose }: CreateServerDraftFormProps) {
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           placeholder="Leave blank for public"
-          className="rounded-lg bg-gray-800 px-2 py-1.5 text-sm text-white placeholder-gray-500 outline-none ring-1 ring-gray-700 focus:ring-cyan-500"
+          className="rounded-lg border border-white/10 bg-black/18 px-2 py-1.5 text-sm text-white placeholder-white/30 outline-none focus:border-cyan-400/40"
         />
       </label>
 

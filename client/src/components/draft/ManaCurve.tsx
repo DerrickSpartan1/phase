@@ -5,7 +5,6 @@ import { useDraftStore } from "../../stores/draftStore";
 // ── Types ───────────────────────────────────────────────────────────────
 
 interface ManaCurveProps {
-  /** Card names in the current deck selection. */
   cards: string[];
 }
 
@@ -16,7 +15,6 @@ const MAX_BAR_HEIGHT = 100;
 
 // ── Component ───────────────────────────────────────────────────────────
 
-/** Simple div-based mana curve bar chart. Per RESEARCH: no chart library needed. */
 const EMPTY_POOL: never[] = [];
 
 export function ManaCurve({ cards }: ManaCurveProps) {
@@ -47,25 +45,22 @@ export function ManaCurve({ cards }: ManaCurveProps) {
 
   return (
     <div className="flex flex-col gap-1">
-      <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-500">
+      <div className="text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
         Mana Curve
       </div>
       <div className="flex items-end gap-1.5" style={{ height: MAX_BAR_HEIGHT + 24 }}>
         {counts.map(({ label, count }) => (
-          <div key={label} className="flex flex-col items-center gap-0.5 flex-1">
-            {/* Count label above bar */}
-            <span className="text-[10px] text-gray-400 h-4 leading-4">
+          <div key={label} className="flex flex-1 flex-col items-center gap-0.5">
+            <span className="h-4 text-[10px] leading-4 text-white/50">
               {count > 0 ? count : ""}
             </span>
-            {/* Bar */}
             <div
-              className="w-full bg-blue-500/80 rounded-t transition-all duration-200"
+              className="w-full rounded-t bg-cyan-500/60 transition-all duration-200"
               style={{
                 height: count > 0 ? Math.max(4, (count / maxCount) * MAX_BAR_HEIGHT) : 0,
               }}
             />
-            {/* CMC label */}
-            <span className="text-[10px] text-gray-500">{label}</span>
+            <span className="text-[10px] text-white/30">{label}</span>
           </div>
         ))}
       </div>

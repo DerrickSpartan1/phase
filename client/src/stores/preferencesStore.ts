@@ -105,6 +105,7 @@ function buildDefaultPreferences(): PreferencesState {
     lastFormat: null,
     lastMatchType: "Bo1",
     lastPlayerCount: 2,
+    experimentalFeatures: false,
   };
 }
 
@@ -142,6 +143,7 @@ interface PreferencesState {
   lastFormat: GameFormat | null;
   lastMatchType: MatchType;
   lastPlayerCount: number;
+  experimentalFeatures: boolean;
 }
 
 interface PreferencesActions {
@@ -184,6 +186,7 @@ interface PreferencesActions {
   setLastFormat: (format: GameFormat) => void;
   setLastMatchType: (matchType: MatchType) => void;
   setLastPlayerCount: (count: number) => void;
+  setExperimentalFeatures: (enabled: boolean) => void;
 }
 
 type LegacyFlatAiPrefs = Partial<{
@@ -271,6 +274,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setLastFormat: (format) => set({ lastFormat: format }),
       setLastMatchType: (matchType) => set({ lastMatchType: matchType }),
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
+      setExperimentalFeatures: (enabled) => set({ experimentalFeatures: enabled }),
     }),
     {
       name: "phase-preferences",

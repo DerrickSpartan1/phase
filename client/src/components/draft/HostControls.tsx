@@ -50,8 +50,8 @@ export function HostControls() {
     return null;
 
   return (
-    <div className="fixed bottom-4 right-4 z-50 rounded-xl border border-white/10 bg-gray-900/95 backdrop-blur-sm p-3 flex flex-col gap-2 min-w-[180px]">
-      <div className="text-xs text-white/40 uppercase tracking-wider">
+    <div className="fixed bottom-4 right-4 z-50 flex min-w-[180px] flex-col gap-2 rounded-[18px] border border-white/10 bg-black/18 p-3 shadow-[0_18px_54px_rgba(0,0,0,0.22)] backdrop-blur-md">
+      <div className="text-[0.68rem] uppercase tracking-[0.18em] text-white/40">
         Host Controls
       </div>
 

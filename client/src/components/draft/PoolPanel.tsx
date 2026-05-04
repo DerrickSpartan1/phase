@@ -111,12 +111,12 @@ function groupPool(pool: DraftCardInstance[], mode: PoolSortMode): CardGroup[] {
 const RARITY_DOT: Record<string, string> = {
   mythic: "bg-amber-400",
   rare: "bg-yellow-300",
-  uncommon: "bg-gray-300",
-  common: "bg-gray-500",
+  uncommon: "bg-slate-300",
+  common: "bg-slate-500",
 };
 
 function rarityDotClass(rarity: string): string {
-  return RARITY_DOT[rarity.toLowerCase()] ?? "bg-gray-500";
+  return RARITY_DOT[rarity.toLowerCase()] ?? "bg-slate-500";
 }
 
 // ── Sort mode tabs ──────────────────────────────────────────────────────
@@ -133,7 +133,6 @@ interface PoolPanelProps {
   onCardHover?: (name: string | null) => void;
 }
 
-/** Collapsible side panel showing drafted pool. Per D-07: sortable by color/type/CMC. */
 export function PoolPanel({ onCardHover }: PoolPanelProps = {}) {
   const view = useDraftStore((s) => s.view);
   const poolSortMode = useDraftStore((s) => s.poolSortMode);
@@ -149,12 +148,12 @@ export function PoolPanel({ onCardHover }: PoolPanelProps = {}) {
   );
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex h-full flex-col">
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-gray-700">
+      <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
         <button
           onClick={togglePoolPanel}
-          className="flex items-center gap-2 text-sm text-gray-300 hover:text-white transition-colors"
+          className="flex items-center gap-2 text-sm text-white/60 transition-colors hover:text-white"
         >
           <span className={`transition-transform ${poolPanelOpen ? "rotate-0" : "-rotate-90"}`}>
             ▼
@@ -168,15 +167,15 @@ export function PoolPanel({ onCardHover }: PoolPanelProps = {}) {
       {poolPanelOpen && (
         <>
           {/* Sort tabs */}
-          <div className="flex gap-1 px-3 py-2 border-b border-gray-700/50">
+          <div className="flex gap-1 border-b border-white/8 px-3 py-2">
             {SORT_MODES.map(({ mode, label }) => (
               <button
                 key={mode}
                 onClick={() => setPoolSortMode(mode)}
-                className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                className={`rounded-[12px] px-2.5 py-1 text-xs font-medium transition-colors ${
                   poolSortMode === mode
-                    ? "bg-gray-600 text-white"
-                    : "text-gray-400 hover:text-gray-200 hover:bg-gray-700/50"
+                    ? "bg-white/10 text-white"
+                    : "text-white/40 hover:bg-white/5 hover:text-white/70"
                 }`}
               >
                 {label}
@@ -185,10 +184,10 @@ export function PoolPanel({ onCardHover }: PoolPanelProps = {}) {
           </div>
 
           {/* Card groups */}
-          <div className="flex-1 overflow-y-auto px-3 py-2 space-y-3">
+          <div className="flex-1 space-y-3 overflow-y-auto px-3 py-2">
             {groups.map((group) => (
               <div key={group.label}>
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-500 mb-1">
+                <div className="mb-1 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
                   {group.label} ({group.cards.length})
                 </div>
                 <div className="space-y-0.5">
@@ -197,11 +196,11 @@ export function PoolPanel({ onCardHover }: PoolPanelProps = {}) {
                       key={card.instance_id}
                       onMouseEnter={onCardHover ? () => onCardHover(card.name) : undefined}
                       onMouseLeave={onCardHover ? () => onCardHover(null) : undefined}
-                      className="flex items-center gap-2 px-2 py-1 rounded text-xs hover:bg-gray-700/50 transition-colors"
+                      className="flex items-center gap-2 rounded-[10px] px-2 py-1 text-xs transition-colors hover:bg-white/5"
                     >
-                      <span className={`w-2 h-2 rounded-full shrink-0 ${rarityDotClass(card.rarity)}`} />
-                      <span className="text-gray-200 truncate">{card.name}</span>
-                      <span className="text-gray-500 ml-auto shrink-0">{card.cmc}</span>
+                      <span className={`h-2 w-2 shrink-0 rounded-full ${rarityDotClass(card.rarity)}`} />
+                      <span className="truncate text-white/80">{card.name}</span>
+                      <span className="ml-auto shrink-0 text-white/30">{card.cmc}</span>
                     </div>
                   ))}
                 </div>
@@ -209,7 +208,7 @@ export function PoolPanel({ onCardHover }: PoolPanelProps = {}) {
             ))}
 
             {pool.length === 0 && (
-              <div className="text-gray-500 text-xs text-center py-4">
+              <div className="py-4 text-center text-xs text-white/30">
                 No cards drafted yet
               </div>
             )}
