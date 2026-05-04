@@ -271,15 +271,22 @@ pub(super) fn try_parse_put_counter<'a>(
     .unwrap_or(after_type);
 
     // If we entered via "a number of ..." without finding the "equal to" clause
-    // eagerly, it MUST appear here after the counter noun. Consume it and
-    // overwrite the placeholder count. Abort the dynamic path if the clause
-    // is missing — the phrase is malformed as a dynamic-count.
-    let (mut count_expr, after_counter_word) = if dynamic_pending {
-        let (after_clause, qty) = nom_quantity::parse_equal_to(after_counter_word).ok()?;
-        let after_clause = after_clause.strip_prefix(' ').unwrap_or(after_clause);
-        (qty, after_clause)
+    // eagerly, it may appear here after the counter noun OR after the target.
+    // Two Oracle orderings exist:
+    //   pre-target:  "a number of +1/+1 counters equal to its power on ..." (Gruff Triplets)
+    //   post-target: "a number of +1/+1 counters on ~ equal to that creature's power" (Vincent Valentine)
+    // Try consuming "equal to" here; if absent, defer to post-target resolution.
+    let (mut count_expr, after_counter_word, dynamic_deferred) = if dynamic_pending {
+        match nom_quantity::parse_equal_to(after_counter_word) {
+            Ok((after_clause, qty)) => {
+                // allow-noncombinator: whitespace trim after nom combinator result, not dispatch
+                let after_clause = after_clause.strip_prefix(' ').unwrap_or(after_clause);
+                (qty, after_clause, false)
+            }
+            Err(_) => (QuantityExpr::Fixed { value: 0 }, after_counter_word, true),
+        }
     } else {
-        (count_expr, after_counter_word)
+        (count_expr, after_counter_word, false)
     };
 
     // CR 122.1: The placement clause MUST begin with "on <target>" — MTG never
@@ -293,6 +300,15 @@ pub(super) fn try_parse_put_counter<'a>(
     })?;
     let (target, mut remainder, multi_target) =
         resolve_counter_placement_target(on_rest, lower, text, ctx);
+    // CR 122.1: Post-target "equal to" clause — when dynamic_deferred is set,
+    // the clause wasn't found before "on {target}" and must appear here.
+    if dynamic_deferred {
+        let trimmed = remainder.trim_start();
+        let (after_clause, qty) = nom_quantity::parse_equal_to(trimmed).ok()?;
+        count_expr = qty;
+        remainder = after_clause.trim_start();
+    }
+
     if let Some((for_each_count, after_suffix)) = parse_counter_for_each_suffix(remainder) {
         count_expr = replace_fixed_quantity(count_expr, for_each_count);
         remainder = after_suffix;
