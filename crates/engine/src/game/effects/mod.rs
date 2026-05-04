@@ -5865,10 +5865,91 @@ mod tests {
         // After: started with 2 in hand, discarded 1 (-1), drew 2 (+2) = 3 cards in hand.
         let hand_after = state.players[0].hand.len();
         assert_eq!(
-            hand_after,
-            3,
+            hand_after, 3,
             "After discarding 1 of 2 and drawing 2, hand should have 3 cards, got {}. \
              IfYouDo sub-ability likely did not fire.",
+            hand_after,
+        );
+    }
+
+    /// Abandon Attachments #81: stale cost_payment_failed_flag from a previous resolution
+    /// must not block the IfYouDo condition. The flag should be cleared when accepting
+    /// an optional effect.
+    #[test]
+    fn optional_discard_if_you_do_not_blocked_by_stale_flag() {
+        let mut state = GameState::new_two_player(42);
+
+        // Simulate a previous resolution that left the flag set
+        state.cost_payment_failed_flag = true;
+
+        // Card in hand to discard
+        create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Fodder".to_string(),
+            Zone::Hand,
+        );
+
+        // Cards in library to draw
+        create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(0),
+            "Draw A".to_string(),
+            Zone::Library,
+        );
+        create_object(
+            &mut state,
+            CardId(12),
+            PlayerId(0),
+            "Draw B".to_string(),
+            Zone::Library,
+        );
+
+        // Build: optional Discard 1 → sub: Draw 2 (IfYouDo)
+        let sub = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .condition(AbilityCondition::IfYouDo);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        )
+        .sub_ability(sub);
+        ability.optional = true;
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        // Accept → forced discard (1 card, count=1) → should draw 2
+        let _waiting = crate::game::engine_payment_choices::handle_optional_effect_choice(
+            &mut state,
+            true,
+            &mut events,
+        )
+        .unwrap();
+
+        let hand_after = state.players[0].hand.len();
+        assert_eq!(
+            hand_after, 2,
+            "Stale cost_payment_failed_flag should be cleared by handle_optional_effect_choice. \
+             Hand should have 2 cards (discard 1 + draw 2), got {}.",
             hand_after,
         );
     }
