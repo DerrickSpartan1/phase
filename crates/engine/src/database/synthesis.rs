@@ -1146,6 +1146,83 @@ pub fn synthesize_evoke(face: &mut CardFace) {
     face.triggers.push(trigger);
 }
 
+/// CR 702.175a: Offspring represents two abilities:
+///   1. "You may pay an additional [cost] as you cast this spell" — modeled as
+///      `AdditionalCost::Optional(AbilityCost::Mana { cost })`.
+///   2. "When this permanent enters, if its offspring cost was paid, create a
+///      token that's a copy of it, except it's 1/1." — modeled as an ETB trigger
+///      with `TriggerCondition::AdditionalCostPaid` and `Effect::CopyTokenOf`
+///      carrying `SetPower { value: 1 }` + `SetToughness { value: 1 }` modifications.
+///
+/// Build-for-the-class: every card with `Keyword::Offspring(cost)` flows through
+/// this single synthesizer. Idempotent across repeated invocations.
+pub fn synthesize_offspring(face: &mut CardFace) {
+    let Some(offspring_cost) = face.keywords.iter().find_map(|k| match k {
+        Keyword::Offspring(cost) => Some(cost.clone()),
+        _ => None,
+    }) else {
+        return;
+    };
+
+    // CR 702.175a ability 1: Optional additional cost.
+    // Only set if no additional_cost was already parsed (e.g., a card with both
+    // kicker and offspring would need the kicker cost to take precedence since
+    // AdditionalCost is a single slot — but no such card exists in print).
+    if face.additional_cost.is_none() {
+        face.additional_cost = Some(AdditionalCost::Optional(AbilityCost::Mana {
+            cost: offspring_cost,
+        }));
+    }
+
+    // CR 702.175a ability 2: ETB trigger creating a 1/1 copy token.
+    // Idempotency: skip if an AdditionalCostPaid + CopyTokenOf ETB trigger already exists.
+    let already_has_trigger = face.triggers.iter().any(|t| {
+        matches!(t.mode, TriggerMode::ChangesZone)
+            && t.destination == Some(Zone::Battlefield)
+            && matches!(t.valid_card, Some(TargetFilter::SelfRef))
+            && matches!(
+                t.condition,
+                Some(TriggerCondition::AdditionalCostPaid { .. })
+            )
+            && matches!(
+                t.execute.as_deref().map(|a| &*a.effect),
+                Some(Effect::CopyTokenOf { .. })
+            )
+    });
+    if already_has_trigger {
+        return;
+    }
+
+    let copy_effect = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CopyTokenOf {
+            target: TargetFilter::SelfRef,
+            enters_attacking: false,
+            tapped: false,
+            count: QuantityExpr::Fixed { value: 1 },
+            extra_keywords: vec![],
+            additional_modifications: vec![
+                ContinuousModification::SetPower { value: 1 },
+                ContinuousModification::SetToughness { value: 1 },
+            ],
+        },
+    );
+    let trigger = TriggerDefinition::new(TriggerMode::ChangesZone)
+        .destination(Zone::Battlefield)
+        .valid_card(TargetFilter::SelfRef)
+        .condition(TriggerCondition::AdditionalCostPaid {
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
+        })
+        .execute(copy_effect)
+        .description(
+            "CR 702.175a: When this permanent enters, if its offspring cost was paid, create a token that's a copy of it, except it's 1/1."
+                .to_string(),
+        );
+    face.triggers.push(trigger);
+}
+
 /// CR 702.62a: Suspend N—{cost} synthesizes three abilities for every face
 /// carrying `Keyword::Suspend { count, cost }`:
 ///
@@ -1449,6 +1526,8 @@ pub fn synthesize_all(face: &mut CardFace) {
     synthesize_entwine(face);
     synthesize_madness_intrinsics(face);
     synthesize_evoke(face);
+    // CR 702.175a: Offspring — optional additional cost + ETB 1/1 copy trigger.
+    synthesize_offspring(face);
     // CR 702.62a: Suspend — hand-activated alt-cost + upkeep counter-removal +
     // last-counter free-cast. Runs after Evoke to keep alt-cost synthesizers
     // grouped; idempotent so order against Cycling/Madness is irrelevant.
@@ -3836,5 +3915,117 @@ mod loyalty_sorcery_speed_tests {
         assert!(def
             .activation_restrictions
             .contains(&ActivationRestriction::AsSorcery));
+    }
+}
+
+#[cfg(test)]
+mod offspring_synthesis_tests {
+    use super::*;
+    use crate::types::mana::ManaCostShard;
+
+    /// CR 702.175a: Offspring synthesizes an optional additional cost and an
+    /// ETB trigger that creates a 1/1 copy token.
+    #[test]
+    fn synthesize_offspring_sets_additional_cost_and_trigger() {
+        let offspring_cost = ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::Red],
+        };
+        let mut face = CardFace {
+            keywords: vec![Keyword::Offspring(offspring_cost.clone())],
+            ..CardFace::default()
+        };
+
+        synthesize_offspring(&mut face);
+
+        // Part 1: additional_cost is Optional(Mana { offspring_cost })
+        match face.additional_cost.as_ref().expect("additional_cost set") {
+            AdditionalCost::Optional(AbilityCost::Mana { cost }) => {
+                assert_eq!(*cost, offspring_cost);
+            }
+            other => panic!("expected Optional(Mana), got {other:?}"),
+        }
+
+        // Part 2: ETB trigger with AdditionalCostPaid condition + CopyTokenOf effect
+        let trigger = face
+            .triggers
+            .iter()
+            .find(|t| {
+                matches!(t.mode, TriggerMode::ChangesZone)
+                    && t.destination == Some(Zone::Battlefield)
+                    && matches!(
+                        t.condition,
+                        Some(TriggerCondition::AdditionalCostPaid { .. })
+                    )
+            })
+            .expect("offspring ETB trigger");
+        let effect = &trigger.execute.as_ref().expect("execute body").effect;
+        match &**effect {
+            Effect::CopyTokenOf {
+                target,
+                additional_modifications,
+                ..
+            } => {
+                assert!(matches!(target, TargetFilter::SelfRef));
+                assert_eq!(additional_modifications.len(), 2);
+                assert!(matches!(
+                    additional_modifications[0],
+                    ContinuousModification::SetPower { value: 1 }
+                ));
+                assert!(matches!(
+                    additional_modifications[1],
+                    ContinuousModification::SetToughness { value: 1 }
+                ));
+            }
+            other => panic!("expected CopyTokenOf, got {other:?}"),
+        }
+    }
+
+    /// Idempotency: running synthesize_offspring twice produces the same result.
+    #[test]
+    fn synthesize_offspring_is_idempotent() {
+        let mut face = CardFace {
+            keywords: vec![Keyword::Offspring(ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            })],
+            ..CardFace::default()
+        };
+
+        synthesize_offspring(&mut face);
+        let first_cost = face.additional_cost.clone();
+        let first_trigger_count = face.triggers.len();
+        synthesize_offspring(&mut face);
+        assert_eq!(face.additional_cost, first_cost);
+        assert_eq!(face.triggers.len(), first_trigger_count);
+    }
+
+    /// Offspring skips additional_cost when one is already set (e.g., kicker).
+    #[test]
+    fn synthesize_offspring_skips_additional_cost_when_already_set() {
+        let existing = AdditionalCost::Kicker {
+            costs: vec![AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 1,
+                    shards: vec![],
+                },
+            }],
+            repeatable: false,
+        };
+        let mut face = CardFace {
+            keywords: vec![Keyword::Offspring(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::White],
+            })],
+            additional_cost: Some(existing.clone()),
+            ..CardFace::default()
+        };
+
+        synthesize_offspring(&mut face);
+
+        // additional_cost unchanged (kicker takes precedence)
+        assert_eq!(face.additional_cost, Some(existing));
+        // Trigger is still synthesized
+        assert_eq!(face.triggers.len(), 1);
     }
 }

@@ -57,6 +57,11 @@ pub(crate) fn handle_decide_additional_cost(
         AdditionalCost::Optional(cost) => {
             if pay {
                 ability.context.additional_cost_paid = true;
+                // CR 702.175a: Offspring (and similar optional costs) synthesize
+                // ETB triggers conditioned on TriggerCondition::AdditionalCostPaid,
+                // which evaluates obj.kickers_paid.len(). Push First so the
+                // permanent carries evidence the trigger evaluator can read.
+                ability.context.kickers_paid.push(KickerVariant::First);
                 Some(cost.clone())
             } else {
                 None
