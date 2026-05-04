@@ -2373,6 +2373,13 @@ fn build_triggered_ability(
 /// and TriggeringSource auto-resolve from event context at resolution time
 /// (via `state.current_trigger_event`), so they do not require player selection.
 pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&TargetFilter> {
+    // CR 701.21a: Sacrifice does not target — the controller chooses permanents
+    // at resolution time via EffectZoneChoice. Returning a filter here would
+    // cause collect_target_slots to create target selection slots, routing
+    // resolution through the targeted path which lacks controller scoping.
+    if matches!(effect, Effect::Sacrifice { .. }) {
+        return None;
+    }
     // CR 115.1: ChangeZone from private zones (hand/library) uses resolution-time
     // selection, not stack-push-time targeting.
     if let Effect::ChangeZone { origin, target, .. } = effect {
@@ -5392,6 +5399,20 @@ pub mod tests {
         assert!(
             extract_target_filter_from_effect(&effect).is_some(),
             "ChangeZone from battlefield should still extract target for stack-time targeting"
+        );
+    }
+
+    /// CR 701.21a: Sacrifice does not target — the sacrifice effect handler
+    /// uses EffectZoneChoice for controller-scoped selection at resolution time.
+    #[test]
+    fn extract_target_skips_sacrifice() {
+        let effect = Effect::Sacrifice {
+            target: TargetFilter::Typed(TypedFilter::creature()),
+            count: QuantityExpr::Fixed { value: 1 },
+        };
+        assert!(
+            extract_target_filter_from_effect(&effect).is_none(),
+            "Sacrifice should not extract a target filter (resolution-time selection)"
         );
     }
 

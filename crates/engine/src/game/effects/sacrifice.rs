@@ -214,6 +214,14 @@ pub fn resolve(
             continue;
         }
 
+        // CR 701.21a: Defense-in-depth — a player can only sacrifice permanents
+        // they control. The primary fix is that Sacrifice no longer creates
+        // target slots (see extract_target_filter_from_effect), but if this
+        // path is ever reached, enforce controller ownership.
+        if obj.controller != ability.controller {
+            continue;
+        }
+
         let player_id = obj.controller;
 
         match sacrifice::sacrifice_permanent(state, obj_id, player_id, events) {
@@ -490,6 +498,36 @@ mod tests {
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),
         }
+    }
+
+    /// CR 701.21a: Even if the targeted path is reached (defense-in-depth),
+    /// sacrifice must skip permanents not controlled by the ability controller.
+    #[test]
+    fn targeted_path_skips_opponent_permanents() {
+        let mut state = GameState::new_two_player(42);
+        // Create a permanent controlled by the opponent
+        let opp_obj = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        // Simulate the targeted path with an opponent's object as target
+        let ability = make_sacrifice_ability(opp_obj);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // The opponent's permanent must NOT be sacrificed
+        assert!(
+            state.battlefield.contains(&opp_obj),
+            "opponent's permanent should remain on battlefield"
+        );
+        assert!(
+            !state.players[1].graveyard.contains(&opp_obj),
+            "opponent's permanent should not be in graveyard"
+        );
     }
 
     #[test]
