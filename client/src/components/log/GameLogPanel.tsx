@@ -17,6 +17,7 @@ const LOG_PANEL_WIDTH_PX = 320;
 export function GameLogPanel() {
   const logHistory = useGameStore((s) => s.logHistory ?? EMPTY_LOG);
   const logDefaultState = usePreferencesStore((s) => s.logDefaultState);
+  const isGameOver = useGameStore((s) => s.gameState?.waiting_for?.type === "GameOver");
   const isOpen = useUiStore((s) => s.logPanelOpen);
   const setLogPanelOpen = useUiStore((s) => s.setLogPanelOpen);
 
@@ -34,6 +35,14 @@ export function GameLogPanel() {
     if (logDefaultState === "open") setLogPanelOpen(true);
   }, [logDefaultState, setLogPanelOpen]);
 
+  // Auto-open log in full verbosity when game ends
+  useEffect(() => {
+    if (isGameOver) {
+      setLogPanelOpen(true);
+      setVerbosity("full");
+    }
+  }, [isGameOver, setLogPanelOpen]);
+
   useEffect(() => {
     const el = scrollRef.current;
     if (el) {
@@ -41,14 +50,14 @@ export function GameLogPanel() {
     }
   }, [filteredEntries.length]);
 
-  // Close panel when clicking outside
+  // Close panel when clicking outside (disabled during game over so log stays visible)
   const handleOutsideClick = useCallback(
     (e: MouseEvent) => {
-      if (isOpen && panelRef.current && !panelRef.current.contains(e.target as Node)) {
+      if (isOpen && !isGameOver && panelRef.current && !panelRef.current.contains(e.target as Node)) {
         setLogPanelOpen(false);
       }
     },
-    [isOpen, setLogPanelOpen],
+    [isOpen, isGameOver, setLogPanelOpen],
   );
 
   useEffect(() => {
@@ -71,7 +80,7 @@ export function GameLogPanel() {
         {isOpen && (
           <motion.div
             ref={panelRef}
-            className="fixed bottom-0 right-0 top-0 z-40 flex w-80 flex-col border-l border-gray-700 bg-gray-900/95 shadow-2xl"
+            className="fixed bottom-0 right-0 top-0 z-[60] flex w-80 flex-col border-l border-gray-700 bg-gray-900/95 shadow-2xl"
             initial={{ x: "100%" }}
             animate={{ x: 0 }}
             exit={{ x: "100%" }}
