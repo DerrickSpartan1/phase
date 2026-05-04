@@ -207,10 +207,11 @@ function PhaseDot({ phase }: { phase: Phase }) {
   );
 }
 
-/** Upkeep, Draw, Main1 — placed to the left of the player avatar */
+/** Upkeep, Draw, Main1 — placed to the left of the player avatar.
+ *  Hidden on mobile (<lg) where the dots are too small to tap and crowd the HUD. */
 export function PhaseIndicatorLeft() {
   return (
-    <div className="flex items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/58 px-1 py-1 backdrop-blur-xl lg:px-1.5">
+    <div className="hidden items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/58 px-1 py-1 backdrop-blur-xl lg:flex lg:px-1.5">
       {LEFT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}
@@ -218,10 +219,11 @@ export function PhaseIndicatorLeft() {
   );
 }
 
-/** Main2, End — placed to the right of the player avatar */
+/** Main2, End — placed to the right of the player avatar.
+ *  Hidden on mobile (<lg) where the dots are too small to tap and crowd the HUD. */
 export function PhaseIndicatorRight() {
   return (
-    <div className="flex items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/58 px-1 py-1 backdrop-blur-xl lg:px-1.5">
+    <div className="hidden items-center gap-0.5 rounded-full border border-white/10 bg-slate-950/58 px-1 py-1 backdrop-blur-xl lg:flex lg:px-1.5">
       {RIGHT_PHASES.map((phase) => (
         <PhaseDot key={phase} phase={phase} />
       ))}

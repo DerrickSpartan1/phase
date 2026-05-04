@@ -342,7 +342,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
       onMouseLeave={hasIncoming ? scheduleClosePopover : undefined}
       onFocus={hasIncoming ? openPopover : undefined}
       onBlur={hasIncoming ? scheduleClosePopover : undefined}
-      className={`relative flex items-center gap-3 rounded-[18px] border px-3 py-2 backdrop-blur-xl transition-all duration-200 ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
+      className={`relative flex items-center gap-1.5 rounded-xl border px-2 py-1.5 backdrop-blur-xl transition-all duration-200 lg:gap-3 lg:rounded-[18px] lg:px-3 lg:py-2 ${borderClass} ${isEliminated || isPhasedOut ? "opacity-40 grayscale" : ""}`}
     >
       {isTheirTurn && !shouldReduceMotion && (
         <motion.div
@@ -369,10 +369,10 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
         </>
       )}
       <div className="flex min-w-[4.5rem] flex-col items-start leading-none">
-        <span className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.18em] text-white/48">
+        <span className="relative mb-1 flex w-full items-center justify-center text-[10px] font-semibold uppercase tracking-[0.18em] text-white/48">
           <span
             aria-hidden
-            className="h-1.5 w-1.5 shrink-0 rounded-full ring-1 ring-black/30"
+            className="absolute left-0 h-1.5 w-1.5 shrink-0 rounded-full ring-1 ring-black/30"
             style={{ backgroundColor: seatColor }}
           />
           {label}

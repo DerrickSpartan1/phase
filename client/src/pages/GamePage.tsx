@@ -10,6 +10,7 @@ import { useLocation, useNavigate, useParams, useSearchParams } from "react-rout
 import { AnimatePresence, motion } from "framer-motion";
 
 import type { DeckCardCount, GameFormat, MatchConfig } from "../adapter/types";
+import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { BetweenGamesSideboardModal } from "../components/multiplayer/BetweenGamesSideboardModal.tsx";
 import { audioManager } from "../audio/AudioManager.ts";
 import { useAudioContext } from "../audio/useAudioContext.ts";
@@ -612,6 +613,7 @@ function GamePageContent({
   const waitingFor = useGameStore((s) => s.waitingFor);
   const lobbyProgress = useGameStore((s) => s.lobbyProgress);
   const dispatch = useGameDispatch();
+  const isMobile = useIsMobile();
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const objects = useGameStore((s) => s.gameState?.objects);
   const seatOrder = useGameStore((s) => s.gameState?.seat_order);
@@ -802,10 +804,9 @@ function GamePageContent({
   const gamePageStyle = {
     "--game-top-overlay-offset": `${topOverlayOffsetPx}px`,
   } as CSSProperties;
-  const playerZoneRailStyle: ZoneRailStyle = {
-    "--card-w": "clamp(60px, 7vw, 95px)",
-    "--card-h": "clamp(84px, 9.8vw, 133px)",
-  };
+  const playerZoneRailStyle: ZoneRailStyle = isMobile
+    ? { "--card-w": "36px", "--card-h": "50px" }
+    : { "--card-w": "clamp(60px, 7vw, 95px)", "--card-h": "clamp(84px, 9.8vw, 133px)" };
 
   return (
     <div
@@ -862,7 +863,7 @@ function GamePageContent({
         <div className="relative z-20 w-full shrink-0" data-debug-label="Opp Top">
           <OpponentHand showCards={showAiHand} />
           {/* Opponent HUD — bottom-center of opp container */}
-          <div className="pointer-events-none absolute bottom-0 left-0 right-0 z-20 flex justify-center" data-debug-label="Opp HUD">
+          <div className="pointer-events-none absolute -bottom-5 left-0 right-0 z-20 flex justify-center lg:bottom-0" data-debug-label="Opp HUD">
             <div className="pointer-events-auto">
               <OpponentHud
                 opponentName={isOnlineMode ? opponentDisplayName : undefined}
@@ -919,7 +920,7 @@ function GamePageContent({
              Zones are anchored to top-0 so they stay in the visible area. */}
         <div className="relative shrink-0 pt-4 mb-[calc(var(--card-h)*-0.25)] sm:mb-[calc(var(--card-h)*-0.25)] md:mb-[calc(var(--card-h)*-0.35)] [@media(max-height:500px)]:!mb-0 [@media(max-height:500px)]:!pt-1" data-debug-label="Player Bottom">
           {/* Player HUD — top-center of player bottom container */}
-          <div className="pointer-events-none absolute top-0 left-0 right-0 z-20 flex justify-center" data-debug-label="Player HUD">
+          <div className="pointer-events-none absolute top-3 left-0 right-0 z-20 flex justify-center lg:top-0" data-debug-label="Player HUD">
             <div className="pointer-events-auto">
               <PlayerHud />
             </div>

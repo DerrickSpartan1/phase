@@ -113,7 +113,7 @@ export function LifeTotal({ playerId, size = "default", hideLabel = false }: Lif
         initial={{ scale: 1.3 }}
         animate={{ scale: 1 }}
         transition={{ duration: 0.2 }}
-        className={`rounded-md px-1.5 py-0.5 font-bold tabular-nums transition-colors duration-400 ${size === "lg" ? "text-2xl lg:text-[2rem]" : "text-lg lg:text-[1.4rem]"} ${colorClass} ${flashBg}`}
+        className={`rounded-md px-1 py-0.5 font-bold tabular-nums transition-colors duration-400 lg:px-1.5 ${size === "lg" ? "text-lg lg:text-2xl" : "text-base lg:text-lg"} ${colorClass} ${flashBg}`}
       >
         <motion.span>{displayed}</motion.span>
       </motion.span>

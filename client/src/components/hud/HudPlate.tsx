@@ -71,7 +71,7 @@ export function HudPlate({
     <Component
       type={onClick ? "button" : undefined}
       onClick={onClick}
-      className={`group relative inline-flex max-w-full items-center gap-2 rounded-[18px] border px-2.5 py-1.5 backdrop-blur-xl transition-all duration-200 ${TONE_CLASSES[tone]}${activeRing} ${
+      className={`group relative inline-flex max-w-full items-center gap-1 rounded-xl border px-1.5 py-1 backdrop-blur-xl transition-all duration-200 lg:gap-2 lg:rounded-[18px] lg:px-2.5 lg:py-1.5 ${TONE_CLASSES[tone]}${activeRing} ${
         onClick ? "cursor-pointer hover:-translate-y-0.5 hover:border-white/30" : ""
       }`}
     >
@@ -102,19 +102,19 @@ export function HudPlate({
         </>
       )}
       <div className="absolute inset-[1px] rounded-[16px] bg-gradient-to-b from-white/8 via-transparent to-black/10" />
-      <div className="relative min-w-0">
-        <div className="mb-0.5 flex items-center justify-center gap-1.5">
-          {seatColor && (
-            <span
-              aria-hidden
-              className="h-1.5 w-1.5 shrink-0 rounded-full ring-1 ring-black/30"
-              style={{ backgroundColor: seatColor }}
-            />
-          )}
-          <span className="text-[9px] font-semibold uppercase tracking-[0.18em] text-white/68">
-            {label}
-          </span>
-        </div>
+      <div className="pointer-events-none absolute inset-x-0 top-1 flex items-center justify-center gap-1 lg:top-1.5">
+        {seatColor && (
+          <span
+            aria-hidden
+            className="h-1.5 w-1.5 shrink-0 rounded-full ring-1 ring-black/30"
+            style={{ backgroundColor: seatColor }}
+          />
+        )}
+        <span className="truncate text-[9px] font-semibold uppercase tracking-[0.18em] text-white/68">
+          {label}
+        </span>
+      </div>
+      <div className="relative mt-3 min-w-0">
         <div className="flex items-center justify-center gap-2">
           {children}
         </div>
