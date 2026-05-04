@@ -189,24 +189,35 @@ if [[ "$FAIL_ON_ENGINE" -eq 1 && "$engine_count" -gt 0 ]]; then
 fi
 
 # Diagnostic count ratchet (D-09): any increase in any category = failure.
-diag_fail=0
-while IFS='=' read -r cat count; do
-    base_count=$(jq -r ".diagnostics[\"$cat\"] // 0" "$BASELINE" 2>/dev/null)
-    if [[ "$count" -gt "$base_count" ]]; then
-        echo "DIAGNOSTIC REGRESSION: $cat increased from $base_count to $count" >&2
-        diag_fail=1
-    elif [[ "$count" -lt "$base_count" ]]; then
-        echo "DIAGNOSTIC IMPROVEMENT: $cat decreased from $base_count to $count"
-    fi
-done < <(jq -r '.diagnostics // {} | to_entries[] | "\(.key)=\(.value)"' "$CURRENT" 2>/dev/null)
+# Skip entirely when the baseline has no diagnostics field (first measurement).
+baseline_has_diag=0
+if jq -e '.diagnostics | keys | length > 0' "$BASELINE" > /dev/null 2>&1; then
+    baseline_has_diag=1
+fi
 
-# Also check for new categories not in baseline
-while IFS='=' read -r cat count; do
-    if ! jq -e ".diagnostics[\"$cat\"]" "$BASELINE" > /dev/null 2>&1; then
-        echo "DIAGNOSTIC REGRESSION: new category $cat with count $count (not in baseline)" >&2
-        diag_fail=1
-    fi
-done < <(jq -r '.diagnostics // {} | to_entries[] | "\(.key)=\(.value)"' "$CURRENT" 2>/dev/null)
+diag_fail=0
+if [[ "$baseline_has_diag" -eq 1 ]]; then
+    while IFS='=' read -r cat count; do
+        base_count=$(jq -r ".diagnostics[\"$cat\"] // 0" "$BASELINE" 2>/dev/null)
+        if [[ "$count" -gt "$base_count" ]]; then
+            echo "DIAGNOSTIC REGRESSION: $cat increased from $base_count to $count" >&2
+            diag_fail=1
+        elif [[ "$count" -lt "$base_count" ]]; then
+            echo "DIAGNOSTIC IMPROVEMENT: $cat decreased from $base_count to $count"
+        fi
+    done < <(jq -r '.diagnostics // {} | to_entries[] | "\(.key)=\(.value)"' "$CURRENT" 2>/dev/null)
+
+    # Also check for new categories not in baseline
+    while IFS='=' read -r cat count; do
+        if ! jq -e ".diagnostics[\"$cat\"]" "$BASELINE" > /dev/null 2>&1; then
+            echo "DIAGNOSTIC REGRESSION: new category $cat with count $count (not in baseline)" >&2
+            diag_fail=1
+        fi
+    done < <(jq -r '.diagnostics // {} | to_entries[] | "\(.key)=\(.value)"' "$CURRENT" 2>/dev/null)
+else
+    echo "INFO: baseline has no diagnostics field — seeding ratchet with current counts." >&2
+    jq -r '.diagnostics // {} | to_entries[] | "  \(.key): \(.value)"' "$CURRENT" 2>/dev/null >&2
+fi
 
 if [[ "$diag_fail" -eq 1 ]]; then
     echo "FAIL: one or more diagnostic categories regressed." >&2
