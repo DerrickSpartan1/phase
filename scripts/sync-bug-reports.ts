@@ -14,6 +14,7 @@ import {
 import { extractReports } from "./lib/extract.ts";
 import { triageReports } from "./lib/triage.ts";
 import { renderDashboard, renderTriageDashboard } from "./lib/render.ts";
+import { crossReference, type CrossrefItem } from "./lib/crossref.ts";
 
 // ---------------------------------------------------------------------------
 // JSONL helpers
@@ -430,15 +431,143 @@ async function cmdRender(): Promise<void> {
   console.log(`Dashboard written to ${DASHBOARD_PATH}`);
 }
 
+const LLM_TRIAGE_PATH = "triage/llm-triage-items.jsonl";
+const CROSSREF_PATH = "triage/coverage-crossref.jsonl";
+const CROSSREF_SUMMARY_PATH = "triage/coverage-crossref-summary.md";
+
+async function cmdCrossref(): Promise<void> {
+  if (!existsSync(LLM_TRIAGE_PATH)) {
+    console.error(`No LLM triage items at ${LLM_TRIAGE_PATH}. Run LLM triage first.`);
+    process.exit(1);
+  }
+
+  console.log("Cross-referencing LLM triage against card-data.json parser coverage...");
+  const items = await crossReference(LLM_TRIAGE_PATH, "client/public/card-data.json");
+
+  await writeJsonl(CROSSREF_PATH, items);
+
+  const counts = { likely_fixed: 0, still_broken: 0, unknown_card: 0, no_card: 0 };
+  for (const item of items) counts[item.overall_status]++;
+
+  console.log(`Cross-reference complete.`);
+  console.log(`  Total items: ${items.length}`);
+  console.log(`  likely_fixed: ${counts.likely_fixed}`);
+  console.log(`  still_broken: ${counts.still_broken}`);
+  console.log(`  unknown_card: ${counts.unknown_card}`);
+  console.log(`  no_card: ${counts.no_card}`);
+  console.log(`  Written to ${CROSSREF_PATH}`);
+
+  const summaryLines: string[] = [];
+  summaryLines.push(`# Coverage Cross-Reference Summary`);
+  summaryLines.push(`_Generated: ${new Date().toISOString()}_\n`);
+  summaryLines.push(`| Status | Count |`);
+  summaryLines.push(`|--------|-------|`);
+  for (const [status, count] of Object.entries(counts)) {
+    summaryLines.push(`| ${status} | ${count} |`);
+  }
+  summaryLines.push(``);
+
+  const broken = items.filter((i) => i.overall_status === "still_broken");
+  summaryLines.push(`## Still Broken (${broken.length} items)\n`);
+  if (broken.length > 0) {
+    const byPriority = new Map<string, CrossrefItem[]>();
+    for (const item of broken) {
+      if (!byPriority.has(item.priority)) byPriority.set(item.priority, []);
+      byPriority.get(item.priority)!.push(item);
+    }
+    for (const [prio, pItems] of [...byPriority.entries()].sort()) {
+      summaryLines.push(`### ${(prio ?? "unknown").toUpperCase()}\n`);
+      summaryLines.push(`| Thread | Cards | Summary |`);
+      summaryLines.push(`|--------|-------|---------|`);
+      for (const item of pItems) {
+        summaryLines.push(`| ${item.thread_name} | ${item.cards.join(", ")} | ${item.summary.slice(0, 80)} |`);
+      }
+      summaryLines.push(``);
+    }
+  }
+
+  const fixed = items.filter((i) => i.overall_status === "likely_fixed");
+  summaryLines.push(`## Likely Fixed (${fixed.length} items)\n`);
+  const fixedByPrio = new Map<string, number>();
+  for (const item of fixed) {
+    fixedByPrio.set(item.priority, (fixedByPrio.get(item.priority) ?? 0) + 1);
+  }
+  for (const [prio, count] of [...fixedByPrio.entries()].sort()) {
+    summaryLines.push(`- **${prio}**: ${count}`);
+  }
+  summaryLines.push(``);
+
+  await Bun.write(CROSSREF_SUMMARY_PATH, summaryLines.join("\n"));
+  console.log(`  Summary written to ${CROSSREF_SUMMARY_PATH}`);
+}
+
+async function cmdVerify(): Promise<void> {
+  const crossref = readJsonl<CrossrefItem>(CROSSREF_PATH);
+  if (crossref.length === 0) {
+    console.error(`No crossref data at ${CROSSREF_PATH}. Run 'crossref' first.`);
+    process.exit(1);
+  }
+
+  console.log("Checking open GitHub issues against current coverage...");
+
+  const ghResult = Bun.spawnSync(
+    ["gh", "issue", "list", "--repo", "phase-rs/phase", "--state", "open", "--limit", "200", "--json", "number,title,labels"],
+  );
+  if (ghResult.exitCode !== 0) {
+    console.error("Failed to fetch GitHub issues. Is `gh` authenticated?");
+    process.exit(1);
+  }
+
+  const ghIssues = JSON.parse(ghResult.stdout.toString()) as Array<{
+    number: number;
+    title: string;
+    labels: Array<{ name: string }>;
+  }>;
+
+  const parserIssues = ghIssues.filter((i) =>
+    i.labels.some((l) => l.name === "area:parser") &&
+    i.labels.some((l) => l.name === "status:confirmed"),
+  );
+
+  const cardData = (await Bun.file("client/public/card-data.json").json()) as Record<string, unknown>;
+
+  console.log(`\n  Open parser issues: ${parserIssues.length}`);
+  console.log(`  Checking each against current card-data.json...\n`);
+
+  let fixedCount = 0;
+  for (const issue of parserIssues) {
+    const matchingCrossref = crossref.filter((c) =>
+      c.summary.length > 10 &&
+      issue.title.toLowerCase().includes(c.cards[0]?.toLowerCase() ?? "___nomatch___"),
+    );
+
+    if (matchingCrossref.length > 0 && matchingCrossref.every((c) => c.overall_status === "likely_fixed")) {
+      console.log(`  ✓ #${issue.number} ${issue.title.slice(0, 60)} → likely fixed`);
+      fixedCount++;
+    }
+  }
+
+  if (fixedCount === 0) {
+    console.log("  No newly-fixed parser issues detected.");
+  } else {
+    console.log(`\n  ${fixedCount} issue(s) have fully-parsed cards. Transition to needs-runtime-verify:`);
+    console.log(`    gh issue edit <N> --repo phase-rs/phase --remove-label "status:confirmed" --add-label "status:needs-runtime-verify"`);
+    console.log(`  After runtime verification, close with:`);
+    console.log(`    gh issue close <N> --repo phase-rs/phase --comment "Verified fixed in gameplay."`);
+  }
+}
+
 function printHelp(): void {
   console.log(`Usage: bun scripts/sync-bug-reports.ts <command>
 
 Commands:
-  fetch    Fetch Discord messages → triage/raw/discord-messages.jsonl
-  extract  Extract report items from messages → triage/report-items.jsonl
-  triage   Classify report items → triage/triage-items.jsonl
-  render   Generate dashboard markdown → triage/dashboard.md (+ triage-dashboard.md if triaged)
-  --help   Show this help message
+  fetch     Fetch Discord messages → triage/raw/discord-messages.jsonl
+  extract   Extract report items from messages → triage/report-items.jsonl
+  triage    Classify report items → triage/triage-items.jsonl
+  crossref  Cross-reference LLM triage against parser coverage → triage/coverage-crossref.jsonl
+  verify    Check open GitHub issues against current coverage for newly-fixed bugs
+  render    Generate dashboard markdown → triage/dashboard.md (+ triage-dashboard.md if triaged)
+  --help    Show this help message
 `);
 }
 
@@ -457,6 +586,12 @@ switch (command) {
     break;
   case "triage":
     await cmdTriage();
+    break;
+  case "crossref":
+    await cmdCrossref();
+    break;
+  case "verify":
+    await cmdVerify();
     break;
   case "render":
     await cmdRender();

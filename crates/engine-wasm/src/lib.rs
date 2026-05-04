@@ -855,6 +855,168 @@ pub fn select_action_from_scores(
     }
 }
 
+/// Batch-resolve the stack by auto-passing priority for the requesting player
+/// and delegating to the AI for opponent decisions. Runs entirely inside WASM
+/// with no JS round-trips between resolutions — collapses the O(N) priority
+/// pass cycle into a single call.
+///
+/// `requester` is the human player seat (whose "Resolve All" click initiated
+/// this). `ai_seats_json` is a JSON array of `{ playerId, difficulty }` for
+/// each AI opponent.
+///
+/// Returns a `BatchResolveResult` with all accumulated events, the final
+/// `WaitingFor`, and a count of items resolved.
+///
+/// Stop conditions (all CR-compliant):
+/// - Stack empties
+/// - Stack grows beyond baseline (new triggers appeared — pause for human)
+/// - An interactive `WaitingFor` appears (target selection, scry, etc.)
+/// - An AI player chooses a non-pass action (response spell/ability)
+/// - Game ends
+/// - Safety cap reached (prevents infinite loops from cascading triggers)
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchResolveResult {
+    events: Vec<engine::types::events::GameEvent>,
+    waiting_for: engine::types::game_state::WaitingFor,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    log_entries: Vec<engine::types::log::GameLogEntry>,
+    items_resolved: u32,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiSeatConfig {
+    player_id: u8,
+    difficulty: String,
+}
+
+#[wasm_bindgen]
+pub fn resolve_all(
+    requester: u8,
+    ai_seats_json: &str,
+    max_resolutions: u32,
+) -> Result<JsValue, JsValue> {
+    let ai_seats: Vec<AiSeatConfig> = serde_json::from_str(ai_seats_json)
+        .map_err(|e| JsValue::from_str(&format!("Failed to deserialize AI seats: {e}")))?;
+
+    let requester = PlayerId(requester);
+    let resolution_cap = if max_resolutions == 0 {
+        u32::MAX
+    } else {
+        max_resolutions
+    };
+
+    with_state_mut(|state| {
+        let initial_stack_len = state.stack.len();
+        let mut all_events = Vec::new();
+        let mut all_log_entries = Vec::new();
+        let mut items_resolved: u32 = 0;
+        // Safety cap: 2 passes per player per stack item + headroom for new triggers
+        let max_iterations = initial_stack_len
+            .saturating_mul(state.players.len())
+            .saturating_mul(4)
+            .clamp(100, 20_000);
+
+        for _ in 0..max_iterations {
+            let wf = &state.waiting_for;
+
+            // Stop: game over
+            if matches!(wf, engine::types::game_state::WaitingFor::GameOver { .. }) {
+                break;
+            }
+
+            // Stop: non-priority interactive WaitingFor
+            let Some(acting) = wf.acting_player() else {
+                break;
+            };
+            if !matches!(wf, engine::types::game_state::WaitingFor::Priority { .. }) {
+                break;
+            }
+
+            // Stop: stack emptied
+            if state.stack.is_empty() {
+                break;
+            }
+
+            // Stop: stack grew beyond initial size (new triggers appeared)
+            if state.stack.len() > initial_stack_len {
+                break;
+            }
+
+            // Determine the action for the current priority holder
+            let action = if acting == requester {
+                // Human requested resolve-all — auto-pass
+                GameAction::PassPriority
+            } else if let Some(seat) = ai_seats.iter().find(|s| PlayerId(s.player_id) == acting) {
+                // AI player — ask the AI what to do
+                let ai_difficulty = match seat.difficulty.as_str() {
+                    "VeryEasy" => AiDifficulty::VeryEasy,
+                    "Easy" => AiDifficulty::Easy,
+                    "Medium" => AiDifficulty::Medium,
+                    "Hard" => AiDifficulty::Hard,
+                    "VeryHard" => AiDifficulty::VeryHard,
+                    _ => AiDifficulty::Medium,
+                };
+                let config = create_config_for_players(
+                    ai_difficulty,
+                    Platform::Wasm,
+                    state.players.len() as u8,
+                );
+                let mut rng = rand::rng();
+                match choose_action(state, acting, &config, &mut rng) {
+                    Some(action) => {
+                        if !matches!(action, GameAction::PassPriority) {
+                            // AI wants to respond — apply and stop
+                            if let Ok(result) = apply(state, acting, action) {
+                                all_events.extend(result.events);
+                                all_log_entries.extend(result.log_entries);
+                            }
+                            break;
+                        }
+                        GameAction::PassPriority
+                    }
+                    None => GameAction::PassPriority,
+                }
+            } else {
+                // Unknown seat — shouldn't happen, but pass to avoid deadlock
+                GameAction::PassPriority
+            };
+
+            // Track resolutions: a resolution happens when all players pass
+            // and the stack shrinks
+            let stack_before = state.stack.len();
+
+            match apply(state, acting, action) {
+                Ok(result) => {
+                    all_events.extend(result.events);
+                    all_log_entries.extend(result.log_entries);
+
+                    if state.stack.len() < stack_before {
+                        items_resolved += (stack_before - state.stack.len()) as u32;
+                        if items_resolved >= resolution_cap {
+                            break;
+                        }
+                    }
+
+                    // Stop: stack grew (new triggers from resolution)
+                    if state.stack.len() > initial_stack_len {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        Ok(to_js(&BatchResolveResult {
+            events: all_events,
+            waiting_for: state.waiting_for.clone(),
+            log_entries: all_log_entries,
+            items_resolved,
+        }))
+    })?
+}
+
 /// Apply a seat mutation to a seat state, using the TLS card database for deck
 /// resolution. Both arguments are JSON strings; returns `{ state, delta }` as
 /// a JS object on success, or a JS error string on failure.

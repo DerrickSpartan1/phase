@@ -332,6 +332,7 @@ fn rewrite_bound_x_in_ability_cost(cost: &mut AbilityCost, binding: &QuantityExp
         | AbilityCost::Reveal { .. }
         | AbilityCost::Waterbend { .. }
         | AbilityCost::NinjutsuFamily { .. }
+        | AbilityCost::EffectCost { .. }
         | AbilityCost::Unimplemented { .. } => 0,
     }
 }
