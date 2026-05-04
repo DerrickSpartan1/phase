@@ -2233,17 +2233,13 @@ fn score_combination(
 
 /// Compute the maximum legal value of X the caster can choose for a pending cast.
 ///
-/// Upper bound = (mana currently in pool) + (mana producible from untapped,
-/// free-to-tap sources under the caster's control) − (fixed portion of cost).
+/// Upper bound = (mana currently in pool) + (all activatable mana sources
+/// under the caster's control) − (fixed portion of cost).
 ///
-/// Free-to-tap = mana abilities whose activation imposes no irreversible cost
-/// on the player: i.e., `ManaSourceOption` entries classified as
-/// `ManaSourcePenalty::None` (`penalty.is_free()`). Costed mana abilities
-/// (e.g. "1, T: Add {C}") are excluded for v1 — they cascade and would
-/// require a search to bound precisely. Treasure tokens are likewise
-/// excluded because they sacrifice the source; pain lands and pay-life
-/// sources are excluded because activating them for extra X damages or
-/// drains the caster.
+/// All activatable mana sources are counted regardless of penalty — Treasure
+/// tokens (sacrifice), pain lands (life payment), and ordinary tap sources
+/// all contribute. Since this is only an upper bound for UI/AI enumeration,
+/// overcounting is safe; `ManaPayment` validates actual affordability later.
 ///
 /// Each untapped producer counts once, regardless of how many color options it
 /// offers (a shock land is still one tap → one mana).
@@ -2279,20 +2275,16 @@ pub fn max_x_value(state: &GameState, player: PlayerId, cost: &ManaCost) -> u32 
         .find(|p| p.id == player)
         .map_or(0, |p| p.mana_pool.total() as u32);
 
-    let free_producers: u32 = state
+    let all_producers: u32 = state
         .battlefield
         .iter()
-        .filter(|&&id| {
-            mana_sources::activatable_mana_options(state, id, player)
-                .iter()
-                .any(|opt| opt.penalty.is_free())
-        })
+        .filter(|&&id| !mana_sources::activatable_mana_options(state, id, player).is_empty())
         .count() as u32;
 
     // CR 107.1b: Each `ManaCostShard::X` in the cost contributes `value` generic,
     // so for `{X}{X}` each point of X costs 2 mana. Dividing by `x_count` yields
     // the largest X the caster can actually afford.
-    let remaining = (pool + free_producers).saturating_sub(fixed_portion);
+    let remaining = (pool + all_producers).saturating_sub(fixed_portion);
     remaining / x_count
 }
 
@@ -5117,5 +5109,104 @@ mod tests {
             }
             other => panic!("expected ExileForCost, got {other:?}"),
         }
+    }
+
+    // ── max_x_value tests ──────────────────────────────────────────────
+
+    #[test]
+    fn max_x_value_counts_treasure_tokens() {
+        // CR 107.1b + CR 601.2f: X is chosen before mana payment.
+        // Treasure tokens (sacrifice-for-mana) must be counted so the player
+        // can choose an X that includes them as potential mana sources.
+        use crate::types::ability::{ManaContribution, ManaProduction, TargetFilter};
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+
+        // Create 3 basic lands (free mana sources) with tap-for-green abilities.
+        for i in 0..3 {
+            let land = create_object(
+                &mut state,
+                CardId(100 + i),
+                player,
+                "Forest".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::Mana {
+                        produced: ManaProduction::Fixed {
+                            colors: vec![ManaColor::Green],
+                            contribution: ManaContribution::Base,
+                        },
+                        restrictions: vec![],
+                        grants: vec![],
+                        expiry: None,
+                        target: None,
+                    },
+                )
+                .cost(AbilityCost::Tap),
+            );
+        }
+
+        // Create 2 Treasure tokens (sacrifice-for-mana sources).
+        for i in 0..2 {
+            let treasure = create_object(
+                &mut state,
+                CardId(200 + i),
+                player,
+                "Treasure".to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&treasure).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Treasure".to_string());
+
+            let ability = AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::AnyOneColor {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        color_options: vec![
+                            ManaColor::White,
+                            ManaColor::Blue,
+                            ManaColor::Black,
+                            ManaColor::Red,
+                            ManaColor::Green,
+                        ],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Composite {
+                costs: vec![
+                    AbilityCost::Tap,
+                    AbilityCost::Sacrifice {
+                        target: TargetFilter::SelfRef,
+                        count: 1,
+                    },
+                ],
+            });
+            let obj = state.objects.get_mut(&treasure).unwrap();
+            Arc::make_mut(&mut obj.abilities).push(ability);
+        }
+
+        // Cost: {X}{R} — 1 fixed colored shard, rest is X.
+        let cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::X, ManaCostShard::Red],
+            generic: 0,
+        };
+
+        // 3 lands + 2 Treasures = 5 sources, minus 1 for the {R} = max X of 4.
+        let max = max_x_value(&state, player, &cost);
+        assert_eq!(max, 4, "max X should count Treasure tokens as mana sources");
     }
 }
