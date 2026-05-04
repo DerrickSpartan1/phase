@@ -80,7 +80,7 @@ function buildDefaultPreferences(): PreferencesState {
   return {
     cardSize: "medium",
     hudLayout: "inline",
-    followActiveOpponent: false,
+    followActiveOpponent: true,
     logDefaultState: "closed",
     boardBackground: "auto-wubrg",
     customBackgroundUrl: "",

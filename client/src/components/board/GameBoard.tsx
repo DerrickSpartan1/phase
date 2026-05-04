@@ -42,7 +42,7 @@ export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
     return getOpponentIds(gameState, myId);
   }, [gameState, myId]);
 
-  const focusedId = focusedOpponent ?? (opponents.length === 1 ? opponents[0] : null);
+  const focusedId = focusedOpponent ?? opponents[0] ?? null;
   const playerBattlefieldView = useMemo(
     () => buildPlayerBattlefieldView(gameState, myId),
     [gameState, myId],
@@ -209,10 +209,10 @@ export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
           />
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">
-            {focusedOpponent != null && opponents.includes(focusedOpponent) ? (
+            {focusedId != null ? (
               <PlayerArea
                 battlefieldView={focusedBattlefieldView ?? undefined}
-                playerId={focusedOpponent}
+                playerId={focusedId}
                 mode="focused"
                 hud={oppHud}
               />
