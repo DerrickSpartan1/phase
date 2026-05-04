@@ -31,6 +31,14 @@ set -euo pipefail
 BASE="${1:-$(git merge-base origin/main HEAD 2>/dev/null || echo HEAD~1)}"
 SCOPE='crates/engine/src/parser'
 
+# When invoked as a pre-commit hook (GIT_INDEX_FILE is set, or no explicit base
+# was provided and BASE == HEAD), only check staged changes to avoid flagging
+# another agent's unstaged work in the working tree.
+DIFF_MODE=""
+if [ -n "${GIT_INDEX_FILE:-}" ] || [ "$BASE" = "$(git rev-parse HEAD 2>/dev/null)" ]; then
+    DIFF_MODE="--cached"
+fi
+
 # (A) String-method dispatch. The "..." suffix on `.contains` / `.starts_with`
 # / `.ends_with` / `.find` / `.trim_*_matches` matches only string-literal
 # arguments — `.contains(&item)` (Vec/slice op) and `.trim_end_matches('.')`
@@ -86,7 +94,7 @@ filter_allow_noncombinator() {
     printf '%s' "${added%$'\n'}"
 }
 
-files=$(git diff --name-only "$BASE" -- "$SCOPE" ':(exclude)**/*.md' 2>/dev/null || true)
+files=$(git diff $DIFF_MODE --name-only "$BASE" -- "$SCOPE" ':(exclude)**/*.md' 2>/dev/null || true)
 if [ -z "$files" ]; then
     exit 0
 fi
@@ -95,7 +103,7 @@ while IFS= read -r file; do
     [ -f "$file" ] || continue
 
     # Pull all added lines once (without line-number prefix) for reuse.
-    diff_added=$(git diff --unified=0 "$BASE" -- "$file" | grep -E '^\+[^+]' || true)
+    diff_added=$(git diff $DIFF_MODE --unified=0 "$BASE" -- "$file" | grep -E '^\+[^+]' || true)
     if [ -z "$diff_added" ]; then
         continue
     fi
