@@ -48,6 +48,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ChooseDungeon { .. }
             | WaitingFor::ChooseDungeonRoom { .. }
             | WaitingFor::ChooseLegend { .. }
+            | WaitingFor::CommanderZoneChoice { .. }
             | WaitingFor::BattleProtectorChoice { .. }
             | WaitingFor::CategoryChoice { .. }
             | WaitingFor::PayAmountChoice { .. }
@@ -1235,6 +1236,23 @@ pub(super) fn handle_resolution_choice(
                 .collect();
             for id in to_remove {
                 zones::move_to_zone(state, id, Zone::Graveyard, events);
+            }
+            ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
+                player: state.active_player,
+            })
+        }
+        // CR 903.9a: Owner decides whether to return their commander to the command zone.
+        // Accept = move to command zone; Decline = leave in current zone (marked as
+        // declined so SBA doesn't re-ask).
+        // Returning to Priority re-runs SBA, which will find any remaining commanders.
+        (
+            WaitingFor::CommanderZoneChoice { commander_id, .. },
+            GameAction::DecideOptionalEffect { accept },
+        ) => {
+            if accept {
+                zones::move_to_zone(state, commander_id, Zone::Command, events);
+            } else {
+                state.commander_declined_zone_return.insert(commander_id);
             }
             ResolutionChoiceOutcome::WaitingFor(WaitingFor::Priority {
                 player: state.active_player,

@@ -1123,6 +1123,7 @@ impl GameRunner {
             WaitingFor::MiracleReveal { .. } => "MiracleReveal",
             WaitingFor::MiracleCastOffer { .. } => "MiracleCastOffer",
             WaitingFor::MadnessCastOffer { .. } => "MadnessCastOffer",
+            WaitingFor::CommanderZoneChoice { .. } => "CommanderZoneChoice",
         }
     }
 

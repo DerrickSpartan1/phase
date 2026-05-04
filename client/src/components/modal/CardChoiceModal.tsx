@@ -32,6 +32,7 @@ type ExileForCost = Extract<WaitingFor, { type: "ExileForCost" }>;
 type CollectEvidenceChoice = Extract<WaitingFor, { type: "CollectEvidenceChoice" }>;
 type HarmonizeTapChoice = Extract<WaitingFor, { type: "HarmonizeTapChoice" }>;
 type ChooseLegend = Extract<WaitingFor, { type: "ChooseLegend" }>;
+type CommanderZoneChoice = Extract<WaitingFor, { type: "CommanderZoneChoice" }>;
 type ManifestDreadChoice = Extract<WaitingFor, { type: "ManifestDreadChoice" }>;
 type CrewVehicle = Extract<WaitingFor, { type: "CrewVehicle" }>;
 type StationTarget = Extract<WaitingFor, { type: "StationTarget" }>;
@@ -159,6 +160,9 @@ export function CardChoiceModal() {
     case "ChooseLegend":
       if (!canActForWaitingState) return null;
       return <LegendChoiceModal data={waitingFor.data} />;
+    case "CommanderZoneChoice":
+      if (!canActForWaitingState) return null;
+      return <CommanderZoneChoiceModal data={waitingFor.data} />;
     case "ConniveDiscard":
       if (!canActForWaitingState) return null;
       return <DiscardModal data={waitingFor.data} title={`Connive \u2014 Discard ${waitingFor.data.count === 1 ? "a card" : `${waitingFor.data.count} cards`}`} />;
@@ -1854,6 +1858,52 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
           );
         })}
       </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+// ── Commander Zone Choice Modal (CR 903.9a) ───────────────────────────────
+
+function CommanderZoneChoiceModal({ data }: { data: CommanderZoneChoice["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+
+  if (!objects) return null;
+
+  const obj = objects[data.commander_id];
+  const zoneName = data.current_zone.charAt(0).toUpperCase() + data.current_zone.slice(1);
+
+  return (
+    <ChoiceOverlay
+      title="Commander Zone"
+      subtitle={`${obj?.name ?? "Commander"} was put into the ${zoneName}. Return to the Command Zone?`}
+    >
+      <div className="flex items-center gap-6">
+        <motion.div
+          className="relative rounded-lg"
+          initial={{ opacity: 0, y: 60, scale: 0.85 }}
+          animate={{ opacity: 0.85, y: 0, scale: 1 }}
+          transition={{ delay: 0.1, duration: 0.35 }}
+          {...hoverProps(data.commander_id)}
+        >
+          <CardImage
+            cardName={obj?.name ?? "Unknown"}
+            size="normal"
+            className={CHOICE_CARD_IMAGE_CLASS}
+          />
+        </motion.div>
+        <div className="flex flex-col gap-3">
+          <ConfirmButton
+            label="Command Zone"
+            onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: true } })}
+          />
+          <ConfirmButton
+            label={`Leave in ${zoneName}`}
+            onClick={() => dispatch({ type: "DecideOptionalEffect", data: { accept: false } })}
+          />
+        </div>
+      </div>
     </ChoiceOverlay>
   );
 }

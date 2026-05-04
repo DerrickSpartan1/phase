@@ -190,14 +190,9 @@ pub fn move_to_zone(
     to: Zone,
     events: &mut Vec<GameEvent>,
 ) {
-    // CR 903.9a: Commander may be redirected to the command zone instead of graveyard/exile.
-    let to = if state.format_config.command_zone
-        && super::commander::should_redirect_to_command_zone(state, object_id, to)
-    {
-        Zone::Command
-    } else {
-        to
-    };
+    // CR 903.9a: A fresh zone change resets the "declined zone return" flag
+    // so the owner gets a new choice opportunity if the commander moves again.
+    state.commander_declined_zone_return.remove(&object_id);
 
     // CR 614.1d: Check CantEnterBattlefieldFrom statics before allowing the move.
     // e.g., Grafdigger's Cage: "Creature cards in graveyards and libraries can't enter the battlefield."
@@ -391,6 +386,9 @@ pub fn move_to_library_at_index(
     index: Option<usize>,
     events: &mut Vec<GameEvent>,
 ) {
+    // CR 903.9a: A fresh zone change resets the "declined zone return" flag.
+    state.commander_declined_zone_return.remove(&object_id);
+
     let obj = state.objects.get(&object_id).expect("object exists");
     let from = obj.zone;
     let owner = obj.owner;

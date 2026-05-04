@@ -1683,6 +1683,16 @@ pub enum WaitingFor {
         legend_name: String,
         candidates: Vec<ObjectId>,
     },
+    /// CR 903.9a: A commander in a graveyard or exile (put there since the last
+    /// SBA check) may be returned to the command zone by its owner. The player
+    /// chooses accept (move to command zone) or decline (leave in current zone).
+    /// Reuses `GameAction::DecideOptionalEffect`.
+    CommanderZoneChoice {
+        player: PlayerId,
+        commander_id: ObjectId,
+        /// The zone the commander is currently in (Graveyard, Exile, Hand, or Library).
+        current_zone: Zone,
+    },
     /// CR 310.10 + CR 704.5w + CR 704.5x: A battle that isn't being attacked has no
     /// protector, an illegal protector, or (for Sieges) a protector equal to its
     /// controller. The battle's controller (`player`) chooses a legal protector from
@@ -1965,7 +1975,8 @@ impl WaitingFor {
             | WaitingFor::DiscardChoice { player, .. }
             | WaitingFor::MiracleReveal { player, .. }
             | WaitingFor::MiracleCastOffer { player, .. }
-            | WaitingFor::MadnessCastOffer { player, .. } => Some(*player),
+            | WaitingFor::MadnessCastOffer { player, .. }
+            | WaitingFor::CommanderZoneChoice { player, .. } => Some(*player),
             WaitingFor::GameOver { .. } => None,
         }
     }
@@ -2451,6 +2462,12 @@ pub struct GameState {
     // Commander support
     #[serde(default)]
     pub commander_cast_count: HashMap<ObjectId, u32>,
+
+    /// CR 903.9a: Commanders whose owner declined the zone-return choice this
+    /// SBA cycle. Cleared when the commander changes zones again (giving the
+    /// owner a fresh choice opportunity).
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
+    pub commander_declined_zone_return: HashSet<ObjectId>,
 
     /// CR 500.7: Extra turns granted by effects, stored as a LIFO stack.
     /// Most recently created extra turn is taken first (pop from end).
@@ -3086,6 +3103,7 @@ impl GameState {
             initiative: None,
             cancelled_casts: Vec::new(),
             pending_activations: Vec::new(),
+            commander_declined_zone_return: HashSet::new(),
         }
     }
 
@@ -3174,6 +3192,7 @@ impl PartialEq for GameState {
             && self.next_tracked_set_id == other.next_tracked_set_id
             && self.chain_tracked_set_id == other.chain_tracked_set_id
             && self.commander_cast_count == other.commander_cast_count
+            && self.commander_declined_zone_return == other.commander_declined_zone_return
             && self.extra_turns == other.extra_turns
             && self.turns_to_skip == other.turns_to_skip
             && self.scheduled_turn_controls == other.scheduled_turn_controls

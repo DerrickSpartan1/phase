@@ -89,6 +89,14 @@ pub fn check_state_based_actions(state: &mut GameState, events: &mut Vec<GameEve
             return;
         }
 
+        // CR 903.9a: A commander in graveyard or exile (since last SBA check) may
+        // be put into the command zone by its owner. This pauses the SBA loop to
+        // ask the player, similar to the legend rule.
+        check_commander_zone_return(state);
+        if matches!(state.waiting_for, WaitingFor::CommanderZoneChoice { .. }) {
+            return;
+        }
+
         // CR 704.5f: A creature with toughness 0 or less is put into its owner's graveyard.
         check_zero_toughness(state, events, &mut any_performed);
 
@@ -335,6 +343,28 @@ fn check_poison_counters(
         events.push(GameEvent::PlayerLost { player_id: loser });
         super::elimination::eliminate_player(state, loser, events);
         *any_performed = true;
+    }
+}
+
+/// CR 903.9a: If a commander is in a graveyard or exile (and was put there
+/// since the last SBA check), its owner may put it into the command zone.
+/// CR 903.9b: Hand and library are also covered (see `commander_eligible_for_zone_return`).
+///
+/// Pauses the SBA loop by setting `WaitingFor::CommanderZoneChoice` so the
+/// player can accept (move to command zone) or decline (leave in place).
+fn check_commander_zone_return(state: &mut GameState) {
+    if !state.format_config.command_zone {
+        return;
+    }
+
+    if let Some((commander_id, owner, current_zone)) =
+        super::commander::commander_eligible_for_zone_return(state)
+    {
+        state.waiting_for = WaitingFor::CommanderZoneChoice {
+            player: owner,
+            commander_id,
+            current_zone,
+        };
     }
 }
 
