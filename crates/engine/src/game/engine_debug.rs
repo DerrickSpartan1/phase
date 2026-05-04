@@ -65,6 +65,7 @@ pub fn apply_debug_action(
 
             zones::remove_from_zone(state, object_id, zone, owner);
             state.objects.remove(&object_id);
+            state.layers_dirty = true;
         }
 
         DebugAction::DrawCards { player_id, count } => {
@@ -198,6 +199,7 @@ pub fn apply_debug_action(
             validate_object(state, object_id)?;
             validate_object(state, target_id)?;
             attach_to(state, object_id, target_id);
+            state.layers_dirty = true;
         }
 
         DebugAction::Detach { object_id } => {
@@ -211,6 +213,7 @@ pub fn apply_debug_action(
             if let Some(obj) = state.objects.get_mut(&object_id) {
                 obj.attached_to = None;
             }
+            state.layers_dirty = true;
         }
 
         DebugAction::SetLife { player_id, life } => {
@@ -243,6 +246,7 @@ pub fn apply_debug_action(
             state.active_player = active_player;
             state.priority_player = active_player;
             state.combat = None;
+            state.stack.clear();
             state.waiting_for = WaitingFor::Priority {
                 player: active_player,
             };

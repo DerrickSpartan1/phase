@@ -562,12 +562,18 @@ fn handle_debug_create_card(
                 "Engine error: Debug actions require debug_mode to be enabled",
             );
         }
+        if !state.players.iter().any(|p| p.id == owner) {
+            return JsValue::from_str("Engine error: Debug: invalid owner player id");
+        }
         let card_id = engine::types::identifiers::CardId(state.next_object_id);
         let obj_id =
             engine::game::zones::create_object(state, card_id, owner, face.name.clone(), zone);
         let obj = state.objects.get_mut(&obj_id).expect("just created");
         engine::game::printed_cards::apply_card_face_to_object(obj, &face);
         state.layers_dirty = true;
+        engine::game::public_state::bump_state_revision(state);
+        engine::game::public_state::mark_public_state_all_dirty(state);
+        engine::game::public_state::finalize_public_state(state);
         let result = engine::types::game_state::ActionResult {
             events: vec![],
             waiting_for: state.waiting_for.clone(),
