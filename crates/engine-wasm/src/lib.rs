@@ -424,6 +424,7 @@ pub fn initialize_game(
     let game_format = format_config.format;
 
     let mut state = GameState::new(format_config, count, seed);
+    state.debug_mode = true;
     state.match_config = if !match_config_js.is_null() && !match_config_js.is_undefined() {
         serde_wasm_bindgen::from_value::<MatchConfig>(match_config_js)
             .unwrap_or_else(|_| MatchConfig::default())

@@ -11,6 +11,7 @@ import {
 } from "../../services/gameStateExport";
 import { useGameStore } from "../../stores/gameStore";
 import { useUiStore } from "../../stores/uiStore";
+import { DebugActions } from "./DebugActions";
 
 const SCROLL_THRESHOLD = 40; // px from bottom to count as "at bottom"
 
@@ -405,6 +406,13 @@ export function DebugPanel() {
             </button>
           </div>
         </section>
+
+        {/* Debug Actions — only when debug_mode is enabled */}
+        {gameState?.debug_mode && (
+          <section className="border-b border-gray-800 px-3 py-2">
+            <DebugActions />
+          </section>
+        )}
 
         {/* Console */}
         <section className="flex min-h-0 flex-1 flex-col px-3 py-2">

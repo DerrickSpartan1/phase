@@ -1,0 +1,134 @@
+import { useState } from "react";
+
+import type { DebugAction, ManaType, PlayerId } from "../../adapter/types";
+import {
+  AccordionItem,
+  FieldRow,
+  ManaTypeSelect,
+  NumberInput,
+  PlayerSelect,
+  SubmitButton,
+  useAccordion,
+} from "./debugFields";
+
+interface Props {
+  onDispatch: (action: DebugAction) => void;
+}
+
+function SetLifeForm({ onDispatch }: Props) {
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [life, setLife] = useState(20);
+
+  return (
+    <>
+      <FieldRow label="Player">
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label="Life">
+        <NumberInput value={life} onChange={setLife} />
+      </FieldRow>
+      <SubmitButton onClick={() => onDispatch({ type: "SetLife", data: { player_id: playerId, life } })}>
+        Set Life
+      </SubmitButton>
+    </>
+  );
+}
+
+function DrawCardsForm({ onDispatch }: Props) {
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [count, setCount] = useState(1);
+
+  return (
+    <>
+      <FieldRow label="Player">
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label="Count">
+        <NumberInput value={count} onChange={setCount} min={1} />
+      </FieldRow>
+      <SubmitButton onClick={() => onDispatch({ type: "DrawCards", data: { player_id: playerId, count } })}>
+        Draw Cards
+      </SubmitButton>
+    </>
+  );
+}
+
+function MillForm({ onDispatch }: Props) {
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [count, setCount] = useState(1);
+
+  return (
+    <>
+      <FieldRow label="Player">
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label="Count">
+        <NumberInput value={count} onChange={setCount} min={1} />
+      </FieldRow>
+      <SubmitButton onClick={() => onDispatch({ type: "Mill", data: { player_id: playerId, count } })}>
+        Mill
+      </SubmitButton>
+    </>
+  );
+}
+
+function ShuffleLibraryForm({ onDispatch }: Props) {
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+
+  return (
+    <>
+      <FieldRow label="Player">
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <SubmitButton onClick={() => onDispatch({ type: "ShuffleLibrary", data: { player_id: playerId } })}>
+        Shuffle Library
+      </SubmitButton>
+    </>
+  );
+}
+
+function AddManaForm({ onDispatch }: Props) {
+  const [playerId, setPlayerId] = useState<PlayerId>(0);
+  const [mana, setMana] = useState<ManaType[]>([]);
+
+  return (
+    <>
+      <FieldRow label="Player">
+        <PlayerSelect value={playerId} onChange={setPlayerId} />
+      </FieldRow>
+      <FieldRow label="Mana">
+        <ManaTypeSelect value={mana} onChange={setMana} />
+      </FieldRow>
+      <SubmitButton
+        onClick={() => onDispatch({ type: "AddMana", data: { player_id: playerId, mana } })}
+        disabled={mana.length === 0}
+      >
+        Add Mana
+      </SubmitButton>
+    </>
+  );
+}
+
+export function DebugPlayerActions({ onDispatch }: Props) {
+  const { expanded, toggle } = useAccordion();
+
+  return (
+    <div>
+      <AccordionItem label="Set Life" expanded={expanded === "life"} onToggle={() => toggle("life")}>
+        <SetLifeForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label="Draw Cards" expanded={expanded === "draw"} onToggle={() => toggle("draw")}>
+        <DrawCardsForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label="Mill" expanded={expanded === "mill"} onToggle={() => toggle("mill")}>
+        <MillForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label="Shuffle Library" expanded={expanded === "shuffle"} onToggle={() => toggle("shuffle")}>
+        <ShuffleLibraryForm onDispatch={onDispatch} />
+      </AccordionItem>
+      <AccordionItem label="Add Mana" expanded={expanded === "mana"} onToggle={() => toggle("mana")}>
+        <AddManaForm onDispatch={onDispatch} />
+      </AccordionItem>
+    </div>
+  );
+}
