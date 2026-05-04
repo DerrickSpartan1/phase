@@ -5,7 +5,7 @@ import type { ParsedDeck } from "../../services/deckParser";
 import { deduplicateEntries, resolveCommander } from "../../services/deckParser";
 import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
 import { STORAGE_KEY_PREFIX, loadSavedDeck, stampDeckMeta } from "../../constants/storage";
-import { BASIC_LAND_NAMES } from "../../constants/game";
+import { BASIC_LAND_NAMES, hasUnlimitedCopies } from "../../constants/game";
 import { useDeckCardData } from "../../hooks/useDeckCardData";
 import { CardSearch } from "./CardSearch";
 import type { CardSearchFilters } from "./CardSearch";
@@ -123,7 +123,7 @@ export function DeckBuilder({
 
     setDeck((prev) => {
       const existing = prev.main.find((e) => e.name === card.name);
-      if (existing && existing.count >= maxCopies && !BASIC_LAND_NAMES.has(card.name)) {
+      if (existing && existing.count >= maxCopies && !BASIC_LAND_NAMES.has(card.name) && !hasUnlimitedCopies(card.oracle_text)) {
         return prev;
       }
 
@@ -186,7 +186,8 @@ export function DeckBuilder({
           to === "main" &&
           targetEntry &&
           targetEntry.count >= maxCopies &&
-          !BASIC_LAND_NAMES.has(name)
+          !BASIC_LAND_NAMES.has(name) &&
+          !hasUnlimitedCopies(cardDataCache.get(name)?.oracle_text)
         ) {
           return prev;
         }
@@ -211,7 +212,7 @@ export function DeckBuilder({
         };
       });
     },
-    [maxCopies],
+    [maxCopies, cardDataCache],
   );
 
   const applyDeckToEditor = useCallback((next: ParsedDeck) => {
@@ -324,7 +325,7 @@ export function DeckBuilder({
     if (totalCards > 0 && totalCards !== 100) {
       warnings.push(`Deck has ${totalCards} cards (need exactly 100)`);
     }
-    for (const name of getSingletonViolations(deck.main)) {
+    for (const name of getSingletonViolations(deck.main, cardDataCache)) {
       warnings.push(`${name}: multiple copies (singleton format)`);
     }
     for (const name of getColorIdentityViolations(deck.main, commanders, cardDataCache)) {
@@ -336,7 +337,7 @@ export function DeckBuilder({
       warnings.push(`Deck has ${mainTotal} cards (minimum 60)`);
     }
     for (const entry of deck.main) {
-      if (entry.count > 4 && !BASIC_LAND_NAMES.has(entry.name)) {
+      if (entry.count > 4 && !BASIC_LAND_NAMES.has(entry.name) && !hasUnlimitedCopies(cardDataCache.get(entry.name)?.oracle_text)) {
         warnings.push(`${entry.name}: ${entry.count} copies (max 4)`);
       }
     }

@@ -36,7 +36,7 @@ export function CommanderPanel({
 }: CommanderPanelProps) {
   const identity = getCombinedColorIdentity(commanders, cardDataCache);
   const colorViolations = getColorIdentityViolations(deck, commanders, cardDataCache);
-  const singletonViolations = getSingletonViolations(deck);
+  const singletonViolations = getSingletonViolations(deck, cardDataCache);
   const totalCards = deck.reduce((sum, e) => sum + e.count, 0) + commanders.length;
 
   // Find cards in deck that are eligible to be set as commander
