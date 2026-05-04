@@ -13,9 +13,9 @@ import { CommandZone } from "../zone/CommandZone.tsx";
  *  On compact-height (landscape phones), lands shrink hard so creatures
  *  (which players actually interact with — attack, block, P/T, abilities)
  *  get vertical breathing room. */
-const LAND_BASE_SCALE = 0.68;
+const LAND_BASE_SCALE = 0.82;
 const LAND_BASE_SCALE_COMPACT = 0.42;
-const OTHER_BASE_SCALE = 0.82;
+const OTHER_BASE_SCALE = 0.92;
 const OTHER_BASE_SCALE_COMPACT = 0.42;
 /** Minimum scale floor */
 const MIN_ZONE_SCALE = 0.35;

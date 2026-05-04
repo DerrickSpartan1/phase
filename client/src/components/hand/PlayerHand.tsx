@@ -182,8 +182,8 @@ export function PlayerHand() {
   return (
     <div
       ref={handContainerRef}
-      className={`relative flex shrink-0 items-end justify-center overflow-visible px-4 py-1 ${
-        isCompactHeight ? "min-h-[40px]" : "min-h-[calc(var(--card-h)*1.4)]"
+      className={`relative flex items-end justify-center overflow-visible px-4 py-1 ${
+        isCompactHeight ? "min-h-[40px]" : "min-h-[calc(var(--card-h)*0.7)]"
       }`}
       style={{ perspective: "800px", zIndex: draggingCardId != null ? 30 : undefined }}
       onClick={handleContainerClick}
@@ -192,29 +192,6 @@ export function PlayerHand() {
         setSelectedCardId(null);
       }}
     >
-      {handObjects.length > 0 && (
-        <button
-          aria-label={`View full hand (${handObjects.length} cards)`}
-          className="absolute right-2 top-1 z-20 flex items-center gap-1.5 rounded-full border border-white/20 bg-slate-900/70 px-3 py-1 text-xs font-semibold text-white shadow-lg shadow-black/40 ring-1 ring-cyan-400/40 backdrop-blur-md transition hover:border-cyan-300/60 hover:bg-slate-800/80 hover:ring-cyan-300/70 active:scale-95"
-          onClick={(e) => { e.stopPropagation(); setMobileHandOpen(true); }}
-        >
-          <svg
-            aria-hidden="true"
-            viewBox="0 0 24 24"
-            className="h-3.5 w-3.5 text-cyan-300"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          >
-            <rect x="4" y="3" width="11" height="16" rx="2" />
-            <path d="M9 7l11 3-3 11-7-2" />
-          </svg>
-          <span>Hand</span>
-          <span className="tabular-nums text-cyan-300">{handObjects.length}</span>
-        </button>
-      )}
       <AnimatePresence>
         {handObjects.map((obj, i) => {
           const rotation = (i - center) * 6;

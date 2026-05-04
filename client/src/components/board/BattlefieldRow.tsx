@@ -176,7 +176,7 @@ export function BattlefieldRow({ groups, rowType, className }: BattlefieldRowPro
           const staggerPerRow = totalVisibleStagger / rows; // approximate
           const cardW = (cw - (groupsPerRow - 1) * gap - staggerPerRow) / groupsPerRow;
           const cardHFromWidth = cardW / activeAr;
-          const cardH = Math.max(MIN_CARD_H, Math.min(cardHFromHeight, cardHFromWidth));
+          const cardH = Math.max(MIN_CARD_H, Math.min(cardHFromHeight, cardHFromWidth, MAX_CARD_H));
           if (cardH > bestH) {
             bestH = cardH;
           }

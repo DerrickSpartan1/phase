@@ -29,6 +29,7 @@ import { FullControlToggle } from "../components/controls/FullControlToggle.tsx"
 import { CombatPhaseIndicator } from "../components/controls/PhaseStopBar.tsx";
 import { OpponentHand } from "../components/hand/OpponentHand.tsx";
 import { MobileHandDrawer } from "../components/hand/MobileHandDrawer.tsx";
+import { HandBadge } from "../components/hand/HandBadge.tsx";
 import { PlayerHand } from "../components/hand/PlayerHand.tsx";
 import { GameLogPanel } from "../components/log/GameLogPanel.tsx";
 import { ChooseXValueUI } from "../components/mana/ChooseXValueUI.tsx";
@@ -868,8 +869,8 @@ function GamePageContent({
           style={{
             paddingTop: "var(--game-top-overlay-offset, 0px)",
             gridTemplateRows: isCompactHeight
-              ? "minmax(0,14%) 1fr minmax(0,20%)"
-              : "minmax(0,15%) 1fr minmax(0,22%)",
+              ? "minmax(0,12%) 1fr minmax(0,18%)"
+              : "minmax(0,min(12%,100px)) 1fr minmax(0,min(18%,150px))",
             gridTemplateColumns: "1fr",
           }}
           data-debug-label="Grid Layout"
@@ -1066,7 +1067,10 @@ function GamePageContent({
         }}
       >
         <CombatPhaseIndicator />
-        <FullControlToggle />
+        <div className="flex items-center gap-1.5">
+          <HandBadge />
+          <FullControlToggle />
+        </div>
         <ActionButton />
       </div>
 
