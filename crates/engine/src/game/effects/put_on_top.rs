@@ -5,7 +5,8 @@ use crate::types::ability::{
     TargetRef,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::GameState;
+use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::zones::Zone;
 
 /// CR 701.24g / CR 401.3: Place target card at a specific position in its owner's
 /// library. Unlike ChangeZone { destination: Library } which auto-shuffles per
@@ -59,7 +60,55 @@ pub fn resolve(
             .collect()
     };
 
+    // CR 115.1 + CR 400.2: When the filter specifies a private zone (hand/library)
+    // and no targets were pre-selected during casting (because the Oracle text does
+    // not say "target"), present an EffectZoneChoice for resolution-time selection.
+    // This covers Brainstorm ("put two cards from your hand on top of your library")
+    // and similar cards where the player chooses during resolution.
     if collected_targets.is_empty() {
+        if let Some(source_zone) = target_filter.extract_in_zone() {
+            if matches!(source_zone, Zone::Hand | Zone::Library) {
+                let expected =
+                    resolve_quantity_with_targets(state, &count_expr, ability).max(0) as usize;
+                let eligible: Vec<_> = match source_zone {
+                    Zone::Hand => state.players[ability.controller.0 as usize]
+                        .hand
+                        .iter()
+                        .copied()
+                        .collect(),
+                    Zone::Library => state.players[ability.controller.0 as usize]
+                        .library
+                        .iter()
+                        .copied()
+                        .collect(),
+                    _ => unreachable!(),
+                };
+                let eligible_count = eligible.len();
+                if eligible.is_empty() {
+                    events.push(GameEvent::EffectResolved {
+                        kind: EffectKind::PutAtLibraryPosition,
+                        source_id: ability.source_id,
+                    });
+                    return Ok(());
+                }
+                state.waiting_for = WaitingFor::EffectZoneChoice {
+                    player: ability.controller,
+                    cards: eligible,
+                    count: expected.min(eligible_count),
+                    up_to: false,
+                    source_id: ability.source_id,
+                    effect_kind: EffectKind::PutAtLibraryPosition,
+                    zone: source_zone,
+                    destination: None,
+                    enter_tapped: false,
+                    enter_transformed: false,
+                    under_your_control: false,
+                    enters_attacking: false,
+                    owner_library: false,
+                };
+                return Ok(());
+            }
+        }
         return Err(EffectError::InvalidParam(
             "PutAtLibraryPosition requires a target".to_string(),
         ));
@@ -399,5 +448,80 @@ mod tests {
         let lib: Vec<_> = state.players[0].library.iter().copied().collect::<Vec<_>>();
         assert_eq!(lib, vec![id1, id2, id4, id3]);
         assert_eq!(state.objects[&id4].zone, Zone::Library);
+    }
+
+    /// CR 115.1 + CR 400.2: Brainstorm-class — "put two cards from your hand on
+    /// top of your library" is a resolution-time selection (no "target" keyword),
+    /// so the resolver must emit EffectZoneChoice instead of requiring pre-selected
+    /// targets.
+    #[test]
+    fn test_resolution_time_hand_selection_emits_effect_zone_choice() {
+        use crate::types::ability::FilterProp;
+        use crate::types::ability::TypeFilter;
+
+        let mut state = GameState::new_two_player(42);
+        // Put 3 cards in hand (simulating post-draw)
+        let h1 = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Hand A".to_string(),
+            Zone::Hand,
+        );
+        let h2 = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Hand B".to_string(),
+            Zone::Hand,
+        );
+        let h3 = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Hand C".to_string(),
+            Zone::Hand,
+        );
+
+        // PutAtLibraryPosition with InZone(Hand) filter and no pre-selected targets
+        let ability = ResolvedAbility::new(
+            Effect::PutAtLibraryPosition {
+                target: TargetFilter::Typed(crate::types::ability::TypedFilter {
+                    type_filters: vec![TypeFilter::Card],
+                    controller: Some(crate::types::ability::ControllerRef::You),
+                    properties: vec![FilterProp::InZone { zone: Zone::Hand }],
+                    ..Default::default()
+                }),
+                count: QuantityExpr::Fixed { value: 2 },
+                position: LibraryPosition::Top,
+            },
+            vec![], // No targets — resolution-time selection
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let mut events = vec![];
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        // Should emit EffectZoneChoice for the player to select 2 cards from hand
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice {
+                player,
+                cards,
+                count,
+                effect_kind,
+                zone,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 2);
+                assert_eq!(*effect_kind, EffectKind::PutAtLibraryPosition);
+                assert_eq!(*zone, Zone::Hand);
+                assert!(cards.contains(&h1));
+                assert!(cards.contains(&h2));
+                assert!(cards.contains(&h3));
+            }
+            other => panic!("Expected EffectZoneChoice, got {:?}", other),
+        }
     }
 }

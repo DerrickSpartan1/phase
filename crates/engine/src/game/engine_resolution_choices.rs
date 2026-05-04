@@ -1078,6 +1078,15 @@ pub(super) fn handle_resolution_choice(
                         }
                     }
                 }
+                // CR 701.24g + CR 115.1: Resolution-time selection for
+                // PutAtLibraryPosition from a private zone (e.g. Brainstorm's
+                // "put two cards from your hand on top of your library").
+                // Cards are placed in selection order (first chosen = top).
+                EffectKind::PutAtLibraryPosition => {
+                    for &card_id in &chosen {
+                        super::zones::move_to_library_at_index(state, card_id, Some(0), events);
+                    }
+                }
                 other => {
                     return Err(EngineError::InvalidAction(format!(
                         "EffectZoneChoice unsupported for {other:?}"

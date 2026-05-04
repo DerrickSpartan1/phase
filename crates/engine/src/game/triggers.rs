@@ -2395,6 +2395,17 @@ pub(crate) fn extract_target_filter_from_effect(effect: &Effect) -> Option<&Targ
             }
         }
     }
+    // CR 115.1 + CR 400.2: PutAtLibraryPosition from a private zone (hand/library)
+    // is a resolution-time selection, not a casting-time target. Brainstorm's
+    // "put two cards from your hand on top of your library" does not use the word
+    // "target" — the player chooses cards during resolution via EffectZoneChoice.
+    if let Effect::PutAtLibraryPosition { target, .. } = effect {
+        if let Some(zone) = target.extract_in_zone() {
+            if matches!(zone, Zone::Hand | Zone::Library) {
+                return None;
+            }
+        }
+    }
     effect.target_filter().filter(|t| !t.is_context_ref())
 }
 // ---------------------------------------------------------------------------
