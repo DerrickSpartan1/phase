@@ -1505,26 +1505,36 @@ fn apply_action(
                 choice, context, ..
             },
             GameAction::ChooseManaColor { choice: chosen },
-        ) => match context {
-            crate::types::game_state::ManaChoiceContext::ManaAbility(pending_mana_ability) => {
-                engine_casting::handle_choose_mana_color(
-                    state,
-                    pending_mana_ability,
-                    choice,
-                    chosen.clone(),
-                    &mut events,
-                )?
+        ) => {
+            let events_before = events.len();
+            let wf = match context {
+                crate::types::game_state::ManaChoiceContext::ManaAbility(pending_mana_ability) => {
+                    engine_casting::handle_choose_mana_color(
+                        state,
+                        pending_mana_ability,
+                        choice,
+                        chosen.clone(),
+                        &mut events,
+                    )?
+                }
+                crate::types::game_state::ManaChoiceContext::ResolvingEffect(pending_effect) => {
+                    effects::mana::handle_choose_mana_effect(
+                        state,
+                        pending_effect,
+                        choice,
+                        chosen.clone(),
+                        &mut events,
+                    )?
+                }
+            };
+            // CR 605.1b: Process TapsForMana triggers inline after mana color
+            // choice resolves (dual land during mana payment).
+            if events.len() > events_before {
+                let mana_events: Vec<_> = events[events_before..].to_vec();
+                super::triggers::process_triggers(state, &mana_events);
             }
-            crate::types::game_state::ManaChoiceContext::ResolvingEffect(pending_effect) => {
-                effects::mana::handle_choose_mana_effect(
-                    state,
-                    pending_effect,
-                    choice,
-                    chosen.clone(),
-                    &mut events,
-                )?
-            }
-        },
+            wf
+        }
         // CR 605.3a + CR 601.2h + CR 107.4e: Player submits the per-hybrid-shard
         // color vector for a mana-ability mana sub-cost (filter lands, etc.).
         (
@@ -1904,8 +1914,9 @@ fn apply_action(
             if ability_index < obj.abilities.len()
                 && mana_abilities::is_mana_ability(&obj.abilities[ability_index])
             {
+                let events_before = events.len();
                 let ability_def = obj.abilities[ability_index].clone();
-                mana_abilities::activate_mana_ability(
+                let wf = mana_abilities::activate_mana_ability(
                     state,
                     source_id,
                     *player,
@@ -1916,7 +1927,14 @@ fn apply_action(
                         convoke_mode: *convoke_mode,
                     },
                     None,
-                )?
+                )?;
+                // CR 605.1b: Process TapsForMana triggers inline during mana payment
+                // (same rationale as the TapLandForMana arm below).
+                if events.len() > events_before {
+                    let mana_events: Vec<_> = events[events_before..].to_vec();
+                    super::triggers::process_triggers(state, &mana_events);
+                }
+                wf
             } else {
                 return Err(EngineError::ActionNotAllowed(
                     "Only mana abilities can be activated during mana payment".to_string(),
@@ -1931,12 +1949,22 @@ fn apply_action(
             },
             GameAction::TapLandForMana { object_id },
         ) => {
+            let events_before = events.len();
             handle_tap_land_for_mana(state, object_id, &mut events)?;
             state
                 .lands_tapped_for_mana
                 .entry(state.priority_player)
                 .or_default()
                 .push(object_id);
+            // CR 605.1b: TapsForMana triggered mana abilities (Wild Growth, Vorinclex,
+            // Fertile Ground, Mana Flare class) must resolve inline when mana is
+            // produced during cost payment. The ManaPayment path does not flow through
+            // run_post_action_pipeline, so process triggers explicitly here so the
+            // bonus mana reaches the pool before the payment check.
+            if events.len() > events_before {
+                let mana_events: Vec<_> = events[events_before..].to_vec();
+                super::triggers::process_triggers(state, &mana_events);
+            }
             WaitingFor::ManaPayment {
                 player: *player,
                 convoke_mode: *convoke_mode,
@@ -5376,6 +5404,158 @@ mod tests {
         assert!(
             !casting::can_pay_cost_after_auto_tap(&state_no_aura, PlayerId(0), lone_spell, &cost),
             "lone Plains must NOT be reported able to pay {{1}}{{G}}"
+        );
+    }
+
+    #[test]
+    fn vorinclex_mana_doubling_trigger_fires_on_tap() {
+        // Vorinclex, Voice of Hunger: "Whenever you tap a land for mana,
+        // add one mana of any type that land produced."
+        // The trigger is on Vorinclex (creature), not on the land itself.
+        // valid_card: Typed(Land), valid_target: Controller.
+        let mut state = setup_game_at_main_phase();
+
+        let forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        let vorinclex = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Vorinclex, Voice of Hunger".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&vorinclex).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            // Trigger 1: mana doubling for your lands
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Database,
+                        Effect::Mana {
+                            produced: ManaProduction::TriggerEventManaType,
+                            restrictions: vec![],
+                            grants: vec![],
+                            expiry: None,
+                            target: None,
+                        },
+                    ))
+                    .valid_card(TargetFilter::Typed(TypedFilter::land()))
+                    .valid_target(TargetFilter::Controller),
+            );
+        }
+
+        // Tap the Forest — should produce {G} (land) + {G} (Vorinclex doubler).
+        apply_as_current(&mut state, GameAction::TapLandForMana { object_id: forest }).unwrap();
+        assert_eq!(
+            state.players[0]
+                .mana_pool
+                .count_color(crate::types::mana::ManaType::Green),
+            2,
+            "Vorinclex must double land mana: {{G}} (land) + {{G}} (trigger)"
+        );
+    }
+
+    #[test]
+    fn vorinclex_cant_untap_trigger_fires_on_opponent_tap() {
+        // Vorinclex, Voice of Hunger: "Whenever an opponent taps a land for
+        // mana, that land doesn't untap during its controller's next untap step."
+        // The trigger is a GenericEffect (CantUntap) that goes on the stack.
+        use crate::types::ability::{
+            ContinuousModification, ControllerRef, Duration, PlayerScope, StaticDefinition,
+        };
+        let mut state = setup_game_at_main_phase();
+        // Set P1 as active player so they have priority to tap
+        state.active_player = PlayerId(1);
+        state.priority_player = PlayerId(1);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(1),
+        };
+
+        let opp_forest = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&opp_forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+            obj.entered_battlefield_turn = Some(1);
+        }
+
+        let vorinclex = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Vorinclex, Voice of Hunger".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let duration = Duration::UntilNextUntapStepOf {
+                player: PlayerScope::Controller,
+            };
+            let obj = state.objects.get_mut(&vorinclex).unwrap();
+            obj.card_types
+                .core_types
+                .push(crate::types::card_type::CoreType::Creature);
+            obj.entered_battlefield_turn = Some(1);
+            // Trigger 2: opponent lands can't untap
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::TapsForMana)
+                    .execute(
+                        AbilityDefinition::new(
+                            AbilityKind::Database,
+                            Effect::GenericEffect {
+                                static_abilities: vec![StaticDefinition::new(
+                                    StaticMode::CantUntap,
+                                )
+                                .affected(TargetFilter::ParentTarget)
+                                .modifications(vec![ContinuousModification::AddStaticMode {
+                                    mode: StaticMode::CantUntap,
+                                }])],
+                                duration: Some(duration.clone()),
+                                target: Some(TargetFilter::TriggeringSource),
+                            },
+                        )
+                        .duration(duration),
+                    )
+                    .valid_card(TargetFilter::Typed(
+                        TypedFilter::land().controller(ControllerRef::Opponent),
+                    )),
+            );
+        }
+
+        // Opponent taps the Forest
+        apply(
+            &mut state,
+            PlayerId(1),
+            GameAction::TapLandForMana {
+                object_id: opp_forest,
+            },
+        )
+        .unwrap();
+        // The trigger should have been placed on the stack.
+        assert!(
+            !state.stack.is_empty() || !state.transient_continuous_effects.is_empty(),
+            "Vorinclex's CantUntap trigger must fire when opponent taps land"
         );
     }
 

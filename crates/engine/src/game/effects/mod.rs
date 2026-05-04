@@ -5665,7 +5665,7 @@ mod tests {
         let mut state = GameState::new_two_player(42);
 
         // Card in hand to discard
-        let hand_card = create_object(
+        let _hand_card = create_object(
             &mut state,
             CardId(10),
             PlayerId(0),

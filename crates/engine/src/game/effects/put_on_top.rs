@@ -490,7 +490,6 @@ mod tests {
                     type_filters: vec![TypeFilter::Card],
                     controller: Some(crate::types::ability::ControllerRef::You),
                     properties: vec![FilterProp::InZone { zone: Zone::Hand }],
-                    ..Default::default()
                 }),
                 count: QuantityExpr::Fixed { value: 2 },
                 position: LibraryPosition::Top,
