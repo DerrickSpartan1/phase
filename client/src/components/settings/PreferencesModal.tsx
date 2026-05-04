@@ -490,9 +490,6 @@ function ResetAllFooter({
 function ExperimentalSection() {
   const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
   const setExperimentalFeatures = usePreferencesStore((s) => s.setExperimentalFeatures);
-  const useGridLayout = usePreferencesStore((s) => s.useGridLayout);
-  const setUseGridLayout = usePreferencesStore((s) => s.setUseGridLayout);
-
   return (
     <SettingsSection title="Experimental">
       <p className="text-xs text-slate-400">
@@ -512,23 +509,6 @@ function ExperimentalSection() {
             <span className="text-sm text-slate-200">Enable draft</span>
             <span className="text-xs text-slate-500">
               Unlocks Quick Draft and Pod Draft on the main menu.
-            </span>
-          </div>
-        </label>
-      </SettingGroup>
-
-      <SettingGroup label="Board Layout">
-        <label className="flex min-h-11 items-center gap-3">
-          <input
-            type="checkbox"
-            checked={useGridLayout}
-            onChange={(e) => setUseGridLayout(e.target.checked)}
-            className="accent-cyan-500"
-          />
-          <div className="flex flex-col">
-            <span className="text-sm text-slate-200">CSS Grid layout</span>
-            <span className="text-xs text-slate-500">
-              Uses CSS Grid for the game board instead of flexbox. Improved mobile spacing and HUD positioning.
             </span>
           </div>
         </label>

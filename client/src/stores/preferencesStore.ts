@@ -106,7 +106,6 @@ function buildDefaultPreferences(): PreferencesState {
     lastMatchType: "Bo1",
     lastPlayerCount: 2,
     experimentalFeatures: false,
-    useGridLayout: false,
   };
 }
 
@@ -145,7 +144,6 @@ interface PreferencesState {
   lastMatchType: MatchType;
   lastPlayerCount: number;
   experimentalFeatures: boolean;
-  useGridLayout: boolean;
 }
 
 interface PreferencesActions {
@@ -189,7 +187,6 @@ interface PreferencesActions {
   setLastMatchType: (matchType: MatchType) => void;
   setLastPlayerCount: (count: number) => void;
   setExperimentalFeatures: (enabled: boolean) => void;
-  setUseGridLayout: (enabled: boolean) => void;
 }
 
 type LegacyFlatAiPrefs = Partial<{
@@ -278,7 +275,6 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setLastMatchType: (matchType) => set({ lastMatchType: matchType }),
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
       setExperimentalFeatures: (enabled) => set({ experimentalFeatures: enabled }),
-      setUseGridLayout: (enabled) => set({ useGridLayout: enabled }),
     }),
     {
       name: "phase-preferences",

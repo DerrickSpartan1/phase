@@ -802,7 +802,7 @@ function GamePageContent({
     [dispatch],
   );
 
-  const useGridLayout = usePreferencesStore((s) => s.useGridLayout);
+
 
   const isReconnecting = reconnectState.status !== "idle";
   const topOverlayOffsetPx = reconnectState.status === "idle" ? 0 : 56;
@@ -862,201 +862,97 @@ function GamePageContent({
         </div>
       )}
 
-      {/* Full-screen board layout — flex (legacy) or grid (experimental) */}
-      {useGridLayout ? (
-        <div
-          className={`relative z-10 grid min-w-0 h-full${isReconnecting ? " pointer-events-none" : ""}`}
-          style={{
-            paddingTop: "var(--game-top-overlay-offset, 0px)",
-            gridTemplateRows: isCompactHeight
-              ? "minmax(0,12%) 1fr minmax(0,18%)"
-              : "minmax(0,min(12%,100px)) 1fr minmax(0,min(18%,150px))",
-            gridTemplateColumns: "1fr",
-          }}
-          data-debug-label="Grid Layout"
-        >
-          {/* Row 1: Opponent hand + zone piles (flow layout — piles take real space) */}
-          <div className="relative z-20 min-w-0 flex w-full overflow-visible" data-debug-label="Opp Hand">
-            <div className="min-w-0 flex-1">
-              <OpponentHand showCards={showAiHand} />
-            </div>
-            <div
-              className="flex shrink-0 items-start gap-1.5 px-1 py-1"
-              style={playerZoneRailStyle}
-              data-debug-label="Opp Zones"
-            >
-              <ExilePile
-                playerId={activeOpponentId}
-                size={pileSize}
-                onClick={() => setViewingZone({ zone: "exile", playerId: activeOpponentId })}
-              />
-              <LibraryPile playerId={activeOpponentId} size={pileSize} />
-              <GraveyardPile
-                playerId={activeOpponentId}
-                size={pileSize}
-                onClick={() =>
-                  setViewingZone({ zone: "graveyard", playerId: activeOpponentId })
-                }
-              />
-            </div>
+      {/* Full-screen board layout — CSS Grid with 3 rows: opp hand, battlefield, player hand */}
+      <div
+        className={`relative z-10 grid min-w-0 h-full${isReconnecting ? " pointer-events-none" : ""}`}
+        style={{
+          paddingTop: "var(--game-top-overlay-offset, 0px)",
+          gridTemplateRows: isCompactHeight
+            ? "minmax(0,12%) 1fr minmax(0,18%)"
+            : "minmax(0,min(12%,100px)) 1fr minmax(0,min(18%,150px))",
+          gridTemplateColumns: "1fr",
+        }}
+      >
+        {/* Row 1: Opponent hand + zone piles (flow layout — piles take real space) */}
+        <div className="relative z-20 min-w-0 flex w-full overflow-visible">
+          <div className="min-w-0 flex-1">
+            <OpponentHand showCards={showAiHand} />
           </div>
-
-          {/* Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
-          <div className="relative z-10 flex min-h-0 min-w-0 flex-col" data-debug-label="Battlefield">
-            <GameBoard
-              oppHud={
-                <OpponentHud
-                  opponentName={isOnlineMode ? opponentDisplayName : undefined}
-                  onKickPlayer={
-                    isP2PHost
-                      ? (pid) => {
-                          const adapter = useGameStore.getState().adapter as
-                            | { kickPlayer?: (pid: number) => Promise<void> }
-                            | null;
-                          void adapter?.kickPlayer?.(pid);
-                        }
-                      : undefined
-                  }
-                />
+          <div
+            className="flex shrink-0 items-start gap-1.5 px-1 py-1"
+            style={playerZoneRailStyle}
+          >
+            <ExilePile
+              playerId={activeOpponentId}
+              size={pileSize}
+              onClick={() => setViewingZone({ zone: "exile", playerId: activeOpponentId })}
+            />
+            <LibraryPile playerId={activeOpponentId} size={pileSize} />
+            <GraveyardPile
+              playerId={activeOpponentId}
+              size={pileSize}
+              onClick={() =>
+                setViewingZone({ zone: "graveyard", playerId: activeOpponentId })
               }
-              playerHud={<PlayerHud />}
             />
           </div>
+        </div>
 
-          {/* Row 5: Player hand + zones */}
-          <div className="relative min-w-0 overflow-visible" data-debug-label="Player Hand">
-            <div className="flex items-end justify-center">
-              <ZoneHand zone="exile" />
-              <PlayerHand />
-              <ZoneHand zone="graveyard" />
+        {/* Row 2: Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
+        <div className="relative z-10 flex min-h-0 min-w-0 flex-col">
+          <GameBoard
+            oppHud={
+              <OpponentHud
+                opponentName={isOnlineMode ? opponentDisplayName : undefined}
+                onKickPlayer={
+                  isP2PHost
+                    ? (pid) => {
+                        const adapter = useGameStore.getState().adapter as
+                          | { kickPlayer?: (pid: number) => Promise<void> }
+                          | null;
+                        void adapter?.kickPlayer?.(pid);
+                      }
+                    : undefined
+                }
+              />
+            }
+            playerHud={<PlayerHud />}
+          />
+        </div>
+
+        {/* Row 3: Player hand + zones */}
+        <div className="relative min-w-0 overflow-visible">
+          <div className="flex items-end justify-center">
+            <ZoneHand zone="exile" />
+            <PlayerHand />
+            <ZoneHand zone="graveyard" />
+          </div>
+          <div
+            className="pointer-events-none absolute left-0 top-0 bottom-0 z-10 flex w-fit flex-col items-start justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
+            style={playerZoneRailStyle}
+          >
+            <div className="flex items-end gap-2">
+              <ExilePile
+                playerId={perspectivePlayerId}
+                size={pileSize}
+                onClick={() => setViewingZone({ zone: "exile", playerId: perspectivePlayerId })}
+              />
+              <GraveyardPile
+                playerId={perspectivePlayerId}
+                size={pileSize}
+                onClick={() => setViewingZone({ zone: "graveyard", playerId: perspectivePlayerId })}
+              />
+              <LibraryPile playerId={perspectivePlayerId} size={pileSize} />
             </div>
-            <div
-              className="pointer-events-none absolute left-0 top-0 bottom-0 z-10 flex w-fit flex-col items-start justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
-              style={playerZoneRailStyle}
-              data-debug-label="Player Zones"
-            >
-              <div className="flex items-end gap-2">
-                <ExilePile
-                  playerId={perspectivePlayerId}
-                  size={pileSize}
-                  onClick={() => setViewingZone({ zone: "exile", playerId: perspectivePlayerId })}
-                />
-                <GraveyardPile
-                  playerId={perspectivePlayerId}
-                  size={pileSize}
-                  onClick={() => setViewingZone({ zone: "graveyard", playerId: perspectivePlayerId })}
-                />
-                <LibraryPile playerId={perspectivePlayerId} size={pileSize} />
-              </div>
-            </div>
-            <div
-              className="pointer-events-none absolute right-0 top-0 bottom-0 z-10 flex w-fit flex-col items-end justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto"
-              style={playerZoneRailStyle}
-            >
-              <CompanionZone playerId={perspectivePlayerId} />
-            </div>
+          </div>
+          <div
+            className="pointer-events-none absolute right-0 top-0 bottom-0 z-10 flex w-fit flex-col items-end justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto"
+            style={playerZoneRailStyle}
+          >
+            <CompanionZone playerId={perspectivePlayerId} />
           </div>
         </div>
-      ) : (
-        <div
-          className={`relative z-10 flex h-full flex-col${isReconnecting ? " pointer-events-none" : ""}`}
-          style={{ paddingTop: "var(--game-top-overlay-offset, 0px)" }}
-        >
-          {/* Opponent hand + zones at top */}
-          <div className="relative z-20 w-full shrink-0" data-debug-label="Opp Top">
-            <OpponentHand showCards={showAiHand} />
-            {/* Opponent HUD — bottom-center of opp container */}
-            <div className="pointer-events-none absolute -bottom-5 left-0 right-0 z-20 flex justify-center lg:bottom-0" data-debug-label="Opp HUD">
-              <div className="pointer-events-auto">
-                <OpponentHud
-                  opponentName={isOnlineMode ? opponentDisplayName : undefined}
-                  onKickPlayer={
-                    isP2PHost
-                      ? (pid) => {
-                          const adapter = useGameStore.getState().adapter as
-                            | { kickPlayer?: (pid: number) => Promise<void> }
-                            | null;
-                          void adapter?.kickPlayer?.(pid);
-                        }
-                      : undefined
-                  }
-                />
-              </div>
-            </div>
-            <div
-              className="pointer-events-none absolute right-0 top-0 z-10 flex w-fit flex-col items-end gap-2 px-2 py-1 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
-              style={playerZoneRailStyle}
-              data-debug-label="Opp Zones"
-            >
-              <div className="flex items-start gap-2">
-                <ExilePile
-                  playerId={activeOpponentId}
-                  size={pileSize}
-                  onClick={() =>
-                    setViewingZone({ zone: "exile", playerId: activeOpponentId })
-                  }
-                />
-                <LibraryPile playerId={activeOpponentId} size={pileSize} />
-                <GraveyardPile
-                  playerId={activeOpponentId}
-                  size={pileSize}
-                  onClick={() =>
-                    setViewingZone({ zone: "graveyard", playerId: activeOpponentId })
-                  }
-                />
-              </div>
-            </div>
-          </div>
-
-          {/* Battlefield */}
-          <div className="relative z-10 flex min-h-0 flex-1 flex-col" data-debug-label="Battlefield">
-            <GameBoard />
-          </div>
-
-          {/* Player hand + zones at bottom — negative margin pushes hand content
-               below viewport edge so cards peek from the bottom (clipped by page root overflow-hidden).
-               Zones are anchored to top-0 so they stay in the visible area. */}
-          <div className="relative shrink-0 pt-4 mb-[calc(var(--card-h)*-0.25)] sm:mb-[calc(var(--card-h)*-0.25)] md:mb-[calc(var(--card-h)*-0.35)] [@media(max-height:500px)]:!mb-0 [@media(max-height:500px)]:!pt-1" data-debug-label="Player Bottom">
-            {/* Player HUD — top-center of player bottom container */}
-            <div className="pointer-events-none absolute top-3 left-0 right-0 z-20 flex justify-center lg:top-0" data-debug-label="Player HUD">
-              <div className="pointer-events-auto">
-                <PlayerHud />
-              </div>
-            </div>
-            <div className="flex items-end justify-center">
-              <ZoneHand zone="exile" />
-              <PlayerHand />
-              <ZoneHand zone="graveyard" />
-            </div>
-            <div
-              className="pointer-events-none absolute left-0 top-0 bottom-[calc(var(--card-h)*0.25)] sm:bottom-[calc(var(--card-h)*0.25)] md:bottom-[calc(var(--card-h)*0.35)] [@media(max-height:500px)]:!bottom-0 z-10 flex w-fit flex-col items-start justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto [&>div>*]:pointer-events-auto"
-              style={playerZoneRailStyle}
-              data-debug-label="Player Zones"
-            >
-              <div className="flex items-end gap-2">
-                <ExilePile
-                  playerId={perspectivePlayerId}
-                  size={pileSize}
-                  onClick={() => setViewingZone({ zone: "exile", playerId: perspectivePlayerId })}
-                />
-                <GraveyardPile
-                  playerId={perspectivePlayerId}
-                  size={pileSize}
-                  onClick={() => setViewingZone({ zone: "graveyard", playerId: perspectivePlayerId })}
-                />
-                <LibraryPile playerId={perspectivePlayerId} size={pileSize} />
-              </div>
-            </div>
-            {/* Companion zone — right side, Arena-style */}
-            <div
-              className="pointer-events-none absolute right-0 top-0 bottom-[calc(var(--card-h)*0.15)] sm:bottom-[calc(var(--card-h)*0.25)] md:bottom-[calc(var(--card-h)*0.35)] [@media(max-height:500px)]:!bottom-0 z-10 flex w-fit flex-col items-end justify-end gap-0.5 p-1 lg:gap-1 lg:p-3 [&>*]:pointer-events-auto"
-              style={playerZoneRailStyle}
-            >
-              <CompanionZone playerId={perspectivePlayerId} />
-            </div>
-          </div>
-        </div>
-      )}
+      </div>
 
       {/* Right-side fixed UI stack: combat phases → full control → action buttons → log */}
       <div
