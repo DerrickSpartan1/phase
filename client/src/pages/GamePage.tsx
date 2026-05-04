@@ -900,10 +900,10 @@ function GamePageContent({
             </div>
           </div>
 
-          {/* Battlefield — takes remaining space; HUDs overlay top/bottom edges */}
+          {/* Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
           <div className="relative z-10 flex min-h-0 min-w-0 flex-col" data-debug-label="Battlefield">
-            <div className="pointer-events-none absolute top-0 left-0 right-0 z-20 flex justify-center" data-debug-label="Opp HUD">
-              <div className="pointer-events-auto">
+            <GameBoard
+              oppHud={
                 <OpponentHud
                   opponentName={isOnlineMode ? opponentDisplayName : undefined}
                   onKickPlayer={
@@ -917,14 +917,9 @@ function GamePageContent({
                       : undefined
                   }
                 />
-              </div>
-            </div>
-            <GameBoard />
-            <div className="pointer-events-none absolute bottom-0 left-0 right-0 z-20 flex justify-center" data-debug-label="Player HUD">
-              <div className="pointer-events-auto">
-                <PlayerHud />
-              </div>
-            </div>
+              }
+              playerHud={<PlayerHud />}
+            />
           </div>
 
           {/* Row 5: Player hand + zones */}

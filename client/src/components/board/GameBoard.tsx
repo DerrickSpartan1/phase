@@ -15,7 +15,12 @@ import { BoardInteractionContext } from "./BoardInteractionContext.tsx";
 import { CombatLine } from "./CombatLine.tsx";
 import { PlayerArea } from "./PlayerArea.tsx";
 
-export function GameBoard() {
+interface GameBoardProps {
+  oppHud?: React.ReactNode;
+  playerHud?: React.ReactNode;
+}
+
+export function GameBoard({ oppHud, playerHud }: GameBoardProps) {
   const gameState = useGameStore((s) => s.gameState);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
@@ -200,6 +205,7 @@ export function GameBoard() {
             battlefieldView={focusedBattlefieldView ?? undefined}
             playerId={opponents[0]}
             mode="focused"
+            hud={oppHud}
           />
         ) : (
           <div className="flex min-h-0 flex-1 flex-col">
@@ -208,6 +214,7 @@ export function GameBoard() {
                 battlefieldView={focusedBattlefieldView ?? undefined}
                 playerId={focusedOpponent}
                 mode="focused"
+                hud={oppHud}
               />
             ) : (
               <div className="flex flex-1 items-center justify-center">
@@ -225,6 +232,7 @@ export function GameBoard() {
           mode="full"
           landColumnExtra={undoButton}
           creatureOverride={sortedPlayerCreatures}
+          hud={playerHud}
         />
       </div>
     </BoardInteractionContext.Provider>

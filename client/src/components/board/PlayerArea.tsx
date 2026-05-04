@@ -50,6 +50,8 @@ interface PlayerAreaProps {
   /** Override creature groups with pre-sorted list (for blocker alignment) */
   creatureOverride?: GroupedPermanent[];
   battlefieldView?: PlayerBattlefieldView;
+  /** HUD element rendered inline between lands and support in the middle row */
+  hud?: React.ReactNode;
 }
 
 export function PlayerArea({
@@ -60,6 +62,7 @@ export function PlayerArea({
   landColumnExtra,
   creatureOverride,
   battlefieldView,
+  hud,
 }: PlayerAreaProps) {
   const gameState = useGameStore((s) => s.gameState);
   const isCompactHeight = useIsCompactHeight();
@@ -140,7 +143,7 @@ export function PlayerArea({
   const supportStyle = zoneStyle(zoneScale(supportBase, supportCount));
 
   const middleRow = (
-    <div className="flex min-h-0 min-w-0 items-stretch justify-between gap-4" data-debug-label="Middle Row">
+    <div className="flex min-h-0 min-w-0 items-stretch justify-between gap-2" data-debug-label="Middle Row">
       <div
         className={`z-10 flex min-w-0 basis-0 flex-1 gap-2 pl-2 ${landAlignClass}`}
         style={landStyle}
@@ -153,6 +156,11 @@ export function PlayerArea({
         />
         {landColumnExtra}
       </div>
+      {hud && (
+        <div className="z-20 flex shrink-0 items-center" data-debug-label="Inline HUD">
+          {hud}
+        </div>
+      )}
       <div
         className="z-10 flex min-w-0 basis-0 flex-1 items-center justify-end pr-2"
         style={supportStyle}
