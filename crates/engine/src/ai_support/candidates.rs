@@ -183,32 +183,54 @@ pub fn candidate_actions_exact(state: &GameState) -> Vec<CandidateAction> {
             player,
             valid_targets,
             ..
-        } => valid_targets
-            .iter()
-            .map(|&target_id| {
-                candidate(
-                    GameAction::ChooseTarget {
-                        target: Some(TargetRef::Object(target_id)),
-                    },
+        } => {
+            if valid_targets.is_empty() {
+                // No legal copy targets — skip with no target.
+                vec![candidate(
+                    GameAction::ChooseTarget { target: None },
                     TacticalClass::Selection,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                valid_targets
+                    .iter()
+                    .map(|&target_id| {
+                        candidate(
+                            GameAction::ChooseTarget {
+                                target: Some(TargetRef::Object(target_id)),
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         WaitingFor::ExploreChoice {
             player, choosable, ..
-        } => choosable
-            .iter()
-            .map(|&target_id| {
-                candidate(
-                    GameAction::ChooseTarget {
-                        target: Some(TargetRef::Object(target_id)),
-                    },
+        } => {
+            if choosable.is_empty() {
+                // No choosable creatures — skip with no target.
+                vec![candidate(
+                    GameAction::ChooseTarget { target: None },
                     TacticalClass::Selection,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                choosable
+                    .iter()
+                    .map(|&target_id| {
+                        candidate(
+                            GameAction::ChooseTarget {
+                                target: Some(TargetRef::Object(target_id)),
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         WaitingFor::DiscoverChoice { player, .. } => vec![
             candidate(
                 GameAction::DiscoverChoice {
@@ -368,19 +390,30 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             equipment_id,
             valid_targets,
-        } => valid_targets
-            .iter()
-            .map(|&target_id| {
-                candidate(
-                    GameAction::Equip {
-                        equipment_id: *equipment_id,
-                        target_id,
-                    },
-                    TacticalClass::Utility,
+        } => {
+            if valid_targets.is_empty() {
+                // No legal targets — CancelCast backs out the activation.
+                vec![candidate(
+                    GameAction::CancelCast,
+                    TacticalClass::Pass,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                valid_targets
+                    .iter()
+                    .map(|&target_id| {
+                        candidate(
+                            GameAction::Equip {
+                                equipment_id: *equipment_id,
+                                target_id,
+                            },
+                            TacticalClass::Utility,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         // CR 702.122a: Generate valid creature subsets whose total power >= crew_power.
         WaitingFor::CrewVehicle {
             player,
@@ -1251,42 +1284,73 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             ]
         }
         // CR 702.21a: Ward discard cost — choose a card from hand.
-        WaitingFor::WardDiscardChoice { player, cards, .. } => cards
-            .iter()
-            .map(|&card| {
-                candidate(
-                    GameAction::SelectCards { cards: vec![card] },
+        WaitingFor::WardDiscardChoice { player, cards, .. } => {
+            if cards.is_empty() {
+                // No cards to discard — empty selection signals inability to pay.
+                vec![candidate(
+                    GameAction::SelectCards { cards: vec![] },
                     TacticalClass::Selection,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                cards
+                    .iter()
+                    .map(|&card| {
+                        candidate(
+                            GameAction::SelectCards { cards: vec![card] },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         // CR 702.21a: Ward sacrifice cost — choose a permanent.
         WaitingFor::WardSacrificeChoice {
             player, permanents, ..
-        } => permanents
-            .iter()
-            .map(|&perm| {
-                candidate(
-                    GameAction::SelectCards { cards: vec![perm] },
+        } => {
+            if permanents.is_empty() {
+                vec![candidate(
+                    GameAction::SelectCards { cards: vec![] },
                     TacticalClass::Selection,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                permanents
+                    .iter()
+                    .map(|&perm| {
+                        candidate(
+                            GameAction::SelectCards { cards: vec![perm] },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         // CR 118.12: Unless bounce cost — choose a permanent to return to hand.
         WaitingFor::UnlessBounceChoice {
             player, permanents, ..
-        } => permanents
-            .iter()
-            .map(|&perm| {
-                candidate(
-                    GameAction::SelectCards { cards: vec![perm] },
+        } => {
+            if permanents.is_empty() {
+                vec![candidate(
+                    GameAction::SelectCards { cards: vec![] },
                     TacticalClass::Selection,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                permanents
+                    .iter()
+                    .map(|&perm| {
+                        candidate(
+                            GameAction::SelectCards { cards: vec![perm] },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         // CR 704.5j: Choose which legend to keep.
         WaitingFor::ChooseLegend {
             player, candidates, ..
@@ -1300,6 +1364,20 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                 )
             })
             .collect(),
+        // CR 903.9a: Commander owner may return it to the command zone.
+        // AI always accepts — returning to command zone is almost always correct.
+        WaitingFor::CommanderZoneChoice { player, .. } => vec![
+            candidate(
+                GameAction::DecideOptionalEffect { accept: true },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+            candidate(
+                GameAction::DecideOptionalEffect { accept: false },
+                TacticalClass::Selection,
+                Some(*player),
+            ),
+        ],
         // CR 310.10 + CR 704.5w + CR 704.5x: controller chooses a new protector.
         WaitingFor::BattleProtectorChoice {
             player, candidates, ..
@@ -1408,18 +1486,29 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             player,
             valid_tokens,
             ..
-        } => valid_tokens
-            .iter()
-            .map(|&token_id| {
-                candidate(
-                    GameAction::ChooseTarget {
-                        target: Some(TargetRef::Object(token_id)),
-                    },
+        } => {
+            if valid_tokens.is_empty() {
+                // No creature tokens to copy — skip with no target.
+                vec![candidate(
+                    GameAction::ChooseTarget { target: None },
                     TacticalClass::Selection,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                valid_tokens
+                    .iter()
+                    .map(|&token_id| {
+                        candidate(
+                            GameAction::ChooseTarget {
+                                target: Some(TargetRef::Object(token_id)),
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         // CR 707.10c: Copy retargeting — pick the first legal alternative for
         // each slot when populated (initial target selection for Prepare /
         // Paradigm copies). Falls back to keeping `current` when no
@@ -1519,7 +1608,14 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             ..
         } => {
             if targets.is_empty() {
-                Vec::new()
+                // No targets — submit an empty distribution.
+                vec![candidate(
+                    GameAction::DistributeAmong {
+                        distribution: Vec::new(),
+                    },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )]
             } else {
                 let per_target = (*total as usize / targets.len()).max(1) as u32;
                 let mut dist: Vec<_> = targets.iter().map(|t| (t.clone(), per_target)).collect();
@@ -1551,18 +1647,28 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
             )]
         }
         // CR 701.62a: AI selects one card to manifest — one action per card option
-        WaitingFor::ManifestDreadChoice { player, cards } => cards
-            .iter()
-            .map(|&card_id| {
-                candidate(
-                    GameAction::SelectCards {
-                        cards: vec![card_id],
-                    },
+        WaitingFor::ManifestDreadChoice { player, cards } => {
+            if cards.is_empty() {
+                vec![candidate(
+                    GameAction::SelectCards { cards: vec![] },
                     TacticalClass::Selection,
                     Some(*player),
-                )
-            })
-            .collect(),
+                )]
+            } else {
+                cards
+                    .iter()
+                    .map(|&card_id| {
+                        candidate(
+                            GameAction::SelectCards {
+                                cards: vec![card_id],
+                            },
+                            TacticalClass::Selection,
+                            Some(*player),
+                        )
+                    })
+                    .collect()
+            }
+        }
         WaitingFor::ChooseXValue { player, max, .. } => (0..=*max)
             .map(|value| {
                 candidate(

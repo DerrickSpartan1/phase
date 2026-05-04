@@ -217,30 +217,380 @@ pub fn emit_trace_for_candidate(
 /// debug builds panic so the gap surfaces during testing instead of silently
 /// degrading AI play into cast/cancel churn.
 fn fallback_action(state: &GameState) -> Option<GameAction> {
+    // Pending-cast states can always be escaped with CancelCast (CR 601.2).
+    // Check this before the exhaustive match so every pending-cast variant
+    // is covered without repeating CancelCast per-arm.
+    if state.waiting_for.has_pending_cast() {
+        debug_assert!(
+            false,
+            "AI fallback reached during pending cast ({:?}) — \
+             can_cast_object_now has a gap that allowed an uncompletable \
+             cast through. Tighten the pre-cast check rather than relying \
+             on CancelCast recovery.",
+            std::mem::discriminant(&state.waiting_for)
+        );
+        tracing::error!(
+            waiting_for = ?std::mem::discriminant(&state.waiting_for),
+            "AI fallback cancelled an uncompletable cast — can_cast_object_now gap"
+        );
+        return Some(GameAction::CancelCast);
+    }
+
     match &state.waiting_for {
+        // Terminal — no action possible.
         WaitingFor::GameOver { .. } => None,
-        _ if state.waiting_for.has_pending_cast() => {
-            debug_assert!(
-                false,
-                "AI fallback reached during pending cast ({:?}) — \
-                 can_cast_object_now has a gap that allowed an uncompletable \
-                 cast through. Tighten the pre-cast check rather than relying \
-                 on CancelCast recovery.",
-                std::mem::discriminant(&state.waiting_for)
-            );
-            tracing::error!(
-                waiting_for = ?std::mem::discriminant(&state.waiting_for),
-                "AI fallback cancelled an uncompletable cast — can_cast_object_now gap"
-            );
-            Some(GameAction::CancelCast)
-        }
+
+        // Priority is the only state where PassPriority is valid.
+        WaitingFor::Priority { .. } => Some(GameAction::PassPriority),
+
+        // Combat declarations: empty declarations are always legal.
         WaitingFor::DeclareAttackers { .. } => Some(GameAction::DeclareAttackers {
             attacks: Vec::new(),
         }),
         WaitingFor::DeclareBlockers { .. } => Some(GameAction::DeclareBlockers {
             assignments: Vec::new(),
         }),
-        _ => Some(GameAction::PassPriority),
+
+        // Target selection: skip optional slots, fizzle mandatory ones.
+        // TriggerTargetSelection is not a pending cast — the trigger is
+        // already on the stack. ChooseTarget { target: None } signals
+        // "no legal target" and causes the trigger to fizzle (CR 608.2b).
+        WaitingFor::TargetSelection { .. } | WaitingFor::TriggerTargetSelection { .. } => {
+            Some(GameAction::ChooseTarget { target: None })
+        }
+
+        // Selection states: empty selection is a valid "choose nothing".
+        WaitingFor::ScryChoice { .. }
+        | WaitingFor::DigChoice { .. }
+        | WaitingFor::SurveilChoice { .. }
+        | WaitingFor::RevealChoice { .. }
+        | WaitingFor::SearchChoice { .. }
+        | WaitingFor::ChooseFromZoneChoice { .. }
+        | WaitingFor::DiscardChoice { .. }
+        | WaitingFor::EffectZoneChoice { .. }
+        | WaitingFor::ConniveDiscard { .. }
+        | WaitingFor::DiscardToHandSize { .. }
+        | WaitingFor::ManifestDreadChoice { .. }
+        | WaitingFor::WardDiscardChoice { .. }
+        | WaitingFor::WardSacrificeChoice { .. }
+        | WaitingFor::UnlessBounceChoice { .. } => {
+            Some(GameAction::SelectCards { cards: Vec::new() })
+        }
+
+        // Multi-target selection: zero targets is valid when min == 0.
+        WaitingFor::MultiTargetSelection { .. } => {
+            Some(GameAction::SelectCards { cards: Vec::new() })
+        }
+
+        // Binary accept/decline decisions: decline is always safe.
+        WaitingFor::OptionalEffectChoice { .. }
+        | WaitingFor::OpponentMayChoice { .. }
+        | WaitingFor::TributeChoice { .. }
+        | WaitingFor::CommanderZoneChoice { .. }
+        | WaitingFor::MiracleReveal { .. }
+        | WaitingFor::MiracleCastOffer { .. }
+        | WaitingFor::MadnessCastOffer { .. } => {
+            Some(GameAction::DecideOptionalEffect { accept: false })
+        }
+
+        // Unless payment: decline to pay (let the effect resolve).
+        WaitingFor::UnlessPayment { .. } => Some(GameAction::PayUnlessCost { pay: false }),
+
+        // Combat tax: decline to pay.
+        WaitingFor::CombatTaxPayment { .. } => Some(GameAction::PayCombatTax { accept: false }),
+
+        // Equip/Populate/CopyTarget with no valid targets: CancelCast for
+        // equip (activation that can be backed out); skip for non-cast.
+        WaitingFor::EquipTarget { .. } => Some(GameAction::CancelCast),
+        WaitingFor::PopulateChoice { .. } | WaitingFor::CopyTargetChoice { .. } => {
+            Some(GameAction::ChooseTarget { target: None })
+        }
+
+        // Crew/Saddle/Station with no eligible creatures: CancelCast
+        // (these are activated abilities that can be backed out).
+        WaitingFor::CrewVehicle { .. }
+        | WaitingFor::SaddleMount { .. }
+        | WaitingFor::StationTarget { .. } => Some(GameAction::CancelCast),
+
+        // Ring-bearer with no creatures: skip (empty ChooseTarget).
+        WaitingFor::ChooseRingBearer { .. } => Some(GameAction::ChooseTarget { target: None }),
+
+        // Distribute with empty targets: empty distribution.
+        WaitingFor::DistributeAmong { .. } => Some(GameAction::DistributeAmong {
+            distribution: Vec::new(),
+        }),
+
+        // Replacement choice: pick the first option.
+        WaitingFor::ReplacementChoice { .. } => Some(GameAction::ChooseReplacement { index: 0 }),
+
+        // Mulligan: keep the hand.
+        WaitingFor::MulliganDecision { .. } => Some(GameAction::MulliganDecision { keep: true }),
+        WaitingFor::MulliganBottomCards { .. } => {
+            Some(GameAction::SelectCards { cards: Vec::new() })
+        }
+
+        // Named choice: pick the first option if available.
+        WaitingFor::NamedChoice { options, .. } => {
+            options.first().map(|choice| GameAction::ChooseOption {
+                choice: choice.clone(),
+            })
+        }
+
+        // Damage source choice: pick the first option.
+        WaitingFor::DamageSourceChoice { options, .. } => options
+            .first()
+            .map(|&source| GameAction::ChooseDamageSource { source }),
+
+        // Mode choice: select first mode.
+        WaitingFor::ModeChoice { .. } | WaitingFor::AbilityModeChoice { .. } => {
+            Some(GameAction::SelectModes { indices: vec![0] })
+        }
+
+        // Discover/Cascade: decline.
+        WaitingFor::DiscoverChoice { .. } => Some(GameAction::DiscoverChoice {
+            choice: engine::types::actions::CastChoice::Decline,
+        }),
+        WaitingFor::CascadeChoice { .. } => Some(GameAction::CascadeChoice {
+            choice: engine::types::actions::CastChoice::Decline,
+        }),
+
+        // Learn: skip.
+        WaitingFor::LearnChoice { .. } => Some(GameAction::LearnDecision {
+            choice: engine::types::actions::LearnOption::Skip,
+        }),
+
+        // Top or bottom: put on top.
+        WaitingFor::TopOrBottomChoice { .. } | WaitingFor::ClashCardPlacement { .. } => {
+            Some(GameAction::ChooseTopOrBottom { top: true })
+        }
+
+        // Adventure/MDFC/Warp/Evoke/Overload cost choice: pick creature/normal face.
+        WaitingFor::AdventureCastChoice { .. } => {
+            Some(GameAction::ChooseAdventureFace { creature: true })
+        }
+        WaitingFor::ModalFaceChoice { .. } => {
+            Some(GameAction::ChooseModalFace { back_face: false })
+        }
+        WaitingFor::WarpCostChoice { .. } => Some(GameAction::ChooseWarpCost { use_warp: false }),
+        WaitingFor::EvokeCostChoice { .. } => {
+            Some(GameAction::ChooseEvokeCost { use_evoke: false })
+        }
+        WaitingFor::OverloadCostChoice { .. } => Some(GameAction::ChooseOverloadCost {
+            use_overload: false,
+        }),
+
+        // Choose play/draw and sideboard: between-games defaults.
+        WaitingFor::BetweenGamesChoosePlayDraw { .. } => {
+            Some(GameAction::ChoosePlayDraw { play_first: true })
+        }
+        WaitingFor::BetweenGamesSideboard { player, .. } => {
+            // Submit the current deck unchanged (no sideboarding).
+            let pool = state.deck_pools.iter().find(|p| p.player == *player);
+            pool.map(|p| {
+                let main = p
+                    .current_main
+                    .iter()
+                    .fold(
+                        std::collections::BTreeMap::<String, u32>::new(),
+                        |mut acc, entry| {
+                            if entry.count > 0 {
+                                *acc.entry(entry.card.name.clone()).or_insert(0) += entry.count;
+                            }
+                            acc
+                        },
+                    )
+                    .into_iter()
+                    .map(|(name, count)| engine::types::match_config::DeckCardCount { name, count })
+                    .collect();
+                let sideboard = p
+                    .current_sideboard
+                    .iter()
+                    .fold(
+                        std::collections::BTreeMap::<String, u32>::new(),
+                        |mut acc, entry| {
+                            if entry.count > 0 {
+                                *acc.entry(entry.card.name.clone()).or_insert(0) += entry.count;
+                            }
+                            acc
+                        },
+                    )
+                    .into_iter()
+                    .map(|(name, count)| engine::types::match_config::DeckCardCount { name, count })
+                    .collect();
+                GameAction::SubmitSideboard { main, sideboard }
+            })
+        }
+
+        // Dungeon choices: pick first option.
+        WaitingFor::ChooseDungeon { options, .. } => options
+            .first()
+            .map(|&dungeon| GameAction::ChooseDungeon { dungeon }),
+        WaitingFor::ChooseDungeonRoom { options, .. } => options
+            .first()
+            .map(|&room_index| GameAction::ChooseDungeonRoom { room_index }),
+
+        // Paradigm: pass.
+        WaitingFor::ParadigmCastOffer { .. } => Some(GameAction::PassParadigmOffer),
+
+        // Vote: pick the first option.
+        WaitingFor::VoteChoice { options, .. } => {
+            options.first().map(|opt| GameAction::ChooseOption {
+                choice: opt.clone(),
+            })
+        }
+
+        // Legend choice: pick the first candidate.
+        WaitingFor::ChooseLegend { candidates, .. } => candidates
+            .first()
+            .map(|&keep| GameAction::ChooseLegend { keep }),
+
+        // Battle protector: pick the first candidate.
+        WaitingFor::BattleProtectorChoice { candidates, .. } => candidates
+            .first()
+            .map(|&protector| GameAction::ChooseBattleProtector { protector }),
+
+        // Proliferate: choose nothing.
+        WaitingFor::ProliferateChoice { .. } => Some(GameAction::SelectTargets {
+            targets: Vec::new(),
+        }),
+
+        // Copy retarget: keep current targets.
+        WaitingFor::CopyRetarget { target_slots, .. } => {
+            let targets: Vec<_> = target_slots.iter().map(|s| s.current.clone()).collect();
+            Some(GameAction::RetargetSpell {
+                new_targets: targets,
+            })
+        }
+
+        // Assign combat damage: all damage to first blocker or zero.
+        WaitingFor::AssignCombatDamage {
+            total_damage,
+            blockers,
+            ..
+        } => {
+            let assignments: Vec<_> = blockers
+                .iter()
+                .enumerate()
+                .map(|(i, slot)| (slot.blocker_id, if i == 0 { *total_damage } else { 0 }))
+                .collect();
+            Some(GameAction::AssignCombatDamage {
+                mode: engine::types::game_state::CombatDamageAssignmentMode::Normal,
+                assignments,
+                trample_damage: 0,
+                controller_damage: 0,
+            })
+        }
+
+        // X value: pick 0.
+        WaitingFor::ChooseXValue { .. } => Some(GameAction::ChooseX { value: 0 }),
+
+        // Pay amount: pick minimum.
+        WaitingFor::PayAmountChoice { min, .. } => {
+            Some(GameAction::SubmitPayAmount { amount: *min })
+        }
+
+        // Retarget: keep current targets.
+        WaitingFor::RetargetChoice {
+            current_targets, ..
+        } => Some(GameAction::RetargetSpell {
+            new_targets: current_targets.clone(),
+        }),
+
+        // Companion reveal: decline.
+        WaitingFor::CompanionReveal { .. } => {
+            Some(GameAction::DeclareCompanion { card_index: None })
+        }
+
+        // Explore choice: pick the first choosable creature.
+        WaitingFor::ExploreChoice { choosable, .. } => {
+            choosable.first().map(|&id| GameAction::ChooseTarget {
+                target: Some(engine::types::ability::TargetRef::Object(id)),
+            })
+        }
+
+        // Phyrexian payment: pay mana for all shards (safe default).
+        WaitingFor::PhyrexianPayment { shards, .. } => {
+            let choices = shards
+                .iter()
+                .map(|_| engine::types::game_state::ShardChoice::PayMana)
+                .collect();
+            Some(GameAction::SubmitPhyrexianChoices { choices })
+        }
+
+        // Mana-related states: picking a color or paying mana.
+        WaitingFor::ChooseManaColor { choice, .. } => {
+            use engine::types::game_state::{ManaChoice, ManaChoicePrompt};
+            match choice {
+                ManaChoicePrompt::SingleColor { options } => {
+                    options.first().map(|&color| GameAction::ChooseManaColor {
+                        choice: ManaChoice::SingleColor(color),
+                    })
+                }
+                ManaChoicePrompt::Combination { options } => {
+                    options.first().map(|combo| GameAction::ChooseManaColor {
+                        choice: ManaChoice::Combination(combo.clone()),
+                    })
+                }
+                ManaChoicePrompt::AnyCombination { count, options } => {
+                    let combo = vec![
+                        options
+                            .first()
+                            .copied()
+                            .unwrap_or(engine::types::mana::ManaType::Colorless);
+                        *count
+                    ];
+                    Some(GameAction::ChooseManaColor {
+                        choice: ManaChoice::Combination(combo),
+                    })
+                }
+            }
+        }
+        WaitingFor::PayManaAbilityMana { options, .. } => {
+            options.first().map(|plan| GameAction::PayManaAbilityMana {
+                payment: plan.clone(),
+            })
+        }
+
+        // Mana ability sub-costs: these are not pending-cast states but
+        // carry PendingManaAbility. Empty eligible lists shouldn't normally
+        // happen but CancelCast is not valid here. Use empty selection.
+        WaitingFor::TapCreaturesForManaAbility { .. }
+        | WaitingFor::DiscardForManaAbility { .. }
+        | WaitingFor::ExileFromBattlefieldForManaAbility { .. } => {
+            Some(GameAction::SelectCards { cards: Vec::new() })
+        }
+
+        // Category choice: choose None for each category.
+        WaitingFor::CategoryChoice {
+            eligible_per_category,
+            ..
+        } => {
+            let choices = eligible_per_category
+                .iter()
+                .map(|eligible| eligible.first().copied())
+                .collect();
+            Some(GameAction::SelectCategoryPermanents { choices })
+        }
+
+        // Remaining pending-cast states are caught by the has_pending_cast
+        // guard above. This arm is structurally unreachable but required
+        // for exhaustive match. ManaPayment is a pending-cast state.
+        WaitingFor::ManaPayment { .. }
+        | WaitingFor::OptionalCostChoice { .. }
+        | WaitingFor::DefilerPayment { .. }
+        | WaitingFor::DiscardForCost { .. }
+        | WaitingFor::SacrificeForCost { .. }
+        | WaitingFor::ReturnToHandForCost { .. }
+        | WaitingFor::BlightChoice { .. }
+        | WaitingFor::TapCreaturesForSpellCost { .. }
+        | WaitingFor::ExileForCost { .. }
+        | WaitingFor::CollectEvidenceChoice { .. }
+        | WaitingFor::HarmonizeTapChoice { .. } => {
+            // These are all pending-cast states — the has_pending_cast guard
+            // above already returned CancelCast. This branch is unreachable
+            // at runtime but keeps the match exhaustive.
+            Some(GameAction::CancelCast)
+        }
     }
 }
 
