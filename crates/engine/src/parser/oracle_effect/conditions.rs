@@ -23,6 +23,7 @@ use crate::types::ability::{
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::CounterMatch;
+use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost};
 use crate::types::phase::Phase;
 use crate::types::zones::Zone;
@@ -1684,6 +1685,24 @@ pub(super) fn try_nom_condition_as_ability_condition(
 
     if let Some(condition) = parse_target_supertype_condition_text(lower.as_str()) {
         return Some(condition);
+    }
+
+    // CR 702.62a: "it doesn't have [keyword]" / "it does not have [keyword]" — pronoun
+    // subject lacks-keyword check (e.g., "If it doesn't have suspend, it gains suspend").
+    // Mirrors the "~ doesn't have" / "this creature doesn't have" handler in oracle_condition.rs.
+    if let Ok((keyword_text, _)) = alt((
+        tag::<_, _, VerboseError<&str>>("it doesn't have "),
+        tag("it does not have "),
+    ))
+    .parse(lower.as_str())
+    {
+        let keyword: Keyword = keyword_text
+            .trim()
+            .parse()
+            .unwrap_or(Keyword::Unknown(String::new()));
+        if !matches!(keyword, Keyword::Unknown(_)) {
+            return Some(AbilityCondition::SourceLacksKeyword { keyword });
+        }
     }
 
     // CR 730.2a: "it's neither day nor night" — Daybound/Nightbound ETB initialization.
