@@ -756,6 +756,7 @@ pub fn restore_game_state(json_str: &str) -> Result<(), JsValue> {
     let mut state: GameState = serde_json::from_str(json_str)
         .map_err(|e| JsValue::from_str(&format!("Failed to deserialize GameState: {}", e)))?;
     state.rng = ChaCha20Rng::seed_from_u64(state.rng_seed);
+    state.debug_mode = true;
     CARD_DB.with(|cell| {
         if let Some(db) = cell.borrow().as_ref() {
             rehydrate_game_from_card_db(&mut state, db);
