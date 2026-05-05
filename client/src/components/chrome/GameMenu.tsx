@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 
 import { ConnectionDot } from "../multiplayer/ConnectionDot.tsx";
+import { FullscreenButton } from "./FullscreenButton.tsx";
 import { VolumeControl } from "./VolumeControl.tsx";
 import { clearGame } from "../../stores/gameStore.ts";
 import { useCardDataMeta } from "../../hooks/useCardDataMeta.ts";
@@ -70,6 +71,7 @@ export function GameMenu({
           </svg>
         </button>
         <VolumeControl variant="game" />
+        <FullscreenButton variant="game" />
         {isOnlineMode && <ConnectionDot />}
       </div>
       {open && (

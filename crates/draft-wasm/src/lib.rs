@@ -193,6 +193,9 @@ pub fn submit_pick(card_instance_id: &str) -> Result<JsValue, JsValue> {
 
                 if has_pack {
                     let pack = draft_session.current_pack[seat as usize].as_ref().unwrap();
+                    if pack.0.is_empty() {
+                        continue;
+                    }
                     let pool = &draft_session.pools[seat as usize];
 
                     let pick_idx = bot_ai::bot_pick(&pack.0, difficulty, pool, card_db, &mut rng);
