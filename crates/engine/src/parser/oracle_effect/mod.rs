@@ -6774,6 +6774,15 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     fn rewrite_quantity_expr(expr: &mut QuantityExpr) {
         match expr {
             QuantityExpr::Ref { qty } => match qty {
+                QuantityRef::LifeTotal { player }
+                | QuantityRef::HandSize { player }
+                | QuantityRef::LifeLostThisTurn { player }
+                | QuantityRef::LifeGainedThisTurn { player }
+                | QuantityRef::PartySize { player }
+                    if *player == PlayerScope::Controller =>
+                {
+                    *player = PlayerScope::ScopedPlayer;
+                }
                 QuantityRef::LifeTotal {
                     player: PlayerScope::Target,
                 } => {
@@ -7474,10 +7483,24 @@ pub(crate) fn parse_effect_chain_ir(
         };
         let repeat_for = repeat_for.or(repeat_count);
         let (player_scope, text) = strip_player_scope_subject(&text);
+        let carried_player_scope = if player_scope.is_none()
+            && !sequence::starts_clause_text(&text)
+            && sequence::starts_clause_text_or_conjugated(&text)
+        {
+            clauses
+                .iter()
+                .rev()
+                .find(|clause| !clause.absorbed_by_followup)
+                .and_then(|clause| clause.player_scope)
+        } else {
+            None
+        };
         // CR 608.2d: When the optional prefix ("each opponent may") carries an
         // implicit per-player iteration, propagate it to the ability so the
         // OptionalEffectChoice is emitted once per matching player.
-        let mut player_scope = player_scope.or(implicit_player_scope);
+        let mut player_scope = player_scope
+            .or(implicit_player_scope)
+            .or(carried_player_scope);
 
         // CR 701.21a + CR 608.2k: Derive the actor performing this chunk's effect
         // from any actor prefix that was just stripped ("you (may) ", "an
@@ -13841,6 +13864,11 @@ mod tests {
             .sub_ability
             .as_ref()
             .expect("should have sub_ability for Draw after ', then draws'");
+        assert_eq!(
+            sub.player_scope,
+            Some(PlayerFilter::All),
+            "carried each-player subject should apply to the draw continuation"
+        );
         assert!(
             matches!(
                 &*sub.effect,
@@ -13852,6 +13880,57 @@ mod tests {
             "sub_ability should be Draw(7), got {:?}",
             sub.effect
         );
+    }
+
+    #[test]
+    fn windfall_draw_uses_previous_discard_max_for_each_player() {
+        let def = parse_effect_chain(
+            "Each player discards their hand, then draws cards equal to the greatest number of cards a player discarded this way.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        assert!(matches!(&*def.effect, Effect::Discard { .. }));
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected draw continuation");
+        assert_eq!(sub.player_scope, Some(PlayerFilter::All));
+        assert!(matches!(
+            &*sub.effect,
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount
+                },
+                target: TargetFilter::Controller,
+            }
+        ));
+    }
+
+    #[test]
+    fn dark_deal_draw_uses_each_players_discard_count_minus_one() {
+        let def = parse_effect_chain(
+            "Each player discards all the cards in their hand, then draws that many cards minus one.",
+            AbilityKind::Spell,
+        );
+        assert_eq!(def.player_scope, Some(PlayerFilter::All));
+        assert!(matches!(&*def.effect, Effect::Discard { .. }));
+        let sub = def
+            .sub_ability
+            .as_ref()
+            .expect("expected draw continuation");
+        assert_eq!(sub.player_scope, Some(PlayerFilter::All));
+        assert!(matches!(
+            &*sub.effect,
+            Effect::Draw {
+                count: QuantityExpr::Offset { inner, offset: -1 },
+                target: TargetFilter::Controller,
+            } if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                }
+            )
+        ));
     }
 
     #[test]

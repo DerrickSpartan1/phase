@@ -141,6 +141,7 @@ pub fn apply(
     // last_effect_count is set by interactive handlers (e.g., DiscardChoice) and
     // consumed by sub_ability continuations via EventContextAmount fallback.
     state.last_effect_count = None;
+    state.last_effect_counts_by_player.clear();
     state.exiled_from_hand_this_resolution = 0;
     check_actor_authorization(state, actor, &action)?;
     let mut result = apply_action(state, actor, action)?;

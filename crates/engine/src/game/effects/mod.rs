@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashMap;
 
 use crate::game::filter;
 use crate::game::speed::has_max_speed;
@@ -1135,6 +1136,21 @@ fn previous_effect_amount_from_events(effect: &Effect, events: &[GameEvent]) -> 
     (amount > 0).then_some(amount)
 }
 
+fn previous_effect_counts_by_player_from_events(
+    effect: &Effect,
+    events: &[GameEvent],
+) -> HashMap<PlayerId, i32> {
+    let mut counts = HashMap::new();
+    if matches!(effect, Effect::Discard { .. } | Effect::DiscardCard { .. }) {
+        for event in events {
+            if let GameEvent::Discarded { player_id, .. } = event {
+                *counts.entry(*player_id).or_insert(0) += 1;
+            }
+        }
+    }
+    counts
+}
+
 /// Resolve an ability and follow its sub_ability chain using typed nested structs.
 /// No SVar lookup, no parse_ability(). The depth is bounded by the data structure.
 pub fn resolve_ability_chain(
@@ -1154,6 +1170,7 @@ pub fn resolve_ability_chain(
         state.last_revealed_ids.clear();
         state.last_zone_changed_ids.clear();
         state.last_effect_amount = None;
+        state.last_effect_counts_by_player.clear();
         state.exiled_from_hand_this_resolution = 0;
         // CR 603.7: Chain-local tracked-set identity — resets per top-level
         // ability resolution so compound zone changes within one chain
@@ -1251,6 +1268,7 @@ pub fn resolve_ability_chain(
     // the printed ability controller. The unscoped tail then resumes once
     // after the scoped loop, matching the printed instruction order.
     if let Some(ref scope) = ability.player_scope {
+        let scoped_events_before = events.len();
         let controller = ability.controller;
         let matching_players: Vec<PlayerId> = crate::game::players::apnap_order(state)
             .into_iter()
@@ -1291,6 +1309,18 @@ pub fn resolve_ability_chain(
                 paused = true;
                 break;
             }
+        }
+        let scoped_events = &events[scoped_events_before..];
+        let counts_by_player =
+            previous_effect_counts_by_player_from_events(&scoped_template.effect, scoped_events);
+        if !counts_by_player.is_empty() {
+            state.last_effect_count = counts_by_player.values().copied().max();
+            state.last_effect_amount = state.last_effect_count;
+            state.last_effect_counts_by_player = counts_by_player;
+        } else if let Some(amount) =
+            previous_effect_amount_from_events(&scoped_template.effect, scoped_events)
+        {
+            state.last_effect_amount = Some(amount);
         }
         if !paused {
             if let Some(after_scope) = after_scope {
@@ -4399,6 +4429,157 @@ mod tests {
             1,
             "opponent should have drawn a card"
         );
+    }
+
+    #[test]
+    fn player_scope_discard_then_dark_deal_draws_per_players_discard_count_minus_one() {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(0),
+                format!("P0 Hand {i}"),
+                Zone::Hand,
+            );
+            create_object(
+                &mut state,
+                CardId(20 + i),
+                PlayerId(0),
+                format!("P0 Library {i}"),
+                Zone::Library,
+            );
+            create_object(
+                &mut state,
+                CardId(30 + i),
+                PlayerId(1),
+                format!("P1 Library {i}"),
+                Zone::Library,
+            );
+        }
+        create_object(
+            &mut state,
+            CardId(40),
+            PlayerId(1),
+            "P1 Hand".to_string(),
+            Zone::Hand,
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::All);
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }),
+                    offset: -1,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::All);
+        ability.sub_ability = Some(Box::new(draw));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].hand.len(), 2);
+        assert_eq!(state.players[1].hand.len(), 0);
+        assert_eq!(state.players[0].graveyard.len(), 3);
+        assert_eq!(state.players[1].graveyard.len(), 1);
+    }
+
+    #[test]
+    fn player_scope_discard_then_windfall_draws_greatest_discard_count() {
+        let mut state = GameState::new_two_player(42);
+        for i in 0..3 {
+            create_object(
+                &mut state,
+                CardId(50 + i),
+                PlayerId(0),
+                format!("P0 Hand {i}"),
+                Zone::Hand,
+            );
+            create_object(
+                &mut state,
+                CardId(60 + i),
+                PlayerId(0),
+                format!("P0 Library {i}"),
+                Zone::Library,
+            );
+            create_object(
+                &mut state,
+                CardId(70 + i),
+                PlayerId(1),
+                format!("P1 Library {i}"),
+                Zone::Library,
+            );
+        }
+        create_object(
+            &mut state,
+            CardId(80),
+            PlayerId(1),
+            "P1 Hand".to_string(),
+            Zone::Hand,
+        );
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Discard {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::HandSize {
+                        player: PlayerScope::ScopedPlayer,
+                    },
+                },
+                target: TargetFilter::Controller,
+                random: false,
+                unless_filter: None,
+                filter: None,
+            },
+            vec![],
+            ObjectId(101),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::All);
+        let mut draw = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::PreviousEffectAmount,
+                },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(101),
+            PlayerId(0),
+        );
+        draw.player_scope = Some(PlayerFilter::All);
+        ability.sub_ability = Some(Box::new(draw));
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(state.players[0].hand.len(), 3);
+        assert_eq!(state.players[1].hand.len(), 3);
+        assert_eq!(state.players[0].graveyard.len(), 3);
+        assert_eq!(state.players[1].graveyard.len(), 1);
     }
 
     #[test]

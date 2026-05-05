@@ -385,9 +385,41 @@ pub(crate) fn parse_event_context_quantity(text: &str) -> Option<QuantityExpr> {
         });
     }
 
+    if nom::combinator::all_consuming((
+        tag::<_, _, VerboseError<&str>>("the "),
+        alt((tag("greatest "), tag("highest "))),
+        tag("number of cards "),
+        nom::combinator::opt(alt((tag("a player "), tag("any player ")))),
+        tag("discarded this way"),
+    ))
+    .parse(lower)
+    .is_ok()
+    {
+        return Some(QuantityExpr::Ref {
+            qty: QuantityRef::PreviousEffectAmount,
+        });
+    }
+
+    if let Ok((_, (_, offset))) = nom::combinator::all_consuming((
+        alt((
+            tag::<_, _, VerboseError<&str>>("that many cards minus "),
+            tag("that many minus "),
+        )),
+        nom_primitives::parse_number,
+    ))
+    .parse(lower)
+    {
+        return Some(QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            }),
+            offset: -(offset as i32),
+        });
+    }
+
     match lower {
         // allow-noncombinator: dispatching on already-classified pre-trimmed phrase
-        "that much" | "that many" => {
+        "that much" | "that many" | "that many cards" => {
             return Some(QuantityExpr::Ref {
                 qty: QuantityRef::EventContextAmount,
             })

@@ -2824,6 +2824,13 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_effect_count: Option<i32>,
 
+    /// CR 608.2c + CR 701.9a: Per-player counts produced by the preceding
+    /// effect in the current ability chain. Used by carried-subject
+    /// continuations like "Each player discards ..., then draws that many ..."
+    /// after all players have completed the discard pass.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub last_effect_counts_by_player: HashMap<PlayerId, i32>,
+
     /// CR 400.7 + CR 608.2c: Number of cards exiled from a hand by the most recent
     /// `Effect::ChangeZoneAll` resolution. Read by `QuantityRef::ExiledFromHandThisResolution`
     /// for "draws a card for each card exiled from their hand this way" patterns
@@ -3130,6 +3137,7 @@ impl GameState {
             player_actions_this_way: HashSet::new(),
             last_effect_amount: None,
             last_effect_count: None,
+            last_effect_counts_by_player: HashMap::new(),
             exiled_from_hand_this_resolution: 0,
             monarch: None,
             city_blessing: HashSet::new(),
@@ -3301,6 +3309,7 @@ impl PartialEq for GameState {
             && self.last_zone_changed_ids == other.last_zone_changed_ids
             && self.player_actions_this_way == other.player_actions_this_way
             && self.last_effect_count == other.last_effect_count
+            && self.last_effect_counts_by_player == other.last_effect_counts_by_player
             && self.exiled_from_hand_this_resolution == other.exiled_from_hand_this_resolution
             && self.lki_cache == other.lki_cache
             && self.city_blessing == other.city_blessing

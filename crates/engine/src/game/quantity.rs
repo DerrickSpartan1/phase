@@ -1034,6 +1034,10 @@ fn resolve_ref(
             .current_trigger_event
             .as_ref()
             .and_then(crate::game::targeting::extract_amount_from_event)
+            .or_else(|| {
+                ctx.scoped_player
+                    .and_then(|player| state.last_effect_counts_by_player.get(&player).copied())
+            })
             .or(state.last_effect_count)
             .unwrap_or(0),
         // CR 603.7c: Power of the source object from the triggering event.

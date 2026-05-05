@@ -3608,12 +3608,21 @@ pub(super) fn parse_imperative_family_ast(
 
         // Numeric verbs (CR 121)
         "draw" if nom_primitives::scan_contains(lower, "that many") => {
-            // "draw that many cards" → EventContextAmount, bypass numeric AST
-            // which can only represent fixed u32 counts.
+            // "draw that many cards" / "draw that many cards minus one" →
+            // EventContextAmount-based quantities, bypassing numeric AST which
+            // can only represent fixed u32 counts.
+            let count = tag::<_, _, VerboseError<&str>>("draw ")
+                .parse(lower)
+                .ok()
+                .and_then(|(tail_lower, _)| {
+                    let tail = &text[text.len() - tail_lower.len()..];
+                    super::super::oracle_quantity::parse_event_context_quantity(tail)
+                })
+            .unwrap_or(QuantityExpr::Ref {
+                qty: QuantityRef::EventContextAmount,
+            });
             Some(ImperativeFamilyAst::GainKeyword(Effect::Draw {
-                count: QuantityExpr::Ref {
-                    qty: QuantityRef::EventContextAmount,
-                },
+                count,
                 target: TargetFilter::Controller,
             }))
         }
