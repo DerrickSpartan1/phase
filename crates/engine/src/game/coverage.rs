@@ -271,6 +271,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
     for prop in &tf.properties {
         match prop {
             FilterProp::Token => parts.push("token".into()),
+            FilterProp::NonToken => parts.push("nontoken".into()),
             FilterProp::Attacking => parts.push("attacking".into()),
             FilterProp::AttackingController => parts.push("attacking you".into()),
             FilterProp::Blocking => parts.push("blocking".into()),

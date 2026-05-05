@@ -54,9 +54,13 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
         Permanents::IsCreatureType(s) => TargetFilter::Typed(
             TypedFilter::creature().with_type(TypeFilter::Subtype(creature_type_name(s))),
         ),
-        Permanents::IsSupertype(s) => TargetFilter::Typed(
-            TypedFilter::permanent().with_type(TypeFilter::Subtype(supertype_name(s))),
-        ),
+        Permanents::IsSupertype(s) => {
+            TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::HasSupertype {
+                    value: supertype_to_engine(s),
+                },
+            ]))
+        }
 
         // CR 205.3i: Land subtypes (Forest, Plains, …, Cave, Gate, Lair, Sphere, etc.).
         Permanents::IsLandType(lt) => TargetFilter::Typed(
@@ -184,10 +188,8 @@ pub fn convert(p: &Permanents) -> ConvResult<TargetFilter> {
         // CR 110.5 (face up/face down) + CR 707.2: face-down permanents.
         Permanents::IsFaceDown => prop_filter(FilterProp::FaceDown),
 
-        // CR 111.6: token / nontoken predicate.
-        Permanents::IsNonToken => TargetFilter::Not {
-            filter: Box::new(prop_filter(FilterProp::Token)),
-        },
+        // CR 111.1: token identity is an object property, not a subtype.
+        Permanents::IsNonToken => prop_filter(FilterProp::NonToken),
 
         // CR 105.2c: colorless filter.
         Permanents::IsColorless => prop_filter(FilterProp::Colorless),
@@ -813,214 +815,221 @@ fn damage_sources_variant_tag(s: &DamageSources) -> String {
 /// so the report tracks the work queue.
 pub(crate) fn spells_to_filter(s: &crate::schema::types::Spells) -> ConvResult<TargetFilter> {
     use crate::schema::types::Spells as S;
-    let filter = match s {
-        S::AnySpell => TargetFilter::Typed(TypedFilter::default()),
-        S::IsCardtype(ct) => TargetFilter::Typed(TypedFilter::new(card_type(ct))),
-        S::IsNonCardtype(ct) => {
-            TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(Box::new(card_type(ct)))))
-        }
-        S::IsCreatureType(ct) => TargetFilter::Typed(
-            TypedFilter::new(TypeFilter::Creature)
-                .with_type(TypeFilter::Subtype(creature_type_name(ct))),
-        ),
-        S::IsNonCreatureType(ct) => TargetFilter::Typed(
-            TypedFilter::new(TypeFilter::Creature).with_type(TypeFilter::Non(Box::new(
-                TypeFilter::Subtype(creature_type_name(ct)),
-            ))),
-        ),
-        S::IsNonSupertype(st) => TargetFilter::Typed(TypedFilter::default().with_type(
-            TypeFilter::Non(Box::new(TypeFilter::Subtype(supertype_name(st)))),
-        )),
-        S::IsNonEnchantmentType(et) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Enchantment)
-                .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
-                    enchantment_type_name(et),
-                )))),
-        ),
-
-        // CR 205.3: Subtype predicates on spells (cards on the stack still
-        // carry their printed subtypes, so the typed-filter shape mirrors the
-        // Permanents arms).
-        S::IsArtifactType(at) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Artifact)
-                .with_type(TypeFilter::Subtype(artifact_type_name(at))),
-        ),
-        S::IsEnchantmentType(et) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Enchantment)
-                .with_type(TypeFilter::Subtype(enchantment_type_name(et))),
-        ),
-        S::IsPlaneswalkerType(pt) => TargetFilter::Typed(
-            TypedFilter::default()
-                .with_type(TypeFilter::Planeswalker)
-                .with_type(TypeFilter::Subtype(planeswalker_type_name(pt))),
-        ),
-        // CR 205.4a: nonbasic / nonlegendary / etc.
-        S::IsSupertype(st) => TargetFilter::Typed(
-            TypedFilter::default().with_type(TypeFilter::Subtype(supertype_name(st))),
-        ),
-        // CR 110.1: spells that resolve to permanents (artifact/creature/
-        // enchantment/land/planeswalker/battle). Engine TypedFilter has no
-        // boolean "permanent" axis on a card-on-stack scope, so we inherit
-        // the Permanents-side `permanent()` typed filter — the type set is
-        // the same.
-        S::IsPermanent => TargetFilter::Typed(TypedFilter::permanent()),
-
-        // CR 105.1 / CR 105.2c: Color predicates over spells. Non-concrete
-        // colors strict-fail (chosen-color requires runtime binding).
-        S::IsColor(c) => match concrete_color(c) {
-            Some(color) => TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
+    let filter =
+        match s {
+            S::AnySpell => TargetFilter::Typed(TypedFilter::default()),
+            S::IsCardtype(ct) => TargetFilter::Typed(TypedFilter::new(card_type(ct))),
+            S::IsNonCardtype(ct) => {
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Non(Box::new(card_type(ct)))))
+            }
+            S::IsCreatureType(ct) => TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Creature)
+                    .with_type(TypeFilter::Subtype(creature_type_name(ct))),
             ),
-            None => {
-                return Err(ConversionGap::MalformedIdiom {
-                    idiom: "Spells/IsColor",
-                    path: String::new(),
-                    detail: format!("non-concrete color: {c:?}"),
-                });
+            S::IsNonCreatureType(ct) => {
+                TargetFilter::Typed(TypedFilter::new(TypeFilter::Creature).with_type(
+                    TypeFilter::Non(Box::new(TypeFilter::Subtype(creature_type_name(ct)))),
+                ))
             }
-        },
-        S::IsNonColor(c) => match concrete_color(c) {
-            Some(color) => TargetFilter::Not {
-                filter: Box::new(TargetFilter::Typed(
+            S::IsNonSupertype(st) => TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::NotSupertype {
+                    value: supertype_to_engine(st),
+                },
+            ])),
+            S::IsNonEnchantmentType(et) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Enchantment)
+                    .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                        enchantment_type_name(et),
+                    )))),
+            ),
+
+            // CR 205.3: Subtype predicates on spells (cards on the stack still
+            // carry their printed subtypes, so the typed-filter shape mirrors the
+            // Permanents arms).
+            S::IsArtifactType(at) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Artifact)
+                    .with_type(TypeFilter::Subtype(artifact_type_name(at))),
+            ),
+            S::IsEnchantmentType(et) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Enchantment)
+                    .with_type(TypeFilter::Subtype(enchantment_type_name(et))),
+            ),
+            S::IsPlaneswalkerType(pt) => TargetFilter::Typed(
+                TypedFilter::default()
+                    .with_type(TypeFilter::Planeswalker)
+                    .with_type(TypeFilter::Subtype(planeswalker_type_name(pt))),
+            ),
+            // CR 205.4a: nonbasic / nonlegendary / etc.
+            S::IsSupertype(st) => TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::HasSupertype {
+                    value: supertype_to_engine(st),
+                },
+            ])),
+            // CR 110.1: spells that resolve to permanents (artifact/creature/
+            // enchantment/land/planeswalker/battle). Engine TypedFilter has no
+            // boolean "permanent" axis on a card-on-stack scope, so we inherit
+            // the Permanents-side `permanent()` typed filter — the type set is
+            // the same.
+            S::IsPermanent => TargetFilter::Typed(TypedFilter::permanent()),
+
+            // CR 105.1 / CR 105.2c: Color predicates over spells. Non-concrete
+            // colors strict-fail (chosen-color requires runtime binding).
+            S::IsColor(c) => match concrete_color(c) {
+                Some(color) => TargetFilter::Typed(
                     TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
-                )),
+                ),
+                None => {
+                    return Err(ConversionGap::MalformedIdiom {
+                        idiom: "Spells/IsColor",
+                        path: String::new(),
+                        detail: format!("non-concrete color: {c:?}"),
+                    });
+                }
             },
-            None => {
-                return Err(ConversionGap::MalformedIdiom {
-                    idiom: "Spells/IsNonColor",
-                    path: String::new(),
-                    detail: format!("non-concrete color: {c:?}"),
+            S::IsNonColor(c) => match concrete_color(c) {
+                Some(color) => TargetFilter::Not {
+                    filter: Box::new(TargetFilter::Typed(
+                        TypedFilter::default().properties(vec![FilterProp::HasColor { color }]),
+                    )),
+                },
+                None => {
+                    return Err(ConversionGap::MalformedIdiom {
+                        idiom: "Spells/IsNonColor",
+                        path: String::new(),
+                        detail: format!("non-concrete color: {c:?}"),
+                    });
+                }
+            },
+            S::IsColorless => {
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Colorless]))
+            }
+            S::IsMulticolored => TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::Multicolored]),
+            ),
+            // CR 700.6: "historic" — legendary, artifact, or Saga.
+            S::IsHistoric => {
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Historic]))
+            }
+
+            // CR 202.3 / CR 208.1: Numeric comparisons on the cast spell. Reuse
+            // the same comparison helpers Permanents uses; they emit
+            // FilterProp::CmcGE/PowerGE/ToughnessGE which evaluate against the
+            // card's printed/current values regardless of zone.
+            S::ManaValueIs(cmp) => cmc_comparison_filter(cmp)?,
+            S::PowerIs(cmp) => power_comparison_filter(cmp)?,
+            S::ToughnessIs(cmp) => toughness_comparison_filter(cmp)?,
+            // CR 107.3 + CR 202.1: spell with {X} in its mana cost.
+            S::HasXInManaCost => TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasXInManaCost]),
+            ),
+
+            // CR 201.2: name predicate. Reuses the shared NameFilter helper,
+            // which strict-fails for non-static name shapes.
+            S::IsNamed(nf) => name_filter_to_filter(nf)?,
+
+            // CR 702: Keyword presence / absence on a spell. Reuses the same
+            // CheckHasable helper as Permanents — composite shapes strict-fail.
+            S::HasAbility(check) => has_ability_filter(check)?,
+            S::DoesntHaveAbility(check) => TargetFilter::Not {
+                filter: Box::new(has_ability_filter(check)?),
+            },
+
+            // CR 903.3: "your commander" — controller-scoped commander predicate.
+            S::IsYourCommander => TargetFilter::Typed(
+                TypedFilter::default()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::IsCommander]),
+            ),
+            // CR 903.3: "a commander" — any commander on the stack.
+            S::IsACommander => TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::IsCommander]),
+            ),
+
+            // CR 601.2 / CR 109.4: caster / owner / controller axis. The engine
+            // tracks the stack-object controller via ControllerRef; "cast by
+            // player X" maps directly. Compound `Players` (multi-player sets)
+            // strict-fail through `players_to_controller`.
+            S::CastByAPlayer(players) => {
+                let ctrl = players_to_controller(players)?;
+                TargetFilter::Typed(TypedFilter::default().controller(ctrl))
+            }
+            S::CastByPlayer(player) => {
+                let ctrl = player_to_controller(player)?;
+                TargetFilter::Typed(TypedFilter::default().controller(ctrl))
+            }
+            S::ControlledByAPlayer(players) => {
+                let ctrl = players_to_controller(players)?;
+                TargetFilter::Typed(TypedFilter::default().controller(ctrl))
+            }
+            S::OwnedByAPlayer(players) => {
+                let ctrl = players_to_controller(players)?;
+                TargetFilter::Typed(
+                    TypedFilter::default().properties(vec![FilterProp::Owned { controller: ctrl }]),
+                )
+            }
+
+            // CR 115.9c: "spell that targets only ~" — the inner Permanent /
+            // Permanents filter constrains every target of the spell.
+            S::TargetsOnlySinglePermanent(inner) => {
+                TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::TargetsOnly {
+                        filter: Box::new(convert_permanent(inner)?),
+                    },
+                ]))
+            }
+            S::CanTargetOnly(inner) => {
+                TargetFilter::Typed(TypedFilter::default().properties(vec![
+                    FilterProp::TargetsOnly {
+                        filter: Box::new(convert(inner)?),
+                    },
+                ]))
+            }
+            // CR 115.9b: "spell that targets ~" (ANY target satisfies the inner
+            // filter). `TargetsAPermanent` carries a `Permanents`; `TargetsPermanent`
+            // carries a singular `Permanent`. Both reduce to FilterProp::Targets.
+            S::TargetsAPermanent(inner) => {
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Targets {
+                    filter: Box::new(convert(inner)?),
+                }]))
+            }
+            S::TargetsPermanent(inner) => {
+                TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Targets {
+                    filter: Box::new(convert_permanent(inner)?),
+                }]))
+            }
+            // CR 115.7: spell with exactly one target.
+            S::HasASingleTarget => TargetFilter::Typed(
+                TypedFilter::default().properties(vec![FilterProp::HasSingleTarget]),
+            ),
+
+            S::And(parts) => {
+                let mut filters = Vec::with_capacity(parts.len());
+                for part in parts {
+                    filters.push(spells_to_filter(part)?);
+                }
+                TargetFilter::And { filters }
+            }
+            S::Or(parts) => {
+                let mut filters = Vec::with_capacity(parts.len());
+                for part in parts {
+                    filters.push(spells_to_filter(part)?);
+                }
+                TargetFilter::Or { filters }
+            }
+            S::Not(inner) => TargetFilter::Not {
+                filter: Box::new(spells_to_filter(inner)?),
+            },
+
+            other => {
+                return Err(ConversionGap::EnginePrerequisiteMissing {
+                    engine_type: "TargetFilter",
+                    needed_variant: format!("Spells::{}", spells_variant_tag(other)),
                 });
             }
-        },
-        S::IsColorless => {
-            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Colorless]))
-        }
-        S::IsMulticolored => {
-            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Multicolored]))
-        }
-        // CR 700.6: "historic" — legendary, artifact, or Saga.
-        S::IsHistoric => {
-            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Historic]))
-        }
-
-        // CR 202.3 / CR 208.1: Numeric comparisons on the cast spell. Reuse
-        // the same comparison helpers Permanents uses; they emit
-        // FilterProp::CmcGE/PowerGE/ToughnessGE which evaluate against the
-        // card's printed/current values regardless of zone.
-        S::ManaValueIs(cmp) => cmc_comparison_filter(cmp)?,
-        S::PowerIs(cmp) => power_comparison_filter(cmp)?,
-        S::ToughnessIs(cmp) => toughness_comparison_filter(cmp)?,
-        // CR 107.3 + CR 202.1: spell with {X} in its mana cost.
-        S::HasXInManaCost => {
-            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::HasXInManaCost]))
-        }
-
-        // CR 201.2: name predicate. Reuses the shared NameFilter helper,
-        // which strict-fails for non-static name shapes.
-        S::IsNamed(nf) => name_filter_to_filter(nf)?,
-
-        // CR 702: Keyword presence / absence on a spell. Reuses the same
-        // CheckHasable helper as Permanents — composite shapes strict-fail.
-        S::HasAbility(check) => has_ability_filter(check)?,
-        S::DoesntHaveAbility(check) => TargetFilter::Not {
-            filter: Box::new(has_ability_filter(check)?),
-        },
-
-        // CR 903.3: "your commander" — controller-scoped commander predicate.
-        S::IsYourCommander => TargetFilter::Typed(
-            TypedFilter::default()
-                .controller(ControllerRef::You)
-                .properties(vec![FilterProp::IsCommander]),
-        ),
-        // CR 903.3: "a commander" — any commander on the stack.
-        S::IsACommander => {
-            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::IsCommander]))
-        }
-
-        // CR 601.2 / CR 109.4: caster / owner / controller axis. The engine
-        // tracks the stack-object controller via ControllerRef; "cast by
-        // player X" maps directly. Compound `Players` (multi-player sets)
-        // strict-fail through `players_to_controller`.
-        S::CastByAPlayer(players) => {
-            let ctrl = players_to_controller(players)?;
-            TargetFilter::Typed(TypedFilter::default().controller(ctrl))
-        }
-        S::CastByPlayer(player) => {
-            let ctrl = player_to_controller(player)?;
-            TargetFilter::Typed(TypedFilter::default().controller(ctrl))
-        }
-        S::ControlledByAPlayer(players) => {
-            let ctrl = players_to_controller(players)?;
-            TargetFilter::Typed(TypedFilter::default().controller(ctrl))
-        }
-        S::OwnedByAPlayer(players) => {
-            let ctrl = players_to_controller(players)?;
-            TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::Owned { controller: ctrl }]),
-            )
-        }
-
-        // CR 115.9c: "spell that targets only ~" — the inner Permanent /
-        // Permanents filter constrains every target of the spell.
-        S::TargetsOnlySinglePermanent(inner) => TargetFilter::Typed(
-            TypedFilter::default().properties(vec![FilterProp::TargetsOnly {
-                filter: Box::new(convert_permanent(inner)?),
-            }]),
-        ),
-        S::CanTargetOnly(inner) => {
-            TargetFilter::Typed(
-                TypedFilter::default().properties(vec![FilterProp::TargetsOnly {
-                    filter: Box::new(convert(inner)?),
-                }]),
-            )
-        }
-        // CR 115.9b: "spell that targets ~" (ANY target satisfies the inner
-        // filter). `TargetsAPermanent` carries a `Permanents`; `TargetsPermanent`
-        // carries a singular `Permanent`. Both reduce to FilterProp::Targets.
-        S::TargetsAPermanent(inner) => {
-            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Targets {
-                filter: Box::new(convert(inner)?),
-            }]))
-        }
-        S::TargetsPermanent(inner) => {
-            TargetFilter::Typed(TypedFilter::default().properties(vec![FilterProp::Targets {
-                filter: Box::new(convert_permanent(inner)?),
-            }]))
-        }
-        // CR 115.7: spell with exactly one target.
-        S::HasASingleTarget => TargetFilter::Typed(
-            TypedFilter::default().properties(vec![FilterProp::HasSingleTarget]),
-        ),
-
-        S::And(parts) => {
-            let mut filters = Vec::with_capacity(parts.len());
-            for part in parts {
-                filters.push(spells_to_filter(part)?);
-            }
-            TargetFilter::And { filters }
-        }
-        S::Or(parts) => {
-            let mut filters = Vec::with_capacity(parts.len());
-            for part in parts {
-                filters.push(spells_to_filter(part)?);
-            }
-            TargetFilter::Or { filters }
-        }
-        S::Not(inner) => TargetFilter::Not {
-            filter: Box::new(spells_to_filter(inner)?),
-        },
-
-        other => {
-            return Err(ConversionGap::EnginePrerequisiteMissing {
-                engine_type: "TargetFilter",
-                needed_variant: format!("Spells::{}", spells_variant_tag(other)),
-            });
-        }
-    };
+        };
     Ok(filter.normalized())
 }
 
@@ -1068,9 +1077,11 @@ pub(crate) fn cards_in_graveyard_to_filter(
                 TypedFilter::new(TypeFilter::Creature)
                     .with_type(TypeFilter::Subtype(creature_type_name(s))),
             ),
-            C::IsSupertype(s) => TargetFilter::Typed(
-                TypedFilter::default().with_type(TypeFilter::Subtype(supertype_name(s))),
-            ),
+            C::IsSupertype(s) => TargetFilter::Typed(TypedFilter::default().properties(vec![
+                FilterProp::HasSupertype {
+                    value: supertype_to_engine(s),
+                },
+            ])),
             C::IsLandType(lt) => TargetFilter::Typed(
                 TypedFilter::default()
                     .with_type(TypeFilter::Land)
@@ -1218,9 +1229,11 @@ pub(crate) fn cards_to_filter(c: &crate::schema::types::Cards) -> ConvResult<Tar
                 TypedFilter::new(TypeFilter::Creature)
                     .with_type(TypeFilter::Subtype(creature_type_name(ct))),
             ),
-            C::IsSupertype(s) => TargetFilter::Typed(
-                TypedFilter::permanent().with_type(TypeFilter::Subtype(supertype_name(s))),
-            ),
+            C::IsSupertype(s) => TargetFilter::Typed(TypedFilter::permanent().properties(vec![
+                FilterProp::HasSupertype {
+                    value: supertype_to_engine(s),
+                },
+            ])),
             C::IsPermanent => TargetFilter::Typed(TypedFilter::permanent()),
 
             // CR 205.3i / CR 205.3g / CR 205.3h / CR 205.3j: Subtype filters that

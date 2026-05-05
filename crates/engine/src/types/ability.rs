@@ -1328,7 +1328,10 @@ fn is_default_shared_quality_relation(value: &SharedQualityRelation) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum FilterProp {
+    /// CR 111.1: Matches objects that are tokens.
     Token,
+    /// CR 111.1: Matches objects that are not tokens.
+    NonToken,
     Attacking,
     /// CR 509.1a: Matches creatures that are blocking.
     Blocking,

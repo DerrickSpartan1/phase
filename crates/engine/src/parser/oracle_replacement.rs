@@ -2506,15 +2506,40 @@ fn parse_damage_source_filter(norm_lower: &str) -> Option<TargetFilter> {
             }
             // CR 205.4b: "noncreature" qualifier — negation via TypeFilter::Non
             else if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("non").parse(qualifier) {
-                let inner = match rest {
-                    "creature" => TypeFilter::Creature,
-                    "land" => TypeFilter::Land,
-                    "artifact" => TypeFilter::Artifact,
-                    "enchantment" => TypeFilter::Enchantment,
-                    "planeswalker" => TypeFilter::Planeswalker,
-                    other => TypeFilter::Subtype(capitalize_first(other)),
-                };
-                filter = filter.with_type(TypeFilter::Non(Box::new(inner)));
+                if tag::<_, _, VerboseError<&str>>("token")
+                    .parse(rest)
+                    .is_ok_and(|(after, _)| after.is_empty())
+                {
+                    props.push(FilterProp::NonToken);
+                } else {
+                    let inner = alt((
+                        value(
+                            TypeFilter::Creature,
+                            tag::<_, _, VerboseError<&str>>("creature"),
+                        ),
+                        value(TypeFilter::Land, tag::<_, _, VerboseError<&str>>("land")),
+                        value(
+                            TypeFilter::Artifact,
+                            tag::<_, _, VerboseError<&str>>("artifact"),
+                        ),
+                        value(
+                            TypeFilter::Enchantment,
+                            tag::<_, _, VerboseError<&str>>("enchantment"),
+                        ),
+                        value(
+                            TypeFilter::Planeswalker,
+                            tag::<_, _, VerboseError<&str>>("planeswalker"),
+                        ),
+                    ))
+                    .parse(rest)
+                    .ok()
+                    .filter(|(after, _)| after.is_empty())
+                    .map_or_else(
+                        || TypeFilter::Subtype(capitalize_first(rest)),
+                        |(_, filter)| filter,
+                    );
+                    filter = filter.with_type(TypeFilter::Non(Box::new(inner)));
+                }
             }
             // Check for creature type qualifier (e.g. "giant")
             else if !qualifier.is_empty() {

@@ -6689,7 +6689,7 @@ mod tests {
     /// CR 700.6: Arbaaz Mir's "Whenever ~ or another nontoken historic
     /// permanent you control enters" must parse cleanly into a ChangesZone
     /// trigger whose `valid_card` is an `Or { SelfRef, Typed[Permanent,
-    /// Non(Token), controller=You, [Historic, Another]] }`. Regression for
+    /// controller=You, [NonToken, Historic, Another]] }`. Regression for
     /// the previously-Unknown trigger phrase.
     #[test]
     fn trigger_self_or_another_nontoken_historic_permanent_arbaaz() {
@@ -6716,12 +6716,9 @@ mod tests {
             tf.type_filters,
         );
         assert!(
-            tf.type_filters
-                .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
-                    "Token".to_string()
-                )))),
-            "expected Non(Subtype(Token)) in {:?}",
-            tf.type_filters,
+            tf.properties.contains(&FilterProp::NonToken),
+            "expected NonToken in {:?}",
+            tf.properties,
         );
         assert!(
             tf.properties.contains(&FilterProp::Historic),
@@ -10149,19 +10146,16 @@ mod tests {
         );
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert_eq!(def.destination, Some(Zone::Graveyard));
-        // Should have Non(Subtype("Token")) in the type_filters
+        // CR 111.1: "nontoken" is token identity, not a fake subtype.
         if let Some(TargetFilter::Typed(tf)) = &def.valid_card {
             assert!(
-                tf.type_filters.iter().any(|t| matches!(
-                    t,
-                    TypeFilter::Non(inner) if matches!(&**inner, TypeFilter::Subtype(s) if s == "Token")
-                )),
-                "Expected Non(Subtype(Token)) in type_filters, got {:?}",
-                tf.type_filters
+                tf.properties.contains(&FilterProp::NonToken),
+                "Expected NonToken in properties, got {:?}",
+                tf.properties
             );
         } else {
             panic!(
-                "Expected Typed filter with Non(Token), got {:?}",
+                "Expected Typed filter with NonToken, got {:?}",
                 def.valid_card
             );
         }

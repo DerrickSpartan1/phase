@@ -1287,9 +1287,13 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         FilterProp::AnyOf { props } => props
             .iter()
             .any(|p| spell_record_matches_property(record, p)),
+        // CR 111.1: Spell-cast records only track cast spells. Tokens are
+        // permanents, so token identity is false and nontoken identity is true
+        // for this snapshot shape.
+        FilterProp::Token => false,
+        FilterProp::NonToken => true,
         // All remaining props require on-battlefield or stack state unavailable from a snapshot.
-        FilterProp::Token
-        | FilterProp::Attacking
+        FilterProp::Attacking
         | FilterProp::AttackingController
         | FilterProp::Blocking
         | FilterProp::BlockingSource
@@ -1445,6 +1449,11 @@ fn matches_filter_prop(
             .objects
             .get(&object_id)
             .is_some_and(|obj| obj.is_token),
+        // CR 111.1: Nontoken identity of the live object.
+        FilterProp::NonToken => state
+            .objects
+            .get(&object_id)
+            .is_some_and(|obj| !obj.is_token),
         FilterProp::Attacking => state.combat.as_ref().is_some_and(|combat| {
             combat
                 .attackers
@@ -2018,6 +2027,8 @@ fn zone_change_record_matches_property(
         // triggers evaluate correctly after the token has moved to the
         // graveyard (and then ceased to exist per CR 111.7).
         FilterProp::Token => record.is_token,
+        // CR 111.1 + CR 603.6a: Nontoken identity as of the zone change.
+        FilterProp::NonToken => !record.is_token,
 
         // -------- Group 2: source/event relational --------
         // CR 109.1 "another": same-object check against the triggering source.

@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-#[cfg(test)]
-use crate::types::ability::FilterProp;
 use crate::types::ability::{
     ControllerRef, DamageKindFilter, EffectKind, TargetFilter, TargetRef, TriggerDefinition,
     TypedFilter,
@@ -2440,8 +2438,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::parser::oracle_trigger::parse_trigger_line;
     use crate::types::ability::{
-        ControllerRef, QuantityExpr, ResolvedAbility, TargetFilter, TriggerDefinition, TypeFilter,
-        TypedFilter,
+        ControllerRef, FilterProp, QuantityExpr, ResolvedAbility, TargetFilter, TriggerDefinition,
+        TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::{GameEvent, PlayerActionKind};
@@ -2703,6 +2701,74 @@ mod tests {
             Vec::new(),
         );
         assert!(match_changes_zone(&event, &trigger, ObjectId(1), &state));
+    }
+
+    #[test]
+    fn nontoken_artifact_etb_trigger_rejects_created_artifact_tokens() {
+        let mut state = setup();
+        let source_id = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Weapons Manufacturing".to_string(),
+            Zone::Battlefield,
+        );
+        let trigger = parse_trigger_line(
+            "Whenever one or more nontoken artifacts you control enter, create a Munitions token.",
+            "Weapons Manufacturing",
+        );
+
+        let valid_card = trigger.valid_card.as_ref().expect("valid_card");
+        let TargetFilter::Typed(tf) = valid_card else {
+            panic!("expected typed valid_card, got {valid_card:?}");
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Artifact));
+        assert!(tf.properties.contains(&FilterProp::NonToken));
+
+        let nontoken_artifact = ObjectId(31);
+        let nontoken_event = GameEvent::ZoneChanged {
+            object_id: nontoken_artifact,
+            from: Some(Zone::Hand),
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                core_types: vec![CoreType::Artifact],
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                is_token: false,
+                ..ZoneChangeRecord::test_minimal(
+                    nontoken_artifact,
+                    Some(Zone::Hand),
+                    Zone::Battlefield,
+                )
+            }),
+        };
+        assert!(match_changes_zone(
+            &nontoken_event,
+            &trigger,
+            source_id,
+            &state
+        ));
+
+        let munitions = ObjectId(32);
+        let token_event = GameEvent::ZoneChanged {
+            object_id: munitions,
+            from: None,
+            to: Zone::Battlefield,
+            record: Box::new(ZoneChangeRecord {
+                name: "Munitions".to_string(),
+                core_types: vec![CoreType::Artifact],
+                controller: PlayerId(0),
+                owner: PlayerId(0),
+                is_token: true,
+                ..ZoneChangeRecord::test_minimal(munitions, None, Zone::Battlefield)
+            }),
+        };
+        assert!(!match_changes_zone(
+            &token_event,
+            &trigger,
+            source_id,
+            &state
+        ));
     }
 
     #[test]

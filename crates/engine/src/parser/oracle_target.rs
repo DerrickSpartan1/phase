@@ -1454,6 +1454,13 @@ enum NegationResult {
 /// CR 205.4b: Classify a negated word by semantic layer.
 /// `parse_non_prefix` strips "non"/"non-" and lowercases, so `negated` is e.g. "black", "basic", "creature".
 fn classify_negation(negated: &str) -> NegationResult {
+    if tag::<_, _, nom_language::error::VerboseError<&str>>("token")
+        .parse(negated)
+        .is_ok_and(|(rest, _)| rest.is_empty())
+    {
+        return NegationResult::Prop(FilterProp::NonToken);
+    }
+
     match negated {
         // Color negation — parallel to HasColor
         "white" => NegationResult::Prop(FilterProp::NotColor {
@@ -1722,6 +1729,7 @@ fn is_adjective_prefix_prop(prop: &FilterProp) -> bool {
             | FilterProp::NotSupertype { .. }
             // Token qualifier ("creature tokens").
             | FilterProp::Token
+            | FilterProp::NonToken
     )
 }
 
@@ -5329,7 +5337,7 @@ mod tests {
     #[test]
     fn historic_adjective_after_nontoken_arbaaz() {
         // CR 700.6: Arbaaz Mir's "another nontoken historic permanent you
-        // control" composes negation (`Non(Token)` subtype), the Historic
+        // control" composes token identity (`NonToken`), the Historic
         // adjective, the Another property, and the You controller — all in
         // sequence. The historic adjective parses AFTER the `non` negation
         // sweep, exercising the post-negation arm.
@@ -5343,12 +5351,9 @@ mod tests {
                     tf.type_filters,
                 );
                 assert!(
-                    tf.type_filters
-                        .contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
-                            "Token".to_string()
-                        )))),
-                    "expected Non(Token) in {:?}",
-                    tf.type_filters,
+                    tf.properties.contains(&FilterProp::NonToken),
+                    "expected NonToken in {:?}",
+                    tf.properties,
                 );
                 assert!(
                     tf.properties.contains(&FilterProp::Historic),

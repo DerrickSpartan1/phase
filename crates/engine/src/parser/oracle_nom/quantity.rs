@@ -3261,13 +3261,8 @@ mod tests {
         assert_eq!(rest, "");
         let (type_filters, controller, properties) = assert_entered_this_turn_typed(q);
         assert!(type_filters.contains(&TypeFilter::Creature));
-        assert!(
-            type_filters.contains(&TypeFilter::Non(Box::new(TypeFilter::Subtype(
-                "Token".to_string()
-            ))))
-        );
+        assert!(properties.contains(&FilterProp::NonToken));
         assert_eq!(controller, Some(ControllerRef::You));
-        assert!(properties.is_empty());
     }
 
     #[test]
