@@ -2838,24 +2838,25 @@ pub(crate) fn parse_shared_quality_clause(
 /// - CR 400.7: "that entered (the battlefield) this turn" → `EnteredThisTurn`
 /// - CR 508.1a: "that attacked this turn" → `AttackedThisTurn`
 /// - CR 509.1a: "that blocked this turn" → `BlockedThisTurn`
+/// - CR 301.5 + CR 303.4: "that are enchanted or equipped" → attachment predicate
 ///
 /// Returns `(properties, bytes_consumed)` or `None` if the text doesn't match.
-fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
+pub(crate) fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
     let trimmed = text.trim_start();
     let leading_ws = text.len() - trimmed.len();
-
-    if let Some(parsed) = parse_color_relative_clause_suffix(trimmed, leading_ws) {
-        return Some(parsed);
-    }
 
     // CR 303.4 + CR 301.5: "that's enchanted or equipped" / "that's enchanted" /
     // "that's equipped" — relative clause attaching an attachment-presence
     // predicate to the enclosing type phrase. Covers the compound-subject grant
     // class (Reyav, Master Smith; Dogmeat, Ever Loyal). Composes with disjunction
     // via `FilterProp::HasAnyAttachmentOf` (kinds.len() == 2 for the "or" form).
-    if let Ok((after_contraction, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("that's ").parse(trimmed)
-    {
+    let intro = alt((
+        tag::<_, _, nom_language::error::VerboseError<&str>>("that's "),
+        tag("that is "),
+        tag("that are "),
+    ))
+    .parse(trimmed);
+    if let Ok((after_intro, _)) = intro {
         // Note: `parse_that_isnt_subtype_suffix` runs first in `parse_type_phrase`
         // and consumes "that's not …", so this branch only sees positive forms.
         fn parse_attachment_disjunction(
@@ -2877,7 +2878,7 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
             ))
             .parse(input)
         }
-        if let Ok((rest, kinds)) = parse_attachment_disjunction(after_contraction) {
+        if let Ok((rest, kinds)) = parse_attachment_disjunction(after_intro) {
             // Word-boundary check: the next char must terminate the adjective so
             // we don't false-match e.g. "that's enchanted by something else".
             // Accept end-of-string or any non-alphanumeric terminator.
@@ -2886,7 +2887,7 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
                 .next()
                 .is_none_or(|c| !c.is_alphanumeric() && c != '_');
             if next_char_is_boundary {
-                let consumed = trimmed.len() - rest.len();
+                let consumed = leading_ws + trimmed.len() - rest.len();
                 let prop = if kinds.len() == 1 {
                     FilterProp::HasAttachment {
                         kind: kinds.into_iter().next().expect("len == 1"),
@@ -2898,9 +2899,13 @@ fn parse_that_clause_suffix(text: &str) -> Option<(Vec<FilterProp>, usize)> {
                         controller: None,
                     }
                 };
-                return Some((vec![prop], leading_ws + consumed));
+                return Some((vec![prop], consumed));
             }
         }
+    }
+
+    if let Some(parsed) = parse_color_relative_clause_suffix(trimmed, leading_ws) {
+        return Some(parsed);
     }
 
     if let Ok((rest, prop)) = parse_shared_quality_clause(trimmed) {
@@ -6329,6 +6334,19 @@ mod tests {
         let result = parse_that_clause_suffix(" that's equipped or enchanted");
         let (props, _consumed) = result.expect("should parse");
         assert_eq!(props.len(), 1);
+        assert!(matches!(
+            &props[0],
+            FilterProp::HasAnyAttachmentOf { kinds, .. }
+                if kinds.len() == 2 && kinds.contains(&AttachmentKind::Aura)
+                    && kinds.contains(&AttachmentKind::Equipment)
+        ));
+    }
+
+    #[test]
+    fn that_are_enchanted_or_equipped_emits_disjunction() {
+        let result = parse_that_clause_suffix(" that are enchanted or equipped");
+        let (props, consumed) = result.expect("should parse");
+        assert_eq!(consumed, " that are enchanted or equipped".len());
         assert!(matches!(
             &props[0],
             FilterProp::HasAnyAttachmentOf { kinds, .. }

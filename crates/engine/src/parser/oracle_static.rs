@@ -22,7 +22,7 @@ use super::oracle_nom::target as nom_target;
 use super::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use super::oracle_target::{
     parse_combat_status_prefix, parse_counter_suffix, parse_mana_value_suffix, parse_target,
-    parse_type_phrase,
+    parse_that_clause_suffix, parse_type_phrase,
 };
 use super::oracle_util::{
     has_unconsumed_conditional, infer_core_type_for_subtype, parse_comparator_prefix,
@@ -861,7 +861,11 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
                 )
             // CR 613.1: "Creatures you control that are [property] get/have ..."
             } else if let Some(that_rest_tp) = nom_tag_tp(&rest_tp, "that are ") {
-                if let Some((prop, prop_rest_original)) = nom_on_lower(
+                if let Some((filter, predicate_text)) =
+                    parse_creatures_you_control_that_clause(after_prefix, rest_tp.lower, false)
+                {
+                    (filter, predicate_text)
+                } else if let Some((prop, prop_rest_original)) = nom_on_lower(
                     that_rest_tp.original,
                     that_rest_tp.lower,
                     nom_filter::parse_property_filter,
@@ -921,7 +925,11 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
             )
         // CR 613.1: "Other creatures you control that are [property] get/have ..."
         } else if let Some(that_rest_tp) = nom_tag_tp(&rest_tp, "that are ") {
-            if let Some((prop, prop_rest_original)) = nom_on_lower(
+            if let Some((filter, predicate_text)) =
+                parse_creatures_you_control_that_clause(after_prefix, rest_tp.lower, true)
+            {
+                (filter, predicate_text)
+            } else if let Some((prop, prop_rest_original)) = nom_on_lower(
                 that_rest_tp.original,
                 that_rest_tp.lower,
                 nom_filter::parse_property_filter,
@@ -4079,6 +4087,25 @@ fn parse_modified_creature_subject_filter(subject: &str) -> Option<TargetFilter>
     }
 
     None
+}
+
+fn parse_creatures_you_control_that_clause<'a>(
+    original: &'a str,
+    lower: &str,
+    is_other: bool,
+) -> Option<(TargetFilter, &'a str)> {
+    let (mut properties, consumed) = parse_that_clause_suffix(lower)?;
+    if is_other {
+        properties.push(FilterProp::Another);
+    }
+    Some((
+        TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(ControllerRef::You)
+                .properties(properties),
+        ),
+        original[consumed..].trim_start(),
+    ))
 }
 
 fn parse_attachment_creatures_you_control_descriptor(descriptor: &str) -> Option<TargetFilter> {
@@ -12474,10 +12501,45 @@ mod tests {
             Some(TargetFilter::Typed(tf)) => {
                 assert!(tf.type_filters.contains(&TypeFilter::Creature));
                 assert_eq!(tf.controller, Some(ControllerRef::You));
-                assert!(tf.properties.contains(&FilterProp::EnchantedBy));
+                assert!(matches!(
+                    tf.properties.as_slice(),
+                    [FilterProp::HasAttachment {
+                        kind: AttachmentKind::Aura,
+                        controller: None
+                    }]
+                ));
             }
             _ => panic!("expected Typed filter with enchanted property"),
         }
+    }
+
+    #[test]
+    fn creatures_you_control_that_are_enchanted_or_equipped_have_keyword() {
+        let def = parse_static_line(
+            "Creatures you control that are enchanted or equipped have double strike.",
+        )
+        .unwrap();
+        assert_eq!(def.mode, StaticMode::Continuous);
+        match &def.affected {
+            Some(TargetFilter::Typed(tf)) => {
+                assert!(tf.type_filters.contains(&TypeFilter::Creature));
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(matches!(
+                    tf.properties.as_slice(),
+                    [FilterProp::HasAnyAttachmentOf { kinds, controller }]
+                        if controller.is_none()
+                            && kinds.len() == 2
+                            && kinds.contains(&AttachmentKind::Aura)
+                            && kinds.contains(&AttachmentKind::Equipment)
+                ));
+            }
+            _ => panic!("expected Typed filter with attachment disjunction"),
+        }
+        assert!(def
+            .modifications
+            .contains(&ContinuousModification::AddKeyword {
+                keyword: Keyword::DoubleStrike,
+            }));
     }
 
     #[test]
