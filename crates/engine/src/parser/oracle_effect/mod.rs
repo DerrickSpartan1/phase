@@ -5576,6 +5576,65 @@ fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRe
     }
 }
 
+/// CR 701.16a + CR 115.1: Unconditionally set the controller constraint on a
+/// typed object filter, overwriting any existing value. Used when a targeted
+/// subject ("target opponent sacrifices...") must override a pre-parsed "they
+/// control" → `ControllerRef::You` with `ControllerRef::TargetPlayer`.
+fn force_controller(filter: &mut TargetFilter, ctrl: ControllerRef) {
+    match filter {
+        TargetFilter::Typed(tf) => {
+            tf.controller = Some(ctrl);
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for inner in filters.iter_mut() {
+                force_controller(inner, ctrl.clone());
+            }
+        }
+        TargetFilter::Not { filter } => force_controller(filter, ctrl),
+        _ => {}
+    }
+}
+
+/// Rewrite all occurrences of `from` controller inside a `QuantityExpr`'s
+/// embedded filters to `to`. Walks HalfRounded/Multiply/Offset/Sum wrappers
+/// and rewrites ObjectCount filter controllers.
+fn rewrite_quantity_controller(expr: &mut QuantityExpr, from: ControllerRef, to: ControllerRef) {
+    match expr {
+        QuantityExpr::Ref { qty } => {
+            if let QuantityRef::ObjectCount { filter } = qty {
+                rewrite_filter_controller(filter, &from, &to);
+            }
+        }
+        QuantityExpr::HalfRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::UpTo { max: inner } => {
+            rewrite_quantity_controller(inner, from, to);
+        }
+        QuantityExpr::Sum { exprs } => {
+            for inner in exprs {
+                rewrite_quantity_controller(inner, from.clone(), to.clone());
+            }
+        }
+        QuantityExpr::Fixed { .. } => {}
+    }
+}
+
+fn rewrite_filter_controller(filter: &mut TargetFilter, from: &ControllerRef, to: &ControllerRef) {
+    match filter {
+        TargetFilter::Typed(tf) if tf.controller.as_ref() == Some(from) => {
+            tf.controller = Some(to.clone());
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for inner in filters.iter_mut() {
+                rewrite_filter_controller(inner, from, to);
+            }
+        }
+        TargetFilter::Not { filter } => rewrite_filter_controller(filter, from, to),
+        _ => {}
+    }
+}
+
 /// CR 109.4 + CR 115.7: Attach a controller constraint to a typed object
 /// filter that does not yet have one. Walks into `Or`/`And`/`Not` to cover
 /// compound filters like "target creature or planeswalker". Filters that
@@ -5727,18 +5786,28 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // CR 608.2k + CR 109.4: "that player sacrifices a non-Elf creature" /
         // "each opponent sacrifices a creature they control". When the subject
         // is a player reference (TriggeringPlayer / TargetPlayer / etc.) and
-        // the effect targets a TYPED object filter that has not been scoped to
-        // a controller, inject the controller constraint so the filter matches
-        // only permanents controlled by the acting player. Without this, a
-        // phase trigger like Ruthless Winnower's "that player sacrifices a
-        // non-Elf creature" would match any player's non-Elf creature instead
-        // of the sacrificing player's. Reached only when the earlier Any-only
-        // arm did not fire (target is a typed filter, not `Any`).
-        Effect::Sacrifice { target, .. }
+        // CR 115.1 + CR 701.16a: Sacrifice with a typed object filter —
+        // inject the subject's controller constraint. For non-targeted subjects
+        // ("each player sacrifices a non-Elf creature"), this scopes the filter
+        // to the acting player's permanents. For targeted subjects ("target
+        // opponent sacrifices..."), use ControllerRef::TargetPlayer so the
+        // engine surfaces a player target slot and resolve_sacrifice_scope
+        // reads the chosen player from ability.targets at resolution time.
+        // Also rewrite "they control" refs inside the count expression so
+        // the dynamic count resolves against the targeted player's board.
+        Effect::Sacrifice { target, count }
             if player_filter_as_controller_ref(&subject_filter).is_some() =>
         {
             if let Some(ctrl) = player_filter_as_controller_ref(&subject_filter) {
-                attach_controller_if_absent(target, ctrl);
+                let effective_ctrl = if subject.target.is_some() {
+                    ControllerRef::TargetPlayer
+                } else {
+                    ctrl
+                };
+                force_controller(target, effective_ctrl.clone());
+                if subject.target.is_some() {
+                    rewrite_quantity_controller(count, ControllerRef::ScopedPlayer, effective_ctrl);
+                }
             }
         }
         // CR 119.3 + CR 115.1d: "they lose N life" — inject subject's player reference.

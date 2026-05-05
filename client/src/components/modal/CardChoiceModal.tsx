@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion } from "framer-motion";
 
 import { CardImage } from "../card/CardImage.tsx";
+import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
@@ -42,6 +43,19 @@ type DamageSourceChoice = Extract<WaitingFor, { type: "DamageSourceChoice" }>;
 type ChooseRingBearer = Extract<WaitingFor, { type: "ChooseRingBearer" }>;
 const CHOICE_CARD_IMAGE_CLASS = "";
 const SCRY_CARD_IMAGE_CLASS = "";
+
+function objectImageProps(obj: GameObject) {
+  const { name, faceIndex, oracleId, faceName } = cardImageLookup(obj);
+  const isToken = obj.display_source === "Token";
+  return {
+    cardName: name,
+    faceIndex,
+    oracleId,
+    faceName,
+    isToken,
+    tokenFilters: isToken ? { power: obj.power, toughness: obj.toughness, colors: obj.color } : undefined,
+  };
+}
 
 function canAssignDistinctCardTypes(
   objects: Record<ObjectId, GameObject | undefined>,
@@ -259,7 +273,7 @@ function RingBearerModal({ data }: { data: ChooseRingBearer["data"] }) {
               onClick={() => setSelected(id)}
               {...hoverProps(id)}
             >
-              <CardImage cardName={obj.name} size="normal" />
+              <CardImage {...objectImageProps(obj)} size="normal" />
               <span
                 className={`rounded-full px-3 py-1 text-xs font-bold transition ${
                   isSelected
@@ -344,7 +358,7 @@ function ScryModal({ data }: { data: ScryChoice["data"] }) {
                 {...hoverProps(id)}
               >
                 <CardImage
-                  cardName={obj.name}
+                  {...objectImageProps(obj)}
                   size="normal"
                   className={SCRY_CARD_IMAGE_CLASS}
                 />
@@ -470,7 +484,7 @@ function DigModal({ data }: { data: DigChoice["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -549,7 +563,7 @@ function SurveilModal({ data }: { data: SurveilChoice["data"] }) {
                 {...hoverProps(id)}
               >
                 <CardImage
-                  cardName={obj.name}
+                  {...objectImageProps(obj)}
                   size="normal"
                   className={CHOICE_CARD_IMAGE_CLASS}
                 />
@@ -634,7 +648,7 @@ function RevealModal({ data }: { data: RevealChoice["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -718,7 +732,7 @@ function SearchModal({ data }: { data: SearchChoice["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -819,7 +833,7 @@ function ChooseFromZoneModal({
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -914,7 +928,7 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -994,7 +1008,7 @@ function DrawnThisTurnTopdeckModal({ data }: { data: DrawnThisTurnTopdeckChoice[
               onClick={() => toggleSelect(id)}
               {...hoverProps(id)}
             >
-              <CardImage cardName={obj.name} size="normal" className={CHOICE_CARD_IMAGE_CLASS} />
+              <CardImage {...objectImageProps(obj)} size="normal" className={CHOICE_CARD_IMAGE_CLASS} />
               {isSelected && (
                 <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-sky-500/20">
                   <span className="rounded-full bg-sky-500/90 px-3 py-1 text-xs font-bold text-white">
@@ -1115,7 +1129,7 @@ function PermanentCostModal({
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -1193,7 +1207,7 @@ function BlightModal({ data }: { data: BlightChoice["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -1275,7 +1289,7 @@ function CrewModal({ data }: { data: CrewVehicle["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -1351,7 +1365,7 @@ function StationTargetModal({ data }: { data: StationTarget["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -1435,7 +1449,7 @@ function SaddleModal({ data }: { data: SaddleMount["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -1501,7 +1515,7 @@ function WardSacrificeModal({ data }: { data: WardSacrificeChoice["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -1567,7 +1581,7 @@ function UnlessBounceModal({ data }: { data: UnlessBounceChoice["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -1659,7 +1673,7 @@ function ExileForCostModal({
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -1791,7 +1805,7 @@ function CollectEvidenceModal({ data }: { data: CollectEvidenceChoice["data"] })
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -1886,7 +1900,7 @@ function DiscardModal({ data, title = "Discard" }: { data: DiscardToHandSize["da
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -1948,7 +1962,7 @@ function HarmonizeTapModal({ data }: { data: HarmonizeTapChoice["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -1997,7 +2011,7 @@ function LegendChoiceModal({ data }: { data: ChooseLegend["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -2087,7 +2101,7 @@ function DamageSourceModal({ data }: { data: DamageSourceChoice["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
@@ -2144,7 +2158,7 @@ function ManifestDreadModal({ data }: { data: ManifestDreadChoice["data"] }) {
               {...hoverProps(id)}
             >
               <CardImage
-                cardName={obj.name}
+                {...objectImageProps(obj)}
                 size="normal"
                 className={CHOICE_CARD_IMAGE_CLASS}
               />
