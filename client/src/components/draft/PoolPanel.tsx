@@ -40,13 +40,32 @@ const TYPE_ORDER: Record<string, number> = {
   Artifact: 4, Planeswalker: 5, Land: 6, Other: 7,
 };
 
-interface CardGroup {
-  label: string;
-  cards: DraftCardInstance[];
+interface PoolEntry {
+  card: DraftCardInstance;
+  count: number;
 }
 
-function sortWithinGroup(cards: DraftCardInstance[]): DraftCardInstance[] {
-  return [...cards].sort((a, b) => a.cmc - b.cmc || a.name.localeCompare(b.name));
+interface CardGroup {
+  label: string;
+  cards: PoolEntry[];
+}
+
+function dedup(cards: DraftCardInstance[]): PoolEntry[] {
+  const map = new Map<string, PoolEntry>();
+  for (const card of cards) {
+    const existing = map.get(card.name);
+    if (existing) {
+      existing.count++;
+    } else {
+      map.set(card.name, { card, count: 1 });
+    }
+  }
+  return [...map.values()];
+}
+
+function sortWithinGroup(cards: DraftCardInstance[]): PoolEntry[] {
+  const sorted = [...cards].sort((a, b) => a.cmc - b.cmc || a.name.localeCompare(b.name));
+  return dedup(sorted);
 }
 
 function groupByColor(pool: DraftCardInstance[]): CardGroup[] {
@@ -94,7 +113,7 @@ function groupByCmc(pool: DraftCardInstance[]): CardGroup[] {
     .filter((k) => groups.has(k))
     .map((key) => ({
       label: `${key} CMC`,
-      cards: [...groups.get(key)!].sort((a, b) => a.name.localeCompare(b.name)),
+      cards: dedup([...groups.get(key)!].sort((a, b) => a.name.localeCompare(b.name))),
     }));
 }
 
@@ -217,7 +236,7 @@ export function PoolPanel({ onCardHover }: PoolPanelProps = {}) {
                   {group.label} ({group.cards.length})
                 </div>
                 <div className="space-y-0.5">
-                  {group.cards.map((card) => (
+                  {group.cards.map(({ card, count }) => (
                     <div
                       key={card.instance_id}
                       onMouseEnter={onCardHover ? () => onCardHover(card.name) : undefined}
@@ -225,6 +244,11 @@ export function PoolPanel({ onCardHover }: PoolPanelProps = {}) {
                       className="flex items-center gap-2 rounded-[10px] px-2 py-1 text-xs transition-colors hover:bg-white/5"
                     >
                       <span className={`h-2 w-2 shrink-0 rounded-full ${rarityDotClass(card.rarity)}`} />
+                      {count > 1 && (
+                        <span className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-white/10 px-1 text-[10px] font-medium text-white/60">
+                          {count}
+                        </span>
+                      )}
                       <span className="truncate text-white/80">{card.name}</span>
                       <span className="ml-auto flex shrink-0 items-center gap-1.5">
                         <ColorPips colors={card.colors} />
