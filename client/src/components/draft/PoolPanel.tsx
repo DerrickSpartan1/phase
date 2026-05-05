@@ -119,6 +119,32 @@ function rarityDotClass(rarity: string): string {
   return RARITY_DOT[rarity.toLowerCase()] ?? "bg-slate-500";
 }
 
+// ── Color pips ──────────────────────────────────────────────────────────
+
+const COLOR_PIP: Record<string, string> = {
+  W: "bg-amber-100",
+  U: "bg-blue-400",
+  B: "bg-purple-400",
+  R: "bg-red-400",
+  G: "bg-green-400",
+};
+
+function ColorPips({ colors }: { colors: string[] }) {
+  if (colors.length === 0) {
+    return <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-slate-500" />;
+  }
+  return (
+    <span className="flex shrink-0 gap-0.5">
+      {colors.map((c) => (
+        <span
+          key={c}
+          className={`h-1.5 w-1.5 rounded-full ${COLOR_PIP[c] ?? "bg-slate-500"}`}
+        />
+      ))}
+    </span>
+  );
+}
+
 // ── Sort mode tabs ──────────────────────────────────────────────────────
 
 const SORT_MODES: Array<{ mode: PoolSortMode; label: string }> = [
@@ -200,7 +226,10 @@ export function PoolPanel({ onCardHover }: PoolPanelProps = {}) {
                     >
                       <span className={`h-2 w-2 shrink-0 rounded-full ${rarityDotClass(card.rarity)}`} />
                       <span className="truncate text-white/80">{card.name}</span>
-                      <span className="ml-auto shrink-0 text-white/30">{card.cmc}</span>
+                      <span className="ml-auto flex shrink-0 items-center gap-1.5">
+                        <ColorPips colors={card.colors} />
+                        <span className="text-white/30">{card.cmc}</span>
+                      </span>
                     </div>
                   ))}
                 </div>

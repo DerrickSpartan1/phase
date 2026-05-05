@@ -13,6 +13,7 @@ import { useNavigate } from "react-router";
 
 import { CardPreview } from "../components/card/CardPreview";
 import { ScreenChrome } from "../components/chrome/ScreenChrome";
+import { DraftIntro } from "../components/draft/DraftIntro";
 import { DraftPodLobby } from "../components/draft/DraftPodLobby";
 import { DraftProgress } from "../components/draft/DraftProgress";
 import { EliminationBracket } from "../components/draft/EliminationBracket";
@@ -54,24 +55,52 @@ function PodSetup() {
 
   if (mode === "choose") {
     return (
-      <div className="mx-auto flex w-full max-w-lg flex-col gap-6">
-        <h1 className="text-3xl font-bold text-white">Pod Draft</h1>
-        <p className="text-sm text-white/50">
-          Host or join a multiplayer draft pod with up to 8 players.
-        </p>
-        <div className="flex gap-4">
+      <div className="mx-auto flex w-full max-w-2xl flex-col gap-8">
+        <div className="flex flex-col items-center gap-2">
+          <h1 className="text-3xl font-bold text-white">Pod Draft</h1>
+          <p className="text-sm text-white/50">
+            Draft with friends — open packs, pick cards, and play tournament matches.
+          </p>
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2">
+          {/* Host card */}
           <button
             onClick={() => setMode("host")}
-            className={menuButtonClass({ tone: "emerald", size: "lg" })}
+            className="group flex flex-col gap-3 rounded-[16px] border border-emerald-300/18 bg-emerald-400/5 p-6 text-left backdrop-blur-md transition-colors hover:border-emerald-300/30 hover:bg-emerald-400/10"
           >
-            Host a Pod
+            <div className="text-lg font-semibold text-emerald-100">Host a Pod</div>
+            <p className="text-sm leading-relaxed text-white/50 group-hover:text-white/60">
+              Create a new draft room. You choose the set, format, and pod
+              size — then share the room code with your friends. Empty seats
+              can be filled with bots.
+            </p>
           </button>
+
+          {/* Join card */}
           <button
             onClick={() => setMode("join")}
-            className={menuButtonClass({ tone: "blue", size: "lg" })}
+            className="group flex flex-col gap-3 rounded-[16px] border border-blue-300/18 bg-blue-400/5 p-6 text-left backdrop-blur-md transition-colors hover:border-blue-300/30 hover:bg-blue-400/10"
           >
-            Join a Pod
+            <div className="text-lg font-semibold text-blue-100">Join a Pod</div>
+            <p className="text-sm leading-relaxed text-white/50 group-hover:text-white/60">
+              Enter a room code from the host to join an existing draft.
+              You'll be seated in the next open slot and draft alongside
+              everyone in real time.
+            </p>
           </button>
+        </div>
+
+        <div className="rounded-[16px] border border-white/8 bg-white/3 px-5 py-4 backdrop-blur-md">
+          <div className="mb-2 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
+            How Pod Draft works
+          </div>
+          <ul className="space-y-1.5 text-sm leading-relaxed text-white/50">
+            <li>Each player opens 3 packs of 14 cards — pick one, pass the rest</li>
+            <li>Packs alternate direction each round (left → right → left)</li>
+            <li>After drafting, everyone builds a 40-card deck from their pool</li>
+            <li>Then play Swiss or single-elimination tournament matches</li>
+          </ul>
         </div>
       </div>
     );
@@ -480,6 +509,12 @@ function BetweenGamesView() {
 
 function DraftingPhaseContent() {
   const [hoveredCardName, setHoveredCardName] = useState<string | null>(null);
+  const [introDismissed, setIntroDismissed] = useState(false);
+  const podSize = useDraftPodStore((s) => s.config.podSize);
+
+  if (!introDismissed) {
+    return <DraftIntro mode="pod" podSize={podSize} onContinue={() => setIntroDismissed(true)} />;
+  }
 
   return (
     <>

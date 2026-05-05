@@ -30,7 +30,8 @@ export type GameFormat =
   | "Brawl"
   | "HistoricBrawl"
   | "FreeForAll"
-  | "TwoHeadedGiant";
+  | "TwoHeadedGiant"
+  | "Limited";
 
 export type FormatGroup = "Constructed" | "Commander" | "Multiplayer";
 

@@ -4,6 +4,7 @@ import { useNavigate } from "react-router";
 import { useDraftStore } from "../stores/draftStore";
 import { useGameStore } from "../stores/gameStore";
 import { CardPreview } from "../components/card/CardPreview";
+import { DraftIntro } from "../components/draft/DraftIntro";
 import { SetSelector } from "../components/draft/SetSelector";
 import { PackDisplay } from "../components/draft/PackDisplay";
 import { PoolPanel } from "../components/draft/PoolPanel";
@@ -49,6 +50,7 @@ export function DraftPage() {
   const reset = useDraftStore((s) => s.reset);
   const navigate = useNavigate();
   const [hoveredCardName, setHoveredCardName] = useState<string | null>(null);
+  const [introDismissed, setIntroDismissed] = useState(false);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -109,8 +111,8 @@ export function DraftPage() {
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
-      <ScreenChrome onBack={phase === "setup" ? () => navigate("/") : undefined} />
-      {phase === "drafting" && <CardPreview cardName={hoveredCardName} />}
+      <ScreenChrome onBack={() => navigate("/")} />
+      {phase === "drafting" && introDismissed && <CardPreview cardName={hoveredCardName} />}
 
       <div className="relative z-10 mx-auto flex w-full max-w-6xl flex-col px-6 py-16">
         {phase === "setup" && (
@@ -120,7 +122,11 @@ export function DraftPage() {
           </div>
         )}
 
-        {phase === "drafting" && (
+        {phase === "drafting" && !introDismissed && (
+          <DraftIntro mode="quick" onContinue={() => setIntroDismissed(true)} />
+        )}
+
+        {phase === "drafting" && introDismissed && (
           <div className="flex gap-4">
             <div className="flex-1">
               <DraftProgress />

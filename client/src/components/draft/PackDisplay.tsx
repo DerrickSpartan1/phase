@@ -1,3 +1,5 @@
+import { useEffect } from "react";
+
 import { useCardImage } from "../../hooks/useCardImage";
 import { useDraftStore } from "../../stores/draftStore";
 import { menuButtonClass } from "../menu/buttonStyles";
@@ -58,6 +60,12 @@ export function PackDisplay({ onCardHover }: PackDisplayProps) {
   const selectedCard = useDraftStore((s) => s.selectedCard);
   const selectCard = useDraftStore((s) => s.selectCard);
   const confirmPick = useDraftStore((s) => s.confirmPick);
+
+  useEffect(() => {
+    if (view?.current_pack?.length === 1 && !selectedCard) {
+      selectCard(view.current_pack[0].instance_id);
+    }
+  }, [view?.current_pack, selectedCard, selectCard]);
 
   if (!view) return null;
 

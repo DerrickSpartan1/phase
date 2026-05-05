@@ -3,6 +3,7 @@ import { motion } from "framer-motion";
 
 import { menuButtonClass } from "../menu/buttonStyles";
 import { PreferencesModal } from "../settings/PreferencesModal";
+import { FullscreenButton } from "./FullscreenButton";
 import { VolumeControl } from "./VolumeControl";
 
 interface ScreenChromeProps {
@@ -85,8 +86,9 @@ export function ScreenChrome({
         </div>
       )}
 
-      {/* Volume control + Settings cog — upper-right */}
+      {/* Fullscreen + Volume control + Settings cog — upper-right */}
       <div className="fixed right-4 top-[calc(env(safe-area-inset-top)+1rem)] z-30 flex gap-2">
+        <FullscreenButton variant="chrome" />
         <VolumeControl variant="chrome" />
         <motion.button
           className={menuButtonClass({

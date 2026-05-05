@@ -274,6 +274,27 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
   },
 ];
 
+export const LIMITED_FORMAT_CONFIG: FormatMetadata = {
+  format: "Limited",
+  label: "Limited",
+  short_label: "LTD",
+  description: "40-card minimum from a drafted pool",
+  group: "Constructed",
+  default_config: {
+    format: "Limited",
+    starting_life: 20,
+    min_players: 2,
+    max_players: 2,
+    deck_size: 40,
+    singleton: false,
+    command_zone: false,
+    commander_damage_threshold: null,
+    range_of_influence: null,
+    team_based: false,
+  },
+};
+
 export function formatMetadata(format: GameFormat): FormatMetadata | undefined {
+  if (format === "Limited") return LIMITED_FORMAT_CONFIG;
   return FORMAT_REGISTRY.find((m) => m.format === format);
 }
