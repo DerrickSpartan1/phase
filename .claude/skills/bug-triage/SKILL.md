@@ -39,6 +39,14 @@ gh issue close <N> --repo phase-rs/phase --comment "Verified in gameplay. Closin
 gh issue edit <N> --repo phase-rs/phase --remove-label "status:needs-runtime-verify" --add-label "status:verified"
 ```
 
+### GitHub Comment Standard
+
+GitHub comments must be concise, user-facing status updates. Do not paste local command output, long command transcripts, local machine paths, target directories, or exhaustive verification command lists into issues. Summarize the evidence at the semantic level instead:
+- Good: "Fixed in <commit>. The reported ability now parses as a typed ProduceMana replacement with a tapped-for-mana scope, and regression tests cover both multiplied and non-multiplied mana production."
+- Bad: "Verification: `CARGO_TARGET_DIR=... cargo test ...`, `cargo run ...`, `git diff --check`" followed by command details or output.
+
+Keep raw command details in the local working notes or final Codex response when useful, not in GitHub. For issue updates, mention only the commit, the reported behavior now covered, and whether targeted parser/runtime evidence exists.
+
 ## Status Lifecycle
 
 ```
