@@ -588,6 +588,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         GameNumber::NumSpellsCastByPlayerThisTurn(spells, player) => match &**player {
             Player::You => QuantityExpr::Ref {
                 qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
                     filter: Some(spells_to_filter(spells)?),
                 },
             },
@@ -598,6 +599,7 @@ pub fn convert(g: &GameNumber) -> ConvResult<QuantityExpr> {
         // — controller-scoped at runtime via SpellsCastThisTurn.
         GameNumber::NumSpellsCastThisTurn(spells) => QuantityExpr::Ref {
             qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
                 filter: Some(spells_to_filter(spells)?),
             },
         },
