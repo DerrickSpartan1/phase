@@ -285,26 +285,31 @@ fn evaluate_commander(
         unknown_cards,
         LegalityFormat::Commander,
         "Commander",
+        is_commander_eligible,
+        "Commander cards must be legendary creatures or explicitly allow being a commander",
+        false,
     )
 }
 
 /// Shared commander-variant validator. Commander, Duel Commander, and Pauper
 /// Commander all use 100-card-singleton deck shape with a command zone; only
-/// the legality table and display label differ. DuelCommander's 30-life /
-/// 1v1-only rules are expressed in `FormatConfig`, not deck validation.
+/// the legality table, commander eligibility, and display label differ.
+/// DuelCommander's 30-life / 1v1-only rules are expressed in `FormatConfig`,
+/// not deck validation.
 ///
 /// Known gap for Pauper Commander (PDH): the PDH community rule that the
-/// commander must be an **uncommon** creature/planeswalker is not yet
-/// structurally enforced — `is_commander_eligible` is rarity-agnostic, and
-/// the card-pool check relies solely on `LegalityFormat::PauperCommander`
-/// status for non-commander slots. Pool legality works; commander rarity
-/// validation needs a future rarity-aware commander-eligibility predicate.
+/// commander must be uncommon is not yet structurally enforced because exported
+/// `CardFace` data is rarity-agnostic. The card-pool check still relies on
+/// `LegalityFormat::PauperCommander` for non-commander slots.
 fn evaluate_commander_with_format(
     db: &CardDatabase,
     request: &DeckCompatibilityRequest,
     unknown_cards: &BTreeSet<String>,
     legality_format: LegalityFormat,
     format_label: &str,
+    commander_eligible: fn(&CardFace) -> bool,
+    commander_error: &str,
+    skip_commander_legality: bool,
 ) -> CompatibilityCheck {
     let mut reasons = Vec::new();
 
@@ -327,17 +332,13 @@ fn evaluate_commander_with_format(
                 continue;
             };
 
-            if !is_commander_eligible(face) {
+            if !commander_eligible(face) {
                 ineligible_commanders.insert(name.clone());
             }
         }
 
         if !ineligible_commanders.is_empty() {
-            reasons.push(summarize_cards(
-                "Commander cards must be legendary creatures or explicitly allow being a commander",
-                &ineligible_commanders,
-                6,
-            ));
+            reasons.push(summarize_cards(commander_error, &ineligible_commanders, 6));
         }
 
         // CR 702.124: Validate partner pairing for two-commander setups
@@ -395,6 +396,14 @@ fn evaluate_commander_with_format(
     let mut illegal_cards = BTreeSet::new();
     for name in all_deck_cards(request) {
         if unknown_cards.contains(name) {
+            continue;
+        }
+        if skip_commander_legality
+            && request
+                .commander
+                .iter()
+                .any(|commander| commander.eq_ignore_ascii_case(name))
+        {
             continue;
         }
         match db.legality_status(resolve_card_name(db, name), legality_format) {
@@ -676,6 +685,21 @@ fn evaluate_selected_format(
                 unknown_cards,
                 format.legality_format().unwrap(),
                 format.label(),
+                match format {
+                    GameFormat::PauperCommander => is_pauper_commander_eligible,
+                    GameFormat::DuelCommander => is_commander_eligible,
+                    _ => unreachable!("commander variant branch only handles PDH and Duel"),
+                },
+                match format {
+                    GameFormat::PauperCommander => {
+                        "Pauper Commander commander cards must be creatures, Vehicles, or Spacecraft"
+                    }
+                    GameFormat::DuelCommander => {
+                        "Duel Commander cards must be legendary creatures or explicitly allow being a commander"
+                    }
+                    _ => unreachable!("commander variant branch only handles PDH and Duel"),
+                },
+                format == GameFormat::PauperCommander,
             );
             if !check.compatible {
                 reasons.extend(check.reasons);
@@ -1039,6 +1063,13 @@ pub fn is_commander_eligible(face: &CardFace) -> bool {
         .any(|s| s.eq_ignore_ascii_case("Background"));
 
     (is_legendary && is_creature) || explicitly_allowed || (is_legendary && is_background)
+}
+
+fn is_pauper_commander_eligible(face: &CardFace) -> bool {
+    face.card_type.core_types.contains(&CoreType::Creature)
+        || face.card_type.subtypes.iter().any(|subtype| {
+            subtype.eq_ignore_ascii_case("Vehicle") || subtype.eq_ignore_ascii_case("Spacecraft")
+        })
 }
 
 /// CR 702.124: Check if two cards form a valid partner pair for co-commanders.
@@ -1559,6 +1590,74 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.contains("must be legendary creatures")));
+    }
+
+    #[test]
+    fn pauper_commander_allows_nonlegendary_creature_commander_slot() {
+        let db_json = serde_json::json!({
+            "pdh commander": {
+                "name": "PDH Commander",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": { "supertypes": [], "core_types": ["Creature"], "subtypes": [] },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": null,
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "scryfall_oracle_id": null,
+                "legalities": {}
+            },
+            "plains": {
+                "name": "Plains",
+                "mana_cost": { "type": "NoCost" },
+                "card_type": {
+                    "supertypes": ["Basic"],
+                    "core_types": ["Land"],
+                    "subtypes": ["Plains"]
+                },
+                "power": null,
+                "toughness": null,
+                "loyalty": null,
+                "defense": null,
+                "oracle_text": null,
+                "non_ability_text": null,
+                "flavor_name": null,
+                "keywords": [],
+                "abilities": [],
+                "triggers": [],
+                "static_abilities": [],
+                "replacements": [],
+                "color_override": null,
+                "scryfall_oracle_id": null,
+                "legalities": { "paupercommander": "legal" }
+            }
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&db_json).unwrap();
+        let request = DeckCompatibilityRequest {
+            main_deck: expand("Plains", 99),
+            sideboard: Vec::new(),
+            commander: vec!["PDH Commander".to_string()],
+            selected_format: Some(GameFormat::PauperCommander),
+            selected_match_type: None,
+        };
+
+        let result = evaluate_deck_compatibility(&db, &request);
+
+        assert_eq!(result.selected_format_compatible, Some(true));
+        assert!(
+            result.selected_format_reasons.is_empty(),
+            "{:?}",
+            result.selected_format_reasons
+        );
     }
 
     #[test]
