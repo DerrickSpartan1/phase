@@ -4703,6 +4703,8 @@ pub(super) fn parse_zone_counter_ast(
             Effect::MoveCounters {
                 source,
                 counter_type,
+                count,
+                mode,
                 target,
             },
             _rem,
@@ -4711,6 +4713,8 @@ pub(super) fn parse_zone_counter_ast(
             return Some(ZoneCounterImperativeAst::MoveCounters {
                 source,
                 counter_type,
+                count,
+                mode,
                 target,
             });
         }
@@ -4796,12 +4800,16 @@ pub(super) fn parse_zone_counter_ast(
         if let Some(Effect::MoveCounters {
             source,
             counter_type,
+            count,
+            mode,
             target,
         }) = try_parse_move_counters_from(lower, ctx)
         {
             return Some(ZoneCounterImperativeAst::MoveCounters {
                 source,
                 counter_type,
+                count,
+                mode,
                 target,
             });
         }
@@ -4928,10 +4936,14 @@ pub(super) fn lower_zone_counter_ast(ast: ZoneCounterImperativeAst) -> Effect {
         ZoneCounterImperativeAst::MoveCounters {
             source,
             counter_type,
+            count,
+            mode,
             target,
         } => Effect::MoveCounters {
             source,
             counter_type,
+            count,
+            mode,
             target,
         },
     }

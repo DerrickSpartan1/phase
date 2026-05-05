@@ -561,7 +561,23 @@ pub fn flatten_targets_in_chain(ability: &ResolvedAbility) -> Vec<TargetRef> {
 /// CR 608.2b: Re-validate targets on resolution — remove any that are no longer legal.
 pub fn validate_targets_in_chain(state: &GameState, ability: &ResolvedAbility) -> ResolvedAbility {
     let mut validated = ability.clone();
-    validated.targets = if let Effect::Attach { attachment, target } = &validated.effect {
+    validated.targets = if let Effect::MoveCounters { source, target, .. } = &validated.effect {
+        [source, target]
+            .iter()
+            .filter(|filter| !filter.is_context_ref())
+            .zip(validated.targets.iter())
+            .filter_map(|(filter, target_ref)| {
+                let legal = targeting::validate_targets(
+                    state,
+                    std::slice::from_ref(target_ref),
+                    filter,
+                    validated.controller,
+                    validated.source_id,
+                );
+                legal.into_iter().next()
+            })
+            .collect()
+    } else if let Effect::Attach { attachment, target } = &validated.effect {
         [attachment, target]
             .iter()
             .filter(|filter| attach_filter_needs_target_slot(filter))
@@ -634,7 +650,23 @@ fn collect_target_slots(
         return Ok(());
     }
 
-    if let Effect::Attach { attachment, target } = &ability.effect {
+    if let Effect::MoveCounters { source, target, .. } = &ability.effect {
+        for filter in [source, target] {
+            if filter.is_context_ref() {
+                continue;
+            }
+            let legal_targets = legal_targets_for_ability_filter(state, ability, filter, slots);
+            if legal_targets.is_empty() && !ability.optional_targeting {
+                return Err(EngineError::ActionNotAllowed(
+                    "No legal targets available".to_string(),
+                ));
+            }
+            slots.push(TargetSelectionSlot {
+                legal_targets,
+                optional: ability.optional_targeting,
+            });
+        }
+    } else if let Effect::Attach { attachment, target } = &ability.effect {
         for filter in [attachment, target] {
             if !attach_filter_needs_target_slot(filter) {
                 continue;
@@ -2070,8 +2102,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityKind, Effect, ModalChoice, ModalSelectionConstraint, QuantityExpr, QuantityRef,
-        TargetFilter, TypedFilter,
+        AbilityKind, CounterTransferMode, Effect, ModalChoice, ModalSelectionConstraint,
+        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{GameState, TargetSelectionConstraint, TargetSelectionSlot};
@@ -3236,6 +3268,68 @@ mod tests {
         let slots = build_target_slots(&state, &ability).expect("one slot should build");
         assert_eq!(slots.len(), 1, "SelfRef slot must not be surfaced");
         assert_eq!(slots[0].legal_targets, vec![TargetRef::Object(p1_artifact)]);
+    }
+
+    #[test]
+    fn build_target_slots_move_counters_surfaces_source_and_destination() {
+        use crate::types::ability::ControllerRef;
+        let mut state = crate::types::game_state::GameState::new_two_player(42);
+        let source = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let destination = crate::game::zones::create_object(
+            &mut state,
+            crate::types::identifiers::CardId(2),
+            PlayerId(0),
+            "Destination".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [source, destination] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+
+        let controlled_creature = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::You),
+            ..Default::default()
+        });
+        let ability = ResolvedAbility::new(
+            Effect::MoveCounters {
+                source: controlled_creature.clone(),
+                counter_type: None,
+                count: Some(QuantityExpr::Fixed { value: 1 }),
+                mode: CounterTransferMode::Move,
+                target: controlled_creature,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+
+        let slots = build_target_slots(&state, &ability).expect("two slots should build");
+        assert_eq!(
+            slots.len(),
+            2,
+            "move-counters must target source and destination"
+        );
+        assert_eq!(
+            slots[0].legal_targets,
+            vec![TargetRef::Object(source), TargetRef::Object(destination)]
+        );
+        assert_eq!(
+            slots[1].legal_targets,
+            vec![TargetRef::Object(source), TargetRef::Object(destination)]
+        );
     }
 
     #[test]

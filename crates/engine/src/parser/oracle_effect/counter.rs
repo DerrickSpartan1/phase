@@ -6,7 +6,8 @@ use nom::Parser;
 use nom_language::error::VerboseError;
 
 use crate::types::ability::{
-    DoublePTMode, DoubleTarget, Effect, MultiTargetSpec, QuantityExpr, TargetFilter,
+    CounterTransferMode, DoublePTMode, DoubleTarget, Effect, MultiTargetSpec, QuantityExpr,
+    TargetFilter,
 };
 use crate::types::mana::ManaColor;
 
@@ -545,6 +546,8 @@ pub(super) fn try_parse_move_counters<'a>(lower: &str, text: &'a str) -> Option<
         Effect::MoveCounters {
             source: TargetFilter::SelfRef,
             counter_type: None,
+            count: None,
+            mode: CounterTransferMode::Put,
             target,
         },
         remainder,
@@ -557,20 +560,19 @@ pub(super) fn try_parse_move_counters_from(lower: &str, ctx: &mut ParseContext) 
     let ((), after_move) = nom_on_lower(lower, lower, |i| value((), tag("move ")).parse(i))?;
     let after_move = after_move.trim();
 
-    // Parse quantity: "all", "any number of", or a number.
-    // count is informational (None = all, Some(n) = at most n).
-    let rest = if let Some(((), rest)) =
+    // Parse quantity: "all", "any number of", or a count expression.
+    let (count, rest) = if let Some(((), rest)) =
         nom_on_lower(after_move, after_move, |i| value((), tag("all ")).parse(i))
     {
-        rest.trim_start()
+        (None, rest.trim_start())
     } else if let Some(((), rest)) = nom_on_lower(after_move, after_move, |i| {
         value((), tag("any number of ")).parse(i)
     }) {
-        rest.trim_start()
-    } else if let Some((_, rest)) = parse_number(after_move) {
-        rest.trim_start()
+        (None, rest.trim_start())
+    } else if let Some((qty, rest)) = parse_count_expr(after_move) {
+        (Some(qty), rest.trim_start())
     } else {
-        // "move a +1/+1 counter" — article consumed by parse_number("a" → 1)
+        // "move a +1/+1 counter" — article consumed by parse_count_expr("a" → 1)
         return None;
     };
 
@@ -617,6 +619,8 @@ pub(super) fn try_parse_move_counters_from(lower: &str, ctx: &mut ParseContext) 
     Some(Effect::MoveCounters {
         source,
         counter_type,
+        count,
+        mode: CounterTransferMode::Move,
         target,
     })
 }
@@ -945,6 +949,8 @@ mod tests {
         let Some(Effect::MoveCounters {
             source,
             counter_type,
+            count,
+            mode,
             target,
         }) = result
         else {
@@ -952,6 +958,8 @@ mod tests {
         };
         assert!(matches!(source, TargetFilter::SelfRef));
         assert_eq!(counter_type, Some("P1P1".to_string()));
+        assert_eq!(count, Some(QuantityExpr::Fixed { value: 1 }));
+        assert_eq!(mode, CounterTransferMode::Move);
         assert!(matches!(target, TargetFilter::Typed { .. }));
     }
 
@@ -962,10 +970,18 @@ mod tests {
             "move all counters from target creature onto another target creature",
             &mut default_ctx(),
         );
-        let Some(Effect::MoveCounters { counter_type, .. }) = result else {
+        let Some(Effect::MoveCounters {
+            counter_type,
+            count,
+            mode,
+            ..
+        }) = result
+        else {
             panic!("expected MoveCounters, got {result:?}");
         };
         assert_eq!(counter_type, None, "untyped = None");
+        assert_eq!(count, None, "all counters = None");
+        assert_eq!(mode, CounterTransferMode::Move);
     }
 
     #[test]
@@ -978,6 +994,8 @@ mod tests {
         let Some(Effect::MoveCounters {
             source,
             counter_type,
+            count,
+            mode,
             target,
         }) = result
         else {
@@ -985,6 +1003,8 @@ mod tests {
         };
         assert!(matches!(source, TargetFilter::Typed { .. }));
         assert_eq!(counter_type, Some("P1P1".to_string()));
+        assert_eq!(count, Some(QuantityExpr::Fixed { value: 1 }));
+        assert_eq!(mode, CounterTransferMode::Move);
         assert!(matches!(target, TargetFilter::SelfRef));
     }
 
@@ -1256,6 +1276,8 @@ mod tests {
             Effect::MoveCounters {
                 source,
                 counter_type,
+                count,
+                mode,
                 target,
             },
             _,
@@ -1265,6 +1287,8 @@ mod tests {
         };
         assert!(matches!(source, TargetFilter::SelfRef));
         assert_eq!(counter_type, None, "all counters move (no type filter)");
+        assert_eq!(count, None, "CR 122.8 copies every matching counter");
+        assert_eq!(mode, CounterTransferMode::Put);
         match target {
             TargetFilter::Typed(tf) => {
                 assert!(tf

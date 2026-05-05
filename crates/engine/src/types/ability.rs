@@ -470,6 +470,16 @@ pub enum DoublePTMode {
     PowerAndToughness,
 }
 
+/// CR 122.5 / CR 122.8: Whether a counter-transfer effect actually moves
+/// counters off the source or only puts matching counters on the destination.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CounterTransferMode {
+    /// CR 122.5: Remove counters from the source and put them on the target.
+    Move,
+    /// CR 122.8: Put matching counters on the target using source/LKI state.
+    Put,
+}
+
 /// Power/toughness value -- either a fixed integer or a variable reference (e.g. "*", "X").
 ///
 /// Custom Deserialize: accepts both the tagged format `{"type":"Fixed","value":2}` (new)
@@ -3968,10 +3978,9 @@ pub enum Effect {
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
     },
-    /// CR 122.5 + CR 122.8: Put counters from source onto target. CR 122.5 is
-    /// the general "move a counter" rule; CR 122.8 covers the specific case of
-    /// triggered abilities that copy counters off a creature that left the
-    /// battlefield (e.g. dies-trigger "put its counters on…").
+    /// CR 122.5 + CR 122.8: Transfer counters from source onto target.
+    /// `mode` records whether Oracle says to move counters (remove then put)
+    /// or to put matching counters from source/LKI state.
     MoveCounters {
         /// Where counters are read from (SelfRef = ability source object).
         #[serde(default = "default_target_filter_self_ref")]
@@ -3979,6 +3988,13 @@ pub enum Effect {
         /// When Some, only move this counter type. When None, move all counters.
         #[serde(default)]
         counter_type: Option<String>,
+        /// When Some, transfer up to this many matching counters. When None,
+        /// transfer every matching counter.
+        #[serde(default)]
+        count: Option<QuantityExpr>,
+        /// Whether to remove counters from the source or only put matching counters.
+        #[serde(default = "default_counter_transfer_mode")]
+        mode: CounterTransferMode,
         /// Where counters go.
         #[serde(default = "default_target_filter_any")]
         target: TargetFilter,
@@ -4811,6 +4827,10 @@ fn default_player_filter_controller() -> PlayerFilter {
 
 fn default_quantity_one() -> QuantityExpr {
     QuantityExpr::Fixed { value: 1 }
+}
+
+fn default_counter_transfer_mode() -> CounterTransferMode {
+    CounterTransferMode::Move
 }
 
 fn is_default_search_selection_constraint(c: &SearchSelectionConstraint) -> bool {

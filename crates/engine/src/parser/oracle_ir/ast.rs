@@ -895,10 +895,12 @@ pub(crate) enum ZoneCounterImperativeAst {
         count: i32,
         target: TargetFilter,
     },
-    /// CR 122.8: "Put its counters on [target]" — copy all counters from source to target.
+    /// CR 122.5 / CR 122.8: Transfer counters from source to target.
     MoveCounters {
         source: TargetFilter,
         counter_type: Option<String>,
+        count: Option<QuantityExpr>,
+        mode: crate::types::ability::CounterTransferMode,
         target: TargetFilter,
     },
 }

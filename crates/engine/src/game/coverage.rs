@@ -1558,6 +1558,8 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::MoveCounters {
             source,
             counter_type,
+            count,
+            mode,
             target,
         } => {
             d.push(("source".into(), fmt_target(source)));
@@ -1566,6 +1568,10 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
             } else {
                 d.push(("counter".into(), "all".into()));
             }
+            if let Some(count) = count {
+                d.push(("count".into(), format!("{count:?}")));
+            }
+            d.push(("mode".into(), format!("{mode:?}")));
             d.push(("target".into(), fmt_target(target)));
         }
         Effect::Exploit { target } => {
