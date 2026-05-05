@@ -16,13 +16,14 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::{map, opt, value};
+use nom::combinator::{eof, map, opt, value};
 use nom::multi::many1;
 use nom::sequence::preceded;
 use nom::Parser;
 use nom_language::error::VerboseError;
 
 use super::oracle_nom::bridge::nom_on_lower;
+use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_quantity::{
@@ -1503,15 +1504,29 @@ fn try_parse_choose_one_of_inline(
         return None;
     }
 
-    let mut left_def = AbilityDefinition::new(AbilityKind::Spell, left_clause.effect);
+    let mut left_def = ability_definition_from_clause(AbilityKind::Spell, left_clause);
     left_def.description = Some(left_orig.to_string());
-    let mut right_def = AbilityDefinition::new(AbilityKind::Spell, right_clause.effect);
+    let mut right_def = ability_definition_from_clause(AbilityKind::Spell, right_clause);
     right_def.description = Some(right_orig.to_string());
 
     Some(parsed_clause(Effect::ChooseOneOf {
         chooser,
         branches: vec![left_def, right_def],
     }))
+}
+
+fn ability_definition_from_clause(
+    kind: AbilityKind,
+    clause: ParsedEffectClause,
+) -> AbilityDefinition {
+    let mut def = AbilityDefinition::new(kind, clause.effect);
+    def.sub_ability = clause.sub_ability;
+    def.duration = clause.duration;
+    def.condition = clause.condition;
+    def.optional = clause.optional;
+    def.multi_target = clause.multi_target;
+    def.distribute = clause.distribute;
+    def
 }
 
 fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
@@ -1762,10 +1777,25 @@ fn parse_for_each_object_copy_parts<'a>(
     let (body_lower, _) = tag::<_, _, VerboseError<&str>>(", ")
         .parse(after_clause)
         .ok()?;
+    if !is_copy_token_anaphor_body(body_lower.trim()) {
+        return None;
+    }
     let clause = &lower[clause_start..clause_start + clause_lower.len()];
     let source_filter = parse_for_each_object_filter_clause(clause)?;
     let body_start = text.len() - body_lower.len();
     Some((source_filter, text[body_start..].trim()))
+}
+
+fn is_copy_token_anaphor_body(input: &str) -> bool {
+    let parsed = |i| -> OracleResult<'_, ()> {
+        let (i, _) = token::parse_copy_token_entry_modifiers(i)?;
+        let i = i.trim_start();
+        let (i, _) = tag("it").parse(i)?;
+        let (i, _) = opt(tag(".")).parse(i)?;
+        let (i, _) = eof.parse(i)?;
+        Ok((i, ()))
+    };
+    parsed(input).is_ok()
 }
 
 #[tracing::instrument(level = "debug")]
@@ -13561,6 +13591,35 @@ mod tests {
     }
 
     #[test]
+    fn effect_for_each_chosen_type_copy_token_uses_source_filter() {
+        let def = parse_effect_chain(
+            "For each token you control of the chosen type that entered this turn, create a token that's a copy of it",
+            AbilityKind::Spell,
+        );
+        assert!(def.repeat_for.is_none());
+        match &*def.effect {
+            Effect::CopyTokenOf {
+                target,
+                source_filter: Some(TargetFilter::Typed(tf)),
+                ..
+            } => {
+                assert_eq!(*target, TargetFilter::None);
+                assert_eq!(tf.controller, Some(ControllerRef::You));
+                assert!(tf.properties.iter().any(|p| matches!(p, FilterProp::Token)));
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::IsChosenCreatureType)));
+                assert!(tf
+                    .properties
+                    .iter()
+                    .any(|p| matches!(p, FilterProp::EnteredThisTurn)));
+            }
+            other => panic!("expected CopyTokenOf with typed source_filter, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn effect_copy_it_for_each_commander_cast_sets_repeat_for() {
         let def = parse_effect_chain(
             "Copy it for each time you've cast your commander from the command zone this game",
@@ -21984,6 +22043,25 @@ mod tests {
             Effect::ChooseOneOf { chooser, branches } => {
                 assert_eq!(*chooser, PlayerFilter::DefendingPlayer);
                 assert_eq!(branches.len(), 2);
+            }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn choose_one_of_preserves_branch_optionality() {
+        let ability = parse_effect_chain(
+            "Each opponent faces a villainous choice — That player discards a card, or you may put a Construct, Robot, or Vehicle card from your hand onto the battlefield.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { chooser, branches } => {
+                assert_eq!(*chooser, PlayerFilter::Opponent);
+                assert_eq!(branches.len(), 2);
+                assert!(!branches[0].optional);
+                assert!(branches[1].optional);
+                assert!(matches!(&*branches[1].effect, Effect::ChangeZone { .. }));
             }
             other => panic!("expected ChooseOneOf, got {other:?}"),
         }

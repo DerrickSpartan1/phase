@@ -9216,6 +9216,48 @@ mod tests {
     }
 
     #[test]
+    fn source_filtered_copy_token_does_not_emit_dynamic_qty_warning() {
+        let parsed = parse(
+            "As this enchantment enters, choose a creature type.\nCreatures you control of the chosen type get +1/+0.\nAt the beginning of your end step, for each token you control of the chosen type that entered this turn, create a token that's a copy of it.",
+            "Renewed Solidarity",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+
+        assert!(
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:DynamicQty")),
+            "unexpected DynamicQty warning: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    #[test]
+    fn choose_one_of_branch_optional_does_not_emit_you_may_warning() {
+        let parsed = parse(
+            "Flying\nAt the beginning of your end step, draw a card. Then each opponent faces a villainous choice — That player discards a card, or you may put a Construct, Robot, or Vehicle card from your hand onto the battlefield.",
+            "Dr. Eggman",
+            &[],
+            &["Legendary", "Creature"],
+            &["Human", "Scientist"],
+        );
+
+        assert!(
+            parsed.parse_warnings.iter().all(|warning| warning
+                .to_string()
+                .split_whitespace()
+                .next()
+                != Some("Swallow:Optional_YouMay")),
+            "unexpected Optional_YouMay warning: {:?}",
+            parsed.parse_warnings
+        );
+    }
+
+    #[test]
     fn alrund_static_sum_for_each_does_not_emit_dynamic_qty_warning() {
         let oracle = "Alrund gets +1/+1 for each card in your hand and each foretold card you own in exile.\n\
              At the beginning of your end step, choose a card type, then reveal the top two cards of your library. \

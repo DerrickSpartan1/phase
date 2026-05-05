@@ -340,6 +340,7 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
             on_decline: Some(_),
             ..
         } => true,
+        Effect::ChooseOneOf { branches, .. } => branches.iter().any(def_tree_has_optional),
         Effect::CreateEmblem { statics, triggers } => {
             statics.iter().any(static_definition_has_optional)
                 || triggers.iter().any(trigger_tree_has_optional)
@@ -985,6 +986,10 @@ fn detect_dynamic_qty(
         // encoded as `quantity_modification: { type: Double }` on the
         // ReplacementDefinition, not as a QuantityExpr in the effect.
         "\"quantity_modification\":{",
+        // CR 115.10 + CR 608.2c: Non-targeting "for each [object], create a
+        // token that's a copy of it" effects carry the iterated source set as
+        // `CopyTokenOf::source_filter`, not as `repeat_for` or a QuantityExpr.
+        "\"source_filter\":{",
     ];
     if json_has_any(ast_json, dynamic_markers) {
         return;

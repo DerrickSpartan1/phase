@@ -106,7 +106,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
     })
 }
 
-fn parse_copy_token_entry_modifiers(input: &str) -> OracleResult<'_, (bool, bool)> {
+pub(super) fn parse_copy_token_entry_modifiers(input: &str) -> OracleResult<'_, (bool, bool)> {
     let (rest, _) = tag("create ").parse(input)?;
     let (rest, _) = opt(alt((tag("a "), tag("one ")))).parse(rest)?;
     let (rest, flags) = alt((
