@@ -620,7 +620,7 @@ fn counter_transfer_source_counters(
 
     counters
         .into_iter()
-        .filter(|(ct, count)| *count > 0 && counter_type_filter.map_or(true, |filter| filter == ct))
+        .filter(|(ct, count)| *count > 0 && counter_type_filter.is_none_or(|filter| filter == ct))
         .collect()
 }
 
