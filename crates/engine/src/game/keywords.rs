@@ -276,35 +276,32 @@ pub fn returnable_creatures_for_variant(
 pub fn activate_ninjutsu(
     state: &mut GameState,
     player: PlayerId,
-    ninjutsu_card_id: CardId,
+    ninjutsu_obj_id: ObjectId,
     creature_to_return: ObjectId,
     events: &mut Vec<GameEvent>,
 ) -> Result<(), String> {
-    // Find the ninjutsu card in player's hand or command zone (for commander ninjutsu)
     // CR 903.8: Commander tax applies to casting, not to ninjutsu activation.
     let p = &state.players[player.0 as usize];
-    let ninjutsu_obj_id = p
-        .hand
-        .iter()
-        .chain(state.command_zone.iter())
-        .find(|&&obj_id| {
-            state
-                .objects
-                .get(&obj_id)
-                .is_some_and(|o| o.card_id == ninjutsu_card_id)
-        })
-        .copied()
-        .ok_or("Ninjutsu-family card not in hand or command zone")?;
+    if !p.hand.contains(&ninjutsu_obj_id) && !state.command_zone.contains(&ninjutsu_obj_id) {
+        return Err("Ninjutsu-family card not in hand or command zone".to_string());
+    }
 
     // Determine which variant from the card's keywords
     let ninjutsu_obj = state
         .objects
         .get(&ninjutsu_obj_id)
         .ok_or("Ninjutsu-family card object not found")?;
+    if ninjutsu_obj.owner != player {
+        return Err("You don't own that Ninjutsu-family card".to_string());
+    }
     let variant = ninjutsu_family_variant(ninjutsu_obj)
         .ok_or("Card does not have a Ninjutsu-family keyword")?;
+    if ninjutsu_obj.zone == Zone::Command && !matches!(variant, NinjutsuVariant::CommanderNinjutsu)
+    {
+        return Err("Only commander ninjutsu can be activated from the command zone".to_string());
+    }
 
-    // CR 702.49b: Extract the mana cost (validated after all other checks, paid before mutations)
+    // CR 702.49a/d: Extract the activation cost (validated after all other checks, paid before mutations)
     let mana_cost =
         ninjutsu_family_cost(ninjutsu_obj).ok_or("Ninjutsu-family card has no mana cost")?;
 
@@ -394,7 +391,7 @@ pub fn activate_ninjutsu(
     // CR 601.2f: All ninjutsu-family variants share the "ninjutsu" keyword for cost reduction.
     let effective_cost = apply_ability_cost_reduction(state, player, "ninjutsu", mana_cost);
 
-    // CR 702.49b: Pay the ninjutsu-family mana cost (after all validation, before mutations)
+    // CR 702.49a/d: Pay the ninjutsu-family mana cost (after all validation, before mutations)
     super::casting::pay_ability_cost(
         state,
         player,
@@ -512,66 +509,51 @@ fn apply_ability_cost_reduction(
     cost
 }
 
-/// CR 702.49b: Look up the ninjutsu-family mana cost for a card eligible for activation.
-pub fn ninjutsu_family_cost_for_card(
+/// CR 702.49a/d: Look up the source object, variant, and effective cost for
+/// every Ninjutsu-family card the player may activate.
+pub fn ninjutsu_family_activatable_sources(
     state: &GameState,
     player: PlayerId,
-    card_id: CardId,
-) -> Option<ManaCost> {
-    // Reuse activatable_cards to validate card is eligible (DRY — same zone traversal)
-    if !ninjutsu_family_activatable_cards(state, player)
-        .iter()
-        .any(|(c, _)| *c == card_id)
-    {
-        return None;
-    }
-    // Look up the object to extract cost
-    state
-        .objects
-        .values()
-        .find(|o| o.card_id == card_id && o.owner == player)
-        .and_then(ninjutsu_family_cost)
-}
-
-/// Returns the CardIds + variant of activatable Ninjutsu-family cards.
-/// Checks the player's hand for all variants, plus the command zone for CommanderNinjutsu.
-pub fn ninjutsu_family_activatable_cards(
-    state: &GameState,
-    player: PlayerId,
-) -> Vec<(CardId, NinjutsuVariant)> {
+) -> Vec<(ObjectId, CardId, NinjutsuVariant, ManaCost)> {
     let p = &state.players[player.0 as usize];
-    let mut results: Vec<(CardId, NinjutsuVariant)> = p
-        .hand
-        .iter()
-        .filter_map(|&obj_id| {
-            let obj = state.objects.get(&obj_id)?;
-            let variant = ninjutsu_family_variant(obj)?;
-            Some((obj.card_id, variant))
-        })
-        .collect();
+    let hand_sources = p.hand.iter().filter_map(|&obj_id| {
+        let obj = state.objects.get(&obj_id)?;
+        let variant = ninjutsu_family_variant(obj)?;
+        let cost =
+            apply_ability_cost_reduction(state, player, "ninjutsu", ninjutsu_family_cost(obj)?);
+        Some((obj_id, obj.card_id, variant, cost))
+    });
 
-    // CR 702.49d: CommanderNinjutsu can also be activated from the command zone.
-    for &obj_id in &state.command_zone {
-        if let Some(obj) = state.objects.get(&obj_id) {
-            if obj.owner != player {
-                continue;
-            }
-            if let Some(variant) = ninjutsu_family_variant(obj) {
-                if matches!(variant, NinjutsuVariant::CommanderNinjutsu) {
-                    results.push((obj.card_id, variant));
-                }
-            }
+    let command_sources = state.command_zone.iter().filter_map(|&obj_id| {
+        let obj = state.objects.get(&obj_id)?;
+        if obj.owner != player {
+            return None;
         }
-    }
+        let variant = ninjutsu_family_variant(obj)?;
+        if !matches!(variant, NinjutsuVariant::CommanderNinjutsu) {
+            return None;
+        }
+        let cost =
+            apply_ability_cost_reduction(state, player, "ninjutsu", ninjutsu_family_cost(obj)?);
+        Some((obj_id, obj.card_id, variant, cost))
+    });
 
-    results
+    hand_sources.chain(command_sources).collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use crate::ai_support::legal_actions;
+    use crate::types::ability::{
+        AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
+    };
+    use crate::types::actions::GameAction;
+    use crate::types::game_state::WaitingFor;
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::mana::{ManaCost, ManaCostShard, ManaType, ManaUnit};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -707,6 +689,37 @@ mod tests {
     use crate::types::events::GameEvent;
     use crate::types::game_state::GameState;
 
+    fn add_mana_land(state: &mut GameState, card_id: CardId, color: ManaColor) -> ObjectId {
+        let land_id = create_object(
+            state,
+            card_id,
+            PlayerId(0),
+            "Test Land".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&land_id).unwrap();
+        obj.card_types
+            .core_types
+            .push(crate::types::card_type::CoreType::Land);
+        Arc::make_mut(&mut obj.abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Mana {
+                    produced: ManaProduction::Fixed {
+                        colors: vec![color],
+                        contribution: ManaContribution::Base,
+                    },
+                    restrictions: vec![],
+                    grants: vec![],
+                    expiry: None,
+                    target: None,
+                },
+            )
+            .cost(AbilityCost::Tap),
+        );
+        land_id
+    }
+
     fn setup_ninjutsu_scenario() -> (GameState, ObjectId, ObjectId) {
         let mut state = GameState::new_two_player(42);
         state.active_player = PlayerId(0);
@@ -778,17 +791,10 @@ mod tests {
     #[test]
     fn ninjutsu_returns_attacker_to_hand() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
-        let ninja_card_id = state.objects.get(&ninja_id).unwrap().card_id;
         let mut events = Vec::new();
 
-        activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ninja_card_id,
-            attacker_id,
-            &mut events,
-        )
-        .expect("activation should succeed");
+        activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events)
+            .expect("activation should succeed");
 
         // Attacker should be in hand
         let attacker = state.objects.get(&attacker_id).unwrap();
@@ -802,17 +808,10 @@ mod tests {
     #[test]
     fn ninjutsu_creature_enters_battlefield_tapped_attacking() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
-        let ninja_card_id = state.objects.get(&ninja_id).unwrap().card_id;
         let mut events = Vec::new();
 
-        activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ninja_card_id,
-            attacker_id,
-            &mut events,
-        )
-        .expect("activation should succeed");
+        activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events)
+            .expect("activation should succeed");
 
         // Ninjutsu creature should be on battlefield, tapped, attacking
         let ninja = state.objects.get(&ninja_id).unwrap();
@@ -846,17 +845,10 @@ mod tests {
     #[test]
     fn ninjutsu_creature_does_not_fire_attack_triggers() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
-        let ninja_card_id = state.objects.get(&ninja_id).unwrap().card_id;
         let mut events = Vec::new();
 
-        activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ninja_card_id,
-            attacker_id,
-            &mut events,
-        )
-        .expect("activation should succeed");
+        activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events)
+            .expect("activation should succeed");
 
         // CR 702.49c: No AttackersDeclared event should be emitted for the Ninjutsu creature
         let has_attackers_declared = events
@@ -871,7 +863,6 @@ mod tests {
     #[test]
     fn ninjutsu_fails_if_attacker_is_blocked() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
-        let ninja_card_id = state.objects.get(&ninja_id).unwrap().card_id;
 
         // Add a blocker assignment
         let blocker_id = create_object(
@@ -889,48 +880,28 @@ mod tests {
             .insert(attacker_id, vec![blocker_id]);
 
         let mut events = Vec::new();
-        let result = activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ninja_card_id,
-            attacker_id,
-            &mut events,
-        );
+        let result = activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events);
         assert!(result.is_err(), "Should fail when attacker is blocked");
     }
 
     #[test]
     fn ninjutsu_fails_without_combat() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
-        let ninja_card_id = state.objects.get(&ninja_id).unwrap().card_id;
         state.combat = None; // Remove combat
 
         let mut events = Vec::new();
-        let result = activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ninja_card_id,
-            attacker_id,
-            &mut events,
-        );
+        let result = activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events);
         assert!(result.is_err(), "Should fail without active combat");
     }
 
     #[test]
     fn ninjutsu_activation_fails_without_mana() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
-        let ninja_card_id = state.objects.get(&ninja_id).unwrap().card_id;
         // Clear all mana
         state.players[0].mana_pool.clear();
 
         let mut events = Vec::new();
-        let result = activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ninja_card_id,
-            attacker_id,
-            &mut events,
-        );
+        let result = activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events);
         assert!(result.is_err(), "Should fail without mana");
 
         // Verify no zone changes occurred — creature still on battlefield, ninja still in hand
@@ -947,23 +918,56 @@ mod tests {
     #[test]
     fn ninjutsu_activation_deducts_mana() {
         let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
-        let ninja_card_id = state.objects.get(&ninja_id).unwrap().card_id;
         let mut events = Vec::new();
 
-        activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ninja_card_id,
-            attacker_id,
-            &mut events,
-        )
-        .expect("activation should succeed");
+        activate_ninjutsu(&mut state, PlayerId(0), ninja_id, attacker_id, &mut events)
+            .expect("activation should succeed");
 
         // Mana pool should be empty after paying {1}{U}
         assert_eq!(
             state.players[0].mana_pool.total(),
             0,
             "Mana pool should be empty after ninjutsu payment"
+        );
+    }
+
+    #[test]
+    fn ninjutsu_legal_action_uses_auto_tappable_mana_sources() {
+        let (mut state, attacker_id, ninja_id) = setup_ninjutsu_scenario();
+        state.players[0].mana_pool.clear();
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+
+        add_mana_land(&mut state, CardId(10), ManaColor::Blue);
+        add_mana_land(&mut state, CardId(11), ManaColor::Blue);
+
+        let actions = legal_actions(&state);
+
+        assert!(
+            actions.iter().any(|a| matches!(
+                a,
+                GameAction::ActivateNinjutsu {
+                    ninjutsu_object_id,
+                    creature_to_return,
+                } if *ninjutsu_object_id == ninja_id && *creature_to_return == attacker_id
+            )),
+            "Ninjutsu should be legal when untapped mana sources can pay the cost"
+        );
+
+        let (_, _, grouped) = crate::ai_support::legal_actions_full(&state);
+        assert!(
+            grouped
+                .get(&ninja_id)
+                .is_some_and(|actions| actions.iter().any(|a| matches!(
+                    a,
+                    GameAction::ActivateNinjutsu {
+                        ninjutsu_object_id,
+                        creature_to_return,
+                    } if *ninjutsu_object_id == ninja_id && *creature_to_return == attacker_id
+                ))),
+            "Ninjutsu should be grouped under the hand object for frontend playability"
         );
     }
 
@@ -1026,15 +1030,8 @@ mod tests {
             expiry: None,
         });
 
-        let ws_card_id = state.objects.get(&ws_id).unwrap().card_id;
         let mut events = Vec::new();
-        let result = activate_ninjutsu(
-            &mut state,
-            PlayerId(0),
-            ws_card_id,
-            creature_id,
-            &mut events,
-        );
+        let result = activate_ninjutsu(&mut state, PlayerId(0), ws_id, creature_id, &mut events);
         assert!(
             result.is_err(),
             "Should reject non-battlefield creature for WebSlinging"

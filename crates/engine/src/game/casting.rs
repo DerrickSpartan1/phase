@@ -3089,22 +3089,17 @@ pub fn can_cast_object_now(state: &GameState, player: PlayerId, object_id: Objec
 }
 
 /// Returns true if the player can pay this mana cost after auto-tapping
-/// currently activatable lands in a cloned game state.
+/// currently activatable mana sources in a cloned game state.
 ///
 /// Used by legal action generation so the frontend and engine agree on whether
 /// a spell is castable from the current board state.
-pub fn can_pay_cost_after_auto_tap(
-    state: &GameState,
+fn can_pay_mana_cost_after_auto_tap_with_context(
+    mut simulated: GameState,
     player: PlayerId,
     source_id: ObjectId,
     cost: &crate::types::mana::ManaCost,
+    ctx: Option<&PaymentContext<'_>>,
 ) -> bool {
-    let mut simulated = state.clone();
-    if simulated.layers_dirty {
-        super::layers::evaluate_layers(&mut simulated);
-    }
-    let spell_meta = build_spell_meta(&simulated, player, source_id);
-
     let mut tap_events: Vec<crate::types::events::GameEvent> = Vec::new();
     super::casting_costs::auto_tap_mana_sources(
         &mut simulated,
@@ -3128,24 +3123,67 @@ pub fn can_pay_cost_after_auto_tap(
     }
 
     let any_color = super::static_abilities::player_can_spend_as_any_color(&simulated, player);
-    // CR 107.4f + CR 118.3 + CR 119.8: Include the caster's Phyrexian life
+    // CR 107.4f + CR 118.3 + CR 119.8: Include the payer's Phyrexian life
     // budget so a cost containing {C/P} shards is only reported payable when
     // either mana or sufficient life (respecting CantLoseLife) is available.
     let max_life = super::life_costs::max_phyrexian_life_payments(&simulated, player);
-    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
     simulated
         .players
         .iter()
         .find(|p| p.id == player)
         .is_some_and(|player_data| {
-            mana_payment::can_pay_for_spell(
-                &player_data.mana_pool,
-                cost,
-                spell_ctx.as_ref(),
-                any_color,
-                max_life,
-            )
+            mana_payment::can_pay_for_spell(&player_data.mana_pool, cost, ctx, any_color, max_life)
         })
+}
+
+pub fn can_pay_cost_after_auto_tap(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+) -> bool {
+    let mut simulated = state.clone();
+    if simulated.layers_dirty {
+        super::layers::evaluate_layers(&mut simulated);
+    }
+    let spell_meta = build_spell_meta(&simulated, player, source_id);
+
+    let spell_ctx = spell_meta.as_ref().map(PaymentContext::Spell);
+    can_pay_mana_cost_after_auto_tap_with_context(
+        simulated,
+        player,
+        source_id,
+        cost,
+        spell_ctx.as_ref(),
+    )
+}
+
+/// Returns true if the player can pay this activated-ability mana cost after
+/// auto-tapping currently activatable mana sources in a cloned game state.
+pub fn can_pay_ability_mana_cost_after_auto_tap(
+    state: &GameState,
+    player: PlayerId,
+    source_id: ObjectId,
+    cost: &crate::types::mana::ManaCost,
+) -> bool {
+    let mut simulated = state.clone();
+    if simulated.layers_dirty {
+        super::layers::evaluate_layers(&mut simulated);
+    }
+
+    let (source_types, source_subtypes) = activation_source_types(&simulated, source_id);
+    let activation_ctx = PaymentContext::Activation {
+        source_types: &source_types,
+        source_subtypes: &source_subtypes,
+    };
+
+    can_pay_mana_cost_after_auto_tap_with_context(
+        simulated,
+        player,
+        source_id,
+        cost,
+        Some(&activation_ctx),
+    )
 }
 
 // Target/mode selection handlers are in casting_targets module.
@@ -3361,7 +3399,7 @@ fn auto_tap_and_pay_cost(
 }
 
 /// CR 106.6: Build (core-types, subtypes) slices for a `PaymentContext::Activation`
-/// from the source permanent. Mirrors `build_spell_meta`'s type extraction so
+/// from the source object. Mirrors `build_spell_meta`'s type extraction so
 /// `allows_activation` and `allows_spell` consult identically-shaped strings.
 pub(super) fn activation_source_types(
     state: &GameState,

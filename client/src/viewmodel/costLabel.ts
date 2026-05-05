@@ -223,6 +223,24 @@ export function abilityChoiceLabel(
       description: `Cast ${object.name} by paying its sneak cost and returning ${returnedName} to your hand (CR 702.190a).`,
     };
   }
+  if (action.type === "ActivateNinjutsu") {
+    const returnedId = action.data.creature_to_return;
+    const returnedName = objects?.[returnedId]?.name ?? `creature #${returnedId}`;
+    const keyword = object.keywords.find(
+      (
+        k,
+      ): k is { Ninjutsu?: ManaCost; CommanderNinjutsu?: ManaCost; WebSlinging?: ManaCost } =>
+        typeof k === "object" &&
+        ("Ninjutsu" in k || "CommanderNinjutsu" in k || "WebSlinging" in k),
+    );
+    const cost = keyword?.Ninjutsu ?? keyword?.CommanderNinjutsu ?? keyword?.WebSlinging;
+    const costSymbols = cost ? manaCostToShards(cost).map((s) => `{${s}}`).join("") : "";
+    const costSuffix = costSymbols ? ` (${costSymbols})` : "";
+    return {
+      label: `Ninjutsu — return ${returnedName}${costSuffix}`,
+      description: `Activate ${object.name}'s ninjutsu ability and return ${returnedName} to your hand (CR 702.49a).`,
+    };
+  }
   if (action.type === "ActivateAbility") {
     const ability = object.abilities[action.data.ability_index];
     // For mana abilities, show what they produce (e.g., "Add {U}") instead of just the cost

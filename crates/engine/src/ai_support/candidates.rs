@@ -2269,34 +2269,25 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
     // CR 702.49: Offer Ninjutsu-family activations during combat
     // CR 702.61a: Ninjutsu is an activated ability — blocked by split second.
     if !split_second_active && state.active_player == player {
-        let family_cards = keywords::ninjutsu_family_activatable_cards(state, player);
-        for (card_id, variant) in &family_cards {
+        let family_cards = keywords::ninjutsu_family_activatable_sources(state, player);
+        for (ninjutsu_object_id, _card_id, variant, cost) in &family_cards {
             let returnable = keywords::returnable_creatures_for_variant(state, player, variant);
             let timing_ok = keywords::ninjutsu_timing_ok(&state.phase, variant);
             if timing_ok {
-                // CR 702.49b: Only offer ninjutsu if the player can afford it
-                let can_afford = keywords::ninjutsu_family_cost_for_card(state, player, *card_id)
-                    .is_some_and(|cost| {
-                        let pool = &state.players[player.0 as usize].mana_pool;
-                        let any_color =
-                            crate::game::static_abilities::player_can_spend_as_any_color(
-                                state, player,
-                            );
-                        // CR 107.4f + CR 118.3 + CR 119.8: honor the player's
-                        // Phyrexian life budget for costs containing {C/P}.
-                        let max_life =
-                            crate::game::life_costs::max_phyrexian_life_payments(state, player);
-                        crate::game::mana_payment::can_pay_for_spell(
-                            pool, &cost, None, any_color, max_life,
-                        )
-                    });
+                // CR 702.49a/d: Only offer ninjutsu if the player can afford its activation cost.
+                let can_afford = casting::can_pay_ability_mana_cost_after_auto_tap(
+                    state,
+                    player,
+                    *ninjutsu_object_id,
+                    cost,
+                );
                 if !can_afford {
                     continue;
                 }
                 for &creature_id in &returnable {
                     actions.push(candidate(
                         GameAction::ActivateNinjutsu {
-                            ninjutsu_card_id: *card_id,
+                            ninjutsu_object_id: *ninjutsu_object_id,
                             creature_to_return: creature_id,
                         },
                         TacticalClass::Ability,

@@ -56,9 +56,14 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::Priority { .. }, GameAction::TurnFaceUp { object_id })
         | (WaitingFor::Priority { .. }, GameAction::PlayFaceDown { object_id, .. })
         | (WaitingFor::Priority { .. }, GameAction::TapLandForMana { object_id })
-        | (WaitingFor::Priority { .. }, GameAction::UntapLandForMana { object_id }) => {
-            !state.objects.contains_key(object_id)
-        }
+        | (WaitingFor::Priority { .. }, GameAction::UntapLandForMana { object_id })
+        | (
+            WaitingFor::Priority { .. },
+            GameAction::ActivateNinjutsu {
+                ninjutsu_object_id: object_id,
+                ..
+            },
+        ) => !state.objects.contains_key(object_id),
         (WaitingFor::Priority { .. }, GameAction::ActivateAbility { source_id, .. })
         | (
             WaitingFor::Priority { .. },

@@ -2301,7 +2301,7 @@ fn apply_action(
         (
             WaitingFor::Priority { player },
             GameAction::ActivateNinjutsu {
-                ninjutsu_card_id,
+                ninjutsu_object_id,
                 creature_to_return,
             },
         ) => {
@@ -2309,7 +2309,7 @@ fn apply_action(
             super::keywords::activate_ninjutsu(
                 state,
                 p,
-                ninjutsu_card_id,
+                ninjutsu_object_id,
                 creature_to_return,
                 &mut events,
             )

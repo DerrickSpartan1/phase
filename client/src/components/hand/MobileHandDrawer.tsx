@@ -62,6 +62,8 @@ export function MobileHandDrawer() {
       } else if (action.type === "CastSpellAsSneak") {
         // CR 702.190a: Sneak casts originate from `hand_object` (not `object_id`).
         ids.add(Number(action.data.hand_object));
+      } else if (action.type === "ActivateNinjutsu") {
+        ids.add(Number(action.data.ninjutsu_object_id));
       }
     }
     return ids;

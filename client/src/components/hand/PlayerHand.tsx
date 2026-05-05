@@ -68,6 +68,8 @@ export function PlayerHand() {
         );
       } else if (action.type === "CastSpellAsSneak") {
         ids.add(Number(action.data.hand_object));
+      } else if (action.type === "ActivateNinjutsu") {
+        ids.add(Number(action.data.ninjutsu_object_id));
       }
     }
     return ids;

@@ -244,12 +244,9 @@ fn kaito_ninjutsu_activation() {
     add_mana(&mut runner, P0, ManaType::Black, 1);
     add_mana(&mut runner, P0, ManaType::Colorless, 1);
 
-    // Get Kaito's card_id
-    let kaito_card_id = runner.state().objects[&kaito_id].card_id;
-
     // Activate Ninjutsu
     let result = runner.act(GameAction::ActivateNinjutsu {
-        ninjutsu_card_id: kaito_card_id,
+        ninjutsu_object_id: kaito_id,
         creature_to_return: attacker_id,
     });
     assert!(result.is_ok(), "Ninjutsu activation should succeed");

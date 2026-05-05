@@ -175,7 +175,8 @@ pub enum GameAction {
     },
     /// CR 702.49: Activate a Ninjutsu-family keyword from hand or command zone during combat.
     ActivateNinjutsu {
-        ninjutsu_card_id: CardId,
+        /// The card object with Ninjutsu in hand or command zone.
+        ninjutsu_object_id: ObjectId,
         /// The creature to return — unblocked attacker (Ninjutsu) or tapped creature (WebSlinging).
         creature_to_return: ObjectId,
     },
@@ -573,6 +574,9 @@ impl GameAction {
             GameAction::CastSpell { object_id, .. } => Some(*object_id),
             GameAction::Foretell { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsSneak { hand_object, .. } => Some(*hand_object),
+            GameAction::ActivateNinjutsu {
+                ninjutsu_object_id, ..
+            } => Some(*ninjutsu_object_id),
             GameAction::CastSpellForFree { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsMiracle { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsMadness { object_id, .. } => Some(*object_id),
@@ -614,7 +618,6 @@ impl GameAction {
             | GameAction::ChooseWarpCost { .. }
             | GameAction::ChooseEvokeCost { .. }
             | GameAction::ChooseOverloadCost { .. }
-            | GameAction::ActivateNinjutsu { .. }
             | GameAction::DecideOptionalEffect { .. }
             | GameAction::PayUnlessCost { .. }
             | GameAction::PayCombatTax { .. }
@@ -772,6 +775,13 @@ mod tests {
                 GameAction::ActivateAbility {
                     source_id: oid,
                     ability_index: 0,
+                },
+                Some(oid),
+            ),
+            (
+                GameAction::ActivateNinjutsu {
+                    ninjutsu_object_id: oid,
+                    creature_to_return: ObjectId(99),
                 },
                 Some(oid),
             ),

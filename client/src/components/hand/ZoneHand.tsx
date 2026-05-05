@@ -65,6 +65,9 @@ export function ZoneHand({ zone }: ZoneHandProps) {
       if (action.type === "PlayLand" || action.type === "CastSpell") {
         castable.add(Number((action as Extract<GameAction, { type: "PlayLand" | "CastSpell" }>).data.object_id));
       }
+      if (action.type === "ActivateNinjutsu") {
+        castable.add(Number(action.data.ninjutsu_object_id));
+      }
       if (action.type === "ActivateAbility") {
         activatable.add(Number(action.data.source_id));
       }
