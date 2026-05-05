@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 
 import type { PlayerId } from "../../adapter/types.ts";
@@ -369,11 +369,14 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
         </>
       )}
       <div className="flex min-w-[4.5rem] flex-col items-start leading-none">
-        <span className="relative mb-1 flex w-full items-center justify-center text-[10px] font-semibold uppercase tracking-[0.18em] text-white/48">
+        <span
+          className="relative mb-1 flex w-full items-center justify-center text-[10px] font-semibold uppercase tracking-[0.18em]"
+          style={{ color: seatColor }}
+        >
           <span
             aria-hidden
-            className="absolute left-0 h-1.5 w-1.5 shrink-0 rounded-full ring-1 ring-black/30"
-            style={{ backgroundColor: seatColor }}
+            className="absolute left-0 h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-black/30 shadow-[0_0_6px_var(--seat-glow)]"
+            style={{ backgroundColor: seatColor, "--seat-glow": `${seatColor}88` } as CSSProperties}
           />
           {label}
         </span>

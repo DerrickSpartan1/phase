@@ -1,4 +1,4 @@
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 
 import { UnderAttackOverlay } from "./UnderAttackOverlay.tsx";
@@ -106,11 +106,14 @@ export function HudPlate({
         {seatColor && (
           <span
             aria-hidden
-            className="h-1.5 w-1.5 shrink-0 rounded-full ring-1 ring-black/30"
-            style={{ backgroundColor: seatColor }}
+            className="h-2.5 w-2.5 shrink-0 rounded-full ring-1 ring-black/30 shadow-[0_0_6px_var(--seat-glow)]"
+            style={{ backgroundColor: seatColor, "--seat-glow": `${seatColor}88` } as CSSProperties}
           />
         )}
-        <span className="truncate text-[9px] font-semibold uppercase tracking-[0.18em] text-white/68">
+        <span
+          className="truncate text-[9px] font-semibold uppercase tracking-[0.18em]"
+          style={seatColor ? { color: seatColor } : { color: "rgba(255,255,255,0.68)" }}
+        >
           {label}
         </span>
       </div>

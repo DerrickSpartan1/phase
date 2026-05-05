@@ -5,6 +5,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ManaType, PlayerId } from "../../adapter/types";
 import { getCardNames } from "../../services/cardNames";
 import { useGameStore } from "../../stores/gameStore";
+import { getSeatColor } from "../../hooks/useSeatColor";
+import { getPlayerDisplayName } from "../../stores/multiplayerStore";
+import { usePerspectivePlayerId } from "../../hooks/usePlayerId";
 import { useUiStore } from "../../stores/uiStore";
 
 // ── Layout ──────────────────────────────────────────────────────────────
@@ -161,17 +164,24 @@ export function PlayerSelect({
   onChange: (v: PlayerId) => void;
 }) {
   const players = useGameStore((s) => s.gameState?.players);
+  const seatOrder = useGameStore((s) => s.gameState?.seat_order);
+  const myId = usePerspectivePlayerId();
   return (
     <select
       value={value}
       onChange={(e) => onChange(Number(e.target.value) as PlayerId)}
       className={inputClass}
+      style={{ color: getSeatColor(value, seatOrder) }}
     >
-      {(players ?? []).map((p) => (
-        <option key={p.id} value={p.id}>
-          Player {p.id}
-        </option>
-      ))}
+      {(players ?? []).map((p) => {
+        const color = getSeatColor(p.id, seatOrder);
+        const label = getPlayerDisplayName(p.id, myId);
+        return (
+          <option key={p.id} value={p.id} style={{ color }}>
+            {label}
+          </option>
+        );
+      })}
     </select>
   );
 }

@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 
 import type { AttackTarget, ObjectId, PlayerId } from "../../adapter/types.ts";
+import { getSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
@@ -33,16 +34,33 @@ export function AttackTargetPicker({
 
   const gameState = useGameStore((s) => s.gameState);
   const myId = usePlayerId();
+  const seatOrder = gameState?.seat_order;
 
   const teamBased = gameState?.format_config?.team_based ?? false;
+
+  const sortedTargets = useMemo(() => {
+    if (!seatOrder) return validTargets;
+    return [...validTargets].sort((a, b) => {
+      const aIdx = a.type === "Player" ? seatOrder.indexOf(a.data) : Infinity;
+      const bIdx = b.type === "Player" ? seatOrder.indexOf(b.data) : Infinity;
+      return aIdx - bIdx;
+    });
+  }, [validTargets, seatOrder]);
 
   function getTargetLabel(target: AttackTarget): string {
     if (target.type === "Player") {
       return getPlayerLabel(target.data, myId, teamBased);
     }
-    // Planeswalker: show name from game objects
     const obj = gameState?.objects[target.data];
     return obj?.name ?? `Planeswalker #${target.data}`;
+  }
+
+  function getTargetSeatColor(target: AttackTarget): string | undefined {
+    if (target.type === "Player") {
+      return getSeatColor(target.data, seatOrder);
+    }
+    const obj = gameState?.objects[target.data];
+    return obj ? getSeatColor(obj.controller, seatOrder) : undefined;
   }
 
   function handleAttackAll(target: AttackTarget) {
@@ -97,15 +115,18 @@ export function AttackTargetPicker({
         {mode === "all" ? (
           /* Attack All mode: one button per target */
           <div className="flex flex-col gap-2">
-            {validTargets.map((target) => (
-              <button
-                key={attackTargetKey(target)}
-                onClick={() => handleAttackAll(target)}
-                className={gameButtonClass({ tone: "red", size: "md" })}
-              >
-                Attack {getTargetLabel(target)} with {selectedAttackers.length} {selectedAttackers.length === 1 ? "creature" : "creatures"}
-              </button>
-            ))}
+            {sortedTargets.map((target) => {
+              const color = getTargetSeatColor(target);
+              return (
+                <button
+                  key={attackTargetKey(target)}
+                  onClick={() => handleAttackAll(target)}
+                  className={gameButtonClass({ tone: "red", size: "md" })}
+                >
+                  Attack <span className="mx-1 font-bold" style={color ? { color } : undefined}>{getTargetLabel(target)}</span> with {selectedAttackers.length} {selectedAttackers.length === 1 ? "creature" : "creatures"}
+                </button>
+              );
+            })}
           </div>
         ) : (
           /* Split mode: per-creature assignment */
@@ -119,18 +140,21 @@ export function AttackTargetPicker({
                     {obj?.name ?? `Creature #${creatureId}`}
                   </span>
                   <div className="flex gap-1">
-                    {validTargets.map((target) => (
-                      <button
-                        key={attackTargetKey(target)}
-                        onClick={() => setCreatureTarget(creatureId, target)}
-                        className={gameButtonClass({
-                          tone: attackTargetsEqual(currentTarget, target) ? "red" : "slate",
-                          size: "xs",
-                        })}
-                      >
-                        {getTargetLabel(target)}
-                      </button>
-                    ))}
+                    {sortedTargets.map((target) => {
+                      const color = getTargetSeatColor(target);
+                      return (
+                        <button
+                          key={attackTargetKey(target)}
+                          onClick={() => setCreatureTarget(creatureId, target)}
+                          className={gameButtonClass({
+                            tone: attackTargetsEqual(currentTarget, target) ? "red" : "slate",
+                            size: "xs",
+                          })}
+                        >
+                          <span className="mx-0.5 font-bold" style={color ? { color } : undefined}>{getTargetLabel(target)}</span>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               );

@@ -911,7 +911,7 @@ function GamePageContent({
         </div>
 
         {/* Row 2: Battlefield — takes remaining space; HUDs passed inline to PlayerAreas */}
-        <div className="relative z-10 flex min-h-0 min-w-0 flex-col">
+        <div className="relative z-30 flex min-h-0 min-w-0 flex-col">
           <GameBoard
             oppHud={
               <OpponentHud

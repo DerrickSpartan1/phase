@@ -1072,9 +1072,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
 
 export function getPlayerDisplayName(playerId: number, myId?: number): string {
   if (playerId === myId) return "You";
-  const name = useMultiplayerStore.getState().playerNames.get(playerId);
-  if (name) return name;
-  return `Player ${playerId + 1}`;
+  return getOpponentDisplayName(playerId);
 }
 
 export function getOpponentDisplayName(playerId: number): string {
