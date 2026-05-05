@@ -77,7 +77,7 @@ function CommanderCard({ commander }: { commander: GameObject }) {
   // canCast is engine-authoritative: the action is in legalActions only when
   // priority + mana + timing all permit the cast. Reuse it as the drag gate
   // rather than threading a separate hasPriority check through.
-  const dragCast = useDragToCast({ castAction, hasPriority: canCast });
+  const dragCast = useDragToCast({ castAction, hasPriority: canCast, useDistanceThreshold: true });
   // Framer Motion does not suppress the synthetic click that follows a
   // drag gesture on a <motion.button>. Without this guard, a successful
   // drag-cast would immediately trigger the click handler and open the
@@ -100,14 +100,14 @@ function CommanderCard({ commander }: { commander: GameObject }) {
         if (!firedRef.current) inspectObject(commander.id);
       }}
       onDoubleClick={canCast ? () => dispatchAction(castAction) : undefined}
-      drag={canCast ? "y" : false}
+      drag={canCast || false}
       dragSnapToOrigin
       onDragEnd={onDragEnd}
       whileDrag={{ cursor: "grabbing", scale: 1.04 }}
       className={`group relative ${canCast ? "cursor-grab" : "cursor-default"}`}
       title={
         canCast
-          ? `Cast ${commander.name}${tax > 0 ? ` (Tax: +${tax})` : ""} — double-click or drag up`
+          ? `Cast ${commander.name}${tax > 0 ? ` (Tax: +${tax})` : ""} — double-click or drag to play`
           : `Commander: ${commander.name}${tax > 0 ? ` (Tax: +${tax})` : ""}`
       }
       style={{ width: "var(--card-w)", height: "var(--card-h)" }}
