@@ -13370,6 +13370,7 @@ mod tests {
     /// 2. `can_activate_ability_now` returns true — cycling is a legal action.
     /// 3. `handle_cast_spell` returns Err — the runtime rejects the unaffordable cast.
     /// 4. `handle_activate_ability` succeeds — cycling pays its cost and pushes to stack.
+    /// 5. Resolving the cycling ability does not put the creature onto the battlefield.
     #[test]
     fn generous_ent_forestcycling_legal_when_creature_cast_is_unaffordable() {
         let mut state = setup_game_at_main_phase();
@@ -13394,6 +13395,20 @@ mod tests {
                 )
                 .cost(AbilityCost::Tap),
             );
+        }
+
+        let library_forest = create_object(
+            &mut state,
+            CardId(203u64),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Library,
+        );
+        {
+            let obj = state.objects.get_mut(&library_forest).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.supertypes.push(Supertype::Basic);
+            obj.card_types.subtypes.push("Forest".to_string());
         }
 
         // Generous Ent in hand: mana cost {5}{G} (generic=5, shard=Green).
@@ -13504,6 +13519,44 @@ mod tests {
         assert!(
             !state.players[0].hand.contains(&ent),
             "Generous Ent must be discarded as part of the cycling cost"
+        );
+        assert_eq!(
+            state.objects[&ent].zone,
+            Zone::Graveyard,
+            "Generous Ent must be in the graveyard after paying the cycling discard cost"
+        );
+
+        crate::game::stack::resolve_top(&mut state, &mut events);
+        let search_cards = match &state.waiting_for {
+            WaitingFor::SearchChoice { cards, .. } => cards.clone(),
+            other => panic!("expected Forestcycling to ask for a Forest search, got {other:?}"),
+        };
+        assert_eq!(
+            search_cards,
+            vec![library_forest],
+            "Forestcycling should search for the Forest card in library"
+        );
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![library_forest],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            state.objects[&library_forest].zone,
+            Zone::Hand,
+            "Forestcycling should put the searched Forest into hand"
+        );
+        assert_eq!(
+            state.objects[&ent].zone,
+            Zone::Graveyard,
+            "Resolving Forestcycling must not put Generous Ent onto the battlefield"
+        );
+        assert!(
+            !state.battlefield.contains(&ent),
+            "Generous Ent must not be a battlefield permanent after Forestcycling resolves"
         );
     }
 }
