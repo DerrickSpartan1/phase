@@ -129,7 +129,12 @@ export function PlayerHand() {
   );
 
   const handleCardClick = useCallback(
-    (objectId: number) => {
+    (objectId: number, e?: React.MouseEvent) => {
+      if (useUiStore.getState().debugInteractionMode && e) {
+        e.stopPropagation();
+        useUiStore.getState().openDebugContextMenu({ objectId, x: e.clientX, y: e.clientY });
+        return;
+      }
       if (isMobile) {
         setMobileHandOpen(true);
         return;
@@ -144,6 +149,7 @@ export function PlayerHand() {
 
   const handleCardDoubleClick = useCallback(
     (objectId: number) => {
+      if (useUiStore.getState().debugInteractionMode) return;
       if (!hasPriority) return;
       playCard(objectId);
       setSelectedCardId(null);
@@ -245,7 +251,7 @@ interface HandCardProps {
   onDragStart: (id: number) => void;
   onDragStop: () => void;
   onDragEnd: (objectId: number, event: MouseEvent | TouchEvent | PointerEvent, info: PanInfo) => boolean;
-  onClick: (objectId: number) => void;
+  onClick: (objectId: number, e?: React.MouseEvent) => void;
   onDoubleClick: (objectId: number) => void;
   onMouseEnter: (id: number) => void;
   onMouseLeave: () => void;
@@ -335,7 +341,7 @@ const HandCard = memo(function HandCard({
       onClick={(e) => {
         e.stopPropagation();
         if (longPressFired.current) { longPressFired.current = false; return; }
-        onClick(objectId);
+        onClick(objectId, e);
       }}
       onDoubleClick={(e) => {
         e.stopPropagation();

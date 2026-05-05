@@ -19,6 +19,7 @@ import { AnimationOverlay } from "../components/animation/AnimationOverlay.tsx";
 import { TurnBanner } from "../components/animation/TurnBanner.tsx";
 import { BattlefieldBackground } from "../components/board/BattlefieldBackground.tsx";
 import { BoardContextMenu } from "../components/board/BoardContextMenu.tsx";
+import { DebugCardContextMenu } from "../components/chrome/DebugCardContextMenu.tsx";
 import { AttackTargetLines } from "../components/board/AttackTargetLines.tsx";
 import { BlockAssignmentLines } from "../components/board/BlockAssignmentLines.tsx";
 import { GameBoard } from "../components/board/GameBoard.tsx";
@@ -862,6 +863,8 @@ function GamePageContent({
         </div>
       )}
 
+      <DebugModeBanner />
+
       {/* Full-screen board layout — CSS Grid with 3 rows: opp hand, battlefield, player hand */}
       <div
         className={`relative z-10 grid min-w-0 h-full${isReconnecting ? " pointer-events-none" : ""}`}
@@ -1105,6 +1108,8 @@ function GamePageContent({
           onToggleDebugLog={() => useUiStore.getState().toggleDebugPanel()}
         />
       )}
+
+      <DebugCardContextMenu />
 
       {/* Animation overlay (above board, below modals) */}
       <AnimationOverlay containerRef={containerRef} />
@@ -2054,5 +2059,23 @@ function UnlessPaymentModal() {
         dispatch({ type: "PayUnlessCost", data: { pay: id === "pay" } })
       }
     />
+  );
+}
+
+function DebugModeBanner() {
+  const active = useUiStore((s) => s.debugInteractionMode);
+  const toggle = useUiStore((s) => s.toggleDebugInteractionMode);
+
+  if (!active) return null;
+
+  return (
+    <div className="fixed left-1/2 top-2 z-50 -translate-x-1/2">
+      <button
+        onClick={toggle}
+        className="rounded-full border border-amber-500/40 bg-amber-950/80 px-4 py-1.5 font-mono text-xs font-semibold text-amber-300 shadow-lg backdrop-blur-sm transition-colors hover:bg-amber-900/80"
+      >
+        DEBUG MODE - Click any card
+      </button>
+    </div>
   );
 }

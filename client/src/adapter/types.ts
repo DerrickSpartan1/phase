@@ -835,6 +835,8 @@ export type DebugAction =
   | { type: "SetFaceState"; data: { object_id: ObjectId; face_down?: boolean; transformed?: boolean; flipped?: boolean } }
   | { type: "Attach"; data: { object_id: ObjectId; target_id: ObjectId } }
   | { type: "Detach"; data: { object_id: ObjectId } }
+  | { type: "GrantKeyword"; data: { object_id: ObjectId; keyword: Keyword } }
+  | { type: "RemoveKeyword"; data: { object_id: ObjectId; keyword: Keyword } }
   | { type: "SetLife"; data: { player_id: PlayerId; life: number } }
   | { type: "AddMana"; data: { player_id: PlayerId; mana: ManaType[] } }
   | { type: "SetPhase"; data: { phase: Phase; active_player: PlayerId } }

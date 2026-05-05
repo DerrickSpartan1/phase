@@ -488,6 +488,16 @@ pub enum DebugAction {
     },
     /// Detach an object from whatever it's attached to.
     Detach { object_id: ObjectId },
+    /// Grant a keyword to an object (added to runtime keywords list).
+    GrantKeyword {
+        object_id: ObjectId,
+        keyword: Keyword,
+    },
+    /// Remove a keyword from an object's runtime keywords list.
+    RemoveKeyword {
+        object_id: ObjectId,
+        keyword: Keyword,
+    },
 
     // ── Player State Manipulation ─────────────────────────────────────────
     /// Set a player's life total directly.

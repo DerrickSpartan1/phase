@@ -2,6 +2,7 @@ import { useState } from "react";
 
 import type { DebugAction } from "../../adapter/types";
 import { useGameDispatch } from "../../hooks/useGameDispatch";
+import { useUiStore } from "../../stores/uiStore";
 import { StatusMessage } from "./debugFields";
 import { DebugCreateActions } from "./DebugCreateActions";
 import { DebugFlowActions } from "./DebugFlowActions";
@@ -21,6 +22,8 @@ export function DebugActions() {
   const [activeTab, setActiveTab] = useState<Category>("player");
   const [status, setStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const dispatch = useGameDispatch();
+  const debugInteractionMode = useUiStore((s) => s.debugInteractionMode);
+  const toggleDebugInteractionMode = useUiStore((s) => s.toggleDebugInteractionMode);
 
   const handleDispatch = async (action: DebugAction) => {
     setStatus(null);
@@ -34,9 +37,22 @@ export function DebugActions() {
 
   return (
     <div>
-      <h3 className="mb-1 font-mono text-xs font-bold uppercase tracking-wider text-gray-500">
-        Debug Actions
-      </h3>
+      <div className="mb-1 flex items-center justify-between">
+        <h3 className="font-mono text-xs font-bold uppercase tracking-wider text-gray-500">
+          Debug Actions
+        </h3>
+        <button
+          onClick={toggleDebugInteractionMode}
+          className={
+            "rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider transition-colors " +
+            (debugInteractionMode
+              ? "border-amber-500/60 bg-amber-500/20 text-amber-300"
+              : "border-gray-700 bg-transparent text-gray-600 hover:border-gray-600 hover:text-gray-500")
+          }
+        >
+          {debugInteractionMode ? "Click Mode ON" : "Click Mode"}
+        </button>
+      </div>
       <div className="mb-2 flex flex-wrap gap-1">
         {TABS.map(({ key, label }) => {
           const active = activeTab === key;

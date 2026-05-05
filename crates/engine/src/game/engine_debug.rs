@@ -136,7 +136,7 @@ pub fn apply_debug_action(
                     obj.counters.remove(&counter_type);
                 }
             }
-            // Sync loyalty/defense fields with counter map
+            // Sync derived fields with counter map
             if matches!(counter_type, CounterType::Loyalty) {
                 let val = obj
                     .counters
@@ -152,6 +152,12 @@ pub fn apply_debug_action(
                     .copied()
                     .unwrap_or(0);
                 obj.defense = Some(val);
+            }
+            if matches!(counter_type, CounterType::Lore) {
+                if obj.class_level.is_some() {
+                    let lore = obj.counters.get(&CounterType::Lore).copied().unwrap_or(0);
+                    obj.class_level = Some((lore as u8).max(1));
+                }
             }
             state.layers_dirty = true;
         }
@@ -213,6 +219,20 @@ pub fn apply_debug_action(
             if let Some(obj) = state.objects.get_mut(&object_id) {
                 obj.attached_to = None;
             }
+            state.layers_dirty = true;
+        }
+
+        DebugAction::GrantKeyword { object_id, keyword } => {
+            let obj = validate_object_mut(state, object_id)?;
+            if !obj.keywords.contains(&keyword) {
+                obj.keywords.push(keyword);
+            }
+            state.layers_dirty = true;
+        }
+
+        DebugAction::RemoveKeyword { object_id, keyword } => {
+            let obj = validate_object_mut(state, object_id)?;
+            obj.keywords.retain(|k| k != &keyword);
             state.layers_dirty = true;
         }
 

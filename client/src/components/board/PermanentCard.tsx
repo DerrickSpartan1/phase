@@ -282,6 +282,11 @@ export const PermanentCard = memo(function PermanentCard({ objectId, attachments
 
   const handleClick = (e: React.MouseEvent) => {
     if (longPressFired.current) { longPressFired.current = false; return; }
+    if (useUiStore.getState().debugInteractionMode) {
+      e.stopPropagation();
+      useUiStore.getState().openDebugContextMenu({ objectId, x: e.clientX, y: e.clientY });
+      return;
+    }
     if (onPrimaryClickOverride) {
       e.stopPropagation();
       onPrimaryClickOverride();

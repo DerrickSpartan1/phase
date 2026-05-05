@@ -7,7 +7,7 @@ use thiserror::Error;
 use super::card_type::{CardType, CoreType, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
-use super::game_state::{DistributionUnit, RetargetScope};
+use super::game_state::{DistributionUnit, LKISnapshot, RetargetScope};
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, ManaType};
@@ -1924,6 +1924,9 @@ pub enum ObjectScope {
     Recipient,
     /// CR 603.2: The object referenced by the current trigger event.
     EventSource,
+    /// CR 117.1 + CR 400.7j + CR 608.2k: The object paid as a cost for the
+    /// resolving spell or ability, read from `ResolvedAbility.cost_paid_object`.
+    CostPaidObject,
 }
 
 /// Source set for counting distinct card types.
@@ -2169,22 +2172,6 @@ pub enum QuantityRef {
     EventContextSourceToughness,
     /// CR 603.7c: Mana value of the source object from the triggering event.
     EventContextSourceManaValue,
-    /// CR 202.3 + CR 118.8 + CR 701.21: Mana value of the object that was
-    /// sacrificed, exiled, or otherwise paid as part of the cost of the
-    /// resolving spell or ability. The mana value is captured at cost-payment
-    /// time (CR 117.1) — before the object leaves the battlefield — and stored
-    /// on `ResolvedAbility.cost_paid_object_mana_value`.
-    ///
-    /// Covers the "sac-for-mana-by-property" / "exile-for-mana-by-property"
-    /// class: Food Chain ("1 plus the exiled creature's mana value"),
-    /// Burnt Offering, Metamorphosis ("the sacrificed creature's mana value"),
-    /// and any future cards that read the cost-paid object's mana value.
-    ///
-    /// Distinct from `EventContextSourceManaValue` (which reads the triggering
-    /// event's source). A cost-paid object is not a triggering-event source —
-    /// activation/spell-cast announcements (CR 117.1, CR 601.2) are not events
-    /// in the triggered-ability sense.
-    CostPaidObjectManaValue,
     /// CR 603.10a + CR 603.6e: Count of attachments of a given kind that were attached
     /// to the leaving-battlefield object at the moment it left, optionally filtered by
     /// attachment controller. Resolved via the triggering `ZoneChangeRecord`'s
@@ -2332,6 +2319,15 @@ pub enum ObjectProperty {
     Power,
     Toughness,
     ManaValue,
+}
+
+/// CR 117.1 + CR 400.7j + CR 608.2k: Public characteristics of an object paid
+/// as a cost for the resolving spell or ability. Effects can later refer to
+/// that object even after the cost moved it to a public zone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CostPaidObjectSnapshot {
+    pub object_id: ObjectId,
+    pub lki: LKISnapshot,
 }
 
 /// CR 102.1 / CR 102.2 / CR 109.5: Relative player set for player filters that
@@ -6328,6 +6324,10 @@ pub enum AbilityCondition {
     /// Handles both optional-targeting parents (empty targets → empty IDs → false)
     /// and mandatory parents (type filter check on moved objects).
     ZoneChangedThisWay { filter: TargetFilter },
+    /// CR 117.1 + CR 400.7j + CR 608.2k: "if you sacrificed/exiled/discarded a
+    /// [filter] this way" checks the object paid as a cost for this resolving
+    /// ability using its cost-payment-time public characteristics.
+    CostPaidObjectMatchesFilter { filter: TargetFilter },
     /// CR 611.2b: "if this [permanent] is tapped" — checks the source's tapped status.
     /// For the untapped sense, wrap with `AbilityCondition::Not`.
     SourceIsTapped,
@@ -6373,6 +6373,9 @@ pub enum AbilityCondition {
     /// Used by Omnath, Locus of Creation and the broader nth-resolution class
     /// (Ashling the Pilgrim, Nissa Resurgent Animist, Teething Wurmlet, etc.).
     NthResolutionThisTurn { n: u32 },
+    /// CR 702.x: True when the source permanent does not have the specified keyword.
+    /// Inverse of keyword presence check — used by "if ~ doesn't have [keyword]" gates.
+    SourceLacksKeyword { keyword: Keyword },
 }
 
 impl AbilityCondition {
@@ -7855,14 +7858,12 @@ pub struct ResolvedAbility {
     /// Read during resolution by `QuantityRef::Variable { name: "X" }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chosen_x: Option<u32>,
-    /// CR 117.1 + CR 202.3: Mana value of the object paid as part of this
-    /// resolving ability's cost (sacrificed creature, exiled creature, etc.),
-    /// captured at cost-payment time before the object leaves the battlefield.
-    /// Read by `QuantityRef::CostPaidObjectManaValue` during resolution.
-    /// `None` for abilities whose cost did not include a non-self
-    /// sacrifice/exile of a permanent.
+    /// CR 117.1 + CR 400.7j + CR 608.2k: Public characteristics of the object
+    /// paid as part of this resolving ability's cost, captured before it leaves
+    /// its zone. Read by cost-paid-object-scoped quantity refs and
+    /// `AbilityCondition::CostPaidObjectMatchesFilter` during resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost_paid_object_mana_value: Option<u32>,
+    pub cost_paid_object: Option<CostPaidObjectSnapshot>,
     /// CR 603.4: Index of the printed ability this resolution came from on the
     /// source object's ability list. Identifies "this ability" for per-turn
     /// resolution tracking (`AbilityCondition::NthResolutionThisTurn`). `None` for
@@ -7902,7 +7903,7 @@ impl ResolvedAbility {
             distribution: None,
             player_scope: None,
             chosen_x: None,
-            cost_paid_object_mana_value: None,
+            cost_paid_object: None,
             ability_index: None,
         }
     }
@@ -7919,17 +7920,17 @@ impl ResolvedAbility {
         }
     }
 
-    /// CR 117.1 + CR 202.3: Stamp the cost-paid object's mana value across this
+    /// CR 117.1 + CR 400.7j + CR 608.2k: Stamp the cost-paid object across this
     /// ability and every sub/else branch. Captured at cost-payment time (before
-    /// the object leaves the battlefield) and read by
-    /// `QuantityRef::CostPaidObjectManaValue` during resolution.
-    pub fn set_cost_paid_object_mana_value_recursive(&mut self, value: u32) {
-        self.cost_paid_object_mana_value = Some(value);
+    /// the object leaves its zone) and read by cost-paid-object refs during
+    /// resolution.
+    pub fn set_cost_paid_object_recursive(&mut self, snapshot: CostPaidObjectSnapshot) {
+        self.cost_paid_object = Some(snapshot.clone());
         if let Some(sub) = self.sub_ability.as_mut() {
-            sub.set_cost_paid_object_mana_value_recursive(value);
+            sub.set_cost_paid_object_recursive(snapshot.clone());
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
-            else_branch.set_cost_paid_object_mana_value_recursive(value);
+            else_branch.set_cost_paid_object_recursive(snapshot);
         }
     }
 

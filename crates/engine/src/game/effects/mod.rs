@@ -2187,6 +2187,18 @@ fn evaluate_condition(
                 .iter()
                 .any(|&id| crate::game::filter::matches_target_filter(state, id, filter, &ctx))
         }
+        AbilityCondition::CostPaidObjectMatchesFilter { filter } => ability
+            .cost_paid_object
+            .as_ref()
+            .is_some_and(|snapshot| {
+                crate::game::filter::matches_target_filter_on_lki_snapshot(
+                    state,
+                    snapshot.object_id,
+                    &snapshot.lki,
+                    filter,
+                    &crate::game::filter::FilterContext::from_ability(ability),
+                )
+            }),
         // CR 611.2b: "if this creature/permanent is tapped" — check source object.
         // For the untapped sense, wrap with `Not`.
         AbilityCondition::SourceIsTapped => state
@@ -2234,6 +2246,10 @@ fn evaluate_condition(
                 false
             }
         }
+        AbilityCondition::SourceLacksKeyword { keyword } => state
+            .objects
+            .get(&ability.source_id)
+            .is_some_and(|obj| !obj.has_keyword(keyword)),
     }
 }
 
