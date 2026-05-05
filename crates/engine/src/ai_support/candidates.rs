@@ -2054,6 +2054,39 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         }
     }
 
+    // CR 605.1a + CR 605.3b: Hand-zone mana abilities (Elvish Spirit Guide
+    // class) are still legal under split second because they are mana
+    // abilities. Non-mana hand activations remain in the split-second-gated
+    // block above.
+    for &obj_id in &state.players[player.0 as usize].hand {
+        if let Some(obj) = state.objects.get(&obj_id) {
+            if obj.controller == player {
+                for (i, ability_def) in obj.abilities.iter().enumerate() {
+                    if ability_def.kind == crate::types::ability::AbilityKind::Activated
+                        && ability_def.activation_zone == Some(crate::types::zones::Zone::Hand)
+                        && crate::game::mana_abilities::is_mana_ability(ability_def)
+                        && crate::game::mana_abilities::can_activate_mana_ability_now(
+                            state,
+                            player,
+                            obj_id,
+                            i,
+                            ability_def,
+                        )
+                    {
+                        actions.push(candidate(
+                            GameAction::ActivateAbility {
+                                source_id: obj_id,
+                                ability_index: i,
+                            },
+                            TacticalClass::Mana,
+                            Some(player),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     // CR 702.143a-b: Foretell is a priority-time special action from hand
     // during the player's own turn. It does not use the stack; the runtime
     // handler pays {2}, exiles the card, marks it foretold, and grants the

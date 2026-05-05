@@ -1363,6 +1363,9 @@ pub(crate) fn parse_oracle_ir(
             // (Metalhead class: PutCounter silently fell back to `Any`).
             let mut def = parse_activated_with_self_ref_fallback(&effect_text, card_name, &mut ctx);
             normalize_activated_mana_instead_delta(&mut def);
+            if def.activation_zone.is_none() {
+                def.activation_zone = activation_zone_from_self_cost(&cost);
+            }
             def.cost = Some(cost);
             def.description = Some(line.to_string());
             if constraints.sorcery_speed() {
@@ -2192,6 +2195,19 @@ pub(crate) fn parse_oracle_ir(
     }
 
     parsed_abilities_to_doc_ir(result, oracle_text, card_name, &mut ctx)
+}
+
+fn activation_zone_from_self_cost(cost: &AbilityCost) -> Option<Zone> {
+    match cost {
+        AbilityCost::Discard { self_ref: true, .. } => Some(Zone::Hand),
+        AbilityCost::Exile {
+            filter: Some(TargetFilter::SelfRef),
+            zone: Some(zone),
+            ..
+        } => Some(*zone),
+        AbilityCost::Composite { costs } => costs.iter().find_map(activation_zone_from_self_cost),
+        _ => None,
+    }
 }
 
 /// Convert a `ParsedAbilities` into an `OracleDocIr` using `PreLowered*` variants.
@@ -6054,6 +6070,30 @@ mod tests {
         assert_eq!(r.abilities.len(), 1);
         assert_eq!(r.abilities[0].kind, AbilityKind::Activated);
         assert_eq!(r.abilities[0].activation_zone, Some(Zone::Hand));
+    }
+
+    #[test]
+    fn self_exile_from_hand_mana_ability_activates_from_hand() {
+        let r = parse(
+            "Exile this creature from your hand: Add {G}.",
+            "Elvish Spirit Guide",
+            &[],
+            &["Creature"],
+            &["Elf", "Spirit"],
+        );
+        assert_eq!(r.abilities.len(), 1);
+        let ability = &r.abilities[0];
+        assert_eq!(ability.kind, AbilityKind::Activated);
+        assert_eq!(ability.activation_zone, Some(Zone::Hand));
+        assert!(matches!(*ability.effect, Effect::Mana { .. }));
+        assert!(matches!(
+            ability.cost,
+            Some(AbilityCost::Exile {
+                filter: Some(TargetFilter::SelfRef),
+                zone: Some(Zone::Hand),
+                count: 1,
+            })
+        ));
     }
 
     // ── Escape keyword parsing ──────────────────────────────────────────────

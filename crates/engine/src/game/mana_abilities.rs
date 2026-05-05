@@ -289,10 +289,9 @@ fn resolve_single_color_override(
         let Some(chosen_color) = mana_type_to_color(color) else {
             return Vec::new();
         };
-        Some(std::mem::replace(
-            &mut state.last_named_choice,
-            Some(ChoiceValue::Color(chosen_color)),
-        ))
+        let previous = state.last_named_choice.take();
+        state.last_named_choice = Some(ChoiceValue::Color(chosen_color));
+        Some(previous)
     } else {
         None
     };
@@ -313,11 +312,26 @@ pub fn activate_mana_ability(
     source_id: ObjectId,
     player: PlayerId,
     ability_index: usize,
-    _ability_def: &AbilityDefinition,
+    ability_def: &AbilityDefinition,
     events: &mut Vec<GameEvent>,
     resume: ManaAbilityResume,
     color_override: Option<ProductionOverride>,
 ) -> Result<WaitingFor, EngineError> {
+    let source = state
+        .objects
+        .get(&source_id)
+        .ok_or_else(|| EngineError::InvalidAction("Mana ability source not found".to_string()))?;
+    if source.controller != player {
+        return Err(EngineError::NotYourPriority);
+    }
+    let required_zone = ability_def.activation_zone.unwrap_or(Zone::Battlefield);
+    if source.zone != required_zone {
+        return Err(EngineError::InvalidAction(format!(
+            "Object is not in the correct zone (expected {:?})",
+            required_zone
+        )));
+    }
+
     advance_mana_ability_activation(
         state,
         PendingManaAbility {
@@ -1049,6 +1063,15 @@ where
                 }
             }
         }
+        // CR 118.3 + CR 605.3b: Self-exile mana ability costs are paid
+        // atomically before mana production. The printed cost supplies the
+        // activation zone for hand/graveyard abilities; bare self-exile defaults
+        // to battlefield.
+        Some(AbilityCost::Exile {
+            filter: Some(TargetFilter::SelfRef),
+            zone,
+            count: 1,
+        }) => exile_self_for_mana_cost(state, source_id, *zone, events)?,
         // CR 117.1 + CR 118.3 + CR 605.3b: Non-self exile-from-battlefield as a
         // mana ability cost (Food Chain class). The interactive flow has already
         // captured the chosen permanents in `chosen_exiled_battlefield`; here we
@@ -1171,6 +1194,11 @@ where
                     } => {
                         let _ = sacrifice::sacrifice_permanent(state, source_id, player, events)?;
                     }
+                    AbilityCost::Exile {
+                        filter: Some(TargetFilter::SelfRef),
+                        zone,
+                        count: 1,
+                    } => exile_self_for_mana_cost(state, source_id, *zone, events)?,
                     // CR 122.1 + CR 601.2b: RemoveCounter-on-self as part of a
                     // composite mana-ability cost (e.g. Gemstone Mine: `{T}, Remove
                     // a mining counter from this land: Add one mana of any color`).
@@ -1239,6 +1267,26 @@ fn pay_life_cost(
             EngineError::ActionNotAllowed("Cannot pay life cost for mana ability".to_string()),
         ),
     }
+}
+
+fn exile_self_for_mana_cost(
+    state: &mut GameState,
+    source_id: ObjectId,
+    zone: Option<Zone>,
+    events: &mut Vec<GameEvent>,
+) -> Result<(), EngineError> {
+    let required_zone = zone.unwrap_or(Zone::Battlefield);
+    let source = state.objects.get(&source_id).ok_or_else(|| {
+        EngineError::InvalidAction("Source object not found for exile cost".to_string())
+    })?;
+    if source.zone != required_zone {
+        return Err(EngineError::ActionNotAllowed(format!(
+            "Cannot exile from {:?}: source is not in that zone",
+            required_zone
+        )));
+    }
+    super::zones::move_to_zone(state, source_id, Zone::Exile, events);
+    Ok(())
 }
 
 /// CR 605.3a + CR 605.1a: Extract the nested `ManaCost` from an ability cost
@@ -2117,6 +2165,64 @@ mod tests {
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::White), 1);
         assert_eq!(state.players[0].mana_pool.count_color(ManaType::Blue), 1);
         assert_eq!(state.players[0].mana_pool.total(), 2);
+    }
+
+    #[test]
+    fn hand_self_exile_mana_ability_is_legal_and_exiles_source() {
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+        let source = create_object(
+            &mut state,
+            CardId(157),
+            player,
+            "Elvish Spirit Guide".to_string(),
+            Zone::Hand,
+        );
+
+        let mut ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        )
+        .cost(AbilityCost::Exile {
+            filter: Some(TargetFilter::SelfRef),
+            zone: Some(Zone::Hand),
+            count: 1,
+        });
+        ability.activation_zone = Some(Zone::Hand);
+        Arc::make_mut(&mut state.objects.get_mut(&source).unwrap().abilities).push(ability);
+
+        let actions = crate::ai_support::legal_actions(&state);
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id,
+                ability_index: 0,
+            } if *source_id == source
+        )));
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            crate::types::actions::GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .expect("hand-zone self-exile mana ability should activate");
+
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
+        assert_eq!(state.objects[&source].zone, Zone::Exile);
+        assert!(!state.players[0].hand.contains(&source));
     }
 
     #[test]
