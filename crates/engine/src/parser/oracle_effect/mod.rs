@@ -21984,6 +21984,81 @@ mod tests {
         );
     }
 
+    #[test]
+    fn veil_of_summer_effect_chain_parses_supported_clauses() {
+        let def = parse_effect_chain(
+            "Draw a card if an opponent has cast a blue or black spell this turn. Spells you control can't be countered this turn. You and permanents you control gain hexproof from blue and from black until end of turn.",
+            AbilityKind::Spell,
+        );
+
+        assert!(matches!(*def.effect, Effect::Draw { .. }));
+        assert!(matches!(
+            def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: crate::types::ability::CountScope::Opponents,
+                        ..
+                    }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 }
+            })
+        ));
+
+        let cant_counter = def.sub_ability.as_ref().expect("expected second clause");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*cant_counter.effect
+        else {
+            panic!(
+                "expected CantBeCountered GenericEffect, got {:?}",
+                cant_counter.effect
+            );
+        };
+        assert!(static_abilities
+            .iter()
+            .any(|sd| sd.mode == StaticMode::CantBeCountered
+                && matches!(
+                    sd.affected,
+                    Some(TargetFilter::Typed(TypedFilter {
+                        controller: Some(ControllerRef::You),
+                        ..
+                    }))
+                )));
+
+        let hexproof = cant_counter
+            .sub_ability
+            .as_ref()
+            .expect("expected hexproof clause");
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*hexproof.effect
+        else {
+            panic!("expected hexproof GenericEffect, got {:?}", hexproof.effect);
+        };
+        let static_def = static_abilities
+            .iter()
+            .find(|sd| matches!(sd.affected, Some(TargetFilter::Or { .. })))
+            .expect("expected controller-or-permanents affected filter");
+        assert!(static_def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::HexproofFrom(crate::types::keywords::HexproofFilter::Color(
+                    crate::types::mana::ManaColor::Blue
+                ))
+            }
+        )));
+        assert!(static_def.modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddKeyword {
+                keyword: Keyword::HexproofFrom(crate::types::keywords::HexproofFilter::Color(
+                    crate::types::mana::ManaColor::Black
+                ))
+            }
+        )));
+    }
+
     // CR 603.4: Parser arms for `AbilityCondition::NthResolutionThisTurn`.
     // Covers Omnath / Ashling / Nissa / Sephiroth / Teething Wurmlet class.
 

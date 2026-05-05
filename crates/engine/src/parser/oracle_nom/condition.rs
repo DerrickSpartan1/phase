@@ -11,7 +11,7 @@ use nom::sequence::preceded;
 use nom::Parser;
 
 use super::error::OracleResult;
-use super::primitives::{parse_article, parse_mana_cost, parse_number};
+use super::primitives::{parse_article, parse_color, parse_mana_cost, parse_number};
 use super::quantity as nom_quantity;
 use crate::parser::oracle_target::parse_type_phrase;
 use crate::types::ability::{
@@ -57,6 +57,7 @@ pub fn parse_inner_condition(input: &str) -> OracleResult<'_, StaticCondition> {
         parse_there_exists_condition,
         parse_subject_first_zone_count,
         parse_entered_this_turn,
+        parse_opponent_cast_spell_this_turn,
         parse_youve_this_turn,
         parse_event_state_conditions,
     ))
@@ -1102,7 +1103,13 @@ fn parse_youve_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
         ),
         // "you've cast another spell this turn" → SpellsCastThisTurn >= 2
         value(
-            make_quantity_ge(QuantityRef::SpellsCastThisTurn { filter: None }, 2),
+            make_quantity_ge(
+                QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+                2,
+            ),
             tag("cast two or more spells this turn"),
         ),
         // "you've attacked this turn" / "you've attacked with a creature this turn"
@@ -1618,7 +1625,13 @@ fn parse_you_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticConditi
     {
         return Ok((
             rest,
-            make_quantity_ge(QuantityRef::SpellsCastThisTurn { filter: None }, 2),
+            make_quantity_ge(
+                QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+                2,
+            ),
         ));
     }
     // "a [type] spell this turn" / "an [type] spell this turn"
@@ -1632,6 +1645,7 @@ fn parse_you_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticConditi
                 remaining,
                 make_quantity_ge(
                     QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
                         filter: Some(filter),
                     },
                     1,
@@ -1645,6 +1659,31 @@ fn parse_you_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticConditi
             nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
         )],
     }))
+}
+
+fn parse_opponent_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = alt((tag("an opponent has cast "), tag("an opponent cast "))).parse(input)?;
+    let (rest, _) = parse_article(rest)?;
+    let (rest, type_text) = take_until(" spell this turn").parse(rest)?;
+    let (rest, _) = tag(" spell this turn").parse(rest)?;
+    let Some(filter) = parse_spell_history_filter(type_text) else {
+        return Err(nom::Err::Error(nom_language::error::VerboseError {
+            errors: vec![(
+                input,
+                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
+            )],
+        }));
+    };
+    Ok((
+        rest,
+        make_quantity_ge(
+            QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Opponents,
+                filter: Some(filter),
+            },
+            1,
+        ),
+    ))
 }
 
 fn parse_another_spell_cast_this_turn(
@@ -1661,7 +1700,13 @@ fn parse_another_spell_this_turn(input: &str, minimum: u32) -> OracleResult<'_, 
     {
         return Ok((
             rest,
-            make_quantity_ge(QuantityRef::SpellsCastThisTurn { filter: None }, minimum),
+            make_quantity_ge(
+                QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
+                minimum,
+            ),
         ));
     }
     let (rest, type_text) = take_until(" spell this turn").parse(input)?;
@@ -1678,6 +1723,7 @@ fn parse_another_spell_this_turn(input: &str, minimum: u32) -> OracleResult<'_, 
         rest,
         make_quantity_ge(
             QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
                 filter: Some(filter),
             },
             minimum,
@@ -1691,7 +1737,24 @@ pub(crate) fn parse_spell_history_filter(type_text: &str) -> Option<TargetFilter
     if leftover.trim().is_empty() && filter != TargetFilter::Any {
         return Some(filter);
     }
-    let (rest, color) = super::primitives::parse_color(type_text).ok()?;
+    if let Ok((rest, (first, _, second))) = (parse_color, tag(" or "), parse_color).parse(type_text)
+    {
+        if rest.trim().is_empty() {
+            return Some(TargetFilter::Or {
+                filters: vec![
+                    TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![FilterProp::HasColor { color: first }]),
+                    ),
+                    TargetFilter::Typed(
+                        TypedFilter::card()
+                            .properties(vec![FilterProp::HasColor { color: second }]),
+                    ),
+                ],
+            });
+        }
+    }
+
+    let (rest, color) = parse_color(type_text).ok()?;
     if !rest.trim().is_empty() {
         return None;
     }
@@ -1736,7 +1799,10 @@ fn parse_you_didnt_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     alt((
         value(
             make_quantity_comparison(
-                QuantityRef::SpellsCastThisTurn { filter: None },
+                QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter: None,
+                },
                 Comparator::EQ,
                 0,
             ),
@@ -3677,6 +3743,7 @@ mod tests {
                     QuantityExpr::Ref {
                         qty:
                             QuantityRef::SpellsCastThisTurn {
+                                scope: CountScope::Controller,
                                 filter: Some(TargetFilter::Or { filters }),
                             },
                     },
@@ -3694,6 +3761,28 @@ mod tests {
                 ))
             ),
             other => panic!("expected filtered SpellsCastThisTurn GE 2, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn opponent_cast_color_spell_this_turn_counts_opponents() {
+        let (rest, c) =
+            parse_inner_condition("an opponent has cast a blue or black spell this turn").unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::SpellsCastThisTurn {
+                                scope: CountScope::Opponents,
+                                filter: Some(TargetFilter::Or { filters }),
+                            },
+                    },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 },
+            } => assert_eq!(filters.len(), 2),
+            other => panic!("expected opponent scoped filtered SpellsCastThisTurn, got {other:?}"),
         }
     }
 
@@ -3725,7 +3814,10 @@ mod tests {
                 assert!(matches!(
                     lhs,
                     QuantityExpr::Ref {
-                        qty: QuantityRef::SpellsCastThisTurn { filter: None }
+                        qty: QuantityRef::SpellsCastThisTurn {
+                            scope: CountScope::Controller,
+                            filter: None
+                        }
                     }
                 ));
                 assert_eq!(comparator, Comparator::EQ);

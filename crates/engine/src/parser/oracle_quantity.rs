@@ -332,7 +332,10 @@ pub(crate) fn parse_cda_quantity(text: &str) -> Option<QuantityExpr> {
                 }
             };
             return Some(QuantityExpr::Ref {
-                qty: QuantityRef::SpellsCastThisTurn { filter },
+                qty: QuantityRef::SpellsCastThisTurn {
+                    scope: CountScope::Controller,
+                    filter,
+                },
             });
         }
     }
@@ -937,7 +940,10 @@ pub(crate) fn parse_for_each_clause(clause: &str) -> Option<QuantityRef> {
                 None
             }
         };
-        return Some(QuantityRef::SpellsCastThisTurn { filter });
+        return Some(QuantityRef::SpellsCastThisTurn {
+            scope: CountScope::Controller,
+            filter,
+        });
     }
 
     // CR 603.10a + CR 603.6e: "[Aura|Equipment] you controlled that was attached to it"

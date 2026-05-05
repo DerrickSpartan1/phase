@@ -21,7 +21,8 @@ use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::target as nom_target;
 use super::oracle_quantity::{parse_cda_quantity, parse_quantity_ref};
 use super::oracle_target::{
-    parse_combat_status_prefix, parse_counter_suffix, parse_mana_value_suffix, parse_type_phrase,
+    parse_combat_status_prefix, parse_counter_suffix, parse_mana_value_suffix, parse_target,
+    parse_type_phrase,
 };
 use super::oracle_util::{
     has_unconsumed_conditional, infer_core_type_for_subtype, parse_comparator_prefix,
@@ -30,8 +31,9 @@ use super::oracle_util::{
 };
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, AttachmentKind, BasicLandType, CardPlayMode, ChosenSubtypeKind,
-    Comparator, ContinuousModification, ControllerRef, FilterProp, ObjectScope, QuantityExpr,
-    QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+    Comparator, ContinuousModification, ControllerRef, CountScope, FilterProp, ObjectScope,
+    QuantityExpr, QuantityRef, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::counter::{parse_counter_type, CounterMatch};
@@ -4656,48 +4658,10 @@ fn parse_cant_be_countered_subject(tp: &TextPair) -> TargetFilter {
         if subject.is_empty() || subject == "~" || subject.ends_with(" ~") {
             return TargetFilter::SelfRef;
         }
-        // "X spells you control" — parse color + type filter
-        if let Some(before_yc) = subject.strip_suffix(" you control") {
-            if let Some(before_spells) = before_yc
-                .strip_suffix(" spells")
-                .or_else(|| before_yc.strip_suffix(" spell"))
-            {
-                let mut properties = Vec::new();
-                let mut card_types = Vec::new();
-
-                // Split on " and " to handle compound types: "creature and enchantment"
-                for part in before_spells.split(" and ") {
-                    for raw_word in part.split_whitespace() {
-                        let word = raw_word.trim_end_matches(',');
-                        if let Some(color) = parse_named_color(word) {
-                            properties.push(FilterProp::HasColor { color });
-                        } else {
-                            // Try as card type: "creature", "instant", "sorcery", etc.
-                            match word {
-                                "creature" => card_types.push(TypeFilter::Creature),
-                                "instant" => card_types.push(TypeFilter::Instant),
-                                "sorcery" => card_types.push(TypeFilter::Sorcery),
-                                "enchantment" => card_types.push(TypeFilter::Enchantment),
-                                "artifact" => card_types.push(TypeFilter::Artifact),
-                                _ => {}
-                            }
-                        }
-                    }
-                }
-
-                // CR 608.2b: Single type → direct filter; multiple types → AnyOf wrapper
-                let type_filters = if card_types.len() > 1 {
-                    vec![TypeFilter::AnyOf(card_types)]
-                } else {
-                    card_types
-                };
-
-                return TargetFilter::Typed(TypedFilter {
-                    type_filters,
-                    controller: Some(ControllerRef::You),
-                    properties,
-                });
-            }
+        let normalized = format!("all {subject}");
+        let (filter, rest) = parse_target(&normalized);
+        if rest.trim().is_empty() && !matches!(filter, TargetFilter::Any) {
+            return filter;
         }
     }
     TargetFilter::SelfRef
@@ -7277,6 +7241,7 @@ fn first_qualified_spell_condition(filter: &TargetFilter) -> StaticCondition {
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::SpellsCastThisTurn {
+                        scope: CountScope::Controller,
                         filter: Some(filter.clone()),
                     },
                 },
@@ -7641,6 +7606,7 @@ fn parse_cost_modifier_condition(cond_text: &str) -> Option<StaticCondition> {
     Some(StaticCondition::QuantityComparison {
         lhs: QuantityExpr::Ref {
             qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
                 filter: if filter == TargetFilter::Any {
                     None
                 } else {
@@ -8366,6 +8332,7 @@ mod tests {
                 QuantityExpr::Ref {
                     qty:
                         QuantityRef::SpellsCastThisTurn {
+                            scope: CountScope::Controller,
                             filter: Some(TargetFilter::Or { filters }),
                         },
                 },
@@ -8746,7 +8713,7 @@ mod tests {
             condition,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
-                    qty: QuantityRef::SpellsCastThisTurn { filter: Some(inner) },
+                    qty: QuantityRef::SpellsCastThisTurn { scope: CountScope::Controller, filter: Some(inner) },
                 },
                 comparator: Comparator::EQ,
                 rhs: QuantityExpr::Fixed { value: 0 },

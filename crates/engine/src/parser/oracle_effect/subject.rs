@@ -338,6 +338,27 @@ pub(super) fn parse_subject_application(
 
     let lower = subject.to_lowercase();
 
+    if let Ok((_, _)) = all_consuming((
+        tag::<_, _, VerboseError<&str>>("you"),
+        tag(" and "),
+        tag("permanents you control"),
+    ))
+    .parse(lower.as_str())
+    {
+        let (permanents, rest) = parse_target("all permanents you control");
+        if rest.trim().is_empty() {
+            return Some(SubjectApplication {
+                affected: TargetFilter::Or {
+                    filters: vec![TargetFilter::Controller, permanents],
+                },
+                target: None,
+                multi_target: None,
+                inherits_parent: false,
+                is_optional: false,
+            });
+        }
+    }
+
     // CR 115.10a: "another target X" — target with Another filter property,
     // excluding the source object from legal targets.
     if tag::<_, _, VerboseError<&str>>("another target ")
@@ -1683,6 +1704,11 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     // CR 701.27: "~ can't transform" — prohibition on transform (e.g., Immerwolf).
     if lower == "can't transform" || lower == "cannot transform" {
         return Some(vec![StaticMode::Other("CantTransform".to_string())]);
+    }
+    // CR 101.2: Spell/ability restriction predicate; the subject path owns
+    // the "spells you control" / "green spells you control" grammar.
+    if lower == "can't be countered" || lower == "cannot be countered" {
+        return Some(vec![StaticMode::CantBeCountered]);
     }
     // Simple restrictions
     if lower == "can't block" || lower == "cannot block" {

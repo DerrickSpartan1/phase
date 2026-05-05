@@ -1167,28 +1167,26 @@ fn resolve_ref(
             }
             usize_to_i32_saturating(found.len())
         }
-        // CR 117.1: Count spells cast this turn by the controller, optionally filtered.
-        QuantityRef::SpellsCastThisTurn { ref filter } => {
-            let spells = state.spells_cast_this_turn_by_player.get(&controller);
-            match spells {
-                None => 0,
-                Some(list) => match filter {
-                    None => usize_to_i32_saturating(list.len()),
-                    Some(filter) => usize_to_i32_saturating(
-                        list.iter()
-                            .filter(|record| {
-                                spell_record_matches_filter(
-                                    record,
-                                    filter,
-                                    controller,
-                                    &state.all_creature_types,
-                                )
-                            })
-                            .count(),
-                    ),
-                },
-            }
-        }
+        // CR 117.1: Count spells cast this turn by the scoped players, optionally filtered.
+        QuantityRef::SpellsCastThisTurn { scope, ref filter } => usize_to_i32_saturating(
+            scoped_players(state, scope, controller)
+                .filter_map(|player| state.spells_cast_this_turn_by_player.get(&player.id))
+                .map(|list| match filter {
+                    None => list.len(),
+                    Some(filter) => list
+                        .iter()
+                        .filter(|record| {
+                            spell_record_matches_filter(
+                                record,
+                                filter,
+                                controller,
+                                &state.all_creature_types,
+                            )
+                        })
+                        .count(),
+                })
+                .sum(),
+        ),
         // Count permanents matching filter that entered the battlefield this turn.
         // Uses `entered_battlefield_turn` field on GameObject.
         QuantityRef::EnteredThisTurn { ref filter } => usize_to_i32_saturating(
@@ -3581,6 +3579,7 @@ mod tests {
 
         let expr = QuantityExpr::Ref {
             qty: QuantityRef::SpellsCastThisTurn {
+                scope: CountScope::Controller,
                 filter: Some(TargetFilter::Typed(
                     TypedFilter::creature()
                         .with_type(TypeFilter::Subtype("Bird".to_string()))

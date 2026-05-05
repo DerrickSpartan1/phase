@@ -2414,6 +2414,7 @@ mod tests {
                 QuantityExpr::Ref {
                     qty:
                         QuantityRef::SpellsCastThisTurn {
+                            scope: crate::types::ability::CountScope::Controller,
                             filter: Some(TargetFilter::Or { filters }),
                         },
                 },

@@ -765,9 +765,13 @@ fn fmt_quantity_ref(qty: &QuantityRef) -> String {
         QuantityRef::EventContextSourceToughness => "source's toughness".into(),
         QuantityRef::EventContextSourceManaValue => "source's mana value".into(),
         QuantityRef::CostPaidObjectManaValue => "cost-paid object's mana value".into(),
-        QuantityRef::SpellsCastThisTurn { filter } => match filter {
-            Some(filter) => format!("{} spells cast this turn", fmt_target(filter)),
-            None => "spells cast this turn".into(),
+        QuantityRef::SpellsCastThisTurn { scope, filter } => match filter {
+            Some(filter) => format!(
+                "{} spells cast this turn ({})",
+                fmt_target(filter),
+                fmt_count_scope(scope)
+            ),
+            None => format!("spells cast this turn ({})", fmt_count_scope(scope)),
         },
         QuantityRef::EnteredThisTurn { filter } => {
             format!("{} entered this turn", fmt_target(filter))
