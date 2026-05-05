@@ -285,10 +285,43 @@ fn evaluate_commander(
         unknown_cards,
         LegalityFormat::Commander,
         "Commander",
-        is_commander_eligible,
-        "Commander cards must be legendary creatures or explicitly allow being a commander",
-        false,
+        CommanderVariantRules::commander(),
     )
+}
+
+struct CommanderVariantRules {
+    eligible: fn(&CardFace) -> bool,
+    eligibility_error: &'static str,
+    skip_commander_legality: bool,
+}
+
+impl CommanderVariantRules {
+    fn commander() -> Self {
+        Self {
+            eligible: is_commander_eligible,
+            eligibility_error:
+                "Commander cards must be legendary creatures or explicitly allow being a commander",
+            skip_commander_legality: false,
+        }
+    }
+
+    fn duel_commander() -> Self {
+        Self {
+            eligible: is_commander_eligible,
+            eligibility_error:
+                "Duel Commander cards must be legendary creatures or explicitly allow being a commander",
+            skip_commander_legality: false,
+        }
+    }
+
+    fn pauper_commander() -> Self {
+        Self {
+            eligible: is_pauper_commander_eligible,
+            eligibility_error:
+                "Pauper Commander commander cards must be creatures, Vehicles, or Spacecraft",
+            skip_commander_legality: true,
+        }
+    }
 }
 
 /// Shared commander-variant validator. Commander, Duel Commander, and Pauper
@@ -307,9 +340,7 @@ fn evaluate_commander_with_format(
     unknown_cards: &BTreeSet<String>,
     legality_format: LegalityFormat,
     format_label: &str,
-    commander_eligible: fn(&CardFace) -> bool,
-    commander_error: &str,
-    skip_commander_legality: bool,
+    rules: CommanderVariantRules,
 ) -> CompatibilityCheck {
     let mut reasons = Vec::new();
 
@@ -332,13 +363,17 @@ fn evaluate_commander_with_format(
                 continue;
             };
 
-            if !commander_eligible(face) {
+            if !(rules.eligible)(face) {
                 ineligible_commanders.insert(name.clone());
             }
         }
 
         if !ineligible_commanders.is_empty() {
-            reasons.push(summarize_cards(commander_error, &ineligible_commanders, 6));
+            reasons.push(summarize_cards(
+                rules.eligibility_error,
+                &ineligible_commanders,
+                6,
+            ));
         }
 
         // CR 702.124: Validate partner pairing for two-commander setups
@@ -398,7 +433,7 @@ fn evaluate_commander_with_format(
         if unknown_cards.contains(name) {
             continue;
         }
-        if skip_commander_legality
+        if rules.skip_commander_legality
             && request
                 .commander
                 .iter()
@@ -686,20 +721,10 @@ fn evaluate_selected_format(
                 format.legality_format().unwrap(),
                 format.label(),
                 match format {
-                    GameFormat::PauperCommander => is_pauper_commander_eligible,
-                    GameFormat::DuelCommander => is_commander_eligible,
+                    GameFormat::PauperCommander => CommanderVariantRules::pauper_commander(),
+                    GameFormat::DuelCommander => CommanderVariantRules::duel_commander(),
                     _ => unreachable!("commander variant branch only handles PDH and Duel"),
                 },
-                match format {
-                    GameFormat::PauperCommander => {
-                        "Pauper Commander commander cards must be creatures, Vehicles, or Spacecraft"
-                    }
-                    GameFormat::DuelCommander => {
-                        "Duel Commander cards must be legendary creatures or explicitly allow being a commander"
-                    }
-                    _ => unreachable!("commander variant branch only handles PDH and Duel"),
-                },
-                format == GameFormat::PauperCommander,
             );
             if !check.compatible {
                 reasons.extend(check.reasons);
