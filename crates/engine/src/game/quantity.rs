@@ -144,6 +144,15 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
                 scope: ObjectScope::Recipient,
                 ..
             } => true,
+            QuantityRef::Power {
+                scope: ObjectScope::CostPaidObject,
+            }
+            | QuantityRef::Toughness {
+                scope: ObjectScope::CostPaidObject,
+            }
+            | QuantityRef::ObjectManaValue {
+                scope: ObjectScope::CostPaidObject,
+            } => false,
             _ => false,
         },
         QuantityExpr::HalfRounded { inner, .. }
@@ -712,6 +721,7 @@ fn resolve_ref(
             *scope,
             ctx,
             targets,
+            ability,
             |obj| obj.power,
             |lki| lki.power,
         ),
@@ -720,11 +730,12 @@ fn resolve_ref(
             *scope,
             ctx,
             targets,
+            ability,
             |obj| obj.toughness,
             |lki| lki.toughness,
         ),
         QuantityRef::ObjectManaValue { scope } => {
-            resolve_object_mana_value(state, *scope, ctx, targets)
+            resolve_object_mana_value(state, *scope, ctx, targets, ability)
         }
         // CR 105.1 + CR 105.2: Count the object's current colors. The color
         // vector is maintained by layer 5, so recipient-relative static boosts
@@ -1058,14 +1069,6 @@ fn resolve_ref(
                             .map(|lki| u32_to_i32_saturating(lki.mana_value))
                     })
             })
-            .unwrap_or(0),
-        // CR 117.1 + CR 202.3: Mana value of the cost-paid object (sacrificed
-        // creature, exiled creature, etc.), captured at cost-payment time on
-        // the resolving ability. Food Chain / Burnt Offering / Metamorphosis.
-        // Returns 0 when no cost-paid object snapshot is in scope.
-        QuantityRef::CostPaidObjectManaValue => ability
-            .and_then(|a| a.cost_paid_object_mana_value)
-            .map(u32_to_i32_saturating)
             .unwrap_or(0),
         // CR 107.3a + CR 601.2b + CR 603.7c: The announced value of X for the
         // triggering spell. Reads `GameObject::cost_x_paid` — populated during
@@ -1441,6 +1444,7 @@ fn object_for_scope<'a>(
             .as_ref()
             .and_then(crate::game::targeting::extract_source_from_event)
             .and_then(|id| state.objects.get(&id)),
+        ObjectScope::CostPaidObject => None,
     }
 }
 
@@ -1469,6 +1473,7 @@ fn object_id_for_scope(
             .current_trigger_event
             .as_ref()
             .and_then(crate::game::targeting::extract_source_from_event),
+        ObjectScope::CostPaidObject => None,
     }
 }
 
@@ -1547,6 +1552,7 @@ fn resolve_object_pt<F, G>(
     scope: ObjectScope,
     ctx: QuantityContext,
     targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
     obj_extract: F,
     lki_extract: G,
 ) -> i32
@@ -1585,6 +1591,10 @@ where
                 .or_else(|| state.lki_cache.get(&object_id).and_then(&lki_extract))
                 .unwrap_or(0)
         }
+        ObjectScope::CostPaidObject => ability
+            .and_then(|ability| ability.cost_paid_object.as_ref())
+            .and_then(|snapshot| lki_extract(&snapshot.lki))
+            .unwrap_or(0),
     }
 }
 
@@ -1596,6 +1606,7 @@ fn resolve_object_mana_value(
     scope: ObjectScope,
     ctx: QuantityContext,
     targets: &[TargetRef],
+    ability: Option<&ResolvedAbility>,
 ) -> i32 {
     match scope {
         ObjectScope::Source => state
@@ -1638,6 +1649,10 @@ fn resolve_object_mana_value(
                 })
                 .unwrap_or(0)
         }
+        ObjectScope::CostPaidObject => ability
+            .and_then(|ability| ability.cost_paid_object.as_ref())
+            .map(|snapshot| u32_to_i32_saturating(snapshot.lki.mana_value))
+            .unwrap_or(0),
     }
 }
 

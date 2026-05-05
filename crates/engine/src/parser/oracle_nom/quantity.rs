@@ -372,7 +372,7 @@ pub fn parse_quantity_ref(input: &str) -> OracleResult<'_, QuantityRef> {
         // `parse_event_context_refs` so the cost-paid resolver wins over the
         // generic event-source resolver for sacrificed/exiled possessives
         // (Food Chain, Burnt Offering, Metamorphosis).
-        parse_cost_paid_object_mana_value_ref,
+        parse_cost_paid_object_ref,
         parse_event_context_refs,
     ))
     .or(alt((
@@ -1187,7 +1187,7 @@ fn parse_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
 /// Used by Food Chain ("1 plus the exiled creature's mana value"),
 /// Burnt Offering / Metamorphosis ("the sacrificed creature's mana value"),
 /// and the broader cost-paid-by-property class.
-fn parse_cost_paid_object_mana_value_ref(input: &str) -> OracleResult<'_, QuantityRef> {
+fn parse_cost_paid_object_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = opt(tag("the ")).parse(input)?;
     let (rest, _) = alt((tag("sacrificed "), tag("exiled "), tag("discarded "))).parse(rest)?;
     let (rest, _) = alt((
@@ -1200,8 +1200,25 @@ fn parse_cost_paid_object_mana_value_ref(input: &str) -> OracleResult<'_, Quanti
         tag("land"),
     ))
     .parse(rest)?;
-    let (rest, _) = alt((tag("'s mana value"), tag("'s converted mana cost"))).parse(rest)?;
-    Ok((rest, QuantityRef::CostPaidObjectManaValue))
+    let (rest, property) = alt((
+        value(ObjectProperty::ManaValue, tag("'s mana value")),
+        value(ObjectProperty::ManaValue, tag("'s converted mana cost")),
+        value(ObjectProperty::Power, tag("'s power")),
+        value(ObjectProperty::Toughness, tag("'s toughness")),
+    ))
+    .parse(rest)?;
+    let qty = match property {
+        ObjectProperty::Power => QuantityRef::Power {
+            scope: ObjectScope::CostPaidObject,
+        },
+        ObjectProperty::Toughness => QuantityRef::Toughness {
+            scope: ObjectScope::CostPaidObject,
+        },
+        ObjectProperty::ManaValue => QuantityRef::ObjectManaValue {
+            scope: ObjectScope::CostPaidObject,
+        },
+    };
+    Ok((rest, qty))
 }
 
 /// Parse event-context quantity references.
@@ -3119,11 +3136,16 @@ mod tests {
 
     /// CR 117.1 + CR 202.3: Food Chain — "the exiled creature's mana value"
     /// resolves to the cost-paid object snapshot (NOT the trigger-event
-    /// source), so the parser must emit `CostPaidObjectManaValue`.
+    /// source), so the parser must emit a cost-paid-object-scoped mana value.
     #[test]
     fn test_parse_exiled_creatures_mana_value() {
         let (rest, q) = parse_quantity_ref("the exiled creature's mana value").unwrap();
-        assert_eq!(q, QuantityRef::CostPaidObjectManaValue);
+        assert_eq!(
+            q,
+            QuantityRef::ObjectManaValue {
+                scope: ObjectScope::CostPaidObject
+            }
+        );
         assert_eq!(rest, "");
     }
 
@@ -3132,7 +3154,12 @@ mod tests {
     #[test]
     fn test_parse_sacrificed_creatures_mana_value() {
         let (rest, q) = parse_quantity_ref("the sacrificed creature's mana value").unwrap();
-        assert_eq!(q, QuantityRef::CostPaidObjectManaValue);
+        assert_eq!(
+            q,
+            QuantityRef::ObjectManaValue {
+                scope: ObjectScope::CostPaidObject
+            }
+        );
         assert_eq!(rest, "");
     }
 
@@ -3141,7 +3168,12 @@ mod tests {
     fn test_parse_sacrificed_creatures_converted_mana_cost() {
         let (rest, q) =
             parse_quantity_ref("the sacrificed creature's converted mana cost").unwrap();
-        assert_eq!(q, QuantityRef::CostPaidObjectManaValue);
+        assert_eq!(
+            q,
+            QuantityRef::ObjectManaValue {
+                scope: ObjectScope::CostPaidObject
+            }
+        );
         assert_eq!(rest, "");
     }
 

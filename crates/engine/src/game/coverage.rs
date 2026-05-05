@@ -4260,7 +4260,9 @@ fn condition_feature(cond: &AbilityCondition) -> (&'static str, FeatureSupport) 
         AbilityCondition::DayNightIs { .. } => ("DayNightIs", Handled),
         // CR 603.4: Per-ability per-turn resolution counter — handled by evaluate_condition.
         AbilityCondition::NthResolutionThisTurn { .. } => ("NthResolutionThisTurn", Handled),
-        AbilityCondition::CostPaidObjectMatchesFilter { .. } => ("CostPaidObjectMatchesFilter", Handled),
+        AbilityCondition::CostPaidObjectMatchesFilter { .. } => {
+            ("CostPaidObjectMatchesFilter", Handled)
+        }
         AbilityCondition::SourceLacksKeyword { .. } => ("SourceLacksKeyword", Handled),
     }
 }

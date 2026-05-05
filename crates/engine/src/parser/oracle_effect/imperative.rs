@@ -931,6 +931,7 @@ pub(super) fn parse_targeted_action_ast(
                     enter_transformed: d.transformed,
                     under_your_control: d.under_your_control,
                     enter_tapped: d.enter_tapped,
+                    enter_with_counters: d.enter_with_counters,
                 })
             }
             Some(d) if d.zone == Zone::Hand => {
@@ -1094,6 +1095,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_transformed,
             under_your_control,
             enter_tapped,
+            enter_with_counters,
         } => Effect::ChangeZone {
             origin,
             destination: Zone::Battlefield,
@@ -1104,7 +1106,7 @@ pub(super) fn lower_targeted_action_ast(ast: TargetedImperativeAst) -> Effect {
             enter_tapped,
             enters_attacking: false,
             up_to: false,
-            enter_with_counters: vec![],
+            enter_with_counters,
         },
         // CR 400.6: Return to a non-hand, non-battlefield zone (graveyard, library).
         TargetedImperativeAst::ReturnToZone {

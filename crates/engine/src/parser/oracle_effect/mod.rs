@@ -42,10 +42,10 @@ use crate::types::ability::{
     AbilityCondition, AbilityDefinition, AbilityKind, CardPlayMode, CastingPermission, ChoiceType,
     ChooseFromZoneConstraint, CombatDamageScope, ConjureCard, ContinuousModification,
     ControllerRef, DamageModification, DamageSource, DelayedTriggerCondition, Duration, Effect,
-    FilterProp, GainLifePlayer, GameRestriction, MultiTargetSpec, PlayerFilter, PlayerScope,
-    PreventionAmount, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition, RestrictionExpiry,
-    RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition, TargetFilter,
-    TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
+    FilterProp, GainLifePlayer, GameRestriction, MultiTargetSpec, ObjectScope, PlayerFilter,
+    PlayerScope, PreventionAmount, PtValue, QuantityExpr, QuantityRef, ReplacementDefinition,
+    RestrictionExpiry, RestrictionPlayerScope, RoundingMode, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerDefinition, TypeFilter, TypedFilter, UnlessCost,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{DistributionUnit, NextSpellModifier, RetargetScope};
@@ -121,6 +121,53 @@ fn condition_refs_source_object(condition: &AbilityCondition) -> bool {
             conditions.iter().any(condition_refs_source_object)
         }
         _ => false,
+    }
+}
+
+fn condition_refs_cost_paid_object(condition: &AbilityCondition) -> bool {
+    match condition {
+        AbilityCondition::CostPaidObjectMatchesFilter { .. } => true,
+        AbilityCondition::Not { condition }
+        | AbilityCondition::ConditionInstead { inner: condition } => {
+            condition_refs_cost_paid_object(condition)
+        }
+        AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+            conditions.iter().any(condition_refs_cost_paid_object)
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn rewrite_cost_paid_object_quantities_in_definition(ability: &mut AbilityDefinition) {
+    rewrite_cost_paid_object_quantities(&mut ability.effect);
+    if let Some(sub_ability) = ability.sub_ability.as_mut() {
+        rewrite_cost_paid_object_quantities_in_definition(sub_ability);
+    }
+    if let Some(else_ability) = ability.else_ability.as_mut() {
+        rewrite_cost_paid_object_quantities_in_definition(else_ability);
+    }
+    for mode in &mut ability.mode_abilities {
+        rewrite_cost_paid_object_quantities_in_definition(mode);
+    }
+}
+
+fn rewrite_cost_paid_object_quantities(effect: &mut Effect) {
+    if let Effect::Token { count, .. } = effect {
+        if matches!(
+            count,
+            QuantityExpr::Ref {
+                qty: QuantityRef::EventContextSourceToughness
+                    | QuantityRef::Toughness {
+                        scope: ObjectScope::Source
+                    }
+            }
+        ) {
+            *count = QuantityExpr::Ref {
+                qty: QuantityRef::Toughness {
+                    scope: ObjectScope::CostPaidObject,
+                },
+            };
+        }
     }
 }
 
@@ -4145,6 +4192,7 @@ fn try_parse_verb_and_target<'a>(
                     enter_transformed: d.transformed,
                     under_your_control: d.under_your_control,
                     enter_tapped: d.enter_tapped,
+                    enter_with_counters: d.enter_with_counters,
                 },
                 rem,
             )),
@@ -7439,6 +7487,13 @@ pub(crate) fn parse_effect_chain_ir(
             replace_target_with_parent(&mut clause.effect);
         }
 
+        if condition
+            .as_ref()
+            .is_some_and(condition_refs_cost_paid_object)
+        {
+            rewrite_cost_paid_object_quantities(&mut clause.effect);
+        }
+
         // CR 608.2e: "Instead" overrides — marker for lowering to attach as
         // sub_ability on the previous def.
         if matches!(
@@ -9373,6 +9428,8 @@ struct ReturnDestination {
     under_your_control: bool,
     // CR 614.1: "tapped" — enters the battlefield tapped.
     enter_tapped: bool,
+    // CR 122.1 + CR 122.6: Counters placed on the returned object as it enters.
+    enter_with_counters: Vec<(String, QuantityExpr)>,
 }
 
 /// Detect "return ... to <zone>" destination phrase, including "transformed" flag.
@@ -9551,6 +9608,7 @@ fn strip_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>)
     ];
     for (phrase, zone, transformed, under_your_control, enter_tapped) in patterns {
         if let Some(pos) = lower.rfind(phrase) {
+            let after_destination = &lower[pos + phrase.len()..];
             return (
                 text[..pos].trim(),
                 Some(ReturnDestination {
@@ -9558,6 +9616,7 @@ fn strip_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>)
                     transformed: *transformed,
                     under_your_control: *under_your_control,
                     enter_tapped: *enter_tapped,
+                    enter_with_counters: parse_with_counters_suffix(after_destination),
                 }),
             );
         }
@@ -22924,5 +22983,92 @@ mod snapshot_tests {
             AbilityKind::Spell,
         );
         assert_json_snapshot!("assembly_create_token_put_counter", def);
+    }
+
+    #[test]
+    fn cost_paid_object_instead_clause_uses_cost_paid_toughness() {
+        let def = parse_effect_chain(
+            "Create a Blood token. If you sacrificed an Angel this way, create a number of Blood tokens equal to its toughness instead.",
+            AbilityKind::Activated,
+        );
+
+        assert!(matches!(
+            *def.effect,
+            Effect::Token {
+                count: QuantityExpr::Fixed { value: 1 },
+                ..
+            }
+        ));
+
+        let instead = def.sub_ability.as_ref().expect("expected instead branch");
+        assert!(matches!(
+            instead.condition,
+            Some(AbilityCondition::ConditionInstead { ref inner })
+                if matches!(
+                    **inner,
+                    AbilityCondition::CostPaidObjectMatchesFilter {
+                        filter: TargetFilter::Typed(TypedFilter { ref type_filters, .. })
+                    } if type_filters.iter().any(|filter| {
+                        matches!(filter, TypeFilter::Subtype(subtype) if subtype == "Angel")
+                    })
+                )
+        ));
+        assert!(matches!(
+            *instead.effect,
+            Effect::Token {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::Toughness {
+                        scope: ObjectScope::CostPaidObject
+                    }
+                },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn returned_creatures_can_receive_counters_and_additive_type_followup() {
+        let def = parse_effect_chain(
+            "Return each creature card from your graveyard to the battlefield with a finality counter on it. Those creatures are Vampires in addition to their other types.",
+            AbilityKind::Activated,
+        );
+
+        let Effect::ChangeZone {
+            enter_with_counters,
+            ..
+        } = &*def.effect
+        else {
+            panic!("expected ChangeZone, got {:?}", def.effect);
+        };
+        assert_eq!(
+            enter_with_counters,
+            &vec![("finality".to_string(), QuantityExpr::Fixed { value: 1 })]
+        );
+
+        let subtype_followup = def.sub_ability.as_ref().expect("expected subtype followup");
+        assert_eq!(subtype_followup.duration, Some(Duration::Permanent));
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = &*subtype_followup.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", subtype_followup.effect);
+        };
+        assert_eq!(*duration, Some(Duration::Permanent));
+        assert_eq!(*target, None);
+        assert!(static_abilities.iter().any(|static_def| {
+            matches!(
+                static_def.affected,
+                Some(TargetFilter::TrackedSet {
+                    id: TrackedSetId(0)
+                })
+            ) && static_def.modifications.iter().any(|modification| {
+                matches!(
+                    modification,
+                    ContinuousModification::AddSubtype { subtype } if subtype == "Vampire"
+                )
+            })
+        }));
     }
 }

@@ -2823,7 +2823,9 @@ fn parse_subject_additive_type_static(text: &str) -> Option<StaticDefinition> {
 ///   extractor (`every basic land type`, `the chosen type`), or
 /// * no valid type or subtype was recognized (unknown words are dropped —
 ///   the curated `SUBTYPES` list is authoritative).
-fn parse_additive_type_clause_modifications(text: &str) -> Option<Vec<ContinuousModification>> {
+pub(crate) fn parse_additive_type_clause_modifications(
+    text: &str,
+) -> Option<Vec<ContinuousModification>> {
     type VE<'a> = nom_language::error::VerboseError<&'a str>;
 
     let lower = text.to_lowercase();

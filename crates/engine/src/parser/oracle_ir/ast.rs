@@ -557,6 +557,9 @@ pub(crate) enum TargetedImperativeAst {
         under_your_control: bool,
         /// CR 614.1: "tapped" — enters tapped.
         enter_tapped: bool,
+        /// CR 122.1 + CR 122.6: Counters placed on the returned object as it
+        /// enters the battlefield.
+        enter_with_counters: Vec<(String, QuantityExpr)>,
     },
     /// CR 400.6: Return to a specific non-hand, non-battlefield zone (zone change).
     ReturnToZone {

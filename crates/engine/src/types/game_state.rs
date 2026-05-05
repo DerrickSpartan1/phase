@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use super::ability::{
     AbilityCost, AbilityDefinition, AdditionalCost, ChoiceType, ChoiceValue,
-    ChooseFromZoneConstraint, ContinuousModification, DelayedTriggerCondition, Duration,
-    EffectKind, GameRestriction, KeywordAction, KickerVariant, ModalChoice, ResolvedAbility,
-    SearchSelectionConstraint, StaticCondition, TargetFilter, TargetRef, TriggerCondition,
-    UnlessCost,
+    ChooseFromZoneConstraint, ContinuousModification, CostPaidObjectSnapshot,
+    DelayedTriggerCondition, Duration, EffectKind, GameRestriction, KeywordAction, KickerVariant,
+    ModalChoice, ResolvedAbility, SearchSelectionConstraint, StaticCondition, TargetFilter,
+    TargetRef, TriggerCondition, UnlessCost,
 };
 use super::card::CardFace;
 use super::card_type::{CoreType, Supertype};
@@ -749,13 +749,12 @@ pub struct PendingManaAbility {
     /// `WaitingFor::ExileFromBattlefieldForManaAbility` for the player to pick.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub chosen_exiled_battlefield: Vec<ObjectId>,
-    /// CR 117.1 + CR 202.3: Mana value of the cost-paid object captured at
-    /// the moment of cost-payment (before the object leaves the battlefield).
-    /// Threaded into `produce_mana_from_ability` so
-    /// `QuantityRef::CostPaidObjectManaValue` can resolve in inline mana
-    /// ability resolution. `None` outside the cost-paid-object context.
+    /// CR 117.1 + CR 400.7j + CR 608.2k: Public characteristics of the
+    /// cost-paid object captured before it leaves its zone. Threaded into
+    /// `produce_mana_from_ability` so cost-paid-object quantity refs can
+    /// resolve in inline mana ability resolution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cost_paid_object_mana_value: Option<u32>,
+    pub cost_paid_object: Option<CostPaidObjectSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3686,7 +3685,7 @@ mod tests {
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
                 chosen_exiled_battlefield: Vec::new(),
-                cost_paid_object_mana_value: None,
+                cost_paid_object: None,
             }),
         };
         assert!(!tap_mana.has_pending_cast());

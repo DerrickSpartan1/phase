@@ -12,7 +12,7 @@ use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_quantity::{canonicalize_quantity_ref, parse_cda_quantity};
 use super::super::oracle_target::parse_type_phrase;
-use super::super::oracle_util::{parse_comparison_suffix, TextPair};
+use super::super::oracle_util::{parse_comparison_suffix, parse_subtype, TextPair};
 use super::counter::normalize_counter_type;
 use super::{parse_effect_chain, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
@@ -1311,6 +1311,13 @@ pub(super) fn try_parse_generic_instead_clause(
     result.condition = Some(AbilityCondition::ConditionInstead {
         inner: Box::new(condition),
     });
+    if result
+        .condition
+        .as_ref()
+        .is_some_and(super::condition_refs_cost_paid_object)
+    {
+        super::rewrite_cost_paid_object_quantities_in_definition(&mut result);
+    }
     Some(result)
 }
 
@@ -1687,6 +1694,10 @@ pub(super) fn try_nom_condition_as_ability_condition(
         return Some(condition);
     }
 
+    if let Some(condition) = parse_cost_paid_object_matches_filter_condition(lower.as_str()) {
+        return Some(condition);
+    }
+
     // CR 702.62a: "it doesn't have [keyword]" / "it does not have [keyword]" — pronoun
     // subject lacks-keyword check (e.g., "If it doesn't have suspend, it gains suspend").
     // Mirrors the "~ doesn't have" / "this creature doesn't have" handler in oracle_condition.rs.
@@ -1952,6 +1963,57 @@ fn parse_you_controlled_parent_target_condition(lower: &str) -> Option<AbilityCo
         filter,
         use_lki: true,
     })
+}
+
+fn parse_cost_paid_object_matches_filter_condition(lower: &str) -> Option<AbilityCondition> {
+    let (rest, _) = alt((
+        tag::<_, _, VerboseError<&str>>("you sacrificed "),
+        tag("you exiled "),
+        tag("you discarded "),
+    ))
+    .parse(lower)
+    .ok()?;
+    let (rest, _) = opt(alt((
+        tag::<_, _, VerboseError<&str>>("a "),
+        tag("an "),
+        tag("the "),
+    )))
+    .parse(rest)
+    .ok()?;
+    let (rest, type_text) = take_until::<_, _, VerboseError<&str>>(" this way")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = tag::<_, _, VerboseError<&str>>(" this way")
+        .parse(rest)
+        .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let type_filter = parse_cost_paid_object_type_filter(type_text.trim())?;
+
+    Some(AbilityCondition::CostPaidObjectMatchesFilter {
+        filter: TargetFilter::Typed(TypedFilter::new(type_filter)),
+    })
+}
+
+fn parse_cost_paid_object_type_filter(text: &str) -> Option<TypeFilter> {
+    all_consuming(alt((
+        value(
+            TypeFilter::Creature,
+            tag::<_, _, VerboseError<&str>>("creature"),
+        ),
+        value(TypeFilter::Artifact, tag("artifact")),
+        value(TypeFilter::Enchantment, tag("enchantment")),
+        value(TypeFilter::Land, tag("land")),
+        value(TypeFilter::Planeswalker, tag("planeswalker")),
+        value(TypeFilter::Permanent, tag("permanent")),
+        value(TypeFilter::Card, tag("card")),
+    )))
+    .parse(text)
+    .ok()
+    .map(|(_, filter)| filter)
+    .or_else(|| parse_subtype(text).map(|(subtype, _)| TypeFilter::Subtype(subtype)))
 }
 
 fn parse_zone_change_object_matches_filter_condition(lower: &str) -> Option<AbilityCondition> {

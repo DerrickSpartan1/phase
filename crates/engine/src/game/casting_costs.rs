@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 
-use crate::types::ability::{AbilityCost, AdditionalCost, KickerVariant, ResolvedAbility};
+use crate::types::ability::{
+    AbilityCost, AdditionalCost, CostPaidObjectSnapshot, KickerVariant, ResolvedAbility,
+};
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
     CastingVariant, ConvokeMode, DistributionUnit, GameState, PendingCast, StackEntry,
@@ -227,19 +229,17 @@ pub(crate) fn handle_discard_for_cost(
         }
     }
 
-    // CR 117.1 + CR 202.3: Capture the discarded card's mana value BEFORE
-    // it leaves the hand, so `QuantityRef::CostPaidObjectManaValue` can
-    // resolve at ability resolution. Volrath the Fallen ("Volrath gets
-    // +X/+X until end of turn, where X is the discarded card's mana value").
+    // CR 117.1 + CR 400.7j + CR 608.2k: Capture the discarded card's public
+    // characteristics BEFORE it leaves the hand, so cost-paid-object property
+    // references can resolve at ability resolution.
     if let Some(&first) = chosen.first() {
-        if let Some(mv) = state
-            .objects
-            .get(&first)
-            .map(|obj| obj.mana_cost.mana_value())
-        {
+        if let Some(obj) = state.objects.get(&first) {
             pending
                 .ability
-                .set_cost_paid_object_mana_value_recursive(mv);
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                    object_id: first,
+                    lki: obj.snapshot_for_mana_spent(),
+                });
         }
     }
 
@@ -285,20 +285,17 @@ pub(crate) fn handle_sacrifice_for_cost(
         }
     }
 
-    // CR 117.1 + CR 202.3: Capture the sacrificed object's mana value BEFORE
-    // it leaves the battlefield, stamping it onto the resolving ability for
-    // later read by `QuantityRef::CostPaidObjectManaValue` (Food Chain,
-    // Burnt Offering, Metamorphosis). Uses the first chosen permanent — the
-    // class only ever sacrifices one cost-tracked object.
+    // CR 117.1 + CR 400.7j + CR 608.2k: Capture the sacrificed object's public
+    // characteristics BEFORE it leaves the battlefield, stamping it onto the
+    // resolving ability for later cost-paid-object references.
     if let Some(&first) = chosen.first() {
-        if let Some(mv) = state
-            .objects
-            .get(&first)
-            .map(|obj| obj.mana_cost.mana_value())
-        {
+        if let Some(obj) = state.objects.get(&first) {
             pending
                 .ability
-                .set_cost_paid_object_mana_value_recursive(mv);
+                .set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+                    object_id: first,
+                    lki: obj.snapshot_for_mana_spent(),
+                });
         }
     }
 

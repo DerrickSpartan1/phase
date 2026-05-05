@@ -1,5 +1,6 @@
 use crate::types::ability::{
-    AbilityCost, AbilityDefinition, Effect, ManaProduction, ResolvedAbility, TargetFilter,
+    AbilityCost, AbilityDefinition, CostPaidObjectSnapshot, Effect, ManaProduction,
+    ResolvedAbility, TargetFilter,
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
@@ -204,11 +205,9 @@ pub fn resolve_mana_ability(
 /// Shared by `resolve_mana_ability` (cost paid inline) and `handle_choose_mana_color`
 /// (cost already paid during the `TapCreaturesForManaAbility` phase).
 ///
-/// `cost_paid_object_mana_value` carries the captured mana value
-/// (CR 117.1 + CR 202.3) of any object exiled or sacrificed as part of cost
-/// payment so the production count can resolve
-/// `QuantityRef::CostPaidObjectManaValue` (Food Chain, Burnt Offering,
-/// Metamorphosis class).
+/// `cost_paid_object` carries the captured public characteristics of any
+/// object exiled or sacrificed as part of cost payment so production counts can
+/// resolve cost-paid-object refs (Food Chain / Burnt Offering class).
 fn produce_mana_from_ability(
     state: &mut GameState,
     source_id: ObjectId,
@@ -216,7 +215,7 @@ fn produce_mana_from_ability(
     ability_def: &AbilityDefinition,
     events: &mut Vec<GameEvent>,
     color_override: Option<ProductionOverride>,
-    cost_paid_object_mana_value: Option<u32>,
+    cost_paid_object: Option<CostPaidObjectSnapshot>,
 ) {
     // CR 117.1 + CR 202.3: Build a transient `ResolvedAbility` carrying the
     // cost-paid object snapshot so quantity resolution sees it. Reused for
@@ -224,8 +223,8 @@ fn produce_mana_from_ability(
     // snapshot is visible end-to-end.
     let mut resolved_for_quantity =
         super::ability_utils::build_resolved_from_def(ability_def, source_id, player);
-    if let Some(mv) = cost_paid_object_mana_value {
-        resolved_for_quantity.set_cost_paid_object_mana_value_recursive(mv);
+    if let Some(snapshot) = cost_paid_object {
+        resolved_for_quantity.set_cost_paid_object_recursive(snapshot);
     }
 
     // CR 106.6: Resolve spend-restriction templates, grants, and expiry so they
@@ -309,7 +308,7 @@ pub fn activate_mana_ability(
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
-            cost_paid_object_mana_value: None,
+            cost_paid_object: None,
         },
         events,
     )
@@ -465,7 +464,7 @@ pub fn handle_choose_mana_color(
         &ability_def,
         events,
         Some(override_value),
-        pending.cost_paid_object_mana_value,
+        pending.cost_paid_object.clone(),
     );
 
     Ok(resume_waiting_for(pending.player, pending.resume.clone()))
@@ -527,19 +526,18 @@ pub fn handle_exile_from_battlefield_for_mana_ability(
         }
     }
 
-    // CR 117.1 + CR 202.3: Capture the cost-paid object's mana value before
-    // it leaves the battlefield. Uses the first chosen permanent — the class
-    // only ever exiles one cost-tracked object (Food Chain). Multi-exile
-    // costs are unusual but if they ever appear the resolver reads the first
-    // entry; downstream design can extend to a Vec snapshot if a card needs
-    // per-object mana values.
-    let captured_mv = chosen
-        .first()
-        .and_then(|id| state.objects.get(id).map(|obj| obj.mana_cost.mana_value()));
+    // CR 117.1 + CR 400.7j + CR 608.2k: Capture the cost-paid object's public
+    // characteristics before it leaves the battlefield.
+    let captured = chosen.first().and_then(|id| {
+        state.objects.get(id).map(|obj| CostPaidObjectSnapshot {
+            object_id: *id,
+            lki: obj.snapshot_for_mana_spent(),
+        })
+    });
 
     let mut updated = pending.clone();
     updated.chosen_exiled_battlefield = chosen.to_vec();
-    updated.cost_paid_object_mana_value = captured_mv;
+    updated.cost_paid_object = captured;
     advance_mana_ability_activation(state, updated, events)
 }
 
@@ -721,8 +719,8 @@ fn advance_mana_ability_activation(
             pending.source_id,
             pending.player,
         );
-        if let Some(mv) = pending.cost_paid_object_mana_value {
-            resolved_for_prompt.set_cost_paid_object_mana_value_recursive(mv);
+        if let Some(snapshot) = pending.cost_paid_object.clone() {
+            resolved_for_prompt.set_cost_paid_object_recursive(snapshot);
         }
         if let Some(choice) = mana_choice_prompt(
             &ability_def.effect,
@@ -779,7 +777,7 @@ fn advance_mana_ability_activation(
         &pending.chosen_discards,
         &pending.chosen_exiled_battlefield,
         pending.chosen_mana_payment.as_deref(),
-        pending.cost_paid_object_mana_value,
+        pending.cost_paid_object,
     )?;
     Ok(resume_waiting_for(pending.player, pending.resume))
 }
@@ -819,7 +817,7 @@ fn resolve_mana_ability_with_selected_choices(
     discarded_cards: &[ObjectId],
     exiled_battlefield: &[ObjectId],
     chosen_hybrid_payment: Option<&[ManaType]>,
-    cost_paid_object_mana_value: Option<u32>,
+    cost_paid_object: Option<CostPaidObjectSnapshot>,
 ) -> Result<(), EngineError> {
     let mut chosen = tapped_creatures.iter().copied();
     let mut discarded = discarded_cards.iter().copied();
@@ -856,8 +854,8 @@ fn resolve_mana_ability_with_selected_choices(
     // (Food Chain class).
     let mut resolved_for_quantity =
         super::ability_utils::build_resolved_from_def(ability_def, source_id, player);
-    if let Some(mv) = cost_paid_object_mana_value {
-        resolved_for_quantity.set_cost_paid_object_mana_value_recursive(mv);
+    if let Some(snapshot) = cost_paid_object {
+        resolved_for_quantity.set_cost_paid_object_recursive(snapshot);
     }
 
     // CR 106.6: Thread restrictions, grants, and expiry through the
@@ -3119,7 +3117,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
-            cost_paid_object_mana_value: None,
+            cost_paid_object: None,
         };
         let prompt = ManaChoicePrompt::SingleColor {
             options: vec![ManaType::Red, ManaType::Green],
@@ -3178,7 +3176,7 @@ mod tests {
                 chosen_discards: Vec::new(),
                 chosen_mana_payment: None,
                 chosen_exiled_battlefield: Vec::new(),
-                cost_paid_object_mana_value: None,
+                cost_paid_object: None,
             };
             let prompt = ManaChoicePrompt::SingleColor {
                 options: vec![ManaType::Green, ManaType::White],
@@ -3403,7 +3401,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
-            cost_paid_object_mana_value: None,
+            cost_paid_object: None,
         };
         let prompt = ManaChoicePrompt::Combination {
             options: vec![
@@ -3501,7 +3499,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
-            cost_paid_object_mana_value: None,
+            cost_paid_object: None,
         };
         let prompt = ManaChoicePrompt::Combination {
             options: vec![
@@ -3794,7 +3792,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
-            cost_paid_object_mana_value: None,
+            cost_paid_object: None,
         };
         let options = vec![vec![ManaType::Blue], vec![ManaType::Black]];
         let mut events = Vec::new();
@@ -4000,7 +3998,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
-            cost_paid_object_mana_value: None,
+            cost_paid_object: None,
         };
         let prompt = ManaChoicePrompt::SingleColor {
             options: vec![ManaType::Green, ManaType::White],
@@ -4220,7 +4218,7 @@ mod tests {
     ///  to cast creature spells."
     fn make_food_chain_ability() -> AbilityDefinition {
         use crate::types::ability::{
-            ManaSpendRestriction, QuantityRef, TargetFilter as TF, TypedFilter,
+            ManaSpendRestriction, ObjectScope, QuantityRef, TargetFilter as TF, TypedFilter,
         };
         AbilityDefinition::new(
             AbilityKind::Activated,
@@ -4228,7 +4226,9 @@ mod tests {
                 produced: ManaProduction::AnyOneColor {
                     count: QuantityExpr::Offset {
                         inner: Box::new(QuantityExpr::Ref {
-                            qty: QuantityRef::CostPaidObjectManaValue,
+                            qty: QuantityRef::ObjectManaValue {
+                                scope: ObjectScope::CostPaidObject,
+                            },
                         }),
                         offset: 1,
                     },
@@ -4311,7 +4311,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
-            cost_paid_object_mana_value: None,
+            cost_paid_object: None,
         };
         let mut events = Vec::new();
         let _ = handle_exile_from_battlefield_for_mana_ability(
@@ -4369,7 +4369,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
-            cost_paid_object_mana_value: None,
+            cost_paid_object: None,
         };
         let mut events = Vec::new();
         let _ = handle_exile_from_battlefield_for_mana_ability(
@@ -4391,18 +4391,20 @@ mod tests {
 
     /// (c) Burnt-Offering / Metamorphosis class — an `AbilityResolution`
     /// stamped with a captured mana value resolves
-    /// `QuantityRef::CostPaidObjectManaValue` to that value at production time.
+    /// `ObjectManaValue { CostPaidObject }` to that value at production time.
     #[test]
-    fn cost_paid_object_mana_value_resolves_via_resolved_ability_field() {
+    fn cost_paid_object_resolves_via_resolved_ability_field() {
         use crate::game::quantity::resolve_quantity_with_targets;
-        use crate::types::ability::QuantityRef;
+        use crate::types::ability::{CostPaidObjectSnapshot, ObjectScope, QuantityRef};
 
         let state = GameState::new_two_player(42);
         let mut ability = ResolvedAbility::new(
             Effect::Mana {
                 produced: ManaProduction::AnyCombination {
                     count: QuantityExpr::Ref {
-                        qty: QuantityRef::CostPaidObjectManaValue,
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::CostPaidObject,
+                        },
                     },
                     color_options: vec![ManaColor::Black, ManaColor::Red],
                 },
@@ -4415,19 +4417,31 @@ mod tests {
             ObjectId(1),
             PlayerId(0),
         );
-        // Simulate a 5-MV creature being sacrificed as cost.
-        ability.set_cost_paid_object_mana_value_recursive(5);
+        let mut paid = crate::game::game_object::GameObject::new(
+            ObjectId(99),
+            CardId(99),
+            PlayerId(0),
+            "Paid Creature".to_string(),
+            Zone::Battlefield,
+        );
+        paid.mana_cost = crate::types::mana::ManaCost::generic(5);
+        ability.set_cost_paid_object_recursive(CostPaidObjectSnapshot {
+            object_id: paid.id,
+            lki: paid.snapshot_for_mana_spent(),
+        });
 
         let resolved = resolve_quantity_with_targets(
             &state,
             &QuantityExpr::Ref {
-                qty: QuantityRef::CostPaidObjectManaValue,
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
             },
             &ability,
         );
         assert_eq!(
             resolved, 5,
-            "CostPaidObjectManaValue must resolve to the captured mana value"
+            "CostPaidObject must resolve to the captured mana value"
         );
     }
 
@@ -4435,9 +4449,9 @@ mod tests {
     /// regression guard that avoids spurious mana production for unrelated
     /// abilities.
     #[test]
-    fn cost_paid_object_mana_value_returns_zero_without_snapshot() {
+    fn cost_paid_object_returns_zero_without_snapshot() {
         use crate::game::quantity::resolve_quantity_with_targets;
-        use crate::types::ability::QuantityRef;
+        use crate::types::ability::{ObjectScope, QuantityRef};
 
         let state = GameState::new_two_player(42);
         let ability = ResolvedAbility::new(
@@ -4455,18 +4469,20 @@ mod tests {
             ObjectId(1),
             PlayerId(0),
         );
-        // No `set_cost_paid_object_mana_value_recursive` — field stays None.
+        // No `set_cost_paid_object_recursive` — field stays None.
 
         let resolved = resolve_quantity_with_targets(
             &state,
             &QuantityExpr::Ref {
-                qty: QuantityRef::CostPaidObjectManaValue,
+                qty: QuantityRef::ObjectManaValue {
+                    scope: ObjectScope::CostPaidObject,
+                },
             },
             &ability,
         );
         assert_eq!(
             resolved, 0,
-            "CostPaidObjectManaValue must return 0 when no snapshot was captured"
+            "CostPaidObject must return 0 when no snapshot was captured"
         );
     }
 
@@ -4502,7 +4518,7 @@ mod tests {
             chosen_discards: Vec::new(),
             chosen_mana_payment: None,
             chosen_exiled_battlefield: Vec::new(),
-            cost_paid_object_mana_value: None,
+            cost_paid_object: None,
         };
         let mut events = Vec::new();
         let _ = handle_exile_from_battlefield_for_mana_ability(

@@ -19,7 +19,10 @@ use crate::types::statics::StaticMode;
 use super::super::oracle_nom::error::OracleResult;
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::target::parse_event_context_ref;
-use super::super::oracle_static::{parse_continuous_modifications, parse_static_line_multi};
+use super::super::oracle_static::{
+    parse_additive_type_clause_modifications, parse_continuous_modifications,
+    parse_static_line_multi,
+};
 use super::super::oracle_target::{parse_target, parse_type_phrase};
 use super::super::oracle_util::{
     parse_number, TextPair, SELF_REF_PARSE_ONLY_PHRASES, SELF_REF_TYPE_PHRASES,
@@ -43,6 +46,10 @@ pub(super) fn try_parse_subject_predicate_ast(
             |effect, duration, _sub_ability| PredicateAst::Restriction { effect, duration },
             ctx,
         ));
+    }
+
+    if let Some(clause) = try_parse_subject_additive_type_clause(text, ctx) {
+        return Some(clause);
     }
 
     if let Some(clause) = try_parse_subject_continuous_clause(text, ctx) {
@@ -149,6 +156,37 @@ fn extract_subject_text(text: &str) -> Option<String> {
     }
 }
 
+fn try_parse_subject_additive_type_clause(text: &str, ctx: &mut ParseContext) -> Option<ClauseAst> {
+    type VE<'a> = VerboseError<&'a str>;
+
+    let lower = text.to_lowercase();
+    let (subject_lower, predicate_lower) = nom_primitives::scan_split_at_phrase(&lower, |i| {
+        alt((tag::<_, _, VE>("are "), tag::<_, _, VE>("is "))).parse(i)
+    })?;
+    let subject_text = text[..subject_lower.len()].trim();
+    if subject_text.eq_ignore_ascii_case("you") {
+        return None;
+    }
+    let predicate = &text[text.len() - predicate_lower.len()..];
+    let application = additive_type_subject_application(subject_text, ctx)?;
+    let clause = build_additive_type_continuous_clause(&application, predicate)?;
+
+    Some(ClauseAst::SubjectPredicate {
+        subject: Box::new(SubjectPhraseAst {
+            affected: application.affected,
+            target: application.target,
+            multi_target: application.multi_target,
+            inherits_parent: application.inherits_parent,
+            is_optional: application.is_optional,
+        }),
+        predicate: Box::new(PredicateAst::Continuous {
+            effect: clause.effect,
+            duration: clause.duration,
+            sub_ability: clause.sub_ability,
+        }),
+    })
+}
+
 fn try_parse_subject_continuous_clause(
     text: &str,
     ctx: &mut ParseContext,
@@ -164,8 +202,62 @@ fn try_parse_subject_continuous_clause(
     if subject.eq_ignore_ascii_case("you") {
         return None;
     }
+    if let Some(clause) = try_parse_additive_type_continuous_clause(subject, predicate, ctx) {
+        return Some(clause);
+    }
     let application = parse_subject_application(subject, ctx)?;
     build_continuous_clause(application, predicate)
+}
+
+fn additive_type_subject_application(
+    subject: &str,
+    ctx: &mut ParseContext,
+) -> Option<SubjectApplication> {
+    let (parsed_subject, rest) = parse_target(subject);
+    if rest.trim().is_empty()
+        && matches!(
+            parsed_subject,
+            TargetFilter::TrackedSet { .. } | TargetFilter::TrackedSetFiltered { .. }
+        )
+    {
+        return subject_filter_application(parsed_subject, false);
+    }
+
+    parse_subject_application(subject, ctx)
+}
+
+fn try_parse_additive_type_continuous_clause(
+    subject: &str,
+    predicate: &str,
+    ctx: &mut ParseContext,
+) -> Option<ParsedEffectClause> {
+    let application = additive_type_subject_application(subject, ctx)?;
+    build_additive_type_continuous_clause(&application, predicate)
+}
+
+fn build_additive_type_continuous_clause(
+    application: &SubjectApplication,
+    predicate: &str,
+) -> Option<ParsedEffectClause> {
+    let modifications = parse_additive_type_clause_modifications(predicate)?;
+    let affected = static_affected_for_application(application);
+
+    Some(ParsedEffectClause {
+        effect: Effect::GenericEffect {
+            static_abilities: vec![StaticDefinition::continuous()
+                .affected(affected)
+                .modifications(modifications)
+                .description(predicate.to_string())],
+            duration: Some(Duration::Permanent),
+            target: application.target.clone(),
+        },
+        duration: Some(Duration::Permanent),
+        sub_ability: None,
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+    })
 }
 
 fn try_parse_subject_become_clause(

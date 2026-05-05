@@ -6,7 +6,7 @@ use crate::types::ability::{
 };
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
-use crate::types::identifiers::ObjectId;
+use crate::types::identifiers::{ObjectId, TrackedSetId};
 
 /// Effect handler: creates transient continuous effects from a GenericEffect.
 ///
@@ -115,6 +115,7 @@ fn register_transient_effect(
         Some(TargetFilter::Player | TargetFilter::None) | None => {}
         Some(filter) => {
             let filter = crate::game::effects::resolved_object_filter(ability, filter);
+            let filter = resolve_chain_tracked_set_filter(state, filter);
             // Broadcast filter: find matching objects at resolution time and bind each.
             // CR 107.3a + CR 601.2b: ability-context filter evaluation.
             let ctx = filter::FilterContext::from_ability(ability);
@@ -135,6 +136,39 @@ fn register_transient_effect(
                 );
             }
         }
+    }
+}
+
+fn resolve_chain_tracked_set_filter(state: &GameState, filter: TargetFilter) -> TargetFilter {
+    match filter {
+        TargetFilter::TrackedSet {
+            id: TrackedSetId(0),
+        } => state
+            .tracked_object_sets
+            .iter()
+            .filter(|(_, objects)| !objects.is_empty())
+            .max_by_key(|(id, _)| id.0)
+            .map(|(&id, _)| TargetFilter::TrackedSet { id })
+            .unwrap_or(TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            }),
+        TargetFilter::TrackedSetFiltered {
+            id: TrackedSetId(0),
+            filter,
+        } => state
+            .tracked_object_sets
+            .iter()
+            .filter(|(_, objects)| !objects.is_empty())
+            .max_by_key(|(id, _)| id.0)
+            .map(|(&id, _)| TargetFilter::TrackedSetFiltered {
+                id,
+                filter: filter.clone(),
+            })
+            .unwrap_or(TargetFilter::TrackedSetFiltered {
+                id: TrackedSetId(0),
+                filter,
+            }),
+        other => other,
     }
 }
 
@@ -584,5 +618,58 @@ mod tests {
                 PlayerId(0)
             )
         );
+    }
+
+    #[test]
+    fn generic_effect_binds_tracked_set_sentinel_to_latest_chain_set() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let returned = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Returned Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .tracked_object_sets
+            .insert(TrackedSetId(7), vec![returned]);
+        state.chain_tracked_set_id = Some(TrackedSetId(7));
+
+        let static_def = StaticDefinition::continuous()
+            .affected(TargetFilter::TrackedSet {
+                id: TrackedSetId(0),
+            })
+            .modifications(vec![ContinuousModification::AddSubtype {
+                subtype: "Vampire".to_string(),
+            }]);
+
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![static_def],
+                duration: Some(Duration::Permanent),
+                target: None,
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.transient_continuous_effects.len(), 1);
+        let tce = &state.transient_continuous_effects[0];
+        assert_eq!(tce.affected, TargetFilter::SpecificObject { id: returned });
+        assert!(tce.modifications.iter().any(|modification| matches!(
+            modification,
+            ContinuousModification::AddSubtype { subtype } if subtype == "Vampire"
+        )));
     }
 }

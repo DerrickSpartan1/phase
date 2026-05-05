@@ -2414,7 +2414,12 @@ fn parse_cost_paid_mana_value_reference(
         tag("land"),
     ))
     .parse(rest)?;
-    Ok((rest, QuantityRef::CostPaidObjectManaValue))
+    Ok((
+        rest,
+        QuantityRef::ObjectManaValue {
+            scope: ObjectScope::CostPaidObject,
+        },
+    ))
 }
 
 /// Parse "with [count] [counter] counter(s) on it/them" using pure nom combinators.
@@ -4185,7 +4190,9 @@ mod tests {
                 comparator: Comparator::EQ,
                 value: QuantityExpr::Offset {
                     inner: Box::new(QuantityExpr::Ref {
-                        qty: QuantityRef::CostPaidObjectManaValue,
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::CostPaidObject,
+                        },
                     }),
                     offset: 1,
                 },
@@ -4234,7 +4241,9 @@ mod tests {
             TargetFilter::Typed(TypedFilter::card().properties(vec![FilterProp::Cmc {
                 comparator: Comparator::GT,
                 value: QuantityExpr::Ref {
-                    qty: QuantityRef::CostPaidObjectManaValue,
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject,
+                    },
                 },
             }]))
         );
