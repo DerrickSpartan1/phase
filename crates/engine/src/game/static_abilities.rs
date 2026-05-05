@@ -732,6 +732,7 @@ pub(crate) fn static_filter_matches(
                         // CR 109.4: Static abilities have no ability-target context
                         // in which to resolve a target player. Fail closed — the
                         // parser never emits this variant for static filters.
+                        crate::types::ability::ControllerRef::ScopedPlayer => false,
                         crate::types::ability::ControllerRef::TargetPlayer => false,
                         crate::types::ability::ControllerRef::DefendingPlayer => false,
                     };

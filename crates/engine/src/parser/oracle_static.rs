@@ -7550,6 +7550,7 @@ fn try_parse_cost_modification(text: &str, lower: &str) -> Option<StaticDefiniti
             // CR 109.4: TargetPlayer has no defined semantics here (cost-modification
             // static scoping). Fall back to an untyped filter; the parser should not
             // emit this variant for cost statics.
+            Some(ControllerRef::ScopedPlayer) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::TargetPlayer) => TargetFilter::Typed(TypedFilter::card()),
             Some(ControllerRef::DefendingPlayer) => TargetFilter::Typed(TypedFilter::card()),
             None => TargetFilter::Typed(TypedFilter::card()),

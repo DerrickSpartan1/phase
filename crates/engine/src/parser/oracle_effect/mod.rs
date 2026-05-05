@@ -6583,6 +6583,76 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
 /// rewrite uniformly. Only reached when the top-level `def.player_scope` is
 /// set, so non-scoped abilities keep the target-scoped resolution path.
 fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
+    fn rewrite_filter_controller_to_scoped(filter: &mut TargetFilter) {
+        match filter {
+            TargetFilter::Typed(typed) if typed.controller == Some(ControllerRef::You) => {
+                typed.controller = Some(ControllerRef::ScopedPlayer);
+            }
+            TargetFilter::Not { filter } => rewrite_filter_controller_to_scoped(filter),
+            TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+                for filter in filters {
+                    rewrite_filter_controller_to_scoped(filter);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn rewrite_condition_quantity_expr(expr: &mut QuantityExpr) {
+        match expr {
+            QuantityExpr::Ref { qty } => match qty {
+                QuantityRef::LifeTotal { player }
+                | QuantityRef::HandSize { player }
+                | QuantityRef::LifeLostThisTurn { player }
+                | QuantityRef::LifeGainedThisTurn { player }
+                | QuantityRef::PartySize { player }
+                    if *player == PlayerScope::Controller =>
+                {
+                    *player = PlayerScope::ScopedPlayer;
+                }
+                QuantityRef::ObjectCount { filter } => rewrite_filter_controller_to_scoped(filter),
+                _ => {}
+            },
+            QuantityExpr::HalfRounded { inner, .. }
+            | QuantityExpr::Multiply { inner, .. }
+            | QuantityExpr::Offset { inner, .. } => rewrite_condition_quantity_expr(inner),
+            QuantityExpr::Sum { exprs } => {
+                for inner in exprs {
+                    rewrite_condition_quantity_expr(inner);
+                }
+            }
+            QuantityExpr::UpTo { max } => rewrite_condition_quantity_expr(max),
+            QuantityExpr::Fixed { .. } => {}
+        }
+    }
+
+    fn rewrite_condition(condition: &mut AbilityCondition) {
+        match condition {
+            AbilityCondition::QuantityCheck { lhs, rhs, .. } => {
+                rewrite_condition_quantity_expr(lhs);
+                rewrite_condition_quantity_expr(rhs);
+            }
+            AbilityCondition::TargetMatchesFilter { filter, .. }
+            | AbilityCondition::SourceMatchesFilter { filter }
+            | AbilityCondition::ZoneChangeObjectMatchesFilter { filter, .. }
+            | AbilityCondition::ControllerControlsMatching { filter }
+            | AbilityCondition::ZoneChangedThisWay { filter }
+            | AbilityCondition::CostPaidObjectMatchesFilter { filter } => {
+                rewrite_filter_controller_to_scoped(filter);
+            }
+            AbilityCondition::Not { condition }
+            | AbilityCondition::ConditionInstead { inner: condition } => {
+                rewrite_condition(condition)
+            }
+            AbilityCondition::And { conditions } | AbilityCondition::Or { conditions } => {
+                for condition in conditions {
+                    rewrite_condition(condition);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn rewrite_quantity_expr(expr: &mut QuantityExpr) {
         match expr {
             QuantityExpr::Ref { qty } => match qty {
@@ -6590,16 +6660,15 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                     player: PlayerScope::Target,
                 } => {
                     *qty = QuantityRef::LifeTotal {
-                        player: PlayerScope::Controller,
+                        player: PlayerScope::ScopedPlayer,
                     }
                 }
                 QuantityRef::TargetZoneCardCount { zone } => match zone {
                     crate::types::ability::ZoneRef::Hand => {
                         *qty = QuantityRef::HandSize {
-                            player: PlayerScope::Controller,
+                            player: PlayerScope::ScopedPlayer,
                         }
                     }
-                    crate::types::ability::ZoneRef::Graveyard => *qty = QuantityRef::GraveyardSize,
                     crate::types::ability::ZoneRef::Library => {
                         *qty = QuantityRef::ZoneCardCount {
                             zone: crate::types::ability::ZoneRef::Library,
@@ -6607,6 +6676,10 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                             scope: crate::types::ability::CountScope::Controller,
                         };
                     }
+                    // GraveyardSize / ZoneCardCount are still controller-based;
+                    // leave target-scoped graveyard/exile counts unchanged until
+                    // CountScope has a scoped-player axis.
+                    crate::types::ability::ZoneRef::Graveyard => {}
                     // Exile has no clean controller-scoped equivalent in the
                     // current `QuantityRef` set. Leave untouched — the
                     // scoped-controller resolver path does not exist for
@@ -6631,6 +6704,9 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     }
 
     each_quantity_expr_mut(&mut def.effect, &mut rewrite_quantity_expr);
+    if let Some(condition) = def.condition.as_mut() {
+        rewrite_condition(condition);
+    }
     if let Some(sub) = def.sub_ability.as_mut() {
         rewrite_player_scope_refs(sub);
     }

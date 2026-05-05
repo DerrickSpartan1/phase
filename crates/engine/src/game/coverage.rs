@@ -225,6 +225,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::Any => "any target".into(),
         TargetFilter::Player => "player".into(),
         TargetFilter::Controller => "controller".into(),
+        TargetFilter::ScopedPlayer => "scoped player".into(),
         TargetFilter::SelfRef => "self".into(),
         TargetFilter::StackAbility => "ability on stack".into(),
         TargetFilter::StackSpell => "spell on stack".into(),
@@ -437,6 +438,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             let label = match ctrl {
                 ControllerRef::You => "you",
                 ControllerRef::Opponent => "opponent",
+                ControllerRef::ScopedPlayer => "scoped player",
                 ControllerRef::TargetPlayer => "target player",
                 ControllerRef::DefendingPlayer => "defending player",
             };
@@ -500,6 +502,7 @@ fn fmt_controller(ctrl: &ControllerRef) -> String {
     match ctrl {
         ControllerRef::You => "you control",
         ControllerRef::Opponent => "opponent controls",
+        ControllerRef::ScopedPlayer => "scoped player controls",
         ControllerRef::TargetPlayer => "target player controls",
         ControllerRef::DefendingPlayer => "defending player controls",
     }
@@ -596,6 +599,7 @@ fn fmt_aggregate_function(f: AggregateFunction) -> &'static str {
 fn fmt_player_scope(scope: PlayerScope) -> String {
     match scope {
         PlayerScope::Controller => "you".to_string(),
+        PlayerScope::ScopedPlayer => "scoped player".to_string(),
         PlayerScope::Target => "target player".to_string(),
         PlayerScope::RecipientController => "recipient's controller".to_string(),
         PlayerScope::Opponent { aggregate } => {

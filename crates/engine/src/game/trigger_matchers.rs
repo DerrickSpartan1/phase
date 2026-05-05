@@ -517,6 +517,7 @@ pub(super) fn target_filter_matches_object(
         TargetFilter::None => false,
         TargetFilter::Player => false,
         TargetFilter::Controller => false,
+        TargetFilter::ScopedPlayer => false,
         // SpecificPlayer scopes to a player, not an object — never matches an object.
         TargetFilter::SpecificPlayer { .. } => false,
         TargetFilter::TriggeringSpellController

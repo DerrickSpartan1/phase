@@ -188,6 +188,8 @@ mod tests {
                 target,
             },
             controller,
+            original_controller: None,
+            scoped_player: None,
             source_id: ObjectId(1),
             targets: vec![],
             kind: AbilityKind::Spell,
@@ -317,6 +319,8 @@ mod tests {
         ResolvedAbility {
             effect: Effect::LoseAllPlayerCounters { target },
             controller,
+            original_controller: None,
+            scoped_player: None,
             source_id: ObjectId(1),
             targets: vec![],
             kind: AbilityKind::Spell,

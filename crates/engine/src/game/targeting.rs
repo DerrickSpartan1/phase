@@ -88,6 +88,7 @@ pub fn find_legal_targets(
                     // CR 109.4: TargetPlayer is nonsensical when enumerating target
                     // candidates (the "target player" is what's being chosen here).
                     // Fail closed.
+                    Some(ControllerRef::ScopedPlayer) => false,
                     Some(ControllerRef::TargetPlayer) => false,
                     Some(ControllerRef::DefendingPlayer) => false,
                     None => true,
@@ -371,7 +372,8 @@ pub fn resolve_effect_player_ref(
     filter: &TargetFilter,
 ) -> Option<PlayerId> {
     match filter {
-        TargetFilter::Controller => Some(ability.controller),
+        TargetFilter::Controller => Some(ability.scoped_player.unwrap_or(ability.controller)),
+        TargetFilter::ScopedPlayer => ability.scoped_player,
         TargetFilter::Player => ability.targets.iter().find_map(|target| match target {
             TargetRef::Player(player) => Some(*player),
             _ => None,

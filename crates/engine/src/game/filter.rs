@@ -169,6 +169,36 @@ impl<'a> FilterContext<'a> {
     }
 }
 
+fn scoped_player_or_controller(
+    ability: Option<&ResolvedAbility>,
+    source_controller: Option<PlayerId>,
+) -> Option<PlayerId> {
+    ability.and_then(|a| a.scoped_player).or(source_controller)
+}
+
+fn controller_ref_player(
+    state: &GameState,
+    source_id: ObjectId,
+    source_controller: Option<PlayerId>,
+    ability: Option<&ResolvedAbility>,
+    controller: &ControllerRef,
+) -> Option<PlayerId> {
+    match controller {
+        ControllerRef::You => source_controller,
+        ControllerRef::Opponent => None,
+        ControllerRef::ScopedPlayer => scoped_player_or_controller(ability, source_controller),
+        ControllerRef::TargetPlayer => ability.and_then(|a| {
+            a.targets.iter().find_map(|t| match t {
+                TargetRef::Player(pid) => Some(*pid),
+                TargetRef::Object(_) => None,
+            })
+        }),
+        ControllerRef::DefendingPlayer => {
+            crate::game::combat::defending_player_for_attacker(state, source_id)
+        }
+    }
+}
+
 /// Check if an object matches a typed TargetFilter against the given context.
 ///
 /// This is the unified entry point for filter evaluation. Build a
@@ -399,8 +429,9 @@ fn filter_inner_for_object(
     match filter {
         TargetFilter::None => false,
         TargetFilter::Any => true,
-        TargetFilter::Player => false,     // Players are not objects
-        TargetFilter::Controller => false, // Controller is a player, not an object
+        TargetFilter::Player => false,       // Players are not objects
+        TargetFilter::Controller => false,   // Controller is a player, not an object
+        TargetFilter::ScopedPlayer => false, // ScopedPlayer is a player, not an object
         TargetFilter::SelfRef => object_id == source_id,
         TargetFilter::Typed(TypedFilter {
             type_filters,
@@ -424,6 +455,12 @@ fn filter_inner_for_object(
                     ControllerRef::Opponent => {
                         if source_controller == Some(obj.controller) {
                             return false;
+                        }
+                    }
+                    ControllerRef::ScopedPlayer => {
+                        match scoped_player_or_controller(ability, source_controller) {
+                            Some(pid) if pid == obj.controller => {}
+                            _ => return false,
                         }
                     }
                     // CR 109.4 + CR 115.1: "target player controls" — filter scope
@@ -517,7 +554,7 @@ fn filter_inner_for_object(
         // StackAbility/StackSpell targeting is handled directly at call sites, not via filter
         TargetFilter::StackAbility | TargetFilter::StackSpell => false,
         TargetFilter::SpecificObject { id: target_id } => object_id == *target_id,
-        // SpecificPlayer scopes to a player, not an object — no object matches.
+        // SpecificPlayer scopes to players, not objects — no object matches.
         TargetFilter::SpecificPlayer { .. } => false,
         TargetFilter::AttachedTo => state
             .objects
@@ -652,6 +689,7 @@ fn zone_change_filter_inner(
         TargetFilter::Any => true,
         TargetFilter::Player => false,
         TargetFilter::Controller => false,
+        TargetFilter::ScopedPlayer => false,
         TargetFilter::SelfRef => record.object_id == source_id,
         TargetFilter::Typed(TypedFilter {
             type_filters,
@@ -671,6 +709,12 @@ fn zone_change_filter_inner(
                     }
                     ControllerRef::Opponent if source_controller == Some(record.controller) => {
                         return false;
+                    }
+                    ControllerRef::ScopedPlayer => {
+                        match scoped_player_or_controller(ability, source_controller) {
+                            Some(pid) if pid == record.controller => {}
+                            _ => return false,
+                        }
                     }
                     // CR 109.4 + CR 115.1: "target player controls" — match the
                     // record's controller against the chosen player target.
@@ -728,8 +772,8 @@ fn zone_change_filter_inner(
             zone_change_filter_inner(state, record, inner, source_id, source_controller, ability)
         }),
         TargetFilter::SpecificObject { id } => record.object_id == *id,
-        // SpecificPlayer scopes to a player, not an object — a zone-change
-        // record is always an object transition.
+        // SpecificPlayer scopes to players, not objects — a zone-change record
+        // is always an object transition.
         TargetFilter::SpecificPlayer { .. } => false,
         TargetFilter::HasChosenName => {
             let chosen_name = state.objects.get(&source_id).and_then(|obj| {
@@ -929,6 +973,7 @@ pub fn spell_record_matches_filter(
                 match ctrl {
                     ControllerRef::You => {}
                     ControllerRef::Opponent => return false,
+                    ControllerRef::ScopedPlayer => return false,
                     // CR 109.4: A target-player-scoped filter has no meaning for
                     // a spell-history record (no ability context to resolve the
                     // target). Fail closed — this combination should not be
@@ -957,6 +1002,7 @@ pub fn spell_record_matches_filter(
         TargetFilter::None
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::StackAbility
         | TargetFilter::StackSpell
@@ -1105,6 +1151,7 @@ fn spell_object_matches_filter_inner(
                 match ctrl {
                     ControllerRef::You if caster != source_controller => return false,
                     ControllerRef::Opponent if caster == source_controller => return false,
+                    ControllerRef::ScopedPlayer => return false,
                     // CR 109.4: Target-player scope is undefined for spell-cast
                     // history (no ability context). Fail closed.
                     ControllerRef::TargetPlayer => return false,
@@ -1153,6 +1200,7 @@ fn spell_object_matches_filter_inner(
         TargetFilter::None
         | TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::ScopedPlayer
         | TargetFilter::SelfRef
         | TargetFilter::StackAbility
         | TargetFilter::StackSpell
@@ -1547,18 +1595,8 @@ fn matches_filter_prop(
         // Name comparison is case-insensitive per `FilterProp::Named` /
         // `FilterProp::SameName` conventions.
         FilterProp::NameMatchesAnyPermanent { controller } => {
-            let controller_pid = controller.as_ref().and_then(|c| match c {
-                ControllerRef::You => source.controller,
-                ControllerRef::Opponent => None,
-                ControllerRef::TargetPlayer => source.ability.and_then(|a| {
-                    a.targets.iter().find_map(|t| match t {
-                        TargetRef::Player(pid) => Some(*pid),
-                        TargetRef::Object(_) => None,
-                    })
-                }),
-                ControllerRef::DefendingPlayer => {
-                    crate::game::combat::defending_player_for_attacker(state, source.id)
-                }
+            let controller_pid = controller.as_ref().and_then(|c| {
+                controller_ref_player(state, source.id, source.controller, source.ability, c)
             });
             state.objects.values().any(|perm| {
                 if perm.zone != crate::types::zones::Zone::Battlefield {
@@ -1569,6 +1607,7 @@ fn matches_filter_prop(
                     (Some(ControllerRef::Opponent), _) => {
                         source.controller.is_some() && Some(perm.controller) != source.controller
                     }
+                    (Some(ControllerRef::ScopedPlayer), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::TargetPlayer), Some(pid)) => perm.controller == pid,
                     (Some(ControllerRef::DefendingPlayer), Some(pid)) => perm.controller == pid,
                     (Some(_), None) => false,
@@ -1582,6 +1621,10 @@ fn matches_filter_prop(
             ControllerRef::You => source.controller == Some(obj.owner),
             ControllerRef::Opponent => {
                 source.controller.is_some() && source.controller != Some(obj.owner)
+            }
+            ControllerRef::ScopedPlayer => {
+                scoped_player_or_controller(source.ability, source.controller)
+                    .is_some_and(|pid| pid == obj.owner)
             }
             // CR 109.5: Ownership relative to a chosen target player.
             // Resolves against the first TargetRef::Player in ability.targets.
@@ -1697,6 +1740,10 @@ fn matches_filter_prop(
                 Some(ControllerRef::Opponent) => {
                     source.controller.is_some_and(|c| c != att.controller)
                 }
+                Some(ControllerRef::ScopedPlayer) => {
+                    scoped_player_or_controller(source.ability, source.controller)
+                        .is_some_and(|pid| pid == att.controller)
+                }
                 Some(ControllerRef::TargetPlayer) => source
                     .ability
                     .and_then(|a| {
@@ -1737,6 +1784,10 @@ fn matches_filter_prop(
                     Some(ControllerRef::You) => source.controller == Some(att.controller),
                     Some(ControllerRef::Opponent) => {
                         source.controller.is_some_and(|c| c != att.controller)
+                    }
+                    Some(ControllerRef::ScopedPlayer) => {
+                        scoped_player_or_controller(source.ability, source.controller)
+                            .is_some_and(|pid| pid == att.controller)
                     }
                     Some(ControllerRef::TargetPlayer) => source
                         .ability
@@ -2047,6 +2098,10 @@ fn zone_change_record_matches_property(
             ControllerRef::You => source.controller == Some(record.owner),
             ControllerRef::Opponent => {
                 source.controller.is_some() && source.controller != Some(record.owner)
+            }
+            ControllerRef::ScopedPlayer => {
+                scoped_player_or_controller(source.ability, source.controller)
+                    .is_some_and(|pid| pid == record.owner)
             }
             // CR 109.5: Ownership relative to a chosen target player.
             ControllerRef::TargetPlayer => source
@@ -2505,9 +2560,11 @@ pub fn player_matches_target_filter(
         TargetFilter::Any | TargetFilter::Player => true,
         TargetFilter::SelfRef => false, // SelfRef refers to objects, not players
         TargetFilter::Controller => source_controller == Some(player_id),
+        TargetFilter::ScopedPlayer => false,
         TargetFilter::Typed(ref tf) if tf.type_filters.is_empty() => match &tf.controller {
             Some(ControllerRef::You) => source_controller == Some(player_id),
             Some(ControllerRef::Opponent) => source_controller.is_some_and(|c| c != player_id),
+            Some(ControllerRef::ScopedPlayer) => false,
             // CR 109.4: TargetPlayer has no meaning when matching a player against
             // a filter without ability context. Fail closed (mirrors the pattern
             // established at filter.rs:526–569 for spell-record filters).

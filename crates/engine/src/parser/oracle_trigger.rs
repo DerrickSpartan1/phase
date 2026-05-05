@@ -9384,6 +9384,31 @@ mod tests {
     }
 
     #[test]
+    fn hope_estheim_end_step_mill_keeps_you_quantity_controller_scoped() {
+        let def = parse_trigger_line(
+            "At the beginning of your end step, each opponent mills X cards, where X is the amount of life you gained this turn.",
+            "Hope Estheim",
+        );
+        let execute = def.execute.as_ref().expect("trigger execute ability");
+
+        assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
+        match &*execute.effect {
+            Effect::Mill { target, count, .. } => {
+                assert_eq!(*target, TargetFilter::Controller);
+                assert!(matches!(
+                    count,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::LifeGainedThisTurn {
+                            player: PlayerScope::Controller
+                        }
+                    }
+                ));
+            }
+            other => panic!("expected Mill effect, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn phase_trigger_combat_on_your_turn() {
         let def = parse_trigger_line(
             "At the beginning of combat on your turn, target creature gets +1/+1 until end of turn.",

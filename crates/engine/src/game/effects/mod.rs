@@ -903,6 +903,10 @@ pub(crate) fn resolve_player_for_context_ref(
     ability: &ResolvedAbility,
     target_filter: &TargetFilter,
 ) -> PlayerId {
+    if matches!(target_filter, TargetFilter::ScopedPlayer) {
+        return ability.scoped_player.unwrap_or(ability.controller);
+    }
+
     // CR 115.1: For non-context-ref filters (e.g. `TargetFilter::Player` from
     // "target player draws"), the drawing player was chosen at announcement
     // and lives in `ability.targets`. Context-ref filters (Controller,
@@ -931,6 +935,9 @@ pub(crate) fn resolve_player_for_context_ref(
                 .map(|obj| obj.controller)
                 .unwrap_or(ability.controller),
         };
+    }
+    if matches!(target_filter, TargetFilter::Controller) {
+        return ability.scoped_player.unwrap_or(ability.controller);
     }
     // CR 115.1d: `ParentTargetController` resolves the controller of the parent
     // ability's targeted object. In a spell-resolution chain (no
@@ -1238,10 +1245,11 @@ pub fn resolve_ability_chain(
     let ability = ability.as_ref();
 
     // CR 608.2: player_scope iteration — when an ability has player_scope set,
-    // execute the scoped instruction once per matching player, temporarily
-    // overriding ability.controller for each iteration so effects like Discard,
-    // Draw, Mill target the correct player. The unscoped tail then resumes
-    // once after the scoped loop, matching the printed instruction order.
+    // execute the scoped instruction once per matching player. Runtime keeps
+    // the scoped player as the acting `controller` for legacy effect handlers
+    // while preserving `original_controller` so "you" quantities still read
+    // the printed ability controller. The unscoped tail then resumes once
+    // after the scoped loop, matching the printed instruction order.
     if let Some(ref scope) = ability.player_scope {
         let controller = ability.controller;
         let matching_players: Vec<PlayerId> = crate::game::players::apnap_order(state)
@@ -1254,7 +1262,9 @@ pub fn resolve_ability_chain(
         let mut paused = false;
         for (i, pid) in matching_players.iter().enumerate() {
             let mut scoped = scoped_template.clone();
+            scoped.set_original_controller_recursive(controller);
             scoped.controller = *pid;
+            scoped.set_scoped_player_recursive(*pid);
             resolve_ability_chain(state, &scoped, events, depth + 1)?;
 
             // CR 608.2e: Break if inner effect entered a player-choice state —
@@ -1267,7 +1277,9 @@ pub fn resolve_ability_chain(
                 // unscoped tail runs once after the final scoped iteration.
                 for &remaining_pid in remaining.iter().rev() {
                     let mut remaining_scoped = scoped_template.clone();
+                    remaining_scoped.set_original_controller_recursive(controller);
                     remaining_scoped.controller = remaining_pid;
+                    remaining_scoped.set_scoped_player_recursive(remaining_pid);
                     if let Some(prev) = tail {
                         super::ability_utils::append_to_sub_chain(&mut remaining_scoped, *prev);
                     }
@@ -1289,7 +1301,7 @@ pub fn resolve_ability_chain(
     }
 
     // CR 608.2c: Evaluate top-level condition before emitting any optional or unless-pay
-    // choice. This must run after player_scope rebinding so scoped abilities test
+    // choice. This must run after player_scope binding so scoped abilities test
     // conditions relative to the scoped player.
     if let Some(ref condition) = ability.condition {
         if !evaluate_condition(condition, state, ability) {
@@ -2176,8 +2188,11 @@ fn evaluate_condition(
                     && crate::game::filter::matches_target_filter(state, o.id, filter, &ctx)
             })
         }
-        // CR 608.2c: "If it's your turn" — check active player against controller.
-        AbilityCondition::IsYourTurn => state.active_player == ability.controller,
+        // CR 608.2c: "If it's your turn" — check active player against the
+        // scoped player during each-player iteration, otherwise the controller.
+        AbilityCondition::IsYourTurn => {
+            state.active_player == ability.scoped_player.unwrap_or(ability.controller)
+        }
         // CR 500.8 + CR 506.1 + CR 608.2c: "if it's the first combat phase
         // of the turn" gates follow-up effects such as additional combats.
         AbilityCondition::FirstCombatPhaseOfTurn => state.combat_phases_started_this_turn == 1,
@@ -4384,6 +4399,49 @@ mod tests {
             1,
             "opponent should have drawn a card"
         );
+    }
+
+    #[test]
+    fn player_scope_preserves_controller_for_you_quantities() {
+        let mut state = GameState::new_two_player(42);
+        state.players[0].life_gained_this_turn = 3;
+        state.players[1].life_gained_this_turn = 0;
+
+        for i in 0..5 {
+            create_object(
+                &mut state,
+                CardId(10 + i),
+                PlayerId(1),
+                format!("Opponent Card {i}"),
+                Zone::Library,
+            );
+        }
+
+        let mut ability = ResolvedAbility::new(
+            Effect::Mill {
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeGainedThisTurn {
+                        player: PlayerScope::Controller,
+                    },
+                },
+                target: TargetFilter::Controller,
+                destination: Zone::Graveyard,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        ability.player_scope = Some(PlayerFilter::Opponent);
+
+        let mut events = Vec::new();
+        resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.players[1].graveyard.len(),
+            3,
+            "opponent should mill based on the original controller's life gained"
+        );
+        assert_eq!(state.players[1].library.len(), 2);
     }
 
     #[test]

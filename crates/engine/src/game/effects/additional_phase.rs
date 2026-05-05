@@ -93,6 +93,8 @@ mod tests {
                 followed_by,
             },
             controller,
+            original_controller: None,
+            scoped_player: None,
             source_id: ObjectId(1),
             targets: vec![],
             kind: AbilityKind::Spell,

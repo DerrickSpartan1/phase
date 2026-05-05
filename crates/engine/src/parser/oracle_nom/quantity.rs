@@ -280,20 +280,23 @@ fn parse_cards_in_possessive_zone(input: &str) -> OracleResult<'_, QuantityRef> 
 /// permanents they control"). Mirrors `parse_number_of_controlled_type` but
 /// drops the "the number of" prefix required there, so the combinator is
 /// reachable from fractional expressions ("half the X they control"). The
-/// `"they"` arm uses `ControllerRef::You` because `player_scope` iteration
-/// rebinds controller to the iterating player; the `rewrite_player_scope_refs`
-/// walker is NOT required for this path because the typed filter's
-/// `ControllerRef::You` already resolves against the rebound controller.
+/// `"they"` arm uses `ControllerRef::ScopedPlayer` because `player_scope`
+/// iteration binds the affected player separately from the printed ability
+/// controller. `"you"` remains `ControllerRef::You`.
 fn parse_possessive_objects_they_control(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("the ").parse(input)?;
     let (rest, tf) = parse_type_filter_word(rest)?;
-    let (rest, _) = alt((tag(" they control"), tag(" you control"))).parse(rest)?;
+    let (rest, controller) = alt((
+        value(ControllerRef::ScopedPlayer, tag(" they control")),
+        value(ControllerRef::You, tag(" you control")),
+    ))
+    .parse(rest)?;
     Ok((
         rest,
         QuantityRef::ObjectCount {
             filter: TargetFilter::Typed(TypedFilter {
                 type_filters: vec![tf],
-                controller: Some(ControllerRef::You),
+                controller: Some(controller),
                 properties: Vec::new(),
             }),
         },
@@ -1716,8 +1719,8 @@ fn parse_number_of_object_colors_tail(input: &str) -> OracleResult<'_, QuantityR
     Ok((rest, QuantityRef::ObjectColorCount { scope }))
 }
 
-/// Parse controller-scoped combat-class counts:
-/// "for each attacking/blocking creature they control".
+/// Parse controller/scoped-player combat-class counts:
+/// "for each attacking/blocking creature they/you control".
 fn parse_for_each_combat_creature_controlled(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, combat_property) = alt((
         value(FilterProp::Attacking, tag("attacking ")),
@@ -1725,14 +1728,18 @@ fn parse_for_each_combat_creature_controlled(input: &str) -> OracleResult<'_, Qu
     ))
     .parse(input)?;
     let (rest, tf) = parse_type_filter_word(rest)?;
-    let (rest, _) = alt((tag(" they control"), tag(" you control"))).parse(rest)?;
+    let (rest, controller) = alt((
+        value(ControllerRef::ScopedPlayer, tag(" they control")),
+        value(ControllerRef::You, tag(" you control")),
+    ))
+    .parse(rest)?;
 
     Ok((
         rest,
         QuantityRef::ObjectCount {
             filter: TargetFilter::Typed(TypedFilter {
                 type_filters: vec![tf],
-                controller: Some(ControllerRef::You),
+                controller: Some(controller),
                 properties: vec![combat_property],
             }),
         },
@@ -3345,6 +3352,29 @@ mod tests {
                 })
             } if type_filters == vec![TypeFilter::Creature]
                 && properties == vec![FilterProp::Attacking]
+        ));
+    }
+
+    #[test]
+    fn test_parse_half_permanents_they_control_uses_scoped_player() {
+        let (rest, q) = parse_half_rounded("half the permanents they control").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            q,
+            QuantityExpr::HalfRounded {
+                inner,
+                ..
+            } if matches!(
+                *inner,
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectCount {
+                        filter: TargetFilter::Typed(TypedFilter {
+                            controller: Some(ControllerRef::ScopedPlayer),
+                            ..
+                        })
+                    }
+                }
+            )
         ));
     }
 

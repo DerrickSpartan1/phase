@@ -45,6 +45,9 @@ pub struct QuantityContext {
     /// evaluator when the dynamic modification's filter contains
     /// `FilterProp::AttachedToRecipient`; `None` otherwise.
     pub recipient: Option<ObjectId>,
+    /// Current player for an "each player/opponent" resolution pass. Distinct
+    /// from `controller`, which remains the printed ability's controller.
+    pub scoped_player: Option<PlayerId>,
 }
 
 impl QuantityContext {
@@ -73,6 +76,7 @@ pub fn resolve_quantity(
             entering: None,
             source: source_id,
             recipient: None,
+            scoped_player: None,
         },
     )
 }
@@ -96,6 +100,7 @@ pub fn resolve_quantity_with_recipient(
             entering: None,
             source: source_id,
             recipient: Some(recipient_id),
+            scoped_player: None,
         },
     )
 }
@@ -380,16 +385,18 @@ pub fn resolve_quantity_with_targets(
     expr: &QuantityExpr,
     ability: &ResolvedAbility,
 ) -> i32 {
+    let controller = ability.original_controller.unwrap_or(ability.controller);
     match expr {
         QuantityExpr::Fixed { value } => *value,
         QuantityExpr::Ref { qty } => resolve_ref(
             state,
             qty,
-            ability.controller,
+            controller,
             QuantityContext {
                 entering: None,
                 source: ability.source_id,
                 recipient: None,
+                scoped_player: ability.scoped_player,
             },
             &ability.targets,
             ability.chosen_x,
@@ -409,16 +416,18 @@ pub(crate) fn resolve_quantity_with_targets_and_recipient(
     ability: &ResolvedAbility,
     recipient_id: ObjectId,
 ) -> i32 {
+    let controller = ability.original_controller.unwrap_or(ability.controller);
     match expr {
         QuantityExpr::Fixed { value } => *value,
         QuantityExpr::Ref { qty } => resolve_ref(
             state,
             qty,
-            ability.controller,
+            controller,
             QuantityContext {
                 entering: None,
                 source: ability.source_id,
                 recipient: Some(recipient_id),
+                scoped_player: ability.scoped_player,
             },
             &ability.targets,
             ability.chosen_x,
@@ -452,6 +461,7 @@ pub fn resolve_quantity_with_targets_slice(
                 entering: None,
                 source: source_id,
                 recipient: None,
+                scoped_player: None,
             },
             targets,
             None,
@@ -485,6 +495,7 @@ pub(crate) fn resolve_quantity_scoped(
                 entering: None,
                 source: source_id,
                 recipient: None,
+                scoped_player: Some(scope_player),
             },
             &[],
             None,
@@ -1153,6 +1164,9 @@ fn resolve_ref(
                     let controller_matches = match land_controller {
                         ControllerRef::You => obj.controller == controller,
                         ControllerRef::Opponent => obj.controller != controller,
+                        ControllerRef::ScopedPlayer => {
+                            obj.controller == scoped_player_or_controller(ability, controller)
+                        }
                         ControllerRef::TargetPlayer => target_player == Some(obj.controller),
                         ControllerRef::DefendingPlayer => {
                             crate::game::combat::defending_player_for_attacker(state, ctx.source)
@@ -1348,6 +1362,9 @@ fn resolve_ref(
                         None => true,
                         Some(ControllerRef::You) => snap.controller == controller,
                         Some(ControllerRef::Opponent) => snap.controller != controller,
+                        Some(ControllerRef::ScopedPlayer) => {
+                            snap.controller == scoped_player_or_controller(ability, controller)
+                        }
                         Some(ControllerRef::TargetPlayer) => ability
                             .and_then(|a| {
                                 a.targets.iter().find_map(|t| match t {
@@ -1365,6 +1382,15 @@ fn resolve_ref(
             )
         }
     }
+}
+
+fn scoped_player_or_controller(
+    ability: Option<&ResolvedAbility>,
+    controller: PlayerId,
+) -> PlayerId {
+    ability
+        .and_then(|ability| ability.scoped_player)
+        .unwrap_or(controller)
 }
 
 /// Check if an object matches a set of type filters for zone card counting.
@@ -1686,6 +1712,11 @@ where
             .players
             .iter()
             .find(|p| p.id == controller)
+            .map_or(0, &mut extract),
+        PlayerScope::ScopedPlayer => state
+            .players
+            .iter()
+            .find(|p| p.id == ctx.scoped_player.unwrap_or(controller))
             .map_or(0, &mut extract),
         PlayerScope::Target => targets
             .iter()
@@ -2072,6 +2103,7 @@ mod tests {
                     entering: Some(entering),
                     source: static_source,
                     recipient: None,
+                    scoped_player: None,
                 },
             ),
             1

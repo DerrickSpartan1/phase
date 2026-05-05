@@ -33,6 +33,9 @@ fn resolve_sacrifice_scope(
     };
     match scope {
         None | Some(ControllerRef::You) => vec![ability.controller],
+        Some(ControllerRef::ScopedPlayer) => {
+            vec![ability.scoped_player.unwrap_or(ability.controller)]
+        }
         Some(ControllerRef::Opponent) => state
             .players
             .iter()

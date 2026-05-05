@@ -124,7 +124,7 @@ fn collect_player_targets(
     }
 
     match target {
-        TargetFilter::Controller => vec![ability.controller],
+        TargetFilter::Controller => vec![ability.scoped_player.unwrap_or(ability.controller)],
         TargetFilter::Player => state.players.iter().map(|p| p.id).collect(),
         TargetFilter::Typed(TypedFilter {
             type_filters,
@@ -136,6 +136,9 @@ fn collect_player_targets(
             .filter(|p| match controller {
                 Some(ControllerRef::You) => p.id == ability.controller,
                 Some(ControllerRef::Opponent) => p.id != ability.controller,
+                Some(ControllerRef::ScopedPlayer) => {
+                    p.id == ability.scoped_player.unwrap_or(ability.controller)
+                }
                 // CR 109.4: TargetPlayer is ambiguous here (phase_out targets are
                 // resolved from ability.targets directly); fail closed.
                 Some(ControllerRef::TargetPlayer) => false,

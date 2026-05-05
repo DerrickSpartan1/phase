@@ -1632,6 +1632,7 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::Opponent) => state.active_player != controller,
                 // CR 109.4: TargetPlayer active-player gate is nonsensical at
                 // replacement-check time (no ability context). Fail closed.
+                Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 None => true,
@@ -1656,6 +1657,7 @@ fn evaluate_replacement_condition(
                 Some(ControllerRef::Opponent) => state.active_player != controller,
                 // CR 109.4: TargetPlayer active-player gate is nonsensical at
                 // replacement-check time (no ability context). Fail closed.
+                Some(ControllerRef::ScopedPlayer) => false,
                 Some(ControllerRef::TargetPlayer) => false,
                 Some(ControllerRef::DefendingPlayer) => false,
                 None => true,
@@ -1734,6 +1736,7 @@ fn evaluate_replacement_condition(
                 // damage-history condition (no ability-target context here).
                 // Fall back to the replacement controller; parser never emits
                 // this variant in replacement conditions.
+                ControllerRef::ScopedPlayer => controller,
                 ControllerRef::TargetPlayer => controller,
                 ControllerRef::DefendingPlayer => controller,
             };
@@ -1985,6 +1988,7 @@ pub fn find_applicable_replacements(
                                 // CR 109.4: Target-player scope has no meaning
                                 // for static token-creation replacements. Fail
                                 // closed — parser never emits this variant here.
+                                crate::types::ability::ControllerRef::ScopedPlayer => false,
                                 crate::types::ability::ControllerRef::TargetPlayer => false,
                                 crate::types::ability::ControllerRef::DefendingPlayer => false,
                             };
@@ -2008,6 +2012,7 @@ pub fn find_applicable_replacements(
                             }
                             // CR 109.4: Target-player scope has no meaning at
                             // replacement-application time. Fail closed.
+                            Some(crate::types::ability::ControllerRef::ScopedPlayer) => false,
                             Some(crate::types::ability::ControllerRef::TargetPlayer) => false,
                             Some(crate::types::ability::ControllerRef::DefendingPlayer) => false,
                             None => {
@@ -2167,6 +2172,7 @@ fn extract_etb_counters(
                 entering,
                 source: source_id,
                 recipient: None,
+                scoped_player: None,
             };
             let n = match count {
                 QuantityExpr::Fixed { value } => (*value).max(0) as u32,

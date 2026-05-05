@@ -1275,6 +1275,9 @@ pub enum DamageKindFilter {
 pub enum ControllerRef {
     You,
     Opponent,
+    /// CR 115.10 + CR 608.2c: Filter controller is the current player being
+    /// affected by an "each player/opponent" instruction during resolution.
+    ScopedPlayer,
     /// CR 109.4 + CR 115.1: Filter controller is the player chosen as a target
     /// of the enclosing ability (e.g., "each creature target player controls").
     /// At resolution time, `filter_inner` reads the first `TargetRef::Player`
@@ -1782,6 +1785,10 @@ pub enum TargetFilter {
     SpecificPlayer {
         id: PlayerId,
     },
+    /// CR 115.10 + CR 608.2c: The current player being affected by an
+    /// "each player/opponent" instruction during resolution. This is not the
+    /// ability controller; "you" and "your" still refer to `controller`.
+    ScopedPlayer,
     /// Matches the permanent that the trigger source (Equipment/Aura) is attached to.
     /// Used for "equipped creature" / "enchanted creature" trigger subjects.
     AttachedTo,
@@ -1888,6 +1895,10 @@ pub enum TargetFilter {
 pub enum PlayerScope {
     /// CR 109.5 / CR 113.6: The controller of the source ability or effect.
     Controller,
+    /// CR 115.10 + CR 608.2c: The current player being affected by an
+    /// "each player/opponent" instruction during resolution. This keeps
+    /// "their" quantities separate from "you" quantities.
+    ScopedPlayer,
     /// CR 109.4 + CR 113.6 + CR 115.1: The first player target of the
     /// resolving ability (read from `ability.targets`).
     Target,
@@ -5032,6 +5043,7 @@ impl TargetFilter {
             TargetFilter::None
                 | TargetFilter::SelfRef
                 | TargetFilter::Controller
+                | TargetFilter::ScopedPlayer
                 | TargetFilter::TriggeringSpellController
                 | TargetFilter::TriggeringSpellOwner
                 | TargetFilter::TriggeringPlayer
@@ -7845,6 +7857,16 @@ pub struct ResolvedAbility {
     pub targets: Vec<TargetRef>,
     pub source_id: ObjectId,
     pub controller: PlayerId,
+    /// CR 109.5: The controller of the spell or ability before any
+    /// resolution-time player-scope iteration rebinds the acting player.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_controller: Option<PlayerId>,
+    /// CR 115.10 + CR 608.2c: Runtime-only current player for an "each
+    /// player/opponent" instruction. This is intentionally distinct from
+    /// `controller`, because CR 109.5 keeps "you/your" bound to the ability's
+    /// controller while the instruction affects another player.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scoped_player: Option<PlayerId>,
     /// The kind of ability this was (activated, triggered, static, etc.).
     /// Carried through from `AbilityDefinition` to allow resolution guards (e.g. skipping
     /// `BeginGame` abilities during normal stack resolution).
@@ -7930,6 +7952,8 @@ impl ResolvedAbility {
             targets,
             source_id,
             controller,
+            original_controller: None,
+            scoped_player: None,
             kind: AbilityKind::default(),
             sub_ability: None,
             else_ability: None,
@@ -7975,6 +7999,28 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_cost_paid_object_recursive(snapshot);
+        }
+    }
+
+    /// Bind the current player for a `player_scope` resolution pass across the
+    /// local ability chain. This intentionally does not change `controller`.
+    pub fn set_scoped_player_recursive(&mut self, player: PlayerId) {
+        self.scoped_player = Some(player);
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_scoped_player_recursive(player);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_scoped_player_recursive(player);
+        }
+    }
+
+    pub fn set_original_controller_recursive(&mut self, player: PlayerId) {
+        self.original_controller = Some(player);
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_original_controller_recursive(player);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_original_controller_recursive(player);
         }
     }
 

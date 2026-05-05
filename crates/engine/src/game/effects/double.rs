@@ -274,6 +274,8 @@ mod tests {
                 target,
             },
             controller,
+            original_controller: None,
+            scoped_player: None,
             source_id: ObjectId(100),
             targets,
             kind: AbilityKind::Spell,

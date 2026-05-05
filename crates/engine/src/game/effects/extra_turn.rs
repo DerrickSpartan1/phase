@@ -54,6 +54,8 @@ mod tests {
         ResolvedAbility {
             effect: Effect::ExtraTurn { target },
             controller,
+            original_controller: None,
+            scoped_player: None,
             source_id: ObjectId(1),
             targets: vec![],
             kind: AbilityKind::Spell,
