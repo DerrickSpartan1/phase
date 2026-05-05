@@ -2947,7 +2947,10 @@ fn try_parse_event(
             alt((
                 value(
                     AttackTargetFilter::PlayerOrPlaneswalker,
-                    tag(" you or a planeswalker you control"),
+                    alt((
+                        tag(" you or a planeswalker you control"),
+                        tag(" you and/or one or more planeswalkers you control"),
+                    )),
                 ),
                 value(AttackTargetFilter::Planeswalker, tag(" a planeswalker")),
                 value(AttackTargetFilter::Player, tag(" a player")),
@@ -6467,6 +6470,32 @@ mod tests {
             Some(AttackTargetFilter::PlayerOrPlaneswalker)
         );
         assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+    }
+
+    #[test]
+    fn opponent_attacks_that_player_library_binds_to_triggering_player() {
+        let def = parse_trigger_line(
+            "Whenever an opponent attacks you and/or one or more planeswalkers you control, exile the top card of that player's library.",
+            "Cunning Rhetoric",
+        );
+        assert_eq!(def.mode, TriggerMode::Attacks);
+        assert_eq!(
+            def.attack_target_filter,
+            Some(AttackTargetFilter::PlayerOrPlaneswalker)
+        );
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+        let execute = def.execute.as_ref().expect("trigger should have effect");
+        assert!(
+            matches!(
+                execute.effect.as_ref(),
+                Effect::ExileTop {
+                    player: TargetFilter::TriggeringPlayer,
+                    count: QuantityExpr::Fixed { value: 1 },
+                }
+            ),
+            "expected ExileTop to bind to TriggeringPlayer, got {:?}",
+            execute.effect
+        );
     }
 
     #[test]
