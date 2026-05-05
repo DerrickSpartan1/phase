@@ -11,5 +11,6 @@ declare const __SET_LIST_URL__: string;
 declare const __DECKS_URL__: string;
 declare const __DRAFT_POOLS_URL__: string;
 declare const __SCRYFALL_DATA_URL__: string;
+declare const __SCRYFALL_SETS_URL__: string;
 declare const __GIT_REPO_URL__: string;
 

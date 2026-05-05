@@ -128,7 +128,9 @@ jobs:
           echo "Content-addressed card-data: card-data-$HASH.json"
 
       - name: Generate Scryfall data
-        run: ./scripts/gen-scryfall-images.sh
+        run: |
+          ./scripts/gen-scryfall-images.sh
+          ./scripts/gen-scryfall-sets.sh
 
       - name: Generate coverage badge endpoints
         run: |

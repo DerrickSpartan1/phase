@@ -57,7 +57,7 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
       try {
         const [poolsResp, setsResp] = await Promise.all([
           fetch(__DRAFT_POOLS_URL__),
-          fetch("/scryfall-sets.json"),
+          fetch(__SCRYFALL_SETS_URL__),
         ]);
         if (!poolsResp.ok) throw new Error(`Failed to load draft pools: ${poolsResp.status}`);
 
