@@ -38,6 +38,7 @@ client/public/scryfall-sets.json
 client/public/set-list.json
 client/public/decks.json
 client/public/decks-skipped.json
+client/public/draft-pools.json
 # Atomic-write staging files from gen-card-data.sh (cleaned on normal exit,
 # but may linger after SIGKILL / power loss).
 client/public/*.tmp
@@ -103,6 +104,7 @@ __pycache__/
 *.pyc
 
 # Bug triage data (generated)
+triage/
 triage/raw/discord-messages.jsonl
 triage/raw/github-events.jsonl
 triage/report-items.jsonl
