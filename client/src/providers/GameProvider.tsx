@@ -23,6 +23,7 @@ import { loadP2PSession } from "../services/p2pSession";
 import { expandParsedDeck, type ParsedDeck } from "../services/deckParser";
 import { consumeRecentAutoUpdateMarker } from "../pwa/updateMarker";
 import { ensureCardDatabase } from "../services/cardData";
+import { loadDraftRun } from "../services/quickDraftPersistence";
 import { clearWsSession, loadWsSession, saveWsSession } from "../services/multiplayerSession";
 import { detectServerUrl } from "../services/serverDetection";
 import {
@@ -320,6 +321,8 @@ export interface GameProviderProps {
    */
   useBroker?: boolean;
   roomName?: string;
+  source?: string;
+  draftId?: string;
   onWsEvent?: (event: WsAdapterEvent) => void;
   onP2PEvent?: (event: P2PAdapterEvent) => void;
   onReady?: () => void;
@@ -341,6 +344,8 @@ export function GameProvider({
   firstPlayer,
   useBroker = false,
   roomName,
+  source,
+  draftId,
   onWsEvent,
   onP2PEvent,
   onReady,
@@ -969,6 +974,33 @@ export function GameProvider({
         return;
       }
 
+      if (source === "draft" && draftId) {
+        const run = await loadDraftRun(draftId);
+        if (run) {
+          const deckList = {
+            player: { main_deck: run.playerDeck, sideboard: [] as string[], commander: [] as string[] },
+            opponent: { main_deck: run.opponentDeck, sideboard: [] as string[], commander: [] as string[] },
+            ai_decks: [],
+          };
+          try {
+            await initGame(gameId, adapter, deckList, formatConfig, playerCount, matchConfig, firstPlayer);
+            if (cancelled) return;
+            controller = createGameLoopController({
+              mode,
+              difficulty,
+              aiSeats: resolveAiSeatBindings(gameId, playerCount, difficulty),
+              playerCount,
+            });
+            controller.start();
+            audioManager.setContext("battlefield");
+          } catch (err) {
+            console.error("Draft IDB deck fallback failed:", err);
+            if (!cancelled) onNoDeckRef.current?.();
+          }
+          return;
+        }
+      }
+
       const parsedDeck = loadActiveDeck();
       if (!parsedDeck) {
         onNoDeckRef.current?.();
@@ -1034,7 +1066,7 @@ export function GameProvider({
         scheduleStoreReset(reset);
       }
     };
-  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName]);
+  }, [gameId, mode, difficulty, joinCode, formatConfig, playerCount, matchConfig, firstPlayer, useBroker, roomName, source, draftId]);
 
   return (
     <GameDispatchContext.Provider value={dispatchAction}>

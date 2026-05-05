@@ -10,6 +10,9 @@ import { useLocation, useNavigate, useParams, useSearchParams } from "react-rout
 import { AnimatePresence, motion } from "framer-motion";
 
 import type { DeckCardCount, GameFormat, MatchConfig } from "../adapter/types";
+import { useDraftStore } from "../stores/draftStore";
+import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
+import type { DraftMatchResult } from "../services/quickDraftPersistence";
 import { useIsCompactHeight } from "../hooks/useIsCompactHeight.ts";
 import { useIsMobile } from "../hooks/useIsMobile.ts";
 import { BetweenGamesSideboardModal } from "../components/multiplayer/BetweenGamesSideboardModal.tsx";
@@ -144,6 +147,8 @@ export function GamePage() {
   const matchParam = searchParams.get("match");
   const firstParam = searchParams.get("first");
   const roomNameParam = searchParams.get("roomName");
+  const sourceParam = searchParams.get("source") ?? undefined;
+  const draftIdParam = searchParams.get("draftId") ?? undefined;
   const playerCount = playersParam ? Number(playersParam) : undefined;
   // Memoize so the `GameProvider` `useEffect` dep array doesn't
   // tear-down/rebuild the P2P session on every parent re-render. Without
@@ -520,6 +525,8 @@ export function GamePage() {
       firstPlayer={firstPlayer}
       useBroker={useBroker}
       roomName={roomNameParam ?? undefined}
+      source={sourceParam}
+      draftId={draftIdParam}
       onWsEvent={mode === "online" ? handleWsEvent : undefined}
       onP2PEvent={
         mode === "p2p-host" || mode === "p2p-join" ? handleP2PEvent : undefined
@@ -1765,6 +1772,24 @@ function GameOverScreen({
       ? "radial-gradient(ellipse at center, rgba(60,50,10,0.6) 0%, rgba(0,0,0,0.95) 70%)"
       : "radial-gradient(ellipse at center, rgba(60,10,10,0.5) 0%, rgba(0,0,0,0.95) 70%)";
 
+  const source = searchParams.get("source");
+  const draftId = searchParams.get("draftId");
+  const isDraft = source === "draft" && !!draftId;
+  const gameId = useGameStore((s) => s.gameId);
+
+  const [resultRecorded, setResultRecorded] = useState(false);
+  const [runOver, setRunOver] = useState(false);
+
+  useEffect(() => {
+    if (!isDraft || !gameId || resultRecorded) return;
+    const result: DraftMatchResult = isDraw ? "draw" : isVictory ? "win" : "loss";
+    useDraftStore.getState().recordMatchResult(gameId, result).then(() => {
+      setResultRecorded(true);
+      const meta = loadActiveQuickDraft();
+      if (meta?.phase === "complete") setRunOver(true);
+    });
+  }, [isDraft, gameId, isDraw, isVictory, resultRecorded]);
+
   const handleRematch = () => {
     const newId = crypto.randomUUID();
     const params = new URLSearchParams();
@@ -1773,15 +1798,17 @@ function GameOverScreen({
     navigate(`/game/${newId}?${params.toString()}`);
   };
 
+  const handleBackToDraft = () => {
+    navigate("/draft/quick?resume=1");
+  };
+
   return (
     <div
       className="fixed inset-0 z-50 flex flex-col items-center justify-center px-4"
       style={{ background: bgGradient }}
     >
-      {/* Victory particles */}
       {isVictory && <VictoryParticles />}
 
-      {/* Title text */}
       <motion.h2
         className="relative z-10 text-4xl font-black tracking-[0.24em] text-center sm:text-6xl sm:tracking-widest"
         style={{ color: titleColor, textShadow }}
@@ -1798,7 +1825,6 @@ function GameOverScreen({
         {titleText}
       </motion.h2>
 
-      {/* Life totals and game stats */}
       <AnimatePresence>
         {buttonsVisible && (
           <motion.div
@@ -1831,7 +1857,6 @@ function GameOverScreen({
         )}
       </AnimatePresence>
 
-      {/* Buttons */}
       <AnimatePresence>
         {buttonsVisible && (
           <motion.div
@@ -1840,7 +1865,20 @@ function GameOverScreen({
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.15, duration: 0.3 }}
           >
-            {isOnlineMode ? (
+            {isDraft ? (
+              <button
+                disabled={!resultRecorded}
+                onClick={handleBackToDraft}
+                className={gameButtonClass({
+                  tone: isVictory ? "emerald" : "slate",
+                  size: "lg",
+                  disabled: !resultRecorded,
+                  className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
+                })}
+              >
+                {runOver ? "Back to Draft" : "Continue Run"}
+              </button>
+            ) : isOnlineMode ? (
               <button
                 onClick={() => navigate("/?view=lobby")}
                 className={gameButtonClass({
@@ -1852,27 +1890,29 @@ function GameOverScreen({
                 Back to Lobby
               </button>
             ) : (
-              <button
-                onClick={() => navigate("/")}
-                className={gameButtonClass({
-                  tone: isVictory ? "amber" : "slate",
-                  size: "lg",
-                  className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
-                })}
-              >
-                Return to Menu
-              </button>
+              <>
+                <button
+                  onClick={() => navigate("/")}
+                  className={gameButtonClass({
+                    tone: isVictory ? "amber" : "slate",
+                    size: "lg",
+                    className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
+                  })}
+                >
+                  Return to Menu
+                </button>
+                <button
+                  onClick={handleRematch}
+                  className={gameButtonClass({
+                    tone: isVictory ? "emerald" : "neutral",
+                    size: "lg",
+                    className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
+                  })}
+                >
+                  Rematch
+                </button>
+              </>
             )}
-            <button
-              onClick={handleRematch}
-              className={gameButtonClass({
-                tone: isVictory ? "emerald" : "neutral",
-                size: "lg",
-                className: "w-full justify-center sm:w-auto sm:min-w-[12rem]",
-              })}
-            >
-              Rematch
-            </button>
           </motion.div>
         )}
       </AnimatePresence>

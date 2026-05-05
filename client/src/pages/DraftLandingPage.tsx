@@ -7,6 +7,7 @@ import {
   loadActiveQuickDraft,
   type ActiveQuickDraftMeta,
 } from "../services/quickDraftPersistence";
+import { loadGame } from "../services/gamePersistence";
 import { usePreferencesStore } from "../stores/preferencesStore";
 
 const SET_LABELS: Record<string, string> = {
@@ -23,6 +24,8 @@ const SET_LABELS: Record<string, string> = {
   blb: "Bloomburrow",
   fdn: "Foundations",
 };
+
+const DIFFICULTY_NAMES = ["VeryEasy", "Easy", "Medium", "Hard", "VeryHard"] as const;
 
 const DIFFICULTY_LABELS = [
   "Very Easy",
@@ -106,17 +109,49 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
       .catch(() => {});
   }, [meta.setCode]);
 
-  const phaseLabel = meta.phase === "deckbuilding" ? "Deck Building" : "Drafting";
   const difficultyLabel = DIFFICULTY_LABELS[meta.difficulty] ?? "Medium";
+  const [midMatchGameId, setMidMatchGameId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!meta.currentGameId) return;
+    loadGame(meta.currentGameId).then((saved) => {
+      if (saved) setMidMatchGameId(meta.currentGameId!);
+    });
+  }, [meta.currentGameId]);
+
+  function getPhaseLabel(): string {
+    switch (meta.phase) {
+      case "drafting": return "Drafting";
+      case "deckbuilding": return "Deck Building";
+      case "playing": {
+        const w = meta.runWins ?? 0;
+        const l = meta.runLosses ?? 0;
+        const matchNum = w + l + (meta.runDraws ?? 0) + 1;
+        return midMatchGameId ? `Match ${matchNum} — ${w}W-${l}L` : `${w}W-${l}L`;
+      }
+      case "complete": return `Run Complete — ${meta.runWins ?? 0}W-${meta.runLosses ?? 0}L`;
+    }
+  }
+
+  function handleClick() {
+    if (midMatchGameId) {
+      navigate(`/game/${midMatchGameId}?mode=ai&difficulty=${DIFFICULTY_NAMES[meta.difficulty] ?? "Medium"}&format=Limited&match=bo1&source=draft&draftId=${meta.id}`);
+    } else {
+      navigate("/draft/quick?resume=1");
+    }
+  }
+
+  const resumeLabel = midMatchGameId ? "Resume Match" : meta.phase === "complete" ? "View Results" : "Resume";
+  const heading = meta.phase === "complete" ? "Draft Complete" : "Draft in Progress";
 
   return (
     <div className="mb-8">
       <h2 className="mb-3 text-[0.68rem] font-semibold uppercase tracking-[0.18em] text-slate-500">
-        Draft in Progress
+        {heading}
       </h2>
       <button
         type="button"
-        onClick={() => navigate("/draft/quick?resume=1")}
+        onClick={handleClick}
         className="group flex w-full cursor-pointer items-center gap-5 rounded-[20px] border border-amber-400/20 bg-amber-500/[0.06] p-5 text-left transition-colors hover:border-amber-400/35 hover:bg-amber-500/[0.10]"
       >
         <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl border border-white/8 bg-black/24">
@@ -139,10 +174,10 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-white/45">
             <span className="rounded-md border border-amber-400/20 bg-amber-400/10 px-2 py-0.5 text-xs font-medium text-amber-200">
-              {phaseLabel}
+              {getPhaseLabel()}
             </span>
             <span>{difficultyLabel}</span>
-            {meta.pickCount > 0 && (
+            {meta.phase === "drafting" && meta.pickCount > 0 && (
               <span>{meta.pickCount} cards picked</span>
             )}
             <span>{formatRelativeTime(meta.updatedAt)}</span>
@@ -151,7 +186,7 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
 
         <div className="flex items-center self-stretch pl-2">
           <div className="rounded-full border border-amber-400/15 bg-amber-500/10 px-4 py-2 text-sm font-medium text-amber-200 transition-colors group-hover:border-amber-400/30 group-hover:bg-amber-500/18">
-            Resume
+            {resumeLabel}
           </div>
         </div>
       </button>

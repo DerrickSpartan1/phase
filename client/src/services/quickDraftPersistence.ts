@@ -1,18 +1,35 @@
 import { del, get, set } from "idb-keyval";
 
-import { ACTIVE_QUICK_DRAFT_KEY, QUICK_DRAFT_KEY_PREFIX } from "../constants/storage";
+import { ACTIVE_QUICK_DRAFT_KEY, DRAFT_RUN_KEY_PREFIX, QUICK_DRAFT_KEY_PREFIX } from "../constants/storage";
 import type { DraftPhase, PoolSortMode } from "../stores/draftStore";
 import { getDraftStore } from "./draftPersistence";
 
 // ── Types ──────────────────────────────────────────────────────────────
 
+export type DraftRunFormat = "single" | "bo3" | "run";
+
 export interface ActiveQuickDraftMeta {
   id: string;
   setCode: string;
   difficulty: number;
-  phase: "drafting" | "deckbuilding";
+  phase: "drafting" | "deckbuilding" | "playing" | "complete";
   pickCount: number;
   updatedAt: number;
+  runFormat?: DraftRunFormat;
+  runWins?: number;
+  runLosses?: number;
+  runDraws?: number;
+  currentGameId?: string;
+}
+
+export type DraftMatchResult = "win" | "loss" | "draw";
+
+export interface DraftRunState {
+  format: DraftRunFormat;
+  results: Array<{ gameId: string; result: DraftMatchResult }>;
+  playerDeck: string[];
+  opponentDeck: string[];
+  usedBotSeats: number[];
 }
 
 interface PersistedQuickDraftSession {
@@ -67,6 +84,7 @@ export function loadActiveQuickDraft(): ActiveQuickDraftMeta | null {
     const meta = JSON.parse(raw) as ActiveQuickDraftMeta;
     if (Date.now() - meta.updatedAt > SESSION_TTL_MS) {
       void clearQuickDraftSession(meta.id);
+      void clearDraftRun(meta.id);
       return null;
     }
     return meta;
@@ -135,4 +153,45 @@ export async function clearQuickDraftSession(id: string): Promise<void> {
     await del(QUICK_DRAFT_KEY_PREFIX + id, getDraftStore());
   } catch { /* best-effort */ }
   clearActiveQuickDraft();
+}
+
+// ── Draft Run (IndexedDB — async) ─────────────────────────────────────
+
+export async function saveDraftRun(
+  id: string,
+  state: DraftRunState,
+): Promise<void> {
+  try {
+    await set(DRAFT_RUN_KEY_PREFIX + id, state, getDraftStore());
+  } catch (err) {
+    console.warn("[saveDraftRun] IDB write failed:", err);
+  }
+}
+
+export async function loadDraftRun(
+  id: string,
+): Promise<DraftRunState | null> {
+  try {
+    const data = await get<DraftRunState>(
+      DRAFT_RUN_KEY_PREFIX + id,
+      getDraftStore(),
+    );
+    return data ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export async function clearDraftRun(id: string): Promise<void> {
+  try {
+    await del(DRAFT_RUN_KEY_PREFIX + id, getDraftStore());
+  } catch { /* best-effort */ }
+}
+
+export function runLimits(format: DraftRunFormat): { maxWins: number; maxLosses: number } {
+  switch (format) {
+    case "single": return { maxWins: 1, maxLosses: 1 };
+    case "bo3": return { maxWins: 1, maxLosses: 1 };
+    case "run": return { maxWins: 7, maxLosses: 3 };
+  }
 }

@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router";
+import { useNavigate, useSearchParams } from "react-router";
 
 import { ConnectionDot } from "../multiplayer/ConnectionDot.tsx";
 import { FullscreenButton } from "./FullscreenButton.tsx";
 import { VolumeControl } from "./VolumeControl.tsx";
 import { clearGame } from "../../stores/gameStore.ts";
+import { useDraftStore } from "../../stores/draftStore.ts";
 import { useCardDataMeta } from "../../hooks/useCardDataMeta.ts";
 
 interface GameMenuProps {
@@ -27,9 +28,11 @@ export function GameMenu({
   onConcede,
 }: GameMenuProps) {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const cardDataMeta = useCardDataMeta();
+  const isDraft = searchParams.get("source") === "draft" && !!searchParams.get("draftId");
 
   useEffect(() => {
     if (!open) return;
@@ -101,6 +104,11 @@ export function GameMenu({
               setOpen(false);
               if (isOnlineMode && onConcede) {
                 onConcede();
+              } else if (isDraft) {
+                useDraftStore.getState().recordMatchResult(gameId, "loss").then(() => {
+                  clearGame(gameId);
+                  navigate("/draft/quick?resume=1");
+                });
               } else {
                 clearGame(gameId);
                 navigate("/");
@@ -108,8 +116,18 @@ export function GameMenu({
             }}
           />
           <MenuButton
-            label="Main Menu"
-            onClick={() => navigate("/")}
+            label={isDraft ? "Back to Draft" : "Main Menu"}
+            onClick={() => {
+              setOpen(false);
+              if (isDraft) {
+                useDraftStore.getState().recordMatchResult(gameId, "loss").then(() => {
+                  clearGame(gameId);
+                  navigate("/draft/quick?resume=1");
+                });
+              } else {
+                navigate("/");
+              }
+            }}
           />
           <div className="my-1 border-t border-gray-700" />
           <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 px-3 py-1.5 text-[10px] text-slate-500">
