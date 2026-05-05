@@ -11,7 +11,6 @@ import {
   ACTIVE_DECK_KEY,
   listSavedDeckNames,
 } from "../constants/storage";
-import { loadActiveQuickDraft } from "../services/quickDraftPersistence";
 import { isTauri } from "../services/sidecar";
 import { loadWsSession } from "../services/multiplayerSession";
 import { loadP2PSession } from "../services/p2pSession";
@@ -48,7 +47,6 @@ export function MenuPage() {
   const [, setDeckCount] = useState(0);
   const [, setActiveDeckName] = useState<string | null>(null);
   const [formatCoverage, setFormatCoverage] = useState<[string, FormatCoverageSummary][]>([]);
-  const [hasActiveDraft, setHasActiveDraft] = useState(false);
   const experimentalFeatures = usePreferencesStore((s) => s.experimentalFeatures);
   useAudioContext("menu");
 
@@ -56,8 +54,6 @@ export function MenuPage() {
     const savedNames = listSavedDeckNames();
     setDeckCount(savedNames.length);
     setActiveDeckName(localStorage.getItem(ACTIVE_DECK_KEY));
-
-    setHasActiveDraft(loadActiveQuickDraft() !== null);
 
     const saved = loadActiveGame();
     if (saved) {
@@ -162,34 +158,14 @@ export function MenuPage() {
       },
     );
     if (experimentalFeatures) {
-      if (hasActiveDraft) {
-        actions.push({
-          key: "resume-draft",
-          title: "Resume Draft",
-          description: "Continue your saved Quick Draft in progress.",
-          accent: "ember" as const,
-          onClick: () => navigate("/draft"),
-          icon: <DraftIcon />,
-        });
-      }
-      actions.push(
-        {
-          key: "draft",
-          title: hasActiveDraft ? "New Quick Draft" : "Quick Draft",
-          description: "Draft against bots, build a deck, play a match.",
-          accent: hasActiveDraft ? ("stone" as const) : ("ember" as const),
-          onClick: () => navigate("/draft"),
-          icon: <DraftIcon />,
-        },
-        {
-          key: "pod-draft",
-          title: "Pod Draft",
-          description: "Host or join a P2P draft pod with up to 8 players.",
-          accent: "jade" as const,
-          onClick: () => navigate("/draft-pod"),
-          icon: <PodDraftIcon />,
-        },
-      );
+      actions.push({
+        key: "draft",
+        title: "Draft",
+        description: "Quick Draft against bots or Pod Draft with friends.",
+        accent: "ember" as const,
+        onClick: () => navigate("/draft"),
+        icon: <DraftIcon />,
+      });
     }
     actions.push(
       {
@@ -202,7 +178,7 @@ export function MenuPage() {
       },
     );
     return actions;
-  }, [hasSavedGame, hasActiveDraft, experimentalFeatures, navigate, handleResumeGame]);
+  }, [hasSavedGame, experimentalFeatures, navigate, handleResumeGame]);
 
   return (
     <div className="menu-scene relative flex min-h-screen flex-col overflow-hidden">
@@ -391,13 +367,6 @@ function DraftIcon() {
   );
 }
 
-function PodDraftIcon() {
-  return (
-    <svg aria-hidden="true" viewBox="0 0 24 24" className="h-7 w-7 fill-current">
-      <path d="M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5s-3 1.34-3 3 1.34 3 3 3Zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5 5 6.34 5 8s1.34 3 3 3Zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5Zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5Z" />
-    </svg>
-  );
-}
 
 function DeckIcon() {
   return (

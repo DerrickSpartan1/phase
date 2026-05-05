@@ -11,6 +11,7 @@ export interface ActiveQuickDraftMeta {
   setCode: string;
   difficulty: number;
   phase: "drafting" | "deckbuilding";
+  pickCount: number;
   updatedAt: number;
 }
 

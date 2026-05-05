@@ -74,7 +74,7 @@ const initialState: DraftStoreState = {
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 function persistDraft(): void {
-  const { adapter, draftId, phase, mainDeck, landCounts, poolSortMode, poolPanelOpen, difficulty, selectedSet } =
+  const { adapter, draftId, phase, view, mainDeck, landCounts, poolSortMode, poolPanelOpen, difficulty, selectedSet } =
     useDraftStore.getState();
   if (!adapter || !draftId || !selectedSet || phase === "setup" || phase === "launching") return;
   const persistPhase = phase;
@@ -94,6 +94,7 @@ function persistDraft(): void {
         setCode: selectedSet,
         difficulty,
         phase: persistPhase,
+        pickCount: view?.pool.length ?? 0,
         updatedAt: Date.now(),
       });
     } catch (err) {

@@ -21,6 +21,7 @@ const MultiplayerPage = lazy(() => import("./pages/MultiplayerPage").then((m) =>
 const DeckBuilderPage = lazy(() => import("./pages/DeckBuilderPage").then((m) => ({ default: m.DeckBuilderPage })));
 const MyDecksPage = lazy(() => import("./pages/MyDecksPage").then((m) => ({ default: m.MyDecksPage })));
 const CoveragePage = lazy(() => import("./pages/CoveragePage").then((m) => ({ default: m.CoveragePage })));
+const DraftLandingPage = lazy(() => import("./pages/DraftLandingPage").then((m) => ({ default: m.DraftLandingPage })));
 const DraftPage = lazy(() => import("./pages/DraftPage").then((m) => ({ default: m.DraftPage })));
 const DraftPodPage = lazy(() => import("./pages/DraftPodPage").then((m) => ({ default: m.DraftPodPage })));
 
@@ -71,7 +72,8 @@ function AppContent() {
           <Route path="/my-decks" element={<MyDecksPage />} />
           <Route path="/deck-builder" element={<DeckBuilderPage />} />
           <Route path="/coverage" element={<CoveragePage />} />
-          <Route path="/draft" element={<DraftPage />} />
+          <Route path="/draft" element={<DraftLandingPage />} />
+          <Route path="/draft/quick" element={<DraftPage />} />
           <Route path="/draft-pod" element={<DraftPodPage />} />
           <Route path="/game/:id" element={<GamePage />} />
         </Routes>
