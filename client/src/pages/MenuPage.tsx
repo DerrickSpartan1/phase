@@ -161,7 +161,7 @@ export function MenuPage() {
       actions.push({
         key: "draft",
         title: "Draft",
-        description: "Quick Draft against bots or Pod Draft with friends.",
+        description: "Solo Quick Draft against AI or live Pod Draft with friends.",
         accent: "ember" as const,
         onClick: () => navigate("/draft"),
         icon: <DraftIcon />,

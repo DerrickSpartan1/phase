@@ -73,7 +73,7 @@ export function DraftLandingPage() {
 
           <DraftModeCard
             title="Quick Draft"
-            description="Draft against bots, build a 40-card deck, then play a match."
+            description="Draft 3 packs with 7 AI drafters, build a 40-card deck, then play a Bo1 match against one of them."
             icon={<BotIcon />}
             onClick={() => navigate("/draft/quick")}
           />
@@ -81,7 +81,7 @@ export function DraftLandingPage() {
           {experimentalFeatures && (
             <DraftModeCard
               title="Pod Draft"
-              description="Host or join a P2P draft pod with up to 8 players and tournament play."
+              description="Host or join a pod with up to 8 players, draft live together, then play a Swiss or elimination tournament."
               icon={<PodIcon />}
               onClick={() => navigate("/draft-pod")}
             />
