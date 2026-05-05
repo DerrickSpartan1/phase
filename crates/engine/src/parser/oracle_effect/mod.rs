@@ -4002,6 +4002,10 @@ fn lower_clause_ast(ast: ClauseAst, ctx: &mut ParseContext) -> ParsedEffectClaus
 
 #[tracing::instrument(level = "debug")]
 fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectClause {
+    if let Some(effect) = try_parse_drawn_this_turn_choice(text) {
+        return parsed_clause(effect);
+    }
+
     // CR 106.1 + CR 109.1: "For each color among [X], add one mana of that color"
     // (Faeburrow Elder). Must run before the generic for-each-prefix strip path,
     // because "that color" anaphors a per-iteration color rather than the
@@ -4090,6 +4094,41 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
         clause.multi_target = extract_exile_multi_target(text);
     }
     clause
+}
+
+fn try_parse_drawn_this_turn_choice(text: &str) -> Option<Effect> {
+    let lower = text.to_lowercase();
+    let count = nom_on_lower(text, &lower, |input| {
+        let (input, _) = tag("choose ").parse(input)?;
+        let (input, count) = nom_primitives::parse_number(input)?;
+        let (input, _) = tag(" card").parse(input)?;
+        let (input, _) = opt(tag("s")).parse(input)?;
+        let (input, _) = tag(" in your hand drawn this turn").parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, count))
+    })
+    .map(|(count, _)| count)?;
+    Some(Effect::ChooseDrawnThisTurnPayOrTopdeck {
+        count: QuantityExpr::Fixed {
+            value: count as i32,
+        },
+        life_payment: QuantityExpr::Fixed { value: 4 },
+        player: TargetFilter::Controller,
+    })
+}
+
+fn try_parse_drawn_this_turn_pay_or_topdeck_followup(text: &str) -> Option<QuantityExpr> {
+    let lower = text.to_lowercase();
+    nom_on_lower(text, &lower, |input| {
+        let (input, _) = tag("for each of those cards, pay ").parse(input)?;
+        let (input, life_payment) = nom_primitives::parse_number(input)?;
+        let (input, _) = tag(" life or put the card on top of your library").parse(input)?;
+        let (input, _) = eof.parse(input)?;
+        Ok((input, life_payment))
+    })
+    .map(|(life_payment, _)| QuantityExpr::Fixed {
+        value: life_payment as i32,
+    })
 }
 
 /// Parse a verb prefix and its target, returning the AST and `parse_target`'s unconsumed
@@ -6774,15 +6813,6 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     fn rewrite_quantity_expr(expr: &mut QuantityExpr) {
         match expr {
             QuantityExpr::Ref { qty } => match qty {
-                QuantityRef::LifeTotal { player }
-                | QuantityRef::HandSize { player }
-                | QuantityRef::LifeLostThisTurn { player }
-                | QuantityRef::LifeGainedThisTurn { player }
-                | QuantityRef::PartySize { player }
-                    if *player == PlayerScope::Controller =>
-                {
-                    *player = PlayerScope::ScopedPlayer;
-                }
                 QuantityRef::LifeTotal {
                     player: PlayerScope::Target,
                 } => {
@@ -7137,6 +7167,36 @@ pub(crate) fn parse_effect_chain_ir(
                     where_x_expression: None,
                     is_otherwise: false,
                     special: Some(SpecialClause::DieExileRider(Box::new(rider_def))),
+                    source_text: normalized_text.to_string(),
+                });
+                continue;
+            }
+        }
+
+        if let Some(life_payment) =
+            try_parse_drawn_this_turn_pay_or_topdeck_followup(normalized_text)
+        {
+            if !clauses.is_empty() {
+                clauses.push(ClauseIr {
+                    parsed: parsed_clause(Effect::Unimplemented {
+                        name: "drawn_this_turn_pay_or_topdeck_placeholder".to_string(),
+                        description: None,
+                    }),
+                    boundary: chunk.boundary_after,
+                    condition: None,
+                    is_optional: false,
+                    opponent_may_scope: None,
+                    repeat_for: None,
+                    player_scope: None,
+                    delayed_condition: None,
+                    prefix_delayed_condition: None,
+                    intrinsic_continuation: None,
+                    followup_continuation: None,
+                    absorbed_by_followup: false,
+                    multi_target: None,
+                    where_x_expression: None,
+                    is_otherwise: false,
+                    special: Some(SpecialClause::DrawnThisTurnPayOrTopdeck { life_payment }),
                     source_text: normalized_text.to_string(),
                 });
                 continue;
@@ -8311,6 +8371,18 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
                     // Apply intrinsic continuation for THIS SearchLibrary (e.g., reveal flag, ChangeZone).
                     if let Some(ref continuation) = clause_ir.intrinsic_continuation {
                         apply_clause_continuation(&mut defs, continuation.clone(), kind);
+                    }
+                    continue;
+                }
+                SpecialClause::DrawnThisTurnPayOrTopdeck { life_payment } => {
+                    if let Some(last_def) = defs.last_mut() {
+                        if let Effect::ChooseDrawnThisTurnPayOrTopdeck {
+                            life_payment: current,
+                            ..
+                        } = &mut *last_def.effect
+                        {
+                            *current = life_payment.clone();
+                        }
                     }
                     continue;
                 }
@@ -23678,5 +23750,33 @@ mod snapshot_tests {
                 )
             })
         }));
+    }
+
+    #[test]
+    fn sylvan_library_followup_parses_drawn_this_turn_choice() {
+        let def = parse_effect_chain(
+            "You may draw two additional cards. If you do, choose two cards in your hand drawn this turn. For each of those cards, pay 4 life or put the card on top of your library.",
+            AbilityKind::Spell,
+        );
+
+        assert!(def.optional);
+        assert!(matches!(
+            &*def.effect,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 2 },
+                ..
+            }
+        ));
+        let followup = def.sub_ability.as_ref().expect("expected followup");
+        assert_eq!(followup.condition, Some(AbilityCondition::IfYouDo));
+        assert!(followup.sub_ability.is_none());
+        assert!(matches!(
+            &*followup.effect,
+            Effect::ChooseDrawnThisTurnPayOrTopdeck {
+                count: QuantityExpr::Fixed { value: 2 },
+                life_payment: QuantityExpr::Fixed { value: 4 },
+                player: TargetFilter::Controller,
+            }
+        ));
     }
 }

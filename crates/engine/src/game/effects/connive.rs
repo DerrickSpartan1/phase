@@ -92,6 +92,7 @@ pub fn resolve(
                         object_id: obj_id,
                         nth_in_step,
                     });
+                    super::drawn_this_turn_choice::record_drawn_card(state, player_id, obj_id);
                     // CR 702.94a: Connive draws count as draws for miracle tracking.
                     super::draw::record_first_draw_and_enqueue_miracle(state, player_id, obj_id);
                 }

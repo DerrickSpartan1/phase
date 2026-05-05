@@ -1177,6 +1177,16 @@ pub enum WaitingFor {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         owner_library: bool,
     },
+    /// Player chooses which drawn-this-turn hand cards to put on top of their
+    /// library. Each unchosen required card is kept by paying life.
+    DrawnThisTurnTopdeckChoice {
+        player: PlayerId,
+        cards: Vec<ObjectId>,
+        count: usize,
+        min_count: usize,
+        life_payment: u32,
+        source_id: ObjectId,
+    },
     /// CR 701.48a: Learn — player chooses to rummage (discard→draw) or skip.
     /// `hand_cards` lists cards eligible for discard.
     LearnChoice {
@@ -1945,6 +1955,7 @@ impl WaitingFor {
             | WaitingFor::LearnChoice { player, .. }
             | WaitingFor::ManifestDreadChoice { player, .. }
             | WaitingFor::EffectZoneChoice { player, .. }
+            | WaitingFor::DrawnThisTurnTopdeckChoice { player, .. }
             | WaitingFor::TriggerTargetSelection { player, .. }
             | WaitingFor::BetweenGamesSideboard { player, .. }
             | WaitingFor::BetweenGamesChoosePlayDraw { player, .. }
@@ -2634,6 +2645,11 @@ pub struct GameState {
     /// player has not drawn yet this turn.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub first_card_drawn_this_turn: HashMap<PlayerId, ObjectId>,
+    /// Object IDs of cards actually drawn this turn, per player. Cards remain
+    /// in this list even if they later leave hand; consumers filter by current
+    /// zone when presenting choices.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub cards_drawn_this_turn: HashMap<PlayerId, Vec<ObjectId>>,
     /// CR 702.94a + CR 603.11: FIFO queue of miracle reveal offers accumulated
     /// during the current action's resolution. Populated by the draw pipeline
     /// when a card with `Keyword::Miracle(cost)` becomes the first card drawn
@@ -3097,6 +3113,7 @@ impl GameState {
             graveyard_cast_permissions_used: HashSet::new(),
             hand_cast_free_permissions_used: HashSet::new(),
             first_card_drawn_this_turn: HashMap::new(),
+            cards_drawn_this_turn: HashMap::new(),
             pending_miracle_offers: Vec::new(),
             spells_cast_this_game: HashMap::new(),
             spells_cast_this_turn_by_player: HashMap::new(),
@@ -3275,6 +3292,7 @@ impl PartialEq for GameState {
             && self.graveyard_cast_permissions_used == other.graveyard_cast_permissions_used
             && self.hand_cast_free_permissions_used == other.hand_cast_free_permissions_used
             && self.first_card_drawn_this_turn == other.first_card_drawn_this_turn
+            && self.cards_drawn_this_turn == other.cards_drawn_this_turn
             && self.pending_miracle_offers == other.pending_miracle_offers
             && self.spells_cast_this_game == other.spells_cast_this_game
             && self.spells_cast_this_turn_by_player == other.spells_cast_this_turn_by_player

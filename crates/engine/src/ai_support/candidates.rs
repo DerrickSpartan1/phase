@@ -687,6 +687,22 @@ pub fn candidate_actions_broad(state: &GameState) -> Vec<CandidateAction> {
                     .collect()
             }
         }
+        WaitingFor::DrawnThisTurnTopdeckChoice {
+            player,
+            cards,
+            count,
+            min_count,
+            ..
+        } => (*min_count..=*count)
+            .flat_map(|size| combinations(cards, size))
+            .map(|combo| {
+                candidate(
+                    GameAction::SelectCards { cards: combo },
+                    TacticalClass::Selection,
+                    Some(*player),
+                )
+            })
+            .collect(),
         // CR 101.4: Generate all valid per-category permanent assignments.
         WaitingFor::CategoryChoice {
             player,

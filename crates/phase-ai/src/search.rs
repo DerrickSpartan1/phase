@@ -277,6 +277,14 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
             Some(GameAction::SelectCards { cards: Vec::new() })
         }
 
+        // Sylvan Library-style choices: topdeck the required cards rather than
+        // paying life in the fallback path.
+        WaitingFor::DrawnThisTurnTopdeckChoice { cards, count, .. } => {
+            Some(GameAction::SelectCards {
+                cards: cards.iter().take(*count).copied().collect(),
+            })
+        }
+
         // Multi-target selection: zero targets is valid when min == 0.
         WaitingFor::MultiTargetSelection { .. } => {
             Some(GameAction::SelectCards { cards: Vec::new() })

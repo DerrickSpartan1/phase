@@ -317,6 +317,19 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
             selection_mismatch(chosen, cards, exact) || (*up_to && chosen.len() > *count)
         }
         (
+            WaitingFor::DrawnThisTurnTopdeckChoice {
+                cards,
+                count,
+                min_count,
+                ..
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            selection_mismatch(chosen, cards, None)
+                || chosen.len() > *count
+                || chosen.len() < *min_count
+        }
+        (
             WaitingFor::DigChoice {
                 player: _,
                 selectable_cards,

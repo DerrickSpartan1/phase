@@ -43,6 +43,7 @@ pub(super) fn handles(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ConniveDiscard { .. }
             | WaitingFor::DiscardChoice { .. }
             | WaitingFor::EffectZoneChoice { .. }
+            | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::NamedChoice { .. }
             | WaitingFor::DamageSourceChoice { .. }
             | WaitingFor::ChooseRingBearer { .. }
@@ -1131,6 +1132,36 @@ pub(super) fn handle_resolution_choice(
                 kind: effect_kind,
                 source_id,
             });
+            set_priority(state, player);
+            resume_with_error_propagation(state, events)?;
+            ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())
+        }
+        (
+            WaitingFor::DrawnThisTurnTopdeckChoice {
+                player,
+                cards,
+                count,
+                min_count,
+                life_payment,
+                source_id,
+            },
+            GameAction::SelectCards { cards: chosen },
+        ) => {
+            effects::drawn_this_turn_choice::handle_topdeck_choice(
+                state,
+                effects::drawn_this_turn_choice::TopdeckChoice {
+                    player,
+                    eligible: &cards,
+                    count,
+                    min_count,
+                    life_payment,
+                    source_id,
+                    chosen_to_topdeck: &chosen,
+                },
+                events,
+            )
+            .map_err(|error| EngineError::InvalidAction(error.to_string()))?;
+            state.last_effect_count = Some(chosen.len() as i32);
             set_priority(state, player);
             resume_with_error_propagation(state, events)?;
             ResolutionChoiceOutcome::WaitingFor(state.waiting_for.clone())

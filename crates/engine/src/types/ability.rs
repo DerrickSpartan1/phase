@@ -4569,6 +4569,17 @@ pub enum Effect {
         count: QuantityExpr,
         position: LibraryPosition,
     },
+    /// Choose cards in hand that were drawn this turn. Chosen cards are put on
+    /// top of their owner's library; each unchosen required card is kept by
+    /// paying life.
+    ChooseDrawnThisTurnPayOrTopdeck {
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+        #[serde(default = "default_quantity_four")]
+        life_payment: QuantityExpr,
+        #[serde(default = "default_target_filter_controller")]
+        player: TargetFilter,
+    },
     /// CR 401.4: Target's owner puts it on top or bottom of their library (owner chooses).
     PutOnTopOrBottom {
         target: TargetFilter,
@@ -4827,6 +4838,10 @@ fn default_player_filter_controller() -> PlayerFilter {
 
 fn default_quantity_one() -> QuantityExpr {
     QuantityExpr::Fixed { value: 1 }
+}
+
+fn default_quantity_four() -> QuantityExpr {
+    QuantityExpr::Fixed { value: 4 }
 }
 
 fn default_counter_transfer_mode() -> CounterTransferMode {
@@ -5351,6 +5366,7 @@ impl Effect {
             | Effect::RevealFromHand { .. } => None,
             // CR 701.23a: SearchLibrary has an optional player target for opponent search.
             Effect::SearchLibrary { target_player, .. } => target_player.as_ref(),
+            Effect::ChooseDrawnThisTurnPayOrTopdeck { player, .. } => Some(player),
         }
     }
 }
@@ -5476,6 +5492,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::MiracleCast { .. } => "MiracleCast",
         Effect::MadnessCast { .. } => "MadnessCast",
         Effect::PutAtLibraryPosition { .. } => "PutAtLibraryPosition",
+        Effect::ChooseDrawnThisTurnPayOrTopdeck { .. } => "ChooseDrawnThisTurnPayOrTopdeck",
         Effect::PutOnTopOrBottom { .. } => "PutOnTopOrBottom",
         Effect::GiftDelivery { .. } => "GiftDelivery",
         Effect::Goad { .. } => "Goad",
@@ -5638,6 +5655,7 @@ pub enum EffectKind {
     MiracleCast,
     MadnessCast,
     PutAtLibraryPosition,
+    ChooseDrawnThisTurnPayOrTopdeck,
     PutOnTopOrBottom,
     GiftDelivery,
     Goad,
@@ -5804,6 +5822,9 @@ impl From<&Effect> for EffectKind {
             Effect::MiracleCast { .. } => EffectKind::MiracleCast,
             Effect::MadnessCast { .. } => EffectKind::MadnessCast,
             Effect::PutAtLibraryPosition { .. } => EffectKind::PutAtLibraryPosition,
+            Effect::ChooseDrawnThisTurnPayOrTopdeck { .. } => {
+                EffectKind::ChooseDrawnThisTurnPayOrTopdeck
+            }
             Effect::PutOnTopOrBottom { .. } => EffectKind::PutOnTopOrBottom,
             Effect::GiftDelivery { .. } => EffectKind::GiftDelivery,
             Effect::Goad { .. } => EffectKind::Goad,

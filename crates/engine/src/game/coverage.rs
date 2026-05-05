@@ -1097,6 +1097,17 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("target".into(), fmt_target(target)));
             }
         }
+        Effect::ChooseDrawnThisTurnPayOrTopdeck {
+            count,
+            life_payment,
+            player,
+        } => {
+            d.push(("count".into(), fmt_quantity(count)));
+            d.push(("life_payment".into(), fmt_quantity(life_payment)));
+            if !matches!(player, TargetFilter::Controller) {
+                d.push(("player".into(), fmt_target(player)));
+            }
+        }
         Effect::ExileTop { player, count } => {
             d.push(("player".into(), fmt_target(player)));
             d.push(("count".into(), fmt_quantity(count)));

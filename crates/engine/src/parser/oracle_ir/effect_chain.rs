@@ -60,6 +60,9 @@ pub(crate) enum SpecialClause {
     KeywordInsteadOverride,
     /// CR 608.2e: AdditionalCostPaidInstead + SearchLibrary — fold else_ability from previous.
     AdditionalCostInsteadSearch,
+    /// Follow-up to a drawn-this-turn choice: sets the life payment and
+    /// confirms the topdeck branch without emitting a separate effect.
+    DrawnThisTurnPayOrTopdeck { life_payment: QuantityExpr },
 }
 
 /// Per-clause IR: captures everything about a single parsed chunk before chain assembly.

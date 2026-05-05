@@ -1055,6 +1055,7 @@ impl GameRunner {
             WaitingFor::ConniveDiscard { .. } => "ConniveDiscard",
             WaitingFor::DiscardChoice { .. } => "DiscardChoice",
             WaitingFor::EffectZoneChoice { .. } => "EffectZoneChoice",
+            WaitingFor::DrawnThisTurnTopdeckChoice { .. } => "DrawnThisTurnTopdeckChoice",
             WaitingFor::ManifestDreadChoice { .. } => "ManifestDreadChoice",
             WaitingFor::TriggerTargetSelection { .. } => "TriggerTargetSelection",
             WaitingFor::BetweenGamesSideboard { .. } => "BetweenGamesSideboard",

@@ -24,6 +24,7 @@ type RevealChoice = Extract<WaitingFor, { type: "RevealChoice" }>;
 type SearchChoice = Extract<WaitingFor, { type: "SearchChoice" }>;
 type ChooseFromZoneChoice = Extract<WaitingFor, { type: "ChooseFromZoneChoice" }>;
 type EffectZoneChoice = Extract<WaitingFor, { type: "EffectZoneChoice" }>;
+type DrawnThisTurnTopdeckChoice = Extract<WaitingFor, { type: "DrawnThisTurnTopdeckChoice" }>;
 type DiscardToHandSize = Extract<WaitingFor, { type: "DiscardToHandSize" }>;
 type SacrificeForCost = Extract<WaitingFor, { type: "SacrificeForCost" }>;
 type ReturnToHandForCost = Extract<WaitingFor, { type: "ReturnToHandForCost" }>;
@@ -116,6 +117,9 @@ export function CardChoiceModal() {
     case "EffectZoneChoice":
       if (!canActForWaitingState) return null;
       return <EffectZoneModal data={waitingFor.data} />;
+    case "DrawnThisTurnTopdeckChoice":
+      if (!canActForWaitingState) return null;
+      return <DrawnThisTurnTopdeckModal data={waitingFor.data} />;
     case "NamedChoice":
       if (!canActForWaitingState) return null;
       return <NamedChoiceModal data={waitingFor.data} />;
@@ -918,6 +922,83 @@ function EffectZoneModal({ data }: { data: EffectZoneChoice["data"] }) {
                 <div className={`absolute inset-0 flex items-center justify-center rounded-lg ${overlayClass}`}>
                   <span className={`rounded-full px-3 py-1 text-xs font-bold text-white ${badgeClass}`}>
                     {badgeLabel}
+                  </span>
+                </div>
+              )}
+            </motion.button>
+          );
+        })}
+      </ScrollableCardStrip>
+    </ChoiceOverlay>
+  );
+}
+
+function DrawnThisTurnTopdeckModal({ data }: { data: DrawnThisTurnTopdeckChoice["data"] }) {
+  const dispatch = useGameDispatch();
+  const objects = useGameStore((s) => s.gameState?.objects);
+  const hoverProps = useInspectHoverProps();
+  const [selected, setSelected] = useState<Set<ObjectId>>(new Set());
+
+  const toggleSelect = useCallback(
+    (id: ObjectId) => {
+      setSelected((prev) => {
+        const next = new Set(prev);
+        if (next.has(id)) {
+          next.delete(id);
+        } else if (next.size < data.count) {
+          next.add(id);
+        }
+        return next;
+      });
+    },
+    [data.count],
+  );
+
+  const handleConfirm = useCallback(() => {
+    dispatch({
+      type: "SelectCards",
+      data: { cards: Array.from(selected) },
+    });
+  }, [dispatch, selected]);
+
+  if (!objects) return null;
+
+  const payments = data.count - selected.size;
+  const actionLabel =
+    selected.size === 0 ? `Pay ${payments * data.life_payment} life` : `Confirm (${selected.size}/${data.count})`;
+  const disabled = selected.size < data.min_count || selected.size > data.count;
+
+  return (
+    <ChoiceOverlay
+      title="Drawn This Turn"
+      subtitle={`Put up to ${data.count} on top; pay ${data.life_payment} life for each kept`}
+      footer={<ConfirmButton onClick={handleConfirm} disabled={disabled} label={actionLabel} />}
+    >
+      <ScrollableCardStrip>
+        {data.cards.map((id, index) => {
+          const obj = objects[id];
+          if (!obj) return null;
+          const isSelected = selected.has(id);
+          return (
+            <motion.button
+              key={id}
+              className={`relative rounded-lg transition ${
+                isSelected
+                  ? "z-10 ring-2 ring-sky-300/80"
+                  : "hover:shadow-[0_0_16px_rgba(200,200,255,0.3)]"
+              }`}
+              initial={{ opacity: 0, y: 60, scale: 0.85 }}
+              animate={{ opacity: isSelected ? 1 : 0.7, y: 0, scale: 1 }}
+              transition={{ delay: 0.1 + index * 0.08, duration: 0.35 }}
+              whileHover={{ scale: 1.05, y: -6 }}
+              onClick={() => toggleSelect(id)}
+              {...hoverProps(id)}
+            >
+              <CardImage cardName={obj.name} size="normal" className={CHOICE_CARD_IMAGE_CLASS} />
+              {isSelected && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-sky-500/20">
+                  <span className="rounded-full bg-sky-500/90 px-3 py-1 text-xs font-bold text-white">
+                    Top
                   </span>
                 </div>
               )}

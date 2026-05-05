@@ -990,6 +990,9 @@ fn detect_dynamic_qty(
         // token that's a copy of it" effects carry the iterated source set as
         // `CopyTokenOf::source_filter`, not as `repeat_for` or a QuantityExpr.
         "\"source_filter\":{",
+        // Sylvan Library class: "For each of those cards, pay N life or put
+        // the card on top" is captured as a dedicated per-card choice effect.
+        "ChooseDrawnThisTurnPayOrTopdeck",
     ];
     if json_has_any(ast_json, dynamic_markers) {
         return;

@@ -54,6 +54,7 @@ pub mod discard;
 pub mod discover;
 pub mod double;
 pub mod draw;
+pub mod drawn_this_turn_choice;
 pub mod effect;
 pub mod energy;
 pub mod exchange_control;
@@ -388,6 +389,7 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::ManifestDreadChoice { .. }
             | WaitingFor::DiscardChoice { .. }
             | WaitingFor::EffectZoneChoice { .. }
+            | WaitingFor::DrawnThisTurnTopdeckChoice { .. }
             | WaitingFor::CategoryChoice { .. }
             | WaitingFor::LearnChoice { .. }
             | WaitingFor::PopulateChoice { .. }
@@ -630,6 +632,9 @@ pub fn resolve_effect(
             Ok(())
         }
         Effect::PutAtLibraryPosition { .. } => put_on_top::resolve(state, ability, events),
+        Effect::ChooseDrawnThisTurnPayOrTopdeck { .. } => {
+            drawn_this_turn_choice::resolve(state, ability, events)
+        }
         Effect::PutOnTopOrBottom { .. } => put_on_top_or_bottom::resolve(state, ability, events),
         Effect::GiftDelivery { .. } => gift_delivery::resolve(state, ability, events),
         Effect::ChangeTargets { .. } => change_targets::resolve(state, ability, events),
