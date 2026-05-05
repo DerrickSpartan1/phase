@@ -4526,6 +4526,38 @@ fn apply_cost_reduction(
             }
         }
     }
+
+    apply_static_activated_ability_cost_reduction(state, ability_def, source_id);
+}
+
+fn apply_static_activated_ability_cost_reduction(
+    state: &GameState,
+    ability_def: &mut AbilityDefinition,
+    source_id: ObjectId,
+) {
+    let Some(cost) = ability_def.cost.as_mut() else {
+        return;
+    };
+
+    for (static_source, def) in super::functioning_abilities::battlefield_active_statics(state) {
+        let StaticMode::ReduceAbilityCost { keyword, amount } = &def.mode else {
+            continue;
+        };
+        if keyword != "activated" || *amount == 0 {
+            continue;
+        }
+        if def.affected.as_ref().is_some_and(|filter| {
+            !super::filter::matches_target_filter(
+                state,
+                source_id,
+                filter,
+                &super::filter::FilterContext::from_source(state, static_source.id),
+            )
+        }) {
+            continue;
+        }
+        reduce_generic_in_cost(cost, *amount);
+    }
 }
 
 /// CR 101.2: Check if a casting prohibition scope applies to the given caster.
@@ -4879,10 +4911,10 @@ mod tests {
     use crate::parser::oracle_static::parse_static_line;
     use crate::types::ability::{
         ActivationRestriction, BasicLandType, CastVariantPaid, CastingPermission, ChosenAttribute,
-        ChosenSubtypeKind, ContinuousModification, ControllerRef, FilterProp, GameRestriction,
-        ManaContribution, ManaProduction, ModalSelectionCondition, ModalSelectionConstraint,
-        QuantityExpr, RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        ChosenSubtypeKind, ContinuousModification, ControllerRef, FilterProp, GainLifePlayer,
+        GameRestriction, ManaContribution, ManaProduction, ModalSelectionCondition,
+        ModalSelectionConstraint, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope,
+        SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -6422,6 +6454,82 @@ mod tests {
             ),
             other => panic!("expected ManaCost::Cost, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn activated_ability_cost_reduction_applies_to_matching_permanent_type() {
+        let mut state = setup_game_at_main_phase();
+        let sam = create_object(
+            &mut state,
+            CardId(700),
+            PlayerId(0),
+            "Sam, Loyal Attendant".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&sam)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                    keyword: "activated".to_string(),
+                    amount: 1,
+                })
+                .affected(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Subtype("Food".to_string())],
+                    controller: Some(ControllerRef::You),
+                    ..Default::default()
+                })),
+            );
+
+        let food = create_object(
+            &mut state,
+            CardId(701),
+            PlayerId(0),
+            "Food Token".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&food).unwrap();
+            obj.card_types.core_types.push(CoreType::Artifact);
+            obj.card_types.subtypes.push("Food".to_string());
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 3 },
+                        player: GainLifePlayer::Controller,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::generic(2),
+                        },
+                        AbilityCost::Tap,
+                        AbilityCost::Sacrifice {
+                            target: TargetFilter::SelfRef,
+                            count: 1,
+                        },
+                    ],
+                }),
+            );
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), food, 0),
+            "Sam should reduce the Food activation's generic mana cost from 2 to 1"
+        );
+        handle_activate_ability(&mut state, PlayerId(0), food, 0, &mut Vec::new())
+            .expect("reduced Food activation should be payable with one generic mana");
+
+        assert_eq!(state.objects[&food].zone, Zone::Graveyard);
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == food),
+            "Food activation should reach the stack after paying the reduced cost"
+        );
     }
 
     #[test]
