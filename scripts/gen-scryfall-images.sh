@@ -46,8 +46,8 @@ mkdir -p "$(dirname "$OUTPUT")"
 # art_series "Forest // Forest" overwriting basic Forest). The oracle_id
 # path supersedes the back-face-name use case anyway.
 #
-# Non-playable layouts (token, emblem, art_series, etc.) are excluded entirely
-# to prevent name collisions with real cards.
+# Non-playable layouts (token, emblem, art_series, etc.) are excluded from the
+# main card entries to prevent name collisions with real cards.
 #
 # Each entry value contains:
 #   - oracle_id        — Scryfall's stable per-card id (mirrors the key path)
@@ -57,43 +57,72 @@ mkdir -p "$(dirname "$OUTPUT")"
 #                        engine-reported `printed_ref.face_name`.
 #   - faces            — array of {normal, art_crop} per face (image URLs)
 #   - name, mana_cost, cmc, type_line, colors, color_identity, keywords
+#
+# Token entries are included separately with a "token:" prefix key to avoid
+# name collisions (e.g., a card named "Saproling" vs a Saproling token).
+# The frontend resolves token images via this prefix key, avoiding live
+# Scryfall API calls at runtime.
 NON_PLAYABLE='["token","double_faced_token","emblem","art_series","vanguard","scheme","planar","augment","host"]'
 
-jq -c --argjson exclude "$NON_PLAYABLE" '[.[] |
-  select(.layout as $l | $exclude | index($l) | not) |
-  . as $card |
-  {
-    oracle_id: $card.oracle_id,
-    face_names: (if $card.card_faces then
-      [$card.card_faces[] | .name | ascii_downcase]
-    else
-      [$card.name | ascii_downcase]
-    end),
-    faces: (if $card.card_faces then
-      [$card.card_faces[] | {
-        normal: (.image_uris.normal // $card.image_uris.normal),
-        art_crop: (.image_uris.art_crop // $card.image_uris.art_crop)
-      }]
-    else
-      [{normal: $card.image_uris.normal, art_crop: $card.image_uris.art_crop}]
-    end),
-    name: $card.name,
-    mana_cost: ($card.mana_cost // $card.card_faces[0].mana_cost // ""),
-    cmc: $card.cmc,
-    type_line: $card.type_line,
-    colors: ($card.colors // $card.card_faces[0].colors // []),
-    color_identity: $card.color_identity,
-    keywords: ($card.keywords // [])
-  } as $entry |
-  (
-    [$card.oracle_id | ascii_downcase] +
-    [$card.name | ascii_downcase] +
-    if $card.card_faces and ($card.card_faces[0].name != $card.name)
-    then [$card.card_faces[0].name | ascii_downcase]
-    else [] end
-  ) | unique[] |
-  {key: ., value: $entry}
-] | from_entries' "$ORACLE_FILE" > "$OUTPUT"
+jq -c --argjson exclude "$NON_PLAYABLE" '
+  # Playable cards
+  ([.[] |
+    select(.layout as $l | $exclude | index($l) | not) |
+    . as $card |
+    {
+      oracle_id: $card.oracle_id,
+      face_names: (if $card.card_faces then
+        [$card.card_faces[] | .name | ascii_downcase]
+      else
+        [$card.name | ascii_downcase]
+      end),
+      faces: (if $card.card_faces then
+        [$card.card_faces[] | {
+          normal: (.image_uris.normal // $card.image_uris.normal),
+          art_crop: (.image_uris.art_crop // $card.image_uris.art_crop)
+        }]
+      else
+        [{normal: $card.image_uris.normal, art_crop: $card.image_uris.art_crop}]
+      end),
+      name: $card.name,
+      mana_cost: ($card.mana_cost // $card.card_faces[0].mana_cost // ""),
+      cmc: $card.cmc,
+      type_line: $card.type_line,
+      colors: ($card.colors // $card.card_faces[0].colors // []),
+      color_identity: $card.color_identity,
+      keywords: ($card.keywords // [])
+    } as $entry |
+    (
+      [$card.oracle_id | ascii_downcase] +
+      [$card.name | ascii_downcase] +
+      if $card.card_faces and ($card.card_faces[0].name != $card.name)
+      then [$card.card_faces[0].name | ascii_downcase]
+      else [] end
+    ) | unique[] |
+    {key: ., value: $entry}
+  ]) +
+  # Token entries (keyed with "token:" prefix)
+  ([.[] |
+    select(.layout == "token") |
+    select(.image_uris.normal != null) |
+    . as $tok |
+    {
+      oracle_id: $tok.oracle_id,
+      face_names: [$tok.name | ascii_downcase],
+      faces: [{normal: $tok.image_uris.normal, art_crop: $tok.image_uris.art_crop}],
+      name: $tok.name,
+      mana_cost: "",
+      cmc: 0,
+      type_line: $tok.type_line,
+      colors: ($tok.colors // []),
+      color_identity: ($tok.color_identity // []),
+      keywords: ($tok.keywords // []),
+      power: ($tok.power // null),
+      toughness: ($tok.toughness // null)
+    } as $entry |
+    {key: ("token:" + ($tok.name | ascii_downcase)), value: $entry}
+  ]) | from_entries
+' "$ORACLE_FILE" > "$OUTPUT"
 
 ENTRY_COUNT=$(jq 'length' "$OUTPUT")
 FILE_SIZE=$(du -h "$OUTPUT" | cut -f1)

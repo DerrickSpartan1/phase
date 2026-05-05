@@ -289,6 +289,9 @@ export async function fetchTokenImageUrl(
   size: ImageSize = "normal",
   filters?: TokenSearchFilters,
 ): Promise<string> {
+  const localUrl = await fetchTokenImageFromLocal(tokenName, size);
+  if (localUrl) return localUrl;
+
   const colorClause = buildTokenColorClause(filters?.colors);
 
   // Try with exact P/T first, then fall back without P/T if no results.
@@ -310,6 +313,18 @@ export async function fetchTokenImageUrl(
   }
 
   throw new Error(`No token image found for "${tokenName}"`);
+}
+
+async function fetchTokenImageFromLocal(
+  tokenName: string,
+  size: ImageSize,
+): Promise<string | null> {
+  const data = await loadScryfallData();
+  const key = `token:${tokenName.toLowerCase()}`;
+  const entry = data?.[key];
+  if (!entry) return null;
+  const face = entry.faces[0];
+  return face?.[size === "small" || size === "large" ? "normal" : size] ?? null;
 }
 
 function buildTokenQuery(

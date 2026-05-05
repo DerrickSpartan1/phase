@@ -8,6 +8,7 @@ import { useLongPress } from "../../hooks/useLongPress.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
+import { cardImageLookup } from "../../services/cardImageLookup.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
 import { useUiStore } from "../../stores/uiStore.ts";
 import { renderDescription } from "../../utils/description.ts";
@@ -52,8 +53,16 @@ export function StackEntry({ entry, index, isTop, isPending, cardSize, style, on
 
   const sourceObj = objects?.[entry.source_id];
   const sourceName = sourceObj?.name ?? "Unknown";
+  const imageLookup = sourceObj
+    ? cardImageLookup(sourceObj)
+    : { name: "", faceIndex: 0, oracleId: undefined, faceName: undefined };
 
-  const { src, isLoading } = useCardImage(sourceName, { size: "normal" });
+  const { src, isLoading } = useCardImage(imageLookup.name, {
+    size: "normal",
+    faceIndex: imageLookup.faceIndex,
+    oracleId: imageLookup.oracleId,
+    faceName: imageLookup.faceName,
+  });
 
   const isSpell = entry.kind.type === "Spell";
   const abilityLabel =
