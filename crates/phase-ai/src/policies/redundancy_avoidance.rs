@@ -313,7 +313,7 @@ fn redundancy_delta(
         | Effect::ManifestDread
         | Effect::ExtraTurn { .. }
         | Effect::SkipNextTurn { .. }
-        | Effect::AdditionalCombatPhase { .. }
+        | Effect::AdditionalPhase { .. }
         | Effect::Double { .. }
         | Effect::RuntimeHandled { .. }
         | Effect::Incubate { .. }
