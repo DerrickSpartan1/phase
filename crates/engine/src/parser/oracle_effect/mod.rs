@@ -16,7 +16,7 @@ use std::str::FromStr;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::multispace1;
-use nom::combinator::{opt, value};
+use nom::combinator::{map, opt, value};
 use nom::multi::many1;
 use nom::sequence::preceded;
 use nom::Parser;
@@ -2059,16 +2059,33 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
-    // CR 701.57a: "discover N" — effect variant
-    if let Some((_, rest_orig)) =
-        super::oracle_nom::bridge::nom_on_lower(tp.original, tp.lower, |i| {
-            value((), tag("discover ")).parse(i)
+    // CR 701.57a: "discover N" / "discover X" — effect variant.
+    let (discover_tp, discover_where_x) = strip_trailing_where_x(tp);
+    if let Some((limit, rest_orig)) =
+        super::oracle_nom::bridge::nom_on_lower(discover_tp.original, discover_tp.lower, |i| {
+            let (rest, _) = tag("discover ").parse(i)?;
+            let (rest, limit) = alt((
+                map(nom_primitives::parse_number, |value| QuantityExpr::Fixed {
+                    value: value as i32,
+                }),
+                value(
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::Variable {
+                            name: "X".to_string(),
+                        },
+                    },
+                    tag("x"),
+                ),
+            ))
+            .parse(rest)?;
+            let (rest, _) = opt(tag(".")).parse(rest)?;
+            Ok((rest, limit))
         })
     {
-        let rest_lower = &tp.lower[tp.lower.len() - rest_orig.len()..];
-        if let Ok(n) = rest_lower.trim().parse::<u32>() {
+        if rest_orig.trim().is_empty() {
+            let limit = apply_where_x_quantity_expression(limit, discover_where_x.as_deref());
             return parsed_clause(Effect::Discover {
-                mana_value_limit: n,
+                mana_value_limit: limit,
             });
         }
     }
@@ -10495,6 +10512,9 @@ fn apply_where_x_effect_expression(effect: &mut Effect, where_x_expression: Opti
         | Effect::Token { count: amount, .. }
         | Effect::Dig { count: amount, .. }
         | Effect::ExileTop { count: amount, .. }
+        | Effect::Discover {
+            mana_value_limit: amount,
+        }
         | Effect::Incubate { count: amount } => {
             *amount = apply_where_x_quantity_expression(amount.clone(), where_x_expression);
         }
@@ -22131,6 +22151,29 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn discover_x_uses_where_x_quantity_expression() {
+        let def = parse_effect_chain(
+            "discover X, where X is that spell's mana value.",
+            AbilityKind::Spell,
+        );
+
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::Discover {
+                    mana_value_limit: QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::EventSource
+                        }
+                    }
+                }
+            ),
+            "expected dynamic Discover limit, got {:?}",
+            def.effect
+        );
     }
 
     #[test]
