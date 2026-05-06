@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
 import type { FeedDeck } from "../../types/feed";
@@ -42,7 +42,6 @@ import { BASIC_LAND_NAMES } from "../../constants/game";
 const PRECON_PREFIX = "[Pre-built] ";
 const PRECON_PAGE_SIZE = 12;
 const DECK_SCAN_BATCH_SIZE = 1;
-const COVERAGE_SCAN_BATCH_SIZE = 1;
 
 /** Tags that represent a format/archetype — shown with active (green) styling. */
 const FORMAT_TAGS = new Set([
@@ -139,7 +138,7 @@ interface DeckTileProps {
   preconDeckOverride?: PreconDeckEntry;
 }
 
-function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, hideFeedBadge, feedDeckOverride, preconDeckOverride }: DeckTileProps) {
+const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, hideFeedBadge, feedDeckOverride, preconDeckOverride }: DeckTileProps) {
   const [coverageHovered, setCoverageHovered] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
@@ -148,9 +147,11 @@ function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete
     const timer = setTimeout(() => setConfirmingDelete(false), 3000);
     return () => clearTimeout(timer);
   }, [confirmingDelete]);
-  const colors = compatibility?.color_identity
-    ?? feedDeckOverride?.colors
-    ?? getDeckColorIdentity(deckName);
+  const colors = compatibility?.color_identity?.length
+    ? compatibility.color_identity
+    : feedDeckOverride?.colors?.length
+      ? feedDeckOverride.colors
+      : getDeckColorIdentity(deckName);
   const count = feedDeckOverride
     ? feedDeckOverride.main.reduce((sum, e) => sum + e.count, 0)
     : preconDeckOverride
@@ -308,7 +309,86 @@ function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete
       </div>
     </div>
   );
+});
+
+interface SavedDeckTileProps {
+  deckName: string;
+  isActive: boolean;
+  compatibility: DeckCompatibilityResult | undefined;
+  mode: "manage" | "select";
+  onTileClick: (deckName: string) => void;
+  onEditDeck?: (deckName: string) => void;
+  onDeleteDeck: (deckName: string) => void;
+  preconCandidate?: DeckCatalogCandidate;
 }
+
+const SavedDeckTile = memo(function SavedDeckTile({
+  deckName,
+  isActive,
+  compatibility,
+  mode,
+  onTileClick,
+  onEditDeck,
+  onDeleteDeck,
+  preconCandidate,
+}: SavedDeckTileProps) {
+  const handleClick = useCallback(() => onTileClick(deckName), [deckName, onTileClick]);
+  const handleEdit = useMemo(
+    () => onEditDeck ? () => onEditDeck(deckName) : undefined,
+    [deckName, onEditDeck],
+  );
+  const handleDelete = useMemo(
+    () => mode === "manage" ? () => onDeleteDeck(deckName) : undefined,
+    [deckName, mode, onDeleteDeck],
+  );
+  const preconDeckOverride = useMemo(
+    () => preconCandidate ? preconCandidateToDeckEntry(preconCandidate) : undefined,
+    [preconCandidate],
+  );
+
+  return (
+    <DeckTile
+      deckName={deckName}
+      isActive={isActive}
+      compatibility={compatibility}
+      preconDeckOverride={preconDeckOverride}
+      onClick={handleClick}
+      onEdit={handleEdit}
+      onDelete={handleDelete}
+    />
+  );
+});
+
+interface FeedDeckTileProps {
+  deck: FeedDeck;
+  isActive: boolean;
+  compatibility: DeckCompatibilityResult | undefined;
+  onTileClick: (deckName: string) => void;
+  onAdopt: (deckName: string) => void;
+}
+
+const FeedDeckTile = memo(function FeedDeckTile({
+  deck,
+  isActive,
+  compatibility,
+  onTileClick,
+  onAdopt,
+}: FeedDeckTileProps) {
+  const handleClick = useCallback(() => onTileClick(deck.name), [deck.name, onTileClick]);
+  const handleAdopt = useCallback(() => onAdopt(deck.name), [deck.name, onAdopt]);
+
+  return (
+    <DeckTile
+      deckName={deck.name}
+      isActive={isActive}
+      compatibility={compatibility}
+      onClick={handleClick}
+      onAdopt={handleAdopt}
+      hideFeedBadge
+      feedDeckOverride={deck}
+    />
+  );
+});
 
 interface MyDecksProps {
   mode: "manage" | "select";
@@ -356,9 +436,11 @@ export function MyDecks({
   const pendingCompatibility = useRef(new Set<string>());
   const pendingCoverage = useRef(new Set<string>());
   const completedCoverage = useRef(new Set<string>());
+  const coverageInFlight = useRef(false);
   const compatibilityGeneration = useRef(0);
   const [deckScanIndex, setDeckScanIndex] = useState(0);
-  const [activeCoverageDeckName, setActiveCoverageDeckName] = useState<string | null>(null);
+  const [coverageStatus, setCoverageStatus] = useState<{ deckName: string; remaining: number } | null>(null);
+  const [coverageQueueVersion, setCoverageQueueVersion] = useState(0);
   const [catalogCandidates, setCatalogCandidates] = useState<DeckCatalogCandidate[]>([]);
   const [preconDisplayCount, setPreconDisplayCount] = useState(PRECON_PAGE_SIZE);
   const feedCache = useFeedCacheSnapshot();
@@ -423,12 +505,13 @@ export function MyDecks({
     pendingCompatibility.current.clear();
     pendingCoverage.current.clear();
     completedCoverage.current.clear();
+    coverageInFlight.current = false;
     setCompatibilities({});
     setCompatibilityError(null);
     setIsEvaluating(false);
     setCompatibilityStatus(null);
     setDeckScanIndex(0);
-    setActiveCoverageDeckName(null);
+    setCoverageStatus(null);
   }, [deckNamesKey, selectedFormatForCompatibility, selectedMatchType]);
 
   useEffect(() => {
@@ -696,18 +779,18 @@ export function MyDecks({
 
   useEffect(() => {
     if (isScanningUserDecks) return;
-    if (activeCoverageDeckName) return;
+    if (coverageInFlight.current) return;
     if (visibleCoverageDeckNames.length === 0) return;
 
-    const batchNames = visibleCoverageDeckNames.slice(0, COVERAGE_SCAN_BATCH_SIZE);
-    const syntheticResults = new Map<string, DeckCompatibilityResult>();
-    const batch = batchNames.flatMap((name) => {
-      const preconCandidate = legalPreconByName.get(name);
-      const savedCandidate = deckCandidatesByName.get(name);
-      const candidate = savedCandidate ?? preconCandidate;
-      if (!candidate || pendingCoverage.current.has(name)) return [];
-      if (candidate.coveragePct != null) {
-        syntheticResults.set(name, {
+    const name = visibleCoverageDeckNames[0];
+    const candidate = deckCandidatesByName.get(name) ?? legalPreconByName.get(name);
+    if (!candidate || pendingCoverage.current.has(name)) return;
+
+    if (candidate.coveragePct != null) {
+      completedCoverage.current.add(name);
+      setCompatibilities((current) => ({
+        ...current,
+        [name]: {
           standard: { compatible: candidate.knownFormat === "Standard", reasons: [] },
           commander: { compatible: candidate.knownFormat === "Commander", reasons: [] },
           bo3_ready: candidate.deck.sideboard.length > 0,
@@ -716,71 +799,61 @@ export function MyDecks({
             ? candidate.knownFormat === selectedFormatForCompatibility
             : null,
           selected_format_reasons: [],
-          color_identity: [],
+          color_identity: getDeckColorIdentity(name),
           coverage: coverageFromPct(candidate.coveragePct),
-        });
-        return [];
-      }
-      pendingCoverage.current.add(name);
-      return [{ name, deck: candidate.deck }];
-    });
-
-    if (syntheticResults.size > 0) {
-      for (const name of syntheticResults.keys()) completedCoverage.current.add(name);
-      setCompatibilities((current) => ({ ...current, ...Object.fromEntries(syntheticResults) }));
+        },
+      }));
+      setCoverageQueueVersion((version) => version + 1);
+      return;
     }
-    if (batch.length === 0) return;
 
-    let cancelled = false;
     const generation = compatibilityGeneration.current;
-    const firstName = batch[0]?.name ?? "visible deck";
+    pendingCoverage.current.add(name);
+    coverageInFlight.current = true;
     setIsEvaluating(true);
-    setActiveCoverageDeckName(firstName);
-    setCompatibilityStatus(`Loading coverage for ${firstName}…`);
-    logDeckWorkerStatus(`queued visible coverage scan for ${batch.map(({ name }) => name).join(", ")}`);
+    setCoverageStatus({ deckName: name, remaining: visibleCoverageDeckNames.length });
+    setCompatibilityStatus(`Loading coverage for ${name}…`);
+    logDeckWorkerStatus(`queued visible coverage scan for ${name}`);
 
-    evaluateDeckCompatibilityBatch(batch, {
+    evaluateDeckCompatibilityBatch([{ name, deck: candidate.deck }], {
       selectedFormat: selectedFormatForCompatibility,
       selectedMatchType,
       onStatus: (status, statusDeckName) => {
-        if (cancelled || generation !== compatibilityGeneration.current) return;
-        const currentDeckName = statusDeckName ?? firstName;
+        if (generation !== compatibilityGeneration.current) return;
+        const currentDeckName = statusDeckName ?? name;
         logDeckWorkerStatus(`${status}: ${currentDeckName}`);
         if (status === "starting-worker") setCompatibilityStatus("Starting compatibility worker…");
         if (status === "loading-card-database") setCompatibilityStatus("Loading compatibility database…");
         if (status === "checking-deck") setCompatibilityStatus(`Loading coverage for ${currentDeckName}…`);
       },
       onResult: (name, result) => {
-        if (cancelled || generation !== compatibilityGeneration.current) return;
+        if (generation !== compatibilityGeneration.current) return;
         logDeckWorkerStatus(`visible coverage result for ${name}`);
         completedCoverage.current.add(name);
         setCompatibilities((current) => ({ ...current, [name]: result }));
       },
     }).then((results) => {
-      if (cancelled || generation !== compatibilityGeneration.current) return;
-      logDeckWorkerStatus(`visible coverage batch resolved for ${firstName}`);
+      if (generation !== compatibilityGeneration.current) return;
+      logDeckWorkerStatus(`visible coverage batch resolved for ${name}`);
       for (const name of Object.keys(results)) {
         completedCoverage.current.add(name);
       }
-      setCompatibilities((current) => ({ ...current, ...results }));
       setCompatibilityError(null);
     }).catch((error) => {
-      if (cancelled || generation !== compatibilityGeneration.current) return;
-      logDeckWorkerStatus(`visible coverage failed for ${firstName}: ${error instanceof Error ? error.message : String(error)}`);
+      if (generation !== compatibilityGeneration.current) return;
+      logDeckWorkerStatus(`visible coverage failed for ${name}: ${error instanceof Error ? error.message : String(error)}`);
       setCompatibilityError(error instanceof Error ? error.message : String(error));
     }).finally(() => {
-      if (cancelled || generation !== compatibilityGeneration.current) return;
-      for (const { name } of batch) pendingCoverage.current.delete(name);
+      pendingCoverage.current.delete(name);
+      coverageInFlight.current = false;
+      if (generation !== compatibilityGeneration.current) return;
       setCompatibilityStatus(null);
-      setActiveCoverageDeckName(null);
+      setCoverageStatus(null);
       setIsEvaluating(pendingCompatibility.current.size > 0 || pendingCoverage.current.size > 0);
+      setCoverageQueueVersion((version) => version + 1);
     });
-
-    return () => {
-      cancelled = true;
-    };
   }, [
-    activeCoverageDeckName,
+    coverageQueueVersion,
     deckCandidatesByName,
     isScanningUserDecks,
     legalPreconByName,
@@ -789,26 +862,26 @@ export function MyDecks({
     visibleCoverageDeckNames,
   ]);
 
-  const coverageScanTotal = visibleCoverageDeckNames.length + (activeCoverageDeckName ? 1 : 0);
+  const coverageScanTotal = coverageStatus?.remaining ?? visibleCoverageDeckNames.length;
   const isScanningCoverage = coverageScanTotal > 0 || pendingCoverage.current.size > 0;
   const showEvaluationStatus = isScanningUserDecks || isScanningCoverage || (isEvaluating && !requiresCompatibilityFilter);
 
-  const materializePreconDeck = (deckName: string): boolean => {
+  const materializePreconDeck = useCallback((deckName: string): boolean => {
     const candidate = legalPreconByName.get(deckName);
     if (!candidate || candidate.source.type !== "precon") return false;
     savePreconDeck(deckName, preconCandidateToDeckEntry(candidate));
     setDeckNames(listSavedDeckNames());
     return true;
-  };
+  }, [legalPreconByName]);
 
-  const handleTileClick = (deckName: string) => {
+  const handleTileClick = useCallback((deckName: string) => {
     if (mode === "manage") {
       onEditDeck?.(deckName);
       return;
     }
     materializePreconDeck(deckName);
     onSelectDeck?.(deckName);
-  };
+  }, [materializePreconDeck, mode, onEditDeck, onSelectDeck]);
 
   const handleImported = (name: string, names: string[]) => {
     setDeckNames(names);
@@ -827,17 +900,17 @@ export function MyDecks({
     }
   };
 
-  const handleAdoptDeck = (deckName: string) => {
+  const handleAdoptDeck = useCallback((deckName: string) => {
     const newName = prompt("Save as:", deckName);
     if (!newName) return;
     adoptFeedDeck(deckName, newName);
     setDeckNames(listSavedDeckNames());
-  };
+  }, []);
 
-  const handleDeleteDeck = (deckName: string) => {
+  const handleDeleteDeck = useCallback((deckName: string) => {
     deleteDeck(deckName);
     setDeckNames(listSavedDeckNames());
-  };
+  }, []);
 
   const handleFeedManagerClose = () => {
     setShowFeedManager(false);
@@ -1033,8 +1106,8 @@ export function MyDecks({
               {compatibilityStatus
                 ?? (isScanningUserDecks
                 ? "Checking selected deck compatibility…"
-                : activeCoverageDeckName
-                  ? `Loading coverage for ${activeCoverageDeckName}…`
+                : coverageStatus
+                  ? `Loading coverage for ${coverageStatus.deckName}…`
                   : "Evaluating visible decks…")}
             </span>
           </div>
@@ -1101,14 +1174,15 @@ export function MyDecks({
               />
 
               {userDecks.map((deckName) => (
-                <DeckTile
+                <SavedDeckTile
                   key={deckName}
                   deckName={deckName}
                   isActive={deckName === activeDeckName}
                   compatibility={compatibilities[deckName]}
-                  onClick={() => handleTileClick(deckName)}
-                  onEdit={onEditDeck ? () => onEditDeck(deckName) : undefined}
-                  onDelete={mode === "manage" ? () => handleDeleteDeck(deckName) : undefined}
+                  mode={mode}
+                  onTileClick={handleTileClick}
+                  onEditDeck={onEditDeck}
+                  onDeleteDeck={handleDeleteDeck}
                 />
               ))}
             </div>
@@ -1131,18 +1205,16 @@ export function MyDecks({
               </div>
               <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
                 {bundledDecks.map((deckName) => (
-                  <DeckTile
+                  <SavedDeckTile
                     key={deckName}
                     deckName={deckName}
                     isActive={deckName === activeDeckName}
                     compatibility={compatibilities[deckName]}
-                    preconDeckOverride={
-                      legalPreconByName.has(deckName)
-                        ? preconCandidateToDeckEntry(legalPreconByName.get(deckName)!)
-                        : undefined
-                    }
-                    onClick={() => handleTileClick(deckName)}
-                    onEdit={onEditDeck ? () => onEditDeck(deckName) : undefined}
+                    mode={mode}
+                    onTileClick={handleTileClick}
+                    onEditDeck={onEditDeck}
+                    onDeleteDeck={handleDeleteDeck}
+                    preconCandidate={legalPreconByName.get(deckName)}
                   />
                 ))}
               </div>
@@ -1167,14 +1239,16 @@ export function MyDecks({
                 {displayedPreconDeckNames.map((deckName) => {
                   const candidate = legalPreconByName.get(deckName);
                   return (
-                    <DeckTile
+                    <SavedDeckTile
                       key={deckName}
                       deckName={deckName}
                       isActive={deckName === activeDeckName}
                       compatibility={compatibilities[deckName]}
-                      preconDeckOverride={candidate ? preconCandidateToDeckEntry(candidate) : undefined}
-                      onClick={() => handleTileClick(deckName)}
-                      onEdit={onEditDeck ? () => onEditDeck(deckName) : undefined}
+                      mode={mode}
+                      onTileClick={handleTileClick}
+                      onEditDeck={onEditDeck}
+                      onDeleteDeck={handleDeleteDeck}
+                      preconCandidate={candidate}
                     />
                   );
                 })}
@@ -1300,15 +1374,13 @@ function SubscriptionsView({
             </div>
             <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
               {[...feedDecks].sort((a, b) => a.name.localeCompare(b.name)).map((deck) => (
-                <DeckTile
+                <FeedDeckTile
                   key={deck.name}
-                  deckName={deck.name}
+                  deck={deck}
                   isActive={deck.name === activeDeckName}
                   compatibility={compatibilities[deck.name]}
-                  onClick={() => onTileClick(deck.name)}
-                  onAdopt={() => onAdopt(deck.name)}
-                  hideFeedBadge
-                  feedDeckOverride={deck}
+                  onTileClick={onTileClick}
+                  onAdopt={onAdopt}
                 />
               ))}
             </div>
