@@ -702,13 +702,13 @@ function GamePageContent({
   // obj.name to the back-face name — cardImageLookup recovers the front name
   // from obj.back_face. See services/cardImageLookup.ts (issue #90).
   const inspectedLookup = inspectedObj ? cardImageLookup(inspectedObj) : null;
-  const inspectedCardName = inspectedObj
+  const inspectedCardName = inspectedObj && !inspectedObj.face_down
     ? inspectedFaceIndex === 1 && inspectedObj.back_face
       ? inspectedObj.back_face.name
       : inspectedLookup?.name ?? inspectedObj.name
     : null;
   // The "other" face: when viewing front, this is back_face; when viewing back, this is the front
-  const inspectedOtherFaceName = inspectedObj?.back_face
+  const inspectedOtherFaceName = inspectedObj?.back_face && !inspectedObj.face_down
     ? inspectedFaceIndex === 1 ? inspectedObj.name : inspectedObj.back_face.name
     : null;
 

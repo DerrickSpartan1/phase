@@ -6,6 +6,7 @@ use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::keywords::Keyword;
+use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
 use std::sync::Arc;
@@ -27,6 +28,40 @@ pub struct FaceDownData {
     pub replacement_definitions: Vec<ReplacementDefinition>,
     pub static_definitions: Vec<StaticDefinition>,
     pub color: Vec<crate::types::mana::ManaColor>,
+}
+
+/// CR 708.2a: Face-down permanents have no characteristics except those
+/// defined by the effect that put them face down. Manifest/morph-style face
+/// down permanents are 2/2 creatures with no name, subtypes, mana cost, color,
+/// abilities, or rules text.
+pub fn apply_face_down_creature_characteristics(obj: &mut crate::game::game_object::GameObject) {
+    obj.face_down = true;
+    obj.name = String::new();
+    obj.base_name = String::new();
+    obj.power = Some(2);
+    obj.toughness = Some(2);
+    obj.base_power = Some(2);
+    obj.base_toughness = Some(2);
+    obj.card_types = CardType {
+        supertypes: vec![],
+        core_types: vec![CoreType::Creature],
+        subtypes: vec![],
+    };
+    obj.base_card_types = obj.card_types.clone();
+    obj.mana_cost = ManaCost::NoCost;
+    obj.base_mana_cost = ManaCost::NoCost;
+    obj.keywords = Vec::new();
+    obj.base_keywords = Vec::new();
+    obj.abilities = Arc::new(Vec::new());
+    obj.base_abilities = Arc::new(Vec::new());
+    obj.trigger_definitions = crate::types::definitions::Definitions::default();
+    obj.base_trigger_definitions = Arc::new(Vec::new());
+    obj.replacement_definitions = crate::types::definitions::Definitions::default();
+    obj.base_replacement_definitions = Arc::new(Vec::new());
+    obj.static_definitions = crate::types::definitions::Definitions::default();
+    obj.base_static_definitions = Arc::new(Vec::new());
+    obj.color = Vec::new();
+    obj.base_color = Vec::new();
 }
 
 /// CR 702.37a: A face-down permanent is a 2/2 creature with no name, mana cost, creature types, or abilities.
@@ -65,30 +100,7 @@ pub fn play_face_down(
 
     // Apply face-down overrides
     let obj = state.objects.get_mut(&object_id).unwrap();
-    obj.face_down = true;
-    obj.name = String::new();
-    obj.power = Some(2);
-    obj.toughness = Some(2);
-    obj.base_power = Some(2);
-    obj.base_toughness = Some(2);
-    obj.card_types = CardType {
-        supertypes: vec![],
-        core_types: vec![CoreType::Creature],
-        subtypes: vec![],
-    };
-    obj.base_card_types = obj.card_types.clone();
-    obj.keywords = Vec::new();
-    obj.base_keywords = Vec::new();
-    obj.abilities = Arc::new(Vec::new());
-    obj.base_abilities = Arc::new(Vec::new());
-    obj.trigger_definitions = crate::types::definitions::Definitions::default();
-    obj.base_trigger_definitions = Arc::new(Vec::new());
-    obj.replacement_definitions = crate::types::definitions::Definitions::default();
-    obj.base_replacement_definitions = Arc::new(Vec::new());
-    obj.static_definitions = crate::types::definitions::Definitions::default();
-    obj.base_static_definitions = Arc::new(Vec::new());
-    obj.color = Vec::new();
-    obj.base_color = Vec::new();
+    apply_face_down_creature_characteristics(obj);
 
     // Store original characteristics so turn_face_up can restore them
     obj.back_face = Some(original);
@@ -198,30 +210,7 @@ pub fn manifest_card(
 
     // Apply face-down overrides — CR 701.40a: 2/2 creature with no text/name/subtypes/mana cost
     let obj = state.objects.get_mut(&object_id).unwrap();
-    obj.face_down = true;
-    obj.name = String::new();
-    obj.power = Some(2);
-    obj.toughness = Some(2);
-    obj.base_power = Some(2);
-    obj.base_toughness = Some(2);
-    obj.card_types = CardType {
-        supertypes: vec![],
-        core_types: vec![CoreType::Creature],
-        subtypes: vec![],
-    };
-    obj.base_card_types = obj.card_types.clone();
-    obj.keywords = Vec::new();
-    obj.base_keywords = Vec::new();
-    obj.abilities = Arc::new(Vec::new());
-    obj.base_abilities = Arc::new(Vec::new());
-    obj.trigger_definitions = crate::types::definitions::Definitions::default();
-    obj.base_trigger_definitions = Arc::new(Vec::new());
-    obj.replacement_definitions = crate::types::definitions::Definitions::default();
-    obj.base_replacement_definitions = Arc::new(Vec::new());
-    obj.static_definitions = crate::types::definitions::Definitions::default();
-    obj.base_static_definitions = Arc::new(Vec::new());
-    obj.color = Vec::new();
-    obj.base_color = Vec::new();
+    apply_face_down_creature_characteristics(obj);
     obj.back_face = Some(original);
 
     Ok(())

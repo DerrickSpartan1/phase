@@ -115,6 +115,19 @@ describe("toCardProps", () => {
     expect(props.effectiveToughness).toBeNull();
   });
 
+  it("uses public display name for face-down cards", () => {
+    const obj = makeGameObject({
+      face_down: true,
+      name: "Hidden Sorcery",
+    });
+
+    const props = toCardProps(obj);
+
+    expect(props.name).toBe("Face-down card");
+    expect(props.power).toBe(3);
+    expect(props.toughness).toBe(4);
+  });
+
   it("extracts counters as typed array", () => {
     const obj = makeGameObject({ counters: { P1P1: 2, loyalty: 3 } });
     const props = toCardProps(obj);

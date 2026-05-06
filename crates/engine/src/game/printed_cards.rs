@@ -5,9 +5,11 @@ use crate::types::counter::CounterType;
 use crate::types::game_state::GameState;
 use crate::types::keywords::Keyword;
 use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
+use crate::types::zones::Zone;
 use std::sync::Arc;
 
 use super::game_object::{BackFaceData, GameObject};
+use super::morph::apply_face_down_creature_characteristics;
 use super::public_state::{
     bump_state_revision, finalize_public_state, mark_public_state_all_dirty,
 };
@@ -327,13 +329,25 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
 
         let zone = state.objects[&object_id].zone;
         if let Some(obj) = state.objects.get_mut(&object_id) {
-            apply_card_face_to_object(obj, &card_face);
+            let is_face_down_battlefield = obj.face_down && obj.zone == Zone::Battlefield;
+
+            if is_face_down_battlefield {
+                if obj.back_face.is_none() {
+                    obj.back_face = Some(snapshot_object_face(obj));
+                }
+            } else {
+                apply_card_face_to_object(obj, &card_face);
+            }
 
             if let Some(back_face) = obj.back_face.as_mut() {
                 if let Some(back_ref) = back_face.printed_ref.clone() {
                     if let Some(back_card_face) = db.get_face_by_printed_ref(&back_ref) {
                         apply_card_face_to_back_face(back_face, back_card_face);
+                    } else if is_face_down_battlefield {
+                        apply_card_face_to_back_face(back_face, &card_face);
                     }
+                } else if is_face_down_battlefield {
+                    apply_card_face_to_back_face(back_face, &card_face);
                 }
                 // CR 712.12: Restore layout_kind if it was cleared (e.g. after MDFC
                 // front-face choice). Ensures bounced MDFCs can prompt face choice again.
@@ -359,6 +373,13 @@ pub fn rehydrate_game_from_card_db(state: &mut GameState, db: &CardDatabase) {
                                 .and_then(|id| db.get_layout_kind(id))
                         });
                 }
+            }
+
+            if is_face_down_battlefield {
+                apply_face_down_creature_characteristics(obj);
+                changed_any = true;
+                changed_battlefield = true;
+                continue;
             }
 
             // Populate back_face for dual-faced layouts so the other face's
@@ -712,6 +733,67 @@ mod tests {
             back_face.layout_kind,
             Some(LayoutKind::Adventure),
             "Adventure back face should carry LayoutKind::Adventure from export"
+        );
+    }
+
+    #[test]
+    fn rehydrate_preserves_face_down_battlefield_public_characteristics() {
+        let mut face = test_face(
+            "Hidden Sorcery",
+            "face-down-rehydrate-oracle-id",
+            vec![CoreType::Sorcery],
+            ManaCost::Cost {
+                shards: vec![ManaCostShard::Black],
+                generic: 1,
+            },
+        );
+        face.keywords.push(Keyword::Sneak(ManaCost::Cost {
+            shards: vec![ManaCostShard::Black],
+            generic: 0,
+        }));
+        let export = serde_json::json!({
+            "hidden sorcery": serde_json::to_value(&face).unwrap(),
+        })
+        .to_string();
+        let db = CardDatabase::from_json_str(&export).expect("export db should parse");
+
+        let mut state = GameState::default();
+        let object_id = create_object_from_card_face(
+            &mut state,
+            db.get_face_by_name("Hidden Sorcery").unwrap(),
+            PlayerId(0),
+        );
+        state.battlefield.push_back(object_id);
+        {
+            let obj = state.objects.get_mut(&object_id).unwrap();
+            obj.zone = Zone::Battlefield;
+            obj.face_down = true;
+            obj.back_face = Some(snapshot_object_face(obj));
+        }
+
+        rehydrate_game_from_card_db(&mut state, &db);
+
+        let obj = state.objects.get(&object_id).unwrap();
+        assert!(obj.face_down);
+        assert_eq!(obj.name, "");
+        assert_eq!(obj.card_types.core_types, vec![CoreType::Creature]);
+        assert_eq!(obj.power, Some(2));
+        assert_eq!(obj.toughness, Some(2));
+        assert!(obj.keywords.is_empty());
+        assert!(obj.abilities.is_empty());
+
+        let hidden_face = obj
+            .back_face
+            .as_ref()
+            .expect("face-down permanent should keep hidden original face");
+        assert_eq!(hidden_face.name, "Hidden Sorcery");
+        assert_eq!(hidden_face.card_types.core_types, vec![CoreType::Sorcery]);
+        assert_eq!(hidden_face.keywords.len(), 1);
+
+        state.active_player = PlayerId(1);
+        assert!(
+            crate::game::combat::get_valid_blocker_ids(&state).contains(&object_id),
+            "rehydrated face-down battlefield permanents must be legal blocker candidates"
         );
     }
 

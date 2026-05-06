@@ -95,13 +95,13 @@ export function AttackTargetLines() {
         )}
         <marker
           id="attack-arrow-head"
-          markerWidth="6"
-          markerHeight="5"
-          refX="6"
-          refY="2.5"
+          markerWidth="4"
+          markerHeight="3.5"
+          refX="4"
+          refY="1.75"
           orient="auto"
         >
-          <path d="M0,0 L6,2.5 L0,5 Z" fill="rgba(220,38,38,0.95)" />
+          <path d="M0,0 L4,1.75 L0,3.5 Z" fill="rgba(220,38,38,0.95)" />
         </marker>
       </defs>
 

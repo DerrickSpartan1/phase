@@ -82,13 +82,13 @@ export function BlockAssignmentLines() {
         )}
         <marker
           id="block-arrow-head"
-          markerWidth="6"
-          markerHeight="5"
-          refX="6"
-          refY="2.5"
+          markerWidth="4"
+          markerHeight="3.5"
+          refX="4"
+          refY="1.75"
           orient="auto"
         >
-          <path d="M0,0 L6,2.5 L0,5 Z" fill={BLOCK_COLOR_HEAD} />
+          <path d="M0,0 L4,1.75 L0,3.5 Z" fill={BLOCK_COLOR_HEAD} />
         </marker>
       </defs>
       {showCreatureArrows &&

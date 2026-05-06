@@ -57,13 +57,13 @@ export function BlockerArrow({ blockerId, attackerId }: BlockerArrowProps) {
       <defs>
         <marker
           id={`blocker-arrow-${blockerId}`}
-          markerWidth="10"
-          markerHeight="8"
-          refX="10"
-          refY="4"
+          markerWidth="6"
+          markerHeight="5"
+          refX="6"
+          refY="2.5"
           orient="auto"
         >
-          <path d="M0,0 L10,4 L0,8 Z" fill="rgba(249,115,22,0.9)" />
+          <path d="M0,0 L6,2.5 L0,5 Z" fill="rgba(249,115,22,0.9)" />
         </marker>
         {!isMinimal && (
           <filter id={`blocker-glow-${blockerId}`}>

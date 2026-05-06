@@ -1,5 +1,5 @@
 import type { AttackerInfo, CombatState, GameObject, ObjectId, PlayerId } from "../adapter/types";
-import { toCardProps } from "./cardProps";
+import { publicName, toCardProps } from "./cardProps";
 import type { CardViewProps } from "./cardProps";
 
 function canGroup(obj: GameObject): boolean {
@@ -9,7 +9,7 @@ function canGroup(obj: GameObject): boolean {
 function groupKey(obj: GameObject): string {
   const kw = obj.keywords.map((k) => typeof k === "string" ? k : JSON.stringify(k)).sort().join(",");
   const colors = [...obj.color].sort().join("");
-  return `${obj.name}|${obj.tapped}|${obj.face_down}|${obj.flipped}|${obj.transformed}|${obj.power}|${obj.toughness}|${obj.loyalty}|${obj.damage_marked}|${obj.has_summoning_sickness}|${obj.class_level ?? ""}|${colors}|${kw}|${JSON.stringify(obj.counters)}`;
+  return `${publicName(obj)}|${obj.tapped}|${obj.face_down}|${obj.flipped}|${obj.transformed}|${obj.power}|${obj.toughness}|${obj.loyalty}|${obj.damage_marked}|${obj.has_summoning_sickness}|${obj.class_level ?? ""}|${colors}|${kw}|${JSON.stringify(obj.counters)}`;
 }
 
 export interface BattlefieldPartition {
@@ -84,7 +84,7 @@ export function groupByName(objects: GameObject[]): GroupedPermanent[] {
 
   for (const members of groups.values()) {
     result.push({
-      name: members[0].name,
+      name: publicName(members[0]),
       ids: members.map((m) => m.id),
       count: members.length,
       representative: toCardProps(members[0]),

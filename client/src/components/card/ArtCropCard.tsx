@@ -92,7 +92,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
     }
   }
 
-  if (isLoading || !src) {
+  if (!obj.face_down && (isLoading || !src)) {
     return (
       <div className="relative" style={{ width: "var(--art-crop-w)", height: "var(--art-crop-h)" }}>
         <div className="absolute inset-0 rounded-[6px] bg-[#151515] p-[3px] shadow-md">
@@ -101,6 +101,8 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
       </div>
     );
   }
+
+  const renderedSrc = obj.face_down ? CARD_BACK_URL : (src ?? "");
 
   return (
     <div className="relative select-none drop-shadow-[0_4px_6px_rgba(0,0,0,0.6)]" style={{ width: "var(--art-crop-w)", height: "var(--art-crop-h)" }}>
@@ -127,7 +129,7 @@ export const ArtCropCard = memo(function ArtCropCard({ objectId }: ArtCropCardPr
           <div className="flex-1 w-full px-[2px] pb-[2px] flex flex-col relative z-0">
             <div className="w-full h-full relative rounded-[1.5px] overflow-hidden border border-black/80 shadow-[inset_0_1px_3px_rgba(0,0,0,0.6)] bg-black">
               <img
-                src={src}
+                src={renderedSrc}
                 alt={cardName}
                 draggable={false}
                 className="absolute inset-0 w-full h-full object-cover"

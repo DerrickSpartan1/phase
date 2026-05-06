@@ -1,6 +1,7 @@
 import type { CardType, GameObject, Keyword, ManaColor, ObjectId } from "../adapter/types";
 
 const ROMAN = ["", "I", "II", "III", "IV", "V"] as const;
+export const FACE_DOWN_CARD_NAME = "Face-down card";
 /** Convert a small integer (1–5) to a Roman numeral string. */
 export function toRoman(n: number): string { return ROMAN[n] ?? String(n); }
 
@@ -36,6 +37,10 @@ export interface PTDisplay {
   toughnessColor: PTColor;
 }
 
+export function publicName(obj: GameObject): string {
+  return obj.face_down ? FACE_DOWN_CARD_NAME : obj.name;
+}
+
 export function toCardProps(obj: GameObject): CardViewProps {
   const isPowerBuffed = obj.power != null && obj.base_power != null && obj.power > obj.base_power;
   const isPowerDebuffed =
@@ -50,7 +55,7 @@ export function toCardProps(obj: GameObject): CardViewProps {
 
   return {
     id: obj.id,
-    name: obj.name,
+    name: publicName(obj),
     tapped: obj.tapped,
     power: obj.power,
     toughness: obj.toughness,

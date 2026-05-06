@@ -64,19 +64,7 @@ export function CardImage({
     ? getBevelBorderStyle(colors)
     : undefined;
 
-  if (faceDown) {
-    return (
-      <img
-        src={CARD_BACK_URL}
-        alt="Face-down card"
-        draggable={false}
-        className={`${baseClasses} shadow-lg object-cover`}
-        style={borderStyle ?? { border: "1px solid #4b5563" }}
-      />
-    );
-  }
-
-  if (isLoading || !src) {
+  if (!faceDown && (isLoading || !src)) {
     return (
       <div
         className={`${baseClasses} bg-gray-700 shadow-md animate-pulse`}
@@ -86,7 +74,7 @@ export function CardImage({
     );
   }
 
-  if (imageError) {
+  if (!faceDown && imageError) {
     return (
       <div
         className={`${baseClasses} bg-gray-800 shadow-md overflow-hidden flex flex-col p-2`}
@@ -104,11 +92,14 @@ export function CardImage({
     );
   }
 
+  const renderedSrc = faceDown ? CARD_BACK_URL : (src ?? "");
+  const renderedAlt = faceDown ? "Face-down card" : cardName;
+
   return (
     <div className="relative inline-block w-fit select-none">
       <img
-        src={src}
-        alt={cardName}
+        src={renderedSrc}
+        alt={renderedAlt}
         draggable={false}
         onError={() => setImageError(true)}
         className={`${baseClasses} shadow-lg object-cover`}
