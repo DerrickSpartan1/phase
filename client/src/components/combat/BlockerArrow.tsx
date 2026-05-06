@@ -75,20 +75,29 @@ export function BlockerArrow({ blockerId, attackerId }: BlockerArrowProps) {
           </filter>
         )}
       </defs>
+      <path
+        d={d}
+        stroke="black"
+        strokeWidth={isMinimal ? 3 : 5}
+        fill="none"
+        strokeLinecap="round"
+      />
       {isMinimal ? (
         <path
           d={d}
-          stroke="rgba(249,115,22,0.6)"
-          strokeWidth={1.5}
+          stroke="rgba(249,115,22,0.9)"
+          strokeWidth={2}
           fill="none"
+          strokeLinecap="round"
           markerEnd={`url(#blocker-arrow-${blockerId})`}
         />
       ) : (
         <motion.path
           d={d}
-          stroke="rgba(249,115,22,0.85)"
-          strokeWidth={3}
+          stroke="rgba(249,115,22,0.95)"
+          strokeWidth={2}
           fill="none"
+          strokeLinecap="round"
           markerEnd={`url(#blocker-arrow-${blockerId})`}
           filter={`url(#blocker-glow-${blockerId})`}
           initial={{ pathLength: 0, opacity: 0 }}
