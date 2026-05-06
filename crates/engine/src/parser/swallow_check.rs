@@ -997,11 +997,40 @@ fn detect_dynamic_qty(
     if json_has_any(ast_json, dynamic_markers) {
         return;
     }
+    if cleaned_has_only_counter_multiplier_dynamic(cleaned)
+        && json_has_any(ast_json, &["\"type\":\"MultiplyCounter\""])
+    {
+        return;
+    }
     diagnostics.push(OracleDiagnostic::SwallowedClause {
         detector: "DynamicQty".into(),
         description: truncate(original, 140).into(),
         line_index: 0,
     });
+}
+
+fn cleaned_has_only_counter_multiplier_dynamic(cleaned: &str) -> bool {
+    // allow-noncombinator: swallow detector phrase scan on classified text
+    let has_counter_multiplier = cleaned.contains("double the number of +1/+1 counters");
+    if !has_counter_multiplier {
+        return false;
+    }
+    // The counter multiplier itself accounts for "the number of". If another
+    // dynamic marker is present, keep the warning because that second marker
+    // may be a real uncaptured clause.
+    ![
+        " equal to ",
+        "for each ",
+        " twice ",
+        "where x is ",
+        "half your ",
+        "half their ",
+        "half its ",
+        "half the ",
+    ]
+    .iter()
+    // allow-noncombinator: swallow detector marker scan on classified text
+    .any(|marker| cleaned.contains(marker))
 }
 
 // ── Detector G: Condition_If ────────────────────────────────────────────
@@ -1782,5 +1811,26 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    #[test]
+    fn dynamic_qty_accepts_counter_multiplier_carrier() {
+        let parsed = parse(
+            "Put a +1/+1 counter on target creature you control, then double the number of +1/+1 counters on that creature.",
+            &["Instant"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "DynamicQty"));
+    }
+
+    #[test]
+    fn dynamic_qty_keeps_warning_when_counter_multiplier_card_has_second_dynamic_clause() {
+        let parsed = parse(
+            "Put a +1/+1 counter on target creature, then double the number of +1/+1 counters on it.\n\
+             Flashback {8}{G}{G}. This spell costs {X} less to cast this way, where X is the greatest mana value of a commander you own on the battlefield or in the command zone.",
+            &["Sorcery"],
+        );
+
+        assert!(has_swallowed_detector(&parsed, "DynamicQty"));
     }
 }
