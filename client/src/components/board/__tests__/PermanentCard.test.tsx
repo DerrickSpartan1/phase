@@ -14,8 +14,12 @@ vi.mock("../../../game/dispatch.ts", () => ({
 }));
 
 vi.mock("../../card/CardImage.tsx", () => ({
-  CardImage: ({ cardName }: { cardName: string }) => (
-    <div aria-label={cardName} style={{ height: "var(--card-h)", width: "var(--card-w)" }} />
+  CardImage: ({ cardName, faceDown }: { cardName: string; faceDown?: boolean }) => (
+    <div
+      aria-label={faceDown ? "Face-down card" : cardName}
+      data-face-down={faceDown ? "true" : "false"}
+      style={{ height: "var(--card-h)", width: "var(--card-w)" }}
+    />
   ),
 }));
 
@@ -298,5 +302,48 @@ describe("PermanentCard attachments", () => {
       objectId: 39,
       actions: [abilityAction, manaAction],
     });
+  });
+
+  it("renders face-down permanents with the card back in full-card mode", () => {
+    const faceDownPermanent = makeObject({
+      id: 54,
+      name: "Shredder's Technique",
+      face_down: true,
+      color: [],
+      base_color: [],
+    });
+
+    const gameState = {
+      ...makeState(),
+      objects: { 54: faceDownPermanent },
+      battlefield: [54],
+    } as unknown as GameState;
+
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [],
+      legalActionsByObject: {},
+      spellCosts: {},
+    });
+
+    const { getByLabelText } = render(
+      <BoardInteractionContext.Provider
+        value={{
+          activatableObjectIds: new Set(),
+          committedAttackerIds: new Set(),
+          incomingAttackerCounts: new Map(),
+          manaTappableObjectIds: new Set(),
+          selectableManaCostCreatureIds: new Set(),
+          undoableTapObjectIds: new Set(),
+          validAttackerIds: new Set(),
+          validTargetObjectIds: new Set(),
+        }}
+      >
+        <PermanentCard objectId={54} />
+      </BoardInteractionContext.Provider>,
+    );
+
+    expect(getByLabelText("Face-down card")).toHaveAttribute("data-face-down", "true");
   });
 });

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useEngineCardData } from "../../hooks/useEngineCardData.ts";
 import type { TokenSearchFilters } from "../../services/scryfall.ts";
+import { CARD_BACK_URL } from "../../services/scryfall.ts";
 import { getBevelBorderStyle } from "./cardFrame.ts";
 
 interface CardImageProps {
@@ -14,6 +15,7 @@ interface CardImageProps {
   colors?: string[];
   isToken?: boolean;
   tokenFilters?: TokenSearchFilters;
+  faceDown?: boolean;
   /**
    * Canonical lookup id from `printed_ref.oracle_id` (battlefield call sites).
    * When provided, the image is resolved by oracle id + `faceName`, which is
@@ -38,20 +40,21 @@ export function CardImage({
   colors,
   isToken = false,
   tokenFilters,
+  faceDown = false,
   oracleId,
   faceName,
   oracleText,
 }: CardImageProps) {
-  const { src, isLoading } = useCardImage(cardName, {
+  const { src, isLoading } = useCardImage(faceDown ? "" : cardName, {
     size,
     faceIndex,
-    isToken,
-    tokenFilters,
-    oracleId,
-    faceName,
+    isToken: faceDown ? false : isToken,
+    tokenFilters: faceDown ? undefined : tokenFilters,
+    oracleId: faceDown ? undefined : oracleId,
+    faceName: faceDown ? undefined : faceName,
   });
   const [imageError, setImageError] = useState(false);
-  const fallbackData = useEngineCardData(oracleText === undefined ? cardName : null);
+  const fallbackData = useEngineCardData(!faceDown && oracleText === undefined ? cardName : null);
   const resolvedOracleText = oracleText ?? fallbackData?.oracle_text ?? undefined;
 
   const tappedStyle = tapped ? "rotate-[90deg] origin-center" : "";
@@ -60,6 +63,18 @@ export function CardImage({
   const borderStyle = colors
     ? getBevelBorderStyle(colors)
     : undefined;
+
+  if (faceDown) {
+    return (
+      <img
+        src={CARD_BACK_URL}
+        alt="Face-down card"
+        draggable={false}
+        className={`${baseClasses} shadow-lg object-cover`}
+        style={borderStyle ?? { border: "1px solid #4b5563" }}
+      />
+    );
+  }
 
   if (isLoading || !src) {
     return (
