@@ -5109,6 +5109,8 @@ impl TargetFilter {
                 | TargetFilter::ParentTargetController
                 | TargetFilter::PostReplacementSourceController
                 | TargetFilter::PostReplacementDamageTarget
+                | TargetFilter::TrackedSet { .. }
+                | TargetFilter::TrackedSetFiltered { .. }
         )
     }
 

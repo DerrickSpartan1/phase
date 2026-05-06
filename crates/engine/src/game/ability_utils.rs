@@ -2178,12 +2178,12 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityKind, CounterTransferMode, Effect, ModalChoice, ModalSelectionConstraint,
+        AbilityKind, CounterTransferMode, Duration, Effect, ModalChoice, ModalSelectionConstraint,
         QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{GameState, TargetSelectionConstraint, TargetSelectionSlot};
-    use crate::types::identifiers::{CardId, ObjectId};
+    use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -2703,6 +2703,39 @@ mod tests {
         assert_eq!(
             progress.current_legal_targets,
             vec![TargetRef::Object(ObjectId(42))]
+        );
+    }
+
+    #[test]
+    fn build_target_slots_ignores_tracked_set_continuation_filters() {
+        let state = GameState::new_two_player(42);
+        let ability = ResolvedAbility::new(
+            Effect::GenericEffect {
+                static_abilities: vec![],
+                duration: Some(Duration::UntilEndOfTurn),
+                target: None,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        )
+        .sub_ability(ResolvedAbility::new(
+            Effect::Destroy {
+                target: TargetFilter::TrackedSet {
+                    id: TrackedSetId(0),
+                },
+                cant_regenerate: false,
+            },
+            Vec::new(),
+            ObjectId(1),
+            PlayerId(0),
+        ));
+
+        let slots = build_target_slots(&state, &ability).expect("target slots should build");
+
+        assert!(
+            slots.is_empty(),
+            "tracked-set pronouns are bound by prior effects, not chosen as targets"
         );
     }
 
