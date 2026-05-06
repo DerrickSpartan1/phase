@@ -30,6 +30,15 @@ export function AttackTargetLines() {
 
   const isMultiplayer = (seatOrder?.length ?? 0) > 2;
 
+  const blockedAttackerIds = useMemo<Set<number>>(() => {
+    if (!combat) return new Set();
+    const ids = new Set<number>();
+    for (const [attackerId, blockers] of Object.entries(combat.blocker_assignments)) {
+      if (blockers.length > 0) ids.add(Number(attackerId));
+    }
+    return ids;
+  }, [combat]);
+
   const arrows = useMemo<AttackerArrow[]>(() => {
     if (!combat) return [];
     const out: AttackerArrow[] = [];
@@ -74,8 +83,8 @@ export function AttackTargetLines() {
 
   return createPortal(
     <svg className="pointer-events-none fixed inset-0 z-30 h-full w-full">
-      {!isMinimal && (
-        <defs>
+      <defs>
+        {!isMinimal && (
           <filter id="attack-target-glow">
             <feGaussianBlur stdDeviation="3" result="blur" />
             <feMerge>
@@ -83,49 +92,48 @@ export function AttackTargetLines() {
               <feMergeNode in="SourceGraphic" />
             </feMerge>
           </filter>
-          {/* Two markers so the arrowhead weight matches the stroke weight —
-              otherwise an `isAtMe` (3.5px) arrow looks nose-heavy with an
-              understroked head. */}
-          <marker
-            id="attack-target-arrow-spectator"
-            markerWidth="8"
-            markerHeight="6"
-            refX="8"
-            refY="3"
-            orient="auto"
-          >
-            <path d="M0,0 L8,3 L0,6 Z" fill="rgba(220,38,38,0.55)" />
-          </marker>
-          <marker
-            id="attack-target-arrow-atme"
-            markerWidth="10"
-            markerHeight="8"
-            refX="10"
-            refY="4"
-            orient="auto"
-          >
-            <path d="M0,0 L10,4 L0,8 Z" fill="rgba(220,38,38,0.95)" />
-          </marker>
-        </defs>
-      )}
+        )}
+        <marker
+          id="attack-arrow-head"
+          markerWidth="6"
+          markerHeight="5"
+          refX="6"
+          refY="2.5"
+          orient="auto"
+        >
+          <path d="M0,0 L6,2.5 L0,5 Z" fill="rgba(220,38,38,0.95)" />
+        </marker>
+      </defs>
 
-      {positions.map((arrow) => (
-        <path
-          key={arrow.key}
-          d={arcPath(arrow.from, arrow.to)}
-          stroke={arrow.isAtMe ? "rgba(220,38,38,0.95)" : "rgba(220,38,38,0.45)"}
-          strokeWidth={arrow.isAtMe ? 3.5 : 2}
-          fill="none"
-          filter={isMinimal || !arrow.isAtMe ? undefined : "url(#attack-target-glow)"}
-          markerEnd={
-            isMinimal
-              ? undefined
-              : arrow.isAtMe
-                ? "url(#attack-target-arrow-atme)"
-                : "url(#attack-target-arrow-spectator)"
-          }
-        />
-      ))}
+      {positions.map((arrow) => {
+        const d = arcPath(arrow.from, arrow.to);
+        const attackerId = Number(arrow.key.split("->")[0]);
+        const isBlocked = blockedAttackerIds.has(attackerId);
+        const dash = isBlocked ? "8 6" : undefined;
+        return (
+          <g key={arrow.key}>
+            <path
+              d={d}
+              stroke="black"
+              strokeWidth={isMinimal ? 3 : 5}
+              fill="none"
+              strokeLinecap="round"
+              strokeDasharray={dash}
+              markerEnd="url(#attack-arrow-head)"
+            />
+            <path
+              d={d}
+              stroke={arrow.isAtMe ? "rgba(220,38,38,0.95)" : "rgba(220,38,38,0.45)"}
+              strokeWidth={arrow.isAtMe ? 2.5 : 2}
+              fill="none"
+              filter={isMinimal || !arrow.isAtMe ? undefined : "url(#attack-target-glow)"}
+              strokeDasharray={dash}
+              markerEnd="url(#attack-arrow-head)"
+              strokeLinecap="round"
+            />
+          </g>
+        );
+      })}
     </svg>,
     document.body,
   );

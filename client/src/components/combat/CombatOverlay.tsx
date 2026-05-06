@@ -8,7 +8,6 @@ import type { AttackTarget, ObjectId } from "../../adapter/types.ts";
 import { buildAttacks, hasMultipleAttackTargets, getValidAttackTargets } from "../../utils/combat.ts";
 import { AttackerControls } from "./AttackerControls.tsx";
 import { BlockerControls } from "./BlockerControls.tsx";
-import { BlockerArrow } from "./BlockerArrow.tsx";
 import { AttackTargetPicker } from "../controls/AttackTargetPicker.tsx";
 
 interface CombatOverlayProps {
@@ -163,17 +162,8 @@ export function CombatOverlay({ mode }: CombatOverlayProps) {
   }
 
   // Blockers mode
-  const entries = Array.from(blockerAssignments.entries());
-
   return (
     <>
-      {entries.map(([blockerId, attackerId]) => (
-        <BlockerArrow
-          key={blockerId}
-          blockerId={blockerId}
-          attackerId={attackerId}
-        />
-      ))}
       <BlockerControls
         onConfirm={handleConfirmBlockers}
         assignmentCount={blockerAssignments.size}
