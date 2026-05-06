@@ -30,7 +30,7 @@ export const DEFAULT_AI_COVERAGE_FLOOR = 90;
  *  filter the *pool* of Random picks, a concept that doesn't vary per seat. */
 export interface AiSeatPref {
   difficulty: AIDifficulty;
-  deckName: AiDeckSelection;
+  deckId: AiDeckSelection;
 }
 
 export type CardSizePreference = "small" | "medium" | "large";
@@ -46,7 +46,7 @@ export type TapRotation = "mtga" | "classic";
 export type BoardBackground = "auto-wubrg" | "random" | "none" | "custom" | (string & {});
 
 function defaultAiSeat(): AiSeatPref {
-  return { difficulty: DEFAULT_AI_DIFFICULTY, deckName: AI_DECK_RANDOM };
+  return { difficulty: DEFAULT_AI_DIFFICULTY, deckId: AI_DECK_RANDOM };
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -176,7 +176,7 @@ interface PreferencesActions {
   setTapRotation: (rotation: TapRotation) => void;
   setShowKeywordStrip: (show: boolean) => void;
   setAiSeatDifficulty: (index: number, difficulty: AIDifficulty) => void;
-  setAiSeatDeckName: (index: number, name: AiDeckSelection) => void;
+  setAiSeatDeckId: (index: number, id: AiDeckSelection) => void;
   /** Grow or shrink `aiSeats` to `count` slots. New slots inherit defaults;
    *  shrinking truncates trailing slots. Called whenever the player count
    *  changes so the UI always has exactly `playerCount - 1` panels to render. */
@@ -193,6 +193,28 @@ type LegacyFlatAiPrefs = Partial<{
   aiDifficulty: AIDifficulty;
   aiDeckName: AiDeckSelection;
 }>;
+
+type LegacyAiSeatPref = Partial<{
+  difficulty: AIDifficulty;
+  deckName: AiDeckSelection;
+  deckId: AiDeckSelection;
+}>;
+
+function legacyAiDeckNameToId(name: string): string {
+  return `saved:${name}`;
+}
+
+function migrateAiSeat(seat: LegacyAiSeatPref): AiSeatPref {
+  const deckId = seat.deckId ?? (
+    seat.deckName && seat.deckName !== AI_DECK_RANDOM
+      ? legacyAiDeckNameToId(seat.deckName)
+      : AI_DECK_RANDOM
+  );
+  return {
+    difficulty: seat.difficulty ?? DEFAULT_AI_DIFFICULTY,
+    deckId,
+  };
+}
 
 export const usePreferencesStore = create<PreferencesState & PreferencesActions>()(
   persist(
@@ -248,11 +270,11 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           next[index] = { ...next[index], difficulty };
           return { aiSeats: next };
         }),
-      setAiSeatDeckName: (index, deckName) =>
+      setAiSeatDeckId: (index, deckId) =>
         set((state) => {
           if (index < 0 || index >= state.aiSeats.length) return state;
           const next = state.aiSeats.slice();
-          next[index] = { ...next[index], deckName };
+          next[index] = { ...next[index], deckId };
           return { aiSeats: next };
         }),
       ensureAiSeatCount: (count) =>
@@ -278,7 +300,7 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
     }),
     {
       name: "phase-preferences",
-      version: 3,
+      version: 4,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -287,6 +309,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          pacingMultipliers.combat so existing users keep their
       //          combat slider exactly where they left it; other
       //          categories start at the neutral 1.0 default.
+      // v3 → v4: AI deck selections become stable catalog IDs instead
+      //          of display names.
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -295,7 +319,9 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           const legacy = migrated as LegacyFlatAiPrefs & Record<string, unknown>;
           const seat: AiSeatPref = {
             difficulty: legacy.aiDifficulty ?? DEFAULT_AI_DIFFICULTY,
-            deckName: legacy.aiDeckName ?? AI_DECK_RANDOM,
+            deckId: legacy.aiDeckName === AI_DECK_RANDOM || !legacy.aiDeckName
+              ? AI_DECK_RANDOM
+              : legacyAiDeckNameToId(legacy.aiDeckName),
           };
           const { aiDifficulty: _d, aiDeckName: _n, ...rest } = legacy;
           void _d;
@@ -334,6 +360,16 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
           migrated = {
             ...rest,
             pacingMultipliers: { ...defaultPacingMultipliers(), combat: carried },
+          };
+        }
+
+        if (version < 4) {
+          const legacy = migrated as { aiSeats?: LegacyAiSeatPref[] } & Record<string, unknown>;
+          migrated = {
+            ...legacy,
+            aiSeats: Array.isArray(legacy.aiSeats) && legacy.aiSeats.length > 0
+              ? legacy.aiSeats.map(migrateAiSeat)
+              : [defaultAiSeat()],
           };
         }
 

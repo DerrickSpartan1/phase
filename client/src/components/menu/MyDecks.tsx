@@ -23,8 +23,12 @@ import {
   evaluateDeckCompatibilityBatch,
   type DeckCompatibilityResult,
 } from "../../services/deckCompatibility";
+import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
+import { buildLegalAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { ImportDeckModal } from "./ImportDeckModal";
 import { PreconDeckModal } from "./PreconDeckModal";
+import { savePreconDeck } from "../../services/preconDecks";
+import type { DeckEntry as PreconDeckEntry } from "../../hooks/useDecks";
 import { MenuPanel } from "./MenuShell";
 import { menuButtonClass } from "./buttonStyles";
 import {
@@ -51,6 +55,21 @@ const DECK_FORMATS = FORMAT_REGISTRY.filter((m) => m.group !== "Multiplayer");
 
 type DeckFilter = "all" | GameFormat;
 type DeckSort = "alpha" | "recent" | "format";
+
+function preconCandidateToDeckEntry(candidate: AiDeckCandidate): PreconDeckEntry {
+  if (candidate.source.type !== "precon") {
+    throw new Error("Expected precon AI deck candidate");
+  }
+  return {
+    code: candidate.source.code,
+    name: candidate.name.replace(/\s+\([^()]+\)$/, ""),
+    type: "Preconstructed",
+    coveragePct: candidate.coveragePct ?? 100,
+    mainBoard: candidate.deck.main.map((entry) => ({ name: entry.name, count: entry.count })),
+    sideBoard: candidate.deck.sideboard.map((entry) => ({ name: entry.name, count: entry.count })),
+    commander: candidate.deck.commander?.map((name) => ({ name, count: 1 })),
+  };
+}
 
 /** Ordered list of format filters shown in the filter bar. */
 const FORMAT_FILTERS: Array<{ key: DeckFilter; label: string; aetherhubUrl?: string }> = [
@@ -101,9 +120,11 @@ interface DeckTileProps {
   hideFeedBadge?: boolean;
   /** Provide feed deck data directly so the tile doesn't depend on localStorage. */
   feedDeckOverride?: FeedDeck;
+  /** Provide precon data directly for virtual precon tiles not yet saved locally. */
+  preconDeckOverride?: PreconDeckEntry;
 }
 
-function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, hideFeedBadge, feedDeckOverride }: DeckTileProps) {
+function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, hideFeedBadge, feedDeckOverride, preconDeckOverride }: DeckTileProps) {
   const [coverageHovered, setCoverageHovered] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
@@ -117,9 +138,13 @@ function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete
     ?? getDeckColorIdentity(deckName);
   const count = feedDeckOverride
     ? feedDeckOverride.main.reduce((sum, e) => sum + e.count, 0)
+    : preconDeckOverride
+      ? preconDeckOverride.mainBoard.reduce((sum, e) => sum + e.count, 0)
     : getDeckCardCount(deckName);
   const representativeCard = feedDeckOverride
     ? (feedDeckOverride.commander?.[0] ?? feedDeckOverride.main.find((e) => !BASIC_LAND_NAMES.has(e.name))?.name ?? null)
+    : preconDeckOverride
+      ? (preconDeckOverride.commander?.[0]?.name ?? preconDeckOverride.mainBoard.find((e) => !BASIC_LAND_NAMES.has(e.name))?.name ?? null)
     : getRepresentativeCard(deckName);
   const feedOrigin = getDeckFeedOrigin(deckName);
   const feedForBadge = useCachedFeed(feedOrigin ?? "");
@@ -312,6 +337,7 @@ export function MyDecks({
   const [compatibilities, setCompatibilities] = useState<Record<string, DeckCompatibilityResult>>({});
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [compatibilityError, setCompatibilityError] = useState<string | null>(null);
+  const [legalPreconCandidates, setLegalPreconCandidates] = useState<AiDeckCandidate[]>([]);
   const feedCache = useFeedCacheSnapshot();
 
   const contextualFilter = useMemo<DeckFilter | null>(() => {
@@ -335,6 +361,28 @@ export function MyDecks({
   useEffect(() => {
     setDeckNames(listSavedDeckNames());
   }, [selectedFormat]);
+
+  useEffect(() => {
+    if (!selectedFormatForCompatibility) {
+      setLegalPreconCandidates([]);
+      return;
+    }
+
+    let cancelled = false;
+    buildLegalAiDeckCatalog({
+      selectedFormat: selectedFormatForCompatibility,
+      selectedMatchType,
+    }).then((catalog) => {
+      if (cancelled) return;
+      setLegalPreconCandidates(catalog.candidates.filter((candidate) => candidate.source.type === "precon"));
+    }).catch(() => {
+      if (!cancelled) setLegalPreconCandidates([]);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedFormatForCompatibility, selectedMatchType]);
 
   useEffect(() => {
     if (mode !== "select") return;
@@ -439,6 +487,24 @@ export function MyDecks({
     return filteredDeckNames.filter((name) => name.toLowerCase().includes(q));
   }, [filteredDeckNames, searchQuery]);
 
+  const legalPreconByName = useMemo(() => {
+    const entries = legalPreconCandidates.map((candidate) => [
+      PRECON_PREFIX + candidate.name,
+      candidate,
+    ] as const);
+    return new Map(entries);
+  }, [legalPreconCandidates]);
+
+  const preconDeckNames = useMemo(() => {
+    const saved = new Set(deckNames);
+    const names = Array.from(legalPreconByName.keys()).filter((name) =>
+      !saved.has(name) && !saved.has(name.slice(PRECON_PREFIX.length))
+    );
+    if (!searchQuery) return names;
+    const q = searchQuery.toLowerCase();
+    return names.filter((name) => name.toLowerCase().includes(q));
+  }, [deckNames, legalPreconByName, searchQuery]);
+
   const { userDecks, bundledDecks } = useMemo(() => {
     const dir = sortAsc ? 1 : -1;
     const sortNames = (names: string[]): string[] => {
@@ -471,21 +537,37 @@ export function MyDecks({
         user.push(name);
       }
     }
-    return { userDecks: sortNames(user), bundledDecks: sortNames(bundled) };
-  }, [searchFiltered, activeSort, sortAsc, compatibilities]);
+    return {
+      userDecks: sortNames(user),
+      bundledDecks: sortNames([...bundled, ...preconDeckNames]),
+    };
+  }, [searchFiltered, activeSort, sortAsc, compatibilities, preconDeckNames]);
 
   const noDeckSelected = mode === "select"
-    ? !activeDeckName || !searchFiltered.includes(activeDeckName)
+    ? !activeDeckName || (!searchFiltered.includes(activeDeckName) && !preconDeckNames.includes(activeDeckName))
     : false;
-  const selectedDeckLabel = mode === "select" && activeDeckName && searchFiltered.includes(activeDeckName)
+  const selectedDeckLabel = mode === "select"
+    && activeDeckName
+    && (searchFiltered.includes(activeDeckName) || preconDeckNames.includes(activeDeckName))
     ? activeDeckName
     : null;
+  const visibleDeckCount = searchFiltered.length + preconDeckNames.length;
+
+  const materializePreconDeck = (deckName: string): boolean => {
+    const candidate = legalPreconByName.get(deckName);
+    if (!candidate || candidate.source.type !== "precon") return false;
+    savePreconDeck(deckName, preconCandidateToDeckEntry(candidate));
+    setDeckNames(listSavedDeckNames());
+    return true;
+  };
 
   const handleTileClick = (deckName: string) => {
     if (mode === "manage") {
+      materializePreconDeck(deckName);
       onEditDeck?.(deckName);
       return;
     }
+    materializePreconDeck(deckName);
     onSelectDeck?.(deckName);
   };
 
@@ -692,7 +774,7 @@ export function MyDecks({
                 : <>Showing decks legal in <span className="font-semibold">{selectedFormat}</span></>}
             </span>
             <span className="text-xs text-indigo-300/70">
-              · {searchFiltered.length} of {deckNames.length}
+              · {visibleDeckCount} of {deckNames.length + preconDeckNames.length}
             </span>
           </div>
           <button
@@ -717,7 +799,7 @@ export function MyDecks({
         </div>
       )}
 
-      {searchFiltered.length === 0 ? (
+      {visibleDeckCount === 0 ? (
         <div className="flex w-full flex-col items-center justify-center gap-4 rounded-[20px] border border-dashed border-white/10 bg-black/12 px-6 py-12 text-center">
           <div className="text-lg font-medium text-white">No decks match this filter.</div>
           <div className="max-w-md text-sm leading-6 text-slate-400">
@@ -796,6 +878,11 @@ export function MyDecks({
                     deckName={deckName}
                     isActive={deckName === activeDeckName}
                     compatibility={compatibilities[deckName]}
+                    preconDeckOverride={
+                      legalPreconByName.has(deckName)
+                        ? preconCandidateToDeckEntry(legalPreconByName.get(deckName)!)
+                        : undefined
+                    }
                     onClick={() => handleTileClick(deckName)}
                     onEdit={onEditDeck ? () => onEditDeck(deckName) : undefined}
                   />

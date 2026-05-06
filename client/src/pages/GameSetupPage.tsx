@@ -59,6 +59,11 @@ export function GameSetupPage() {
   const [activeDeckName, setActiveDeckName] = useState<string | null>(null);
   const [compatibilities, setCompatibilities] = useState<Record<string, DeckCompatibilityResult>>({});
   const [firstPlayer, setFirstPlayer] = useState<"random" | "play" | "draw">("random");
+  const [legalAiDeckCount, setLegalAiDeckCount] = useState<number | null>(null);
+  const [setupError, setSetupError] = useState<string | null>(() => {
+    const state = location.state as { setupError?: string } | null;
+    return state?.setupError ?? null;
+  });
 
   // Preferences (persisted)
   const lastFormat = usePreferencesStore((s) => s.lastFormat);
@@ -99,6 +104,7 @@ export function GameSetupPage() {
       setMatchType("Bo1");
       setLastMatchType("Bo1");
     }
+    setSetupError(null);
   }
 
   const handleSelectDeck = (name: string) => {
@@ -129,7 +135,7 @@ export function GameSetupPage() {
     const prefSeats = usePreferencesStore.getState().aiSeats.slice(0, opponentCount);
     const aiSeats = prefSeats.map((s) => ({
       difficulty: s.difficulty,
-      deckName: s.deckName === "Random" ? null : s.deckName,
+      deckId: s.deckId === "Random" ? null : s.deckId,
     }));
     const headDifficulty = aiSeats[0]?.difficulty ?? "Medium";
     saveActiveGame({ id: gameId, mode: "ai", difficulty: headDifficulty, aiSeats });
@@ -144,7 +150,8 @@ export function GameSetupPage() {
   const selectedCompat = activeDeckName ? compatibilities[activeDeckName] : undefined;
   const noDeckSelected = !activeDeckName;
   const deckBlockedForSelectedFormat = selectedCompat?.selected_format_compatible === false;
-  const cannotStartAi = noDeckSelected || deckBlockedForSelectedFormat;
+  const noLegalAiDecks = legalAiDeckCount === 0;
+  const cannotStartAi = noDeckSelected || deckBlockedForSelectedFormat || noLegalAiDecks;
   const representativeCard = useMemo(
     () => (activeDeckName ? getRepresentativeCard(activeDeckName) : null),
     [activeDeckName],
@@ -393,9 +400,23 @@ export function GameSetupPage() {
 
               {/* AI opponent configuration */}
               <AiOpponentConfig
-                format={formatConfig?.format}
+                selectedFormat={formatConfig?.format}
+                selectedMatchType={matchType}
                 opponentCount={Math.max(1, playerCount - 1)}
+                onCandidateCountChange={setLegalAiDeckCount}
               />
+
+              {setupError && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                  {setupError}
+                </div>
+              )}
+
+              {noLegalAiDecks && (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                  Add or import a deck legal in {formatConfig?.format ?? "this format"} for the AI to use.
+                </div>
+              )}
 
               {/* Separator */}
               <div className="border-t border-white/8" />

@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { useFeedDeckList } from "../../hooks/useFeedDeckList";
-import type { FeedDeck } from "../../types/feed";
-import type { FeedDeckMeta } from "../../hooks/useFeedDeckList";
+import type { GameFormat, MatchType } from "../../adapter/types";
 import { AI_DIFFICULTIES, getAiDifficultyLabel, type AIDifficulty } from "../../constants/ai";
+import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
+import { useAiDeckCatalog } from "../../services/aiDeckCatalog";
 import {
   AI_DECK_RANDOM,
   usePreferencesStore,
@@ -13,11 +13,13 @@ import {
 import type { DeckArchetype } from "../../services/engineRuntime";
 
 interface Props {
-  format?: string;
+  selectedFormat?: GameFormat;
+  selectedMatchType?: MatchType;
   /** Number of AI opponents to configure (i.e. playerCount - 1). Defaults to 1
    *  so the component still renders sensibly when mounted outside the setup
    *  page's player-count context. */
   opponentCount?: number;
+  onCandidateCountChange?: (count: number | null) => void;
 }
 
 const ARCHETYPE_OPTIONS: AiArchetypeFilter[] = [
@@ -52,10 +54,26 @@ function opponentLabel(index: number): string {
   return `Opponent ${index + 1}`;
 }
 
-export function AiOpponentConfig({ format, opponentCount = 1 }: Props) {
+function sourceLabel(candidate: AiDeckCandidate): string {
+  switch (candidate.source.type) {
+    case "saved":
+      return candidate.source.feedId ? "Feed" : "User";
+    case "feed":
+      return candidate.source.feedId;
+    case "precon":
+      return "Precon";
+  }
+}
+
+export function AiOpponentConfig({
+  selectedFormat,
+  selectedMatchType,
+  opponentCount = 1,
+  onCandidateCountChange,
+}: Props) {
   const aiSeats = usePreferencesStore((s) => s.aiSeats);
   const setAiSeatDifficulty = usePreferencesStore((s) => s.setAiSeatDifficulty);
-  const setAiSeatDeckName = usePreferencesStore((s) => s.setAiSeatDeckName);
+  const setAiSeatDeckId = usePreferencesStore((s) => s.setAiSeatDeckId);
   const ensureAiSeatCount = usePreferencesStore((s) => s.ensureAiSeatCount);
   const archetypeFilter = usePreferencesStore((s) => s.aiArchetypeFilter);
   const setArchetypeFilter = usePreferencesStore((s) => s.setAiArchetypeFilter);
@@ -67,22 +85,25 @@ export function AiOpponentConfig({ format, opponentCount = 1 }: Props) {
     ensureAiSeatCount(opponentCount);
   }, [opponentCount, ensureAiSeatCount]);
 
-  const { decks, meta, loading } = useFeedDeckList(format);
+  const { candidates, loading, error } = useAiDeckCatalog({ selectedFormat, selectedMatchType });
+
+  useEffect(() => {
+    onCandidateCountChange?.(loading ? null : candidates.length);
+  }, [candidates.length, loading, onCandidateCountChange]);
 
   // The archetype + coverage filters only affect the *Random* pool. They are
   // global across all AI seats because they describe which decks are worth
   // considering, not which deck ends up assigned — a concept that doesn't
   // vary per seat.
   const filteredDecks = useMemo(() => {
-    return decks.filter((d) => {
-      const m: FeedDeckMeta | undefined = meta.get(d.name);
-      if (m?.coveragePct != null && m.coveragePct < coverageFloor) return false;
-      if (archetypeFilter !== "Any" && m?.archetype && m.archetype !== archetypeFilter) {
+    return candidates.filter((d) => {
+      if (d.coveragePct != null && d.coveragePct < coverageFloor) return false;
+      if (archetypeFilter !== "Any" && d.archetype && d.archetype !== archetypeFilter) {
         return false;
       }
       return true;
     });
-  }, [decks, meta, coverageFloor, archetypeFilter]);
+  }, [candidates, coverageFloor, archetypeFilter]);
 
   // Render exactly `opponentCount` panels regardless of how many slots the
   // store currently holds — the effect above will catch the store up on the
@@ -90,7 +111,7 @@ export function AiOpponentConfig({ format, opponentCount = 1 }: Props) {
   const seatsToRender = useMemo(() => {
     const fallback = aiSeats[0];
     return Array.from({ length: opponentCount }, (_, i) =>
-      aiSeats[i] ?? fallback ?? { difficulty: "Medium" as AIDifficulty, deckName: AI_DECK_RANDOM },
+      aiSeats[i] ?? fallback ?? { difficulty: "Medium" as AIDifficulty, deckId: AI_DECK_RANDOM },
     );
   }, [aiSeats, opponentCount]);
 
@@ -122,17 +143,28 @@ export function AiOpponentConfig({ format, opponentCount = 1 }: Props) {
             key={i}
             index={i}
             seat={seat}
-            decks={decks}
-            meta={meta}
+            candidates={candidates}
             filteredDecks={filteredDecks}
             expanded={!isMulti || expandedIndex === i}
             collapsible={isMulti}
             onToggle={() => setExpandedIndex((cur) => (cur === i ? null : i))}
-            onDeckChange={(name) => setAiSeatDeckName(i, name)}
+            onDeckChange={(id) => setAiSeatDeckId(i, id)}
             onDifficultyChange={(d) => setAiSeatDifficulty(i, d)}
           />
         ))}
       </div>
+
+      {!loading && candidates.length === 0 && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          No legal AI decks are available for this format.
+        </div>
+      )}
+
+      {error && (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          AI deck catalog unavailable: {error}
+        </div>
+      )}
 
       {/* Global pool filters — apply to every seat set to Random. */}
       <div className="mt-1 flex flex-col gap-3 rounded-lg border border-white/5 bg-black/20 px-3 py-2.5">
@@ -181,10 +213,9 @@ export function AiOpponentConfig({ format, opponentCount = 1 }: Props) {
 
 interface AiSeatPanelProps {
   index: number;
-  seat: { difficulty: AIDifficulty; deckName: AiDeckSelection };
-  decks: FeedDeck[];
-  meta: Map<string, FeedDeckMeta>;
-  filteredDecks: FeedDeck[];
+  seat: { difficulty: AIDifficulty; deckId: AiDeckSelection };
+  candidates: AiDeckCandidate[];
+  filteredDecks: AiDeckCandidate[];
   expanded: boolean;
   collapsible: boolean;
   onToggle: () => void;
@@ -195,8 +226,7 @@ interface AiSeatPanelProps {
 function AiSeatPanel({
   index,
   seat,
-  decks,
-  meta,
+  candidates,
   filteredDecks,
   expanded,
   collapsible,
@@ -204,15 +234,16 @@ function AiSeatPanel({
   onDeckChange,
   onDifficultyChange,
 }: AiSeatPanelProps) {
-  const isRandom = seat.deckName === AI_DECK_RANDOM;
+  const isRandom = seat.deckId === AI_DECK_RANDOM;
   // When the user has pinned a deck, expose the full list so they can switch
   // to another pinned deck; otherwise scope to the filtered Random pool so
   // the "Random" summary count matches the options shown.
-  const deckOptions = isRandom ? filteredDecks : decks;
-  const selectionValid = isRandom || deckOptions.some((d) => d.name === seat.deckName);
-  const effectiveSelection: AiDeckSelection = selectionValid ? seat.deckName : AI_DECK_RANDOM;
+  const deckOptions = isRandom ? filteredDecks : candidates;
+  const selectionValid = isRandom || deckOptions.some((d) => d.id === seat.deckId);
+  const effectiveSelection: AiDeckSelection = selectionValid ? seat.deckId : AI_DECK_RANDOM;
 
-  const summaryDeck = isRandom ? `Random (${filteredDecks.length})` : seat.deckName;
+  const selectedCandidate = candidates.find((d) => d.id === seat.deckId);
+  const summaryDeck = isRandom ? `Random (${filteredDecks.length})` : (selectedCandidate?.name ?? "Random");
   const summaryDifficulty = getAiDifficultyLabel(seat.difficulty);
 
   const body = (
@@ -226,12 +257,11 @@ function AiSeatPanel({
         >
           <option value={AI_DECK_RANDOM}>Random ({filteredDecks.length})</option>
           {deckOptions.map((d) => {
-            const m = meta.get(d.name);
-            const suffix = [m?.archetype, m?.coveragePct != null ? `${m.coveragePct}%` : null]
+            const suffix = [sourceLabel(d), d.archetype, d.coveragePct != null ? `${d.coveragePct}%` : null]
               .filter(Boolean)
               .join(" · ");
             return (
-              <option key={d.name} value={d.name}>
+              <option key={d.id} value={d.id}>
                 {d.name}
                 {suffix ? ` — ${suffix}` : ""}
               </option>

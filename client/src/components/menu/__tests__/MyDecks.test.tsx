@@ -6,6 +6,7 @@ import { MyDecks } from "../MyDecks";
 import { STORAGE_KEY_PREFIX } from "../../../constants/storage";
 import type { ParsedDeck } from "../../../services/deckParser";
 import { evaluateDeckCompatibilityBatch } from "../../../services/deckCompatibility";
+import { buildLegalAiDeckCatalog } from "../../../services/aiDeckCatalog";
 
 vi.mock("../../../hooks/useCardImage", () => ({
   useCardImage: () => ({ src: null, isLoading: false }),
@@ -13,6 +14,10 @@ vi.mock("../../../hooks/useCardImage", () => ({
 
 vi.mock("../../../services/deckCompatibility", () => ({
   evaluateDeckCompatibilityBatch: vi.fn(),
+}));
+
+vi.mock("../../../services/aiDeckCatalog", () => ({
+  buildLegalAiDeckCatalog: vi.fn(),
 }));
 
 function saveDeck(name: string, deck: ParsedDeck): void {
@@ -23,6 +28,7 @@ describe("MyDecks", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({ candidates: [] });
   });
 
   afterEach(() => {
@@ -242,5 +248,44 @@ describe("MyDecks", () => {
 
     expect(onEditDeck).toHaveBeenCalledWith("Selectable Deck");
     expect(onSelectDeck).not.toHaveBeenCalled();
+  });
+
+  it("shows legal precons by default in format selection and saves one when selected", async () => {
+    vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({});
+    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
+      candidates: [{
+        id: "precon:secrets",
+        name: "Secrets of Strixhaven (SOS)",
+        source: { type: "precon", deckId: "secrets", code: "SOS" },
+        deck: {
+          main: [{ name: "Island", count: 99 }],
+          sideboard: [],
+          commander: ["Zimone, Mystery Unraveler"],
+        },
+        coveragePct: 100,
+        archetype: "Control",
+      }],
+    });
+    const onSelectDeck = vi.fn();
+
+    render(
+      <MyDecks
+        mode="select"
+        selectedFormat="Commander"
+        activeDeckName={null}
+        onSelectDeck={onSelectDeck}
+      />,
+    );
+
+    expect(await screen.findByText("Secrets of Strixhaven (SOS)")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByText("Secrets of Strixhaven (SOS)"));
+
+    expect(onSelectDeck).toHaveBeenCalledWith("[Pre-built] Secrets of Strixhaven (SOS)");
+    expect(localStorage.getItem(`${STORAGE_KEY_PREFIX}[Pre-built] Secrets of Strixhaven (SOS)`)).toBeTruthy();
+    expect(buildLegalAiDeckCatalog).toHaveBeenCalledWith({
+      selectedFormat: "Commander",
+      selectedMatchType: undefined,
+    });
   });
 });

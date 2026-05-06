@@ -22,7 +22,7 @@ describe("preferencesStore", () => {
         sfxMuted: false,
         musicMuted: false,
         masterMuted: false,
-        aiSeats: [{ difficulty: "Medium", deckName: "Random" }],
+        aiSeats: [{ difficulty: "Medium", deckId: "Random" }],
       });
     });
     localStorage.clear();
@@ -36,7 +36,7 @@ describe("preferencesStore", () => {
     expect(state.followActiveOpponent).toBe(false);
     expect(state.logDefaultState).toBe("closed");
     expect(state.boardBackground).toBe("auto-wubrg");
-    expect(state.aiSeats).toEqual([{ difficulty: "Medium", deckName: "Random" }]);
+    expect(state.aiSeats).toEqual([{ difficulty: "Medium", deckId: "Random" }]);
   });
 
   it("setAiSeatDifficulty updates the target seat", () => {
@@ -64,13 +64,13 @@ describe("preferencesStore", () => {
   it("ensureAiSeatCount shrinks without losing leading seats", () => {
     act(() => {
       usePreferencesStore.getState().ensureAiSeatCount(4);
-      usePreferencesStore.getState().setAiSeatDeckName(0, "Dimir Control");
+      usePreferencesStore.getState().setAiSeatDeckId(0, "saved:Dimir Control");
       usePreferencesStore.getState().ensureAiSeatCount(1);
     });
 
     const seats = usePreferencesStore.getState().aiSeats;
     expect(seats).toHaveLength(1);
-    expect(seats[0].deckName).toBe("Dimir Control");
+    expect(seats[0].deckId).toBe("saved:Dimir Control");
   });
 
   it("setCardSize updates card size", () => {
@@ -309,11 +309,35 @@ describe("preferencesStore", () => {
     });
 
     const state = usePreferencesStore.getState();
-    expect(state.aiSeats).toEqual([{ difficulty: "Hard", deckName: "Dimir Control" }]);
+    expect(state.aiSeats).toEqual([{ difficulty: "Hard", deckId: "saved:Dimir Control" }]);
     expect(state.cardSize).toBe("large");
     // Legacy flat keys must not leak onto the state object.
     expect((state as unknown as { aiDifficulty?: unknown }).aiDifficulty).toBeUndefined();
     expect((state as unknown as { aiDeckName?: unknown }).aiDeckName).toBeUndefined();
+  });
+
+  it("migrates legacy AI seat deck names to catalog IDs while preserving Random", () => {
+    localStorage.setItem(
+      "phase-preferences",
+      JSON.stringify({
+        state: {
+          aiSeats: [
+            { difficulty: "Easy", deckName: "Random" },
+            { difficulty: "Hard", deckName: "Dimir Control" },
+          ],
+        },
+        version: 3,
+      }),
+    );
+
+    act(() => {
+      usePreferencesStore.persist.rehydrate();
+    });
+
+    expect(usePreferencesStore.getState().aiSeats).toEqual([
+      { difficulty: "Easy", deckId: "Random" },
+      { difficulty: "Hard", deckId: "saved:Dimir Control" },
+    ]);
   });
 
   // --- Audio preferences ---

@@ -499,7 +499,11 @@ export function GamePage() {
     setWaitingForOpponent(false);
   }, []);
 
-  const handleNoDeck = useCallback(() => {
+  const handleNoDeck = useCallback((reason?: string) => {
+    if (reason) {
+      navigate("/setup", { state: { setupError: reason } });
+      return;
+    }
     navigate("/");
   }, [navigate]);
 
