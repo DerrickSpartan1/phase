@@ -7173,6 +7173,12 @@ pub(crate) fn parse_effect_chain_ir(
         // for 1v1. Strip the prefix so the remaining effect text is parsed normally.
         let normalized_text = {
             let temp_lower = normalized_text.to_lowercase();
+            if tag::<_, _, VerboseError<&str>>("starting with you")
+                .parse(temp_lower.as_str())
+                .is_ok_and(|(rest, _)| rest.trim().is_empty())
+            {
+                continue;
+            }
             nom_on_lower(normalized_text, &temp_lower, |i| {
                 value((), tag("starting with you, ")).parse(i)
             })

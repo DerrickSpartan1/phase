@@ -1817,6 +1817,8 @@ pub enum WaitingFor {
         resource: PayableResource,
         min: u32,
         max: u32,
+        #[serde(default)]
+        accumulated: u32,
         source_id: ObjectId,
     },
     /// CR 115.7: Change the target(s) of a spell or ability on the stack.

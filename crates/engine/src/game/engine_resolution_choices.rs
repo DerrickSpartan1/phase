@@ -1,6 +1,6 @@
 use crate::types::ability::{
-    CategoryChooserScope, ChoiceType, ChoiceValue, ChosenAttribute, EffectKind, ResolvedAbility,
-    TargetRef,
+    CategoryChooserScope, ChoiceType, ChoiceValue, ChosenAttribute, Effect, EffectKind,
+    PaymentCost, QuantityExpr, QuantityRef, ResolvedAbility, TargetRef,
 };
 use crate::types::actions::{GameAction, LearnOption};
 use crate::types::events::GameEvent;
@@ -268,6 +268,7 @@ pub(super) fn handle_resolution_choice(
                 resource,
                 min,
                 max,
+                accumulated,
                 source_id,
             },
             GameAction::SubmitPayAmount { amount },
@@ -313,11 +314,27 @@ pub(super) fn handle_resolution_choice(
             // CR 603.7c: Bind the paid amount for downstream chain steps that
             // read `QuantityRef::EventContextAmount` (e.g. "deals that much
             // damage"). `last_effect_count` is the documented fallback slot.
-            state.last_effect_count = Some(amount as i32);
-            if let Some(cont) = state.pending_continuation.as_mut() {
-                cont.chain.set_chosen_x_recursive(amount);
+            let total = accumulated.saturating_add(amount);
+            state.last_effect_count = Some(total as i32);
+            let pending_starts_with_pay_amount = state
+                .pending_continuation
+                .as_ref()
+                .is_some_and(|cont| starts_with_pay_amount_prompt(&cont.chain));
+            if !pending_starts_with_pay_amount {
+                if let Some(cont) = state.pending_continuation.as_mut() {
+                    cont.chain.set_chosen_x_recursive(total);
+                }
             }
-            ResolutionChoiceOutcome::WaitingFor(finish_with_continuation(state, player, events))
+            let mut waiting_for = finish_with_continuation(state, player, events);
+            if let WaitingFor::PayAmountChoice {
+                accumulated: next_accumulated,
+                ..
+            } = &mut waiting_for
+            {
+                *next_accumulated = total;
+                state.waiting_for = waiting_for.clone();
+            }
+            ResolutionChoiceOutcome::WaitingFor(waiting_for)
         }
         (
             WaitingFor::PopulateChoice {
@@ -1495,6 +1512,25 @@ fn action_result_outcome(
 fn set_priority(state: &mut GameState, player: crate::types::player::PlayerId) {
     state.waiting_for = WaitingFor::Priority { player };
     state.priority_player = player;
+}
+
+fn starts_with_pay_amount_prompt(ability: &ResolvedAbility) -> bool {
+    match &ability.effect {
+        Effect::PayCost {
+            cost: PaymentCost::Mana { cost },
+            ..
+        } => casting_costs::cost_has_x(cost),
+        Effect::PayCost {
+            cost: PaymentCost::Energy { amount },
+            ..
+        } => matches!(
+            amount,
+            QuantityExpr::Ref {
+                qty: QuantityRef::Variable { name },
+            } if name == "X"
+        ),
+        _ => false,
+    }
 }
 
 fn finish_with_continuation(

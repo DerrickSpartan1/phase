@@ -3403,6 +3403,19 @@ pub(super) fn parse_cost_resource_ast(
                 },
             });
         }
+        // CR 118.1 + CR 107.3: "pay any amount of mana" → variable generic
+        // mana payment. Join forces uses the total paid this way as X for the
+        // following effect chain.
+        if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>("any amount of mana").parse(rest) {
+            return Some(CostResourceImperativeAst::Pay {
+                cost: PaymentCost::Mana {
+                    cost: crate::types::mana::ManaCost::Cost {
+                        shards: vec![crate::types::mana::ManaCostShard::X],
+                        generic: 0,
+                    },
+                },
+            });
+        }
         // "pay an amount of {e} equal to ..." → variable energy payment
         if let Ok((rest_after, _)) =
             tag::<_, _, VerboseError<&str>>("an amount of {e} equal to ").parse(rest)
@@ -5960,6 +5973,26 @@ mod tests {
             ),
             "Expected AdditionalPhase without main phase, got {effect:?}"
         );
+    }
+
+    #[test]
+    fn parse_pay_any_amount_of_mana_as_variable_mana_cost() {
+        let text = "pay any amount of mana";
+        let lower = text.to_lowercase();
+        let Some(CostResourceImperativeAst::Pay {
+            cost: PaymentCost::Mana { cost },
+        }) = parse_cost_resource_ast(text, &lower, &mut ParseContext::default())
+        else {
+            panic!("expected variable mana PayCost");
+        };
+        let crate::types::mana::ManaCost::Cost { shards, generic } = cost else {
+            panic!("expected concrete mana cost");
+        };
+        assert_eq!(generic, 0);
+        assert!(matches!(
+            shards.as_slice(),
+            [crate::types::mana::ManaCostShard::X]
+        ));
     }
 
     #[test]
