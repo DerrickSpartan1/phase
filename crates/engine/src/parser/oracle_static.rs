@@ -6098,7 +6098,11 @@ pub(crate) fn parse_continuous_modifications(text: &str) -> Vec<ContinuousModifi
     let lower = tp.lower;
     let mut modifications = Vec::new();
 
-    if nom_primitives::scan_contains(tp.lower, "lose all abilities") {
+    if nom_primitives::scan_contains(tp.lower, "lose all abilities")
+        || nom_primitives::scan_contains(tp.lower, "loses all abilities")
+        || nom_primitives::scan_contains(tp.lower, "lose all other abilities")
+        || nom_primitives::scan_contains(tp.lower, "loses all other abilities")
+    {
         modifications.push(ContinuousModification::RemoveAllAbilities);
     }
 

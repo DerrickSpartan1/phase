@@ -1400,8 +1400,17 @@ fn build_become_clause(
         return Some(clause);
     }
 
-    let animation = parse_animation_spec(become_text, ctx)?;
+    let (become_text, name_override) = strip_become_name_override(become_text);
+    let animation = parse_animation_spec(&become_text, ctx)?;
     let modifications = animation_modifications(&animation);
+    let modifications = if let Some(name) = name_override {
+        let mut with_name = Vec::with_capacity(modifications.len() + 1);
+        with_name.push(ContinuousModification::SetName { name });
+        with_name.extend(modifications);
+        with_name
+    } else {
+        modifications
+    };
     if modifications.is_empty() {
         return None;
     }
@@ -1423,6 +1432,20 @@ fn build_become_clause(
         condition: None,
         optional: false,
     })
+}
+
+fn strip_become_name_override(text: &str) -> (String, Option<String>) {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let Some((before, after)) = tp.split_around(" named ") else {
+        return (text.to_string(), None);
+    };
+    let name = after.original.trim().trim_end_matches('.').to_string();
+    if name.is_empty() {
+        (before.original.trim().to_string(), None)
+    } else {
+        (before.original.trim().to_string(), Some(name))
+    }
 }
 
 fn try_parse_become_and_attack_if_able(
@@ -2215,6 +2238,64 @@ mod tests {
             }
             other => panic!("expected BecomeCopy, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn have_card_name_become_named_equipment_and_lose_other_abilities() {
+        let mut ctx = ParseContext {
+            card_name: Some("The Irencrag".to_string()),
+            ..Default::default()
+        };
+        let ability = crate::parser::oracle_effect::parse_effect_chain_with_context(
+            "have The Irencrag become a legendary Equipment artifact named Everflame, Heroes' Legacy. If you do, it gains equip {3} and \"Equipped creature gets +3/+3\" and loses all other abilities.",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*ability.effect
+        else {
+            panic!("expected GenericEffect, got {:?}", ability.effect);
+        };
+        let modifications = &static_abilities[0].modifications;
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetName { name } if name == "Everflame, Heroes' Legacy"
+            )),
+            "expected SetName in {modifications:?}",
+        );
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Equipment"
+            )),
+            "expected AddSubtype(Equipment) in {modifications:?}",
+        );
+
+        let sub_ability = ability.sub_ability.as_ref().expect("If you do sub-ability");
+        assert!(matches!(
+            sub_ability.condition,
+            Some(crate::types::ability::AbilityCondition::IfYouDo)
+        ));
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = &*sub_ability.effect
+        else {
+            panic!(
+                "expected GenericEffect sub-ability, got {:?}",
+                sub_ability.effect
+            );
+        };
+        let sub_modifications = &static_abilities[0].modifications;
+        assert!(
+            sub_modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::RemoveAllAbilities
+            )),
+            "expected RemoveAllAbilities in {sub_modifications:?}",
+        );
     }
 
     #[test]

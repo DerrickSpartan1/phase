@@ -141,6 +141,31 @@ fn condition_refs_cost_paid_object(condition: &AbilityCondition) -> bool {
     }
 }
 
+fn if_you_do_object_anchor(
+    clauses: &[ClauseIr],
+    condition: &Option<AbilityCondition>,
+) -> Option<TargetFilter> {
+    if !matches!(condition, Some(AbilityCondition::IfYouDo)) {
+        return None;
+    }
+    clauses
+        .iter()
+        .rev()
+        .find(|clause| !clause.absorbed_by_followup)
+        .and_then(|clause| match &clause.parsed.effect {
+            Effect::GenericEffect {
+                static_abilities,
+                target,
+                ..
+            } => target.clone().or_else(|| {
+                static_abilities
+                    .iter()
+                    .find_map(|definition| definition.affected.clone())
+            }),
+            _ => None,
+        })
+}
+
 fn merge_clause_conditions(
     outer: AbilityCondition,
     inner: Option<AbilityCondition>,
@@ -2443,6 +2468,24 @@ fn try_parse_have_redirection(text: &str, ctx: &mut ParseContext) -> Option<Pars
     // `extract_event_context_filter` + `resolve_token_owner`).
     if let Some(clause) = try_parse_have_its_controller(text, after_have, ctx) {
         return Some(clause);
+    }
+
+    let self_named_redirected;
+    if let Some(card_name) = ctx.card_name.as_deref() {
+        let card_name_lower = card_name.to_lowercase();
+        let parsed_name =
+            tag::<_, _, VerboseError<&str>>(card_name_lower.as_str()).parse(after_have);
+        if let Ok((after_name, _)) = parsed_name {
+            if after_name.starts_with(char::is_whitespace) {
+                let consumed = lower.len() - after_name.len();
+                self_named_redirected = format!("~ {}", text[consumed..].trim_start());
+                if let Some(ast) =
+                    subject::try_parse_subject_predicate_ast(&self_named_redirected, ctx)
+                {
+                    return Some(lower_clause_ast(ast, ctx));
+                }
+            }
+        }
     }
 
     // Guard: don't intercept if what follows "have" is not a recognizable subject reference.
@@ -7709,10 +7752,11 @@ pub(crate) fn parse_effect_chain_ir(
             _ => None,
         }
         .or_else(|| ctx.actor.clone());
+        let if_you_do_anchor = if_you_do_object_anchor(&clauses, &condition);
         let chunk_subject = if condition.as_ref().is_some_and(condition_refs_source_object) {
             Some(TargetFilter::SelfRef)
         } else {
-            ctx.subject.clone()
+            if_you_do_anchor.clone().or_else(|| ctx.subject.clone())
         };
         let mut chunk_ctx = ParseContext {
             subject: chunk_subject,
@@ -7947,6 +7991,7 @@ pub(crate) fn parse_effect_chain_ir(
             && !condition.as_ref().is_some_and(condition_refs_source_object)
             && !clauses.is_empty()
             && has_anaphoric_reference(&text_lower)
+            && !matches!(if_you_do_anchor, Some(TargetFilter::SelfRef))
             && !replace_fight_subject_with_parent_if_anaphoric_subject(
                 &text_lower,
                 &mut clause.effect,

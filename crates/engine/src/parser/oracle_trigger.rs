@@ -486,7 +486,7 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     let effect_lower = effect_text.to_lowercase();
     // Extract intervening-if condition from effect text first — a leading
     // "if X, " can hide the "you may " optional marker behind the if-clause.
-    let (effect_without_if, if_condition) = extract_if_condition(&effect_lower);
+    let (effect_without_if, if_condition) = extract_if_condition(&effect_text);
 
     // CR 609.3: "You may" at the start of the effect text makes the triggered
     // effect optional at resolution.
@@ -523,7 +523,8 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     }
 
     // Parse the effect body
-    let has_up_to = scan_contains(&effect_for_parse, "up to one");
+    let effect_for_parse_lower = effect_for_parse.to_lowercase();
+    let has_up_to = scan_contains(&effect_for_parse_lower, "up to one");
     let body = if !effect_for_parse.is_empty() {
         // CR 701.38 + CR 207.2c: Vote blocks produce AbilityDefinition directly.
         if let Some(vote_def) =
@@ -6096,9 +6097,9 @@ mod tests {
     use crate::parser::oracle_ir::context::ParseContext;
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
-        AbilityCondition, AbilityKind, Comparator, ControllerRef, DamageModification, Duration,
-        Effect, FilterProp, PlayerFilter, PlayerScope, PtValue, QuantityExpr, QuantityRef,
-        TargetFilter, TypeFilter, TypedFilter, UnlessCost,
+        AbilityCondition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
+        DamageModification, Duration, Effect, FilterProp, PlayerFilter, PlayerScope, PtValue,
+        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter, UnlessCost,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -9407,6 +9408,67 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::ChangesZone);
         assert!(matches!(def.valid_card, Some(TargetFilter::Or { .. })));
         assert_eq!(def.destination, Some(Zone::Battlefield));
+    }
+
+    #[test]
+    fn trigger_may_have_self_become_named_equipment_if_you_do() {
+        let def = parse_trigger_line(
+            "Whenever a legendary creature you control enters, you may have The Irencrag become a legendary Equipment artifact named Everflame, Heroes' Legacy. If you do, it gains equip {3} and \"Equipped creature gets +3/+3\" and loses all other abilities.",
+            "The Irencrag",
+        );
+
+        assert!(def.optional);
+        let execute = def.execute.as_ref().expect("trigger execute ability");
+        assert!(execute.optional);
+
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = execute.effect.as_ref()
+        else {
+            panic!("expected GenericEffect, got {:?}", execute.effect);
+        };
+        let modifications = &static_abilities[0].modifications;
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::SetName { name } if name == "Everflame, Heroes' Legacy"
+            )),
+            "expected SetName in {modifications:?}",
+        );
+        assert!(
+            modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::AddSubtype { subtype } if subtype == "Equipment"
+            )),
+            "expected AddSubtype(Equipment) in {modifications:?}",
+        );
+
+        let sub_ability = execute.sub_ability.as_ref().expect("If you do sub-ability");
+        assert!(matches!(
+            sub_ability.condition,
+            Some(AbilityCondition::IfYouDo)
+        ));
+        let Effect::GenericEffect {
+            static_abilities, ..
+        } = sub_ability.effect.as_ref()
+        else {
+            panic!(
+                "expected GenericEffect sub-ability, got {:?}",
+                sub_ability.effect
+            );
+        };
+        assert!(matches!(
+            static_abilities[0].affected,
+            Some(TargetFilter::SelfRef)
+        ));
+        let sub_modifications = &static_abilities[0].modifications;
+        assert!(
+            sub_modifications.iter().any(|modification| matches!(
+                modification,
+                ContinuousModification::RemoveAllAbilities
+            )),
+            "expected RemoveAllAbilities in {sub_modifications:?}",
+        );
     }
 
     #[test]
