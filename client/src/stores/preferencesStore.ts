@@ -33,6 +33,19 @@ export interface AiSeatPref {
   deckId: AiDeckSelection;
 }
 
+export type ArtChainEntry =
+  | { type: "set"; setCode: string; label: string }
+  | { type: "newest" }
+  | { type: "oldest" }
+  | { type: "prefer_borderless" }
+  | { type: "prefer_extended" };
+
+export interface CardArtOverride {
+  scryfallId: string;
+  setCode: string;
+  collectorNumber: string;
+}
+
 export type CardSizePreference = "small" | "medium" | "large";
 export type HudLayout = "inline" | "floating";
 export type LogDefaultState = "open" | "closed";
@@ -106,6 +119,8 @@ function buildDefaultPreferences(): PreferencesState {
     lastMatchType: "Bo1",
     lastPlayerCount: 2,
     experimentalFeatures: false,
+    artChain: [] as ArtChainEntry[],
+    artOverrides: {} as Record<string, CardArtOverride>,
   };
 }
 
@@ -144,6 +159,8 @@ interface PreferencesState {
   lastMatchType: MatchType;
   lastPlayerCount: number;
   experimentalFeatures: boolean;
+  artChain: ArtChainEntry[];
+  artOverrides: Record<string, CardArtOverride>;
 }
 
 interface PreferencesActions {
@@ -187,6 +204,13 @@ interface PreferencesActions {
   setLastMatchType: (matchType: MatchType) => void;
   setLastPlayerCount: (count: number) => void;
   setExperimentalFeatures: (enabled: boolean) => void;
+  addArtChainEntry: (entry: ArtChainEntry) => void;
+  removeArtChainEntry: (index: number) => void;
+  moveArtChainEntry: (fromIndex: number, toIndex: number) => void;
+  setArtChain: (chain: ArtChainEntry[]) => void;
+  setArtOverride: (oracleId: string, override: CardArtOverride) => void;
+  clearArtOverride: (oracleId: string) => void;
+  clearAllArtOverrides: () => void;
 }
 
 type LegacyFlatAiPrefs = Partial<{
@@ -199,6 +223,12 @@ type LegacyAiSeatPref = Partial<{
   deckName: AiDeckSelection;
   deckId: AiDeckSelection;
 }>;
+
+let strategyCacheClearFn: (() => void) | null = null;
+
+export function registerStrategyCacheClearFn(fn: () => void): void {
+  strategyCacheClearFn = fn;
+}
 
 function legacyAiDeckNameToId(name: string): string {
   return `saved:${name}`;
@@ -297,10 +327,53 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       setLastMatchType: (matchType) => set({ lastMatchType: matchType }),
       setLastPlayerCount: (count) => set({ lastPlayerCount: count }),
       setExperimentalFeatures: (enabled) => set({ experimentalFeatures: enabled }),
+      addArtChainEntry: (entry) =>
+        set((state) => {
+          const isDuplicate = state.artChain.some((e) =>
+            e.type === entry.type && (e.type !== "set" || (entry.type === "set" && e.setCode === entry.setCode)),
+          );
+          if (isDuplicate) return state;
+          strategyCacheClearFn?.();
+          return { artChain: [...state.artChain, entry] };
+        }),
+      removeArtChainEntry: (index) =>
+        set((state) => {
+          if (index < 0 || index >= state.artChain.length) return state;
+          strategyCacheClearFn?.();
+          return { artChain: state.artChain.filter((_, i) => i !== index) };
+        }),
+      moveArtChainEntry: (fromIndex, toIndex) =>
+        set((state) => {
+          if (
+            fromIndex < 0 || fromIndex >= state.artChain.length ||
+            toIndex < 0 || toIndex >= state.artChain.length ||
+            fromIndex === toIndex
+          ) return state;
+          const next = state.artChain.slice();
+          const [moved] = next.splice(fromIndex, 1);
+          next.splice(toIndex, 0, moved);
+          strategyCacheClearFn?.();
+          return { artChain: next };
+        }),
+      setArtChain: (chain) => {
+        strategyCacheClearFn?.();
+        set({ artChain: chain });
+      },
+      setArtOverride: (oracleId, override) =>
+        set((state) => ({
+          artOverrides: { ...state.artOverrides, [oracleId]: override },
+        })),
+      clearArtOverride: (oracleId) =>
+        set((state) => {
+          const { [oracleId]: _, ...rest } = state.artOverrides;
+          void _;
+          return { artOverrides: rest };
+        }),
+      clearAllArtOverrides: () => set({ artOverrides: {} }),
     }),
     {
       name: "phase-preferences",
-      version: 4,
+      version: 6,
       // v0 → v1: flat aiDifficulty + aiDeckName become aiSeats[0].
       // v1 → v2: discrete animationSpeed/combatPacing enums become numeric
       //          animationSpeedMultiplier/combatPacingMultiplier.
@@ -311,6 +384,8 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
       //          categories start at the neutral 1.0 default.
       // v3 → v4: AI deck selections become stable catalog IDs instead
       //          of display names.
+      // v4 → v5: Add artStrategy and artOverrides for card art preferences.
+      // v5 → v6: Replace artStrategy (single enum) with artChain (ordered preference list).
       migrate: (persisted: unknown, version: number) => {
         if (!persisted || typeof persisted !== "object") return persisted;
         let migrated = persisted as Record<string, unknown>;
@@ -371,6 +446,24 @@ export const usePreferencesStore = create<PreferencesState & PreferencesActions>
               ? legacy.aiSeats.map(migrateAiSeat)
               : [defaultAiSeat()],
           };
+        }
+
+        if (version < 5) {
+          migrated = { ...migrated, artStrategy: "default", artOverrides: {} };
+        }
+
+        if (version < 6) {
+          const oldStrategy = migrated.artStrategy as string | undefined;
+          const STRATEGY_TO_CHAIN: Record<string, ArtChainEntry[]> = {
+            newest: [{ type: "newest" }],
+            oldest: [{ type: "oldest" }],
+            prefer_borderless: [{ type: "prefer_borderless" }],
+            prefer_extended: [{ type: "prefer_extended" }],
+          };
+          const artChain = (oldStrategy && STRATEGY_TO_CHAIN[oldStrategy]) ?? [];
+          const { artStrategy: _oldStrat, ...rest } = migrated;
+          void _oldStrat;
+          migrated = { ...rest, artChain };
         }
 
         return migrated;

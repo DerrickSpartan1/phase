@@ -1,10 +1,17 @@
 import { useEffect, useState } from "react";
+
 import {
   fetchCardImageByOracleId,
   fetchCardImageUrl,
   fetchTokenImageUrl,
+  findPrintingById,
+  getCardPrintings,
+  resolveOracleIdSync,
+  resolvePrintingImageUrl,
 } from "../services/scryfall.ts";
-import type { TokenSearchFilters } from "../services/scryfall.ts";
+import type { ImageSize, PrintingEntry, TokenSearchFilters } from "../services/scryfall.ts";
+import { usePreferencesStore, registerStrategyCacheClearFn } from "../stores/preferencesStore.ts";
+import type { ArtChainEntry } from "../stores/preferencesStore.ts";
 
 interface UseCardImageOptions {
   size?: "small" | "normal" | "large" | "art_crop";
@@ -19,6 +26,11 @@ interface UseCardImageOptions {
   /** Companion to `oracleId` — the engine-reported face name selects which
    * Scryfall `card_faces` entry to render. */
   faceName?: string;
+  /** When set, resolves the image from this specific Scryfall printing ID
+   * instead of using the default/strategy resolution. Used by the printing
+   * picker to preview a specific printing's art. Requires `oracleId` to
+   * look up the printings list. */
+  scryfallId?: string;
 }
 
 interface UseCardImageResult {
@@ -33,6 +45,81 @@ interface MemoryCacheEntry {
 }
 
 const imageRequestCache = new Map<string, MemoryCacheEntry>();
+
+const strategyCacheMap = new Map<string, PrintingEntry>();
+const printingsCacheMap = new Map<string, PrintingEntry[]>();
+const strategyInflight = new Set<string>();
+const artCacheEvents = new EventTarget();
+
+registerStrategyCacheClearFn(() => {
+  strategyCacheMap.clear();
+  strategyInflight.clear();
+});
+
+function applyChainEntry(entry: ArtChainEntry, printings: PrintingEntry[]): PrintingEntry | null {
+  switch (entry.type) {
+    case "set":
+      return printings.find((p) => p.set === entry.setCode) ?? null;
+    case "newest":
+      return printings[0];
+    case "oldest":
+      return printings[printings.length - 1];
+    case "prefer_borderless":
+      return printings.find((p) => p.border_color === "borderless") ?? null;
+    case "prefer_extended":
+      return printings.find((p) => p.frame_effects.includes("extendedart")) ?? null;
+  }
+}
+
+function applyChain(chain: ArtChainEntry[], printings: PrintingEntry[]): PrintingEntry | null {
+  if (printings.length === 0) return null;
+  for (const entry of chain) {
+    const match = applyChainEntry(entry, printings);
+    if (match) return match;
+  }
+  return null;
+}
+
+function resolveStrategyInBackground(oracleId: string, chain: ArtChainEntry[]): void {
+  if (strategyInflight.has(oracleId)) return;
+  strategyInflight.add(oracleId);
+
+  getCardPrintings(oracleId).then((printings) => {
+    if (printings.length > 0) {
+      printingsCacheMap.set(oracleId, printings);
+      const winner = applyChain(chain, printings);
+      if (winner) {
+        strategyCacheMap.set(oracleId, winner);
+      }
+    }
+    strategyInflight.delete(oracleId);
+    artCacheEvents.dispatchEvent(new Event("update"));
+  }).catch(() => {
+    strategyInflight.delete(oracleId);
+  });
+}
+
+function resolveOverrideUrl(
+  oracleId: string,
+  scryfallId: string,
+  faceIndex: number,
+  size: ImageSize,
+): string | null {
+  const cached = printingsCacheMap.get(oracleId);
+  if (cached) {
+    const entry = findPrintingById(cached, scryfallId);
+    return entry ? resolvePrintingImageUrl(entry, faceIndex, size) : null;
+  }
+
+  getCardPrintings(oracleId).then((printings) => {
+    if (printings.length > 0) {
+      printingsCacheMap.set(oracleId, printings);
+      artCacheEvents.dispatchEvent(new Event("update"));
+    }
+  }).catch(() => {});
+
+  return null;
+}
 
 function imageRequestKey(
   cardName: string,
@@ -128,12 +215,42 @@ export function useCardImage(
   const tokenFilters = options?.tokenFilters;
   const oracleId = options?.oracleId ?? "";
   const faceName = options?.faceName ?? "";
-  // Stabilize tokenFilters into primitives so the effect doesn't re-fire on every render
+  const scryfallId = options?.scryfallId ?? "";
   const filterPower = tokenFilters?.power ?? null;
   const filterToughness = tokenFilters?.toughness ?? null;
   const filterColors = tokenFilters?.colors?.join(",") ?? "";
+
+  const artOverrides = usePreferencesStore((s) => s.artOverrides);
+  const artChain = usePreferencesStore((s) => s.artChain);
+
   const [src, setSrc] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [, setArtCacheTick] = useState(0);
+
+  useEffect(() => {
+    const handler = () => setArtCacheTick((t) => t + 1);
+    artCacheEvents.addEventListener("update", handler);
+    return () => artCacheEvents.removeEventListener("update", handler);
+  }, []);
+
+  const resolvedOracleId = oracleId || resolveOracleIdSync(cardName) || "";
+
+  let overrideUrl: string | null = null;
+  if (!isToken && resolvedOracleId) {
+    if (scryfallId) {
+      overrideUrl = resolveOverrideUrl(resolvedOracleId, scryfallId, faceIndex, size);
+    } else if (artOverrides[resolvedOracleId]) {
+      overrideUrl = resolveOverrideUrl(resolvedOracleId, artOverrides[resolvedOracleId].scryfallId, faceIndex, size);
+    } else if (artChain.length > 0) {
+      const cached = strategyCacheMap.get(resolvedOracleId);
+      if (cached) {
+        overrideUrl = resolvePrintingImageUrl(cached, faceIndex, size);
+      } else {
+        resolveStrategyInBackground(resolvedOracleId, artChain);
+      }
+    }
+  }
+
   const requestKey = imageRequestKey(
     cardName,
     size,
@@ -147,6 +264,12 @@ export function useCardImage(
   );
 
   useEffect(() => {
+    if (overrideUrl) {
+      setSrc(overrideUrl);
+      setIsLoading(false);
+      return;
+    }
+
     if (!cardName && !oracleId) {
       setSrc(null);
       setIsLoading(false);
@@ -198,6 +321,7 @@ export function useCardImage(
     filterToughness,
     isToken,
     oracleId,
+    overrideUrl,
     requestKey,
     size,
   ]);

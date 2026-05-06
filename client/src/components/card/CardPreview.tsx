@@ -32,6 +32,7 @@ interface CardPreviewProps {
   backFaceName?: string | null;
   faceIndex?: number;
   position?: { x: number; y: number };
+  scryfallId?: string;
 }
 
 export function CardPreview({
@@ -39,6 +40,7 @@ export function CardPreview({
   backFaceName,
   faceIndex,
   position,
+  scryfallId,
 }: CardPreviewProps) {
   if (!cardName) return null;
 
@@ -48,6 +50,7 @@ export function CardPreview({
       backFaceName={backFaceName ?? null}
       faceIndex={faceIndex}
       position={position}
+      scryfallId={scryfallId}
     />
   );
 }
@@ -57,11 +60,13 @@ function CardPreviewInner({
   backFaceName: backFaceNameProp,
   faceIndex,
   position,
+  scryfallId,
 }: {
   cardName: string;
   backFaceName: string | null;
   faceIndex?: number;
   position?: { x: number; y: number };
+  scryfallId?: string;
 }) {
   const inspectedObjectId = useUiStore((s) => s.inspectedObjectId);
   const dismissPreview = useUiStore((s) => s.dismissPreview);
@@ -104,6 +109,7 @@ function CardPreviewInner({
     tokenFilters: isToken ? { power: obj?.power, toughness: obj?.toughness, colors: obj?.color } : undefined,
     oracleId: obj?.printed_ref?.oracle_id,
     faceName: obj?.printed_ref?.face_name,
+    scryfallId,
   });
   const classLevel = obj?.class_level;
   const previewRef = useRef<HTMLDivElement | null>(null);
