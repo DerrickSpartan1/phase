@@ -1303,6 +1303,20 @@ fn detect_duration_this_turn(
     if cleaned.contains("if damage is prevented this way") {
         return;
     }
+    // CR 719.2: Case solve conditions are synthesized into the Case
+    // auto-solve trigger after Oracle parsing. When every "this turn"
+    // occurrence lives on a "To solve" line, the phrase is a turn-history
+    // condition, not an effect duration swallowed by the parser.
+    let total_this_turn = cleaned.matches(" this turn").count();
+    let case_solve_this_turn: usize = cleaned
+        .lines()
+        // allow-noncombinator: swallow detector marker scan on classified text
+        .filter(|line| line.contains("to solve"))
+        .map(|line| line.matches(" this turn").count())
+        .sum();
+    if total_this_turn > 0 && total_this_turn == case_solve_this_turn {
+        return;
+    }
     // CR 700.4 + CR 700.5 (turn-history quantities and counters):
     // "this turn" is used pervasively as a SUFFIX on count/quantity
     // references rather than as a duration on an effect. The detector
@@ -1351,7 +1365,6 @@ fn detect_duration_this_turn(
     // context. Counting occurrences ensures we still fire on cards that have
     // BOTH a quantity-context phrase AND a real duration (the duration could
     // be the swallow). The marker check below handles the all-captured case.
-    let total_this_turn = cleaned.matches(" this turn").count();
     let quantity_this_turn: usize = QUANTITY_CONTEXT_SUFFIXES
         .iter()
         .map(|s| cleaned.matches(s).count())
@@ -1386,6 +1399,35 @@ fn detect_duration_this_turn(
         // reduction consumed by the next-cast spell — its "this turn"
         // scope is structural, not a `duration` slot.
         "ReduceNextSpellCost",
+        // CR 509.1c: `ForceBlock` is the typed representation for
+        // "blocks this turn if able" / "must be blocked this turn if able".
+        // The one-turn combat requirement is inherent to the effect.
+        "ForceBlock",
+        // CR 601.2 / CR 400.7: cast/play permissions that say "this turn"
+        // are represented by `CastFromZone`; choosing not to cast is not a
+        // separate duration field on the ability.
+        "CastFromZone",
+        // Case solve conditions and other turn-history gates represent
+        // "this turn" as a condition/quantity over prior events, not as a
+        // forward-looking effect duration.
+        "SolveConditionMet",
+        "YouCastSpellThisTurn",
+        "YouCastNoncreatureSpellThisTurn",
+        "YouGainedLifeThisTurn",
+        "YouDiscardedCardThisTurn",
+        "YouSacrificedArtifactThisTurn",
+        "CreatureDiedThisTurn",
+        "YouHadCreatureEnterThisTurn",
+        "YouHadAngelOrBerserkerEnterThisTurn",
+        "YouHadArtifactEnterThisTurn",
+        "CardsLeftYourGraveyardThisTurnAtLeast",
+        "SourceEnteredThisTurn",
+        "OpponentSearchedLibraryThisTurn",
+        "CastSpellThisTurn",
+        "AttackedThisTurn",
+        "CounterAddedThisTurn",
+        "NthSpellThisTurn",
+        "NthDrawThisTurn",
     ];
     if json_has_any(ast_json, markers) {
         return;
@@ -1652,4 +1694,78 @@ fn effect_name(effect: &Effect) -> &str {
     // Reuse the existing public name function — keeps this in sync with
     // the rest of the codebase's effect-naming convention.
     crate::types::ability::effect_variant_name(effect)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::parser::oracle::parse_oracle_text;
+    use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
+
+    fn parse(text: &str, types: &[&str]) -> crate::parser::oracle::ParsedAbilities {
+        parse_named(text, "Test Card", types)
+    }
+
+    fn parse_named(
+        text: &str,
+        card_name: &str,
+        types: &[&str],
+    ) -> crate::parser::oracle::ParsedAbilities {
+        parse_oracle_text(
+            text,
+            card_name,
+            &[],
+            &types.iter().map(|ty| (*ty).to_string()).collect::<Vec<_>>(),
+            &[],
+        )
+    }
+
+    fn has_swallowed_detector(
+        parsed: &crate::parser::oracle::ParsedAbilities,
+        detector: &str,
+    ) -> bool {
+        parsed.parse_warnings.iter().any(|warning| {
+            matches!(
+                warning,
+                OracleDiagnostic::SwallowedClause {
+                    detector: warning_detector,
+                    ..
+                } if warning_detector == detector
+            )
+        })
+    }
+
+    #[test]
+    fn duration_this_turn_accepts_turn_history_case_condition() {
+        let parsed = parse_named(
+            "Instant and sorcery spells you cast cost {1} less to cast.\n\
+             To solve — You've cast four or more instant and sorcery spells this turn. \
+             (If unsolved, solve at the beginning of your end step.)\n\
+             Solved — Whenever you cast an instant or sorcery spell, draw a card.",
+            "Case of the Ransacked Lab",
+            &["Enchantment"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    #[test]
+    fn duration_this_turn_accepts_force_block_scope() {
+        let parsed = parse(
+            "Target creature blocks target creature this turn if able.",
+            &["Sorcery"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    #[test]
+    fn duration_this_turn_accepts_cast_permission_scope() {
+        let parsed = parse(
+            "{T}: Add {C}.\n\
+             {1}, {T}, Sacrifice this land: You may cast spells this turn as though they had flash.",
+            &["Land"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
 }
