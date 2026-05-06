@@ -2390,14 +2390,13 @@ fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
     }
 
     let (cost_text, constraints) = strip_activated_constraints(cost_text);
+    let target = parse_equip_target_filter(&cost_text)?;
     let cost = parse_equip_cost(&cost_text);
     let mut ability = AbilityDefinition::new(
         AbilityKind::Activated,
         Effect::Attach {
             attachment: crate::types::ability::TargetFilter::SelfRef,
-            target: crate::types::ability::TargetFilter::Typed(
-                TypedFilter::creature().controller(crate::types::ability::ControllerRef::You),
-            ),
+            target,
         },
     )
     .cost(cost)
@@ -2412,6 +2411,92 @@ fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
     }
     ability.cost_reduction = cost_reduction;
     Some(ability)
+}
+
+fn parse_equip_target_filter(cost_text: &str) -> Option<TargetFilter> {
+    let lower = cost_text.to_ascii_lowercase();
+    let Ok((_, descriptor)) =
+        nom::sequence::terminated(take_until::<_, _, VerboseError<&str>>("{"), tag("{"))
+            .parse(lower.as_str())
+    else {
+        return Some(default_equip_target_filter());
+    };
+    let descriptor = descriptor.trim();
+    if descriptor.is_empty() {
+        return Some(default_equip_target_filter());
+    }
+
+    if tag::<_, _, VerboseError<&str>>("pay")
+        .parse(descriptor)
+        .is_ok()
+    {
+        return Some(default_equip_target_filter());
+    }
+
+    if alt((
+        tag::<_, _, VerboseError<&str>>("abilities"),
+        tag::<_, _, VerboseError<&str>>("costs"),
+    ))
+    .parse(descriptor)
+    .is_ok()
+    {
+        return None;
+    }
+
+    if all_consuming(tag::<_, _, VerboseError<&str>>("commander"))
+        .parse(descriptor)
+        .is_ok()
+    {
+        return Some(TargetFilter::Typed(
+            TypedFilter::creature()
+                .controller(crate::types::ability::ControllerRef::You)
+                .properties(vec![crate::types::ability::FilterProp::IsCommander]),
+        ));
+    }
+
+    let (filter, rest) = super::oracle_target::parse_type_phrase(descriptor);
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    equip_target_filter_with_controller(filter)
+}
+
+fn equip_target_filter_with_controller(filter: TargetFilter) -> Option<TargetFilter> {
+    match filter {
+        TargetFilter::Typed(mut typed) => {
+            typed.controller = Some(crate::types::ability::ControllerRef::You);
+            if !equip_target_has_explicit_attachable_type(&typed) {
+                typed
+                    .type_filters
+                    .insert(0, crate::types::ability::TypeFilter::Creature);
+            }
+            Some(TargetFilter::Typed(typed))
+        }
+        TargetFilter::Or { filters } => Some(TargetFilter::Or {
+            filters: filters
+                .into_iter()
+                .map(equip_target_filter_with_controller)
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        _ => None,
+    }
+}
+
+fn equip_target_has_explicit_attachable_type(typed: &TypedFilter) -> bool {
+    typed.type_filters.iter().any(|filter| {
+        matches!(
+            filter,
+            crate::types::ability::TypeFilter::Creature
+                | crate::types::ability::TypeFilter::Planeswalker
+        )
+    })
+}
+
+fn default_equip_target_filter() -> TargetFilter {
+    TargetFilter::Typed(
+        TypedFilter::creature().controller(crate::types::ability::ControllerRef::You),
+    )
 }
 
 fn parse_equip_cost(cost_text: &str) -> AbilityCost {
@@ -10002,6 +10087,144 @@ mod tests {
                 ),
                 "{line} parsed unexpected cost: {:?}",
                 ability.cost
+            );
+        }
+    }
+
+    #[test]
+    fn restricted_equip_costs_preserve_target_requirement() {
+        let legendary = super::try_parse_equip("Equip legendary creature {1}")
+            .expect("legendary equip should parse");
+        let Effect::Attach { target, .. } = *legendary.effect else {
+            panic!("expected Attach, got {:?}", legendary.effect);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed target, got {:?}", target);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::HasSupertype {
+            value: crate::types::card_type::Supertype::Legendary,
+        }));
+
+        let commander =
+            super::try_parse_equip("Equip commander {3}").expect("commander equip should parse");
+        let Effect::Attach { target, .. } = *commander.effect else {
+            panic!("expected Attach, got {:?}", commander.effect);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed target, got {:?}", target);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::IsCommander));
+    }
+
+    #[test]
+    fn restricted_equip_costs_cover_observed_target_classes() {
+        for line in [
+            "Equip Citizen {1}",
+            "Equip Detective {1}",
+            "Equip Elf {2}",
+            "Equip Halfling {1}",
+            "Equip Human {1}",
+            "Equip Knight {1}",
+            "Equip Pirate {1}",
+            "Equip Soldier {W}",
+        ] {
+            let ability = super::try_parse_equip(line).expect("subtype equip should parse");
+            let Effect::Attach { target, .. } = *ability.effect else {
+                panic!("expected Attach, got {:?}", ability.effect);
+            };
+            let TargetFilter::Typed(tf) = target else {
+                panic!("expected typed target, got {:?}", target);
+            };
+            assert_eq!(tf.controller, Some(ControllerRef::You), "{line}");
+            assert!(tf.type_filters.contains(&TypeFilter::Creature), "{line}");
+            assert!(
+                tf.type_filters
+                    .iter()
+                    .any(|filter| matches!(filter, TypeFilter::Subtype(_))),
+                "{line}"
+            );
+        }
+
+        let class_union = super::try_parse_equip("Equip Shaman, Warlock, or Wizard {1}")
+            .expect("multi-subtype equip should parse");
+        let Effect::Attach { target, .. } = *class_union.effect else {
+            panic!("expected Attach, got {:?}", class_union.effect);
+        };
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected or target, got {:?}", target);
+        };
+        assert_eq!(filters.len(), 3);
+        for expected_subtype in ["Shaman", "Warlock", "Wizard"] {
+            assert!(filters.iter().any(|filter| matches!(
+                filter,
+                TargetFilter::Typed(tf)
+                    if tf.controller == Some(ControllerRef::You)
+                        && tf.type_filters.contains(&TypeFilter::Creature)
+                        && tf
+                            .type_filters
+                            .contains(&TypeFilter::Subtype(expected_subtype.to_string()))
+            )));
+        }
+
+        let token = super::try_parse_equip("Equip creature token {1}")
+            .expect("creature-token equip should parse");
+        let Effect::Attach { target, .. } = *token.effect else {
+            panic!("expected Attach, got {:?}", token.effect);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed target, got {:?}", target);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.type_filters.contains(&TypeFilter::Creature));
+        assert!(tf.properties.contains(&FilterProp::Token));
+
+        let planeswalker = super::try_parse_equip("Equip planeswalker {1}")
+            .expect("planeswalker equip should parse");
+        let Effect::Attach { target, .. } = *planeswalker.effect else {
+            panic!("expected Attach, got {:?}", planeswalker.effect);
+        };
+        let TargetFilter::Typed(tf) = target else {
+            panic!("expected typed target, got {:?}", target);
+        };
+        assert_eq!(tf.controller, Some(ControllerRef::You));
+        assert!(tf.type_filters.contains(&TypeFilter::Planeswalker));
+        assert!(!tf.type_filters.contains(&TypeFilter::Creature));
+
+        let creature_or_planeswalker = super::try_parse_equip("Equip creature or planeswalker {3}")
+            .expect("creature-or-planeswalker equip should parse");
+        let Effect::Attach { target, .. } = *creature_or_planeswalker.effect else {
+            panic!("expected Attach, got {:?}", creature_or_planeswalker.effect);
+        };
+        let TargetFilter::Or { filters } = target else {
+            panic!("expected or target, got {:?}", target);
+        };
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.controller == Some(ControllerRef::You)
+                    && tf.type_filters.contains(&TypeFilter::Creature)
+        )));
+        assert!(filters.iter().any(|filter| matches!(
+            filter,
+            TargetFilter::Typed(tf)
+                if tf.controller == Some(ControllerRef::You)
+                    && tf.type_filters.contains(&TypeFilter::Planeswalker)
+        )));
+    }
+
+    #[test]
+    fn equip_cost_modifier_lines_are_not_equip_abilities() {
+        for line in [
+            "Equip abilities you activate cost {1} less to activate.",
+            "Equip costs you pay cost {1} less.",
+        ] {
+            assert!(
+                super::try_parse_equip(line).is_none(),
+                "{line} must not parse as an equip activated ability"
             );
         }
     }
