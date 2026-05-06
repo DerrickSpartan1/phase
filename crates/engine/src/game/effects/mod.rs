@@ -1436,7 +1436,7 @@ pub fn resolve_ability_chain(
 
     // CR 118.12: "Effect unless [player] pays {cost}" — tax trigger modifier.
     if let Some(ref unless_pay) = ability.unless_pay {
-        if let Some(payer) = resolve_unless_payer(state, &unless_pay.payer) {
+        if let Some(payer) = resolve_unless_payer(state, ability, &unless_pay.payer) {
             // CR 702.21a: Non-mana costs (PayLife, DiscardCard, Sacrifice) bypass
             // mana resolution — pass through to UnlessPayment directly.
             match &unless_pay.cost {
@@ -2359,6 +2359,7 @@ fn evaluate_condition(
 /// (e.g., the opponent who cast a spell for Esper Sentinel).
 fn resolve_unless_payer(
     state: &GameState,
+    ability: &ResolvedAbility,
     payer: &TargetFilter,
 ) -> Option<crate::types::player::PlayerId> {
     match payer {
@@ -2373,6 +2374,9 @@ fn resolve_unless_payer(
                 })
         }
         TargetFilter::Controller => Some(state.active_player),
+        TargetFilter::ParentTargetController => {
+            crate::game::targeting::resolve_effect_player_ref(state, ability, payer)
+        }
         _ => None,
     }
 }
@@ -2693,8 +2697,50 @@ mod tests {
             player_id: PlayerId(1),
             action: crate::types::events::PlayerActionKind::SearchedLibrary,
         });
+        let ability = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            ObjectId(1),
+            PlayerId(0),
+        );
         assert_eq!(
-            resolve_unless_payer(&state, &TargetFilter::TriggeringPlayer),
+            resolve_unless_payer(&state, &ability, &TargetFilter::TriggeringPlayer),
+            Some(PlayerId(1))
+        );
+    }
+
+    #[test]
+    fn resolve_unless_payer_uses_parent_target_controller() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let target = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Target".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = ResolvedAbility::new(
+            Effect::LoseLife {
+                amount: QuantityExpr::Fixed { value: 2 },
+                target: Some(TargetFilter::ParentTargetController),
+            },
+            vec![TargetRef::Object(target)],
+            source,
+            PlayerId(0),
+        );
+
+        assert_eq!(
+            resolve_unless_payer(&state, &ability, &TargetFilter::ParentTargetController),
             Some(PlayerId(1))
         );
     }

@@ -852,11 +852,7 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
         Some((rest, payer)) => (rest, payer),
         None => match payer_result {
             Ok((rest, p)) => (rest, p),
-            Err(_) => {
-                // No recognized payment pattern — strip the unless clause so the effect parses.
-                let cleaned = text[..unless_pos].trim().to_string();
-                return (cleaned, None);
-            }
+            Err(_) => return (text.to_string(), None),
         },
     };
 
@@ -912,6 +908,9 @@ fn infer_they_pay_payer(effect_before_unless: &str) -> Option<TargetFilter> {
     // each scoped opponent before presenting the unless-payment choice.
     if scan_contains(effect_before_unless, "each opponent ") {
         return Some(TargetFilter::Controller);
+    }
+    if scan_contains(effect_before_unless, "creature's controller ") {
+        return Some(TargetFilter::ParentTargetController);
     }
     None
 }
@@ -9113,15 +9112,29 @@ mod tests {
     }
 
     #[test]
-    fn trigger_unless_they_pay_keeps_ambiguous_controller_case_unbound() {
+    fn trigger_unless_they_pay_binds_creature_controller_to_parent_target_controller() {
         let def = parse_trigger_line(
             "Whenever this creature deals combat damage to a creature, that creature's controller loses 2 life unless they pay {2}.",
             "Death Charmer",
         );
 
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+    }
+
+    #[test]
+    fn trigger_unrecognized_unless_payment_preserves_clause_as_gap() {
+        let def = parse_trigger_line(
+            "When this creature enters, draw a card unless the active player compliments your hat.",
+            "Test Card",
+        );
+
+        assert!(def.unless_pay.is_none());
+        let execute = def.execute.as_ref().expect("should have execute");
         assert!(
-            def.unless_pay.is_none(),
-            "ambiguous controller pronoun should remain unbound until runtime payer support exists"
+            matches!(*execute.effect, Effect::Unimplemented { .. }),
+            "unrecognized unless clause must remain visible as Unimplemented, got {:?}",
+            execute.effect
         );
     }
 
