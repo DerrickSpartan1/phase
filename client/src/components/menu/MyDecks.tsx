@@ -915,7 +915,8 @@ export function MyDecks({
 
   const coverageScanTotal = coverageStatus?.remaining ?? visibleCoverageDeckNames.length;
   const isScanningCoverage = coverageScanTotal > 0 || pendingCoverage.current.size > 0;
-  const showEvaluationStatus = isScanningUserDecks || isScanningCoverage || (isEvaluating && !requiresCompatibilityFilter);
+  const showEvaluationStatus = mode === "manage"
+    && (isScanningUserDecks || isScanningCoverage || (isEvaluating && !requiresCompatibilityFilter));
 
   const materializePreconDeck = useCallback((deckName: string): boolean => {
     const candidate = legalPreconByName.get(deckName);
