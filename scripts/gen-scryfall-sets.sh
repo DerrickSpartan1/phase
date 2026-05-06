@@ -23,15 +23,8 @@ fi
 echo "Generating $OUTPUT..."
 mkdir -p "$(dirname "$OUTPUT")"
 
-# Build a map of set_code → { name, icon_svg_uri, released_at, set_type }
-# Only include draftable set types (expansion, draft_innovation, masters, etc.)
-jq -c '.data | map(select(
-  .set_type == "expansion" or
-  .set_type == "draft_innovation" or
-  .set_type == "masters" or
-  .set_type == "core" or
-  .set_type == "funny"
-)) | map({key: .code, value: {
+# Build a map of set_code → { name, icon_svg_uri, released_at, set_type }.
+jq -c '.data | map({key: .code, value: {
   name: .name,
   icon_svg_uri: .icon_svg_uri,
   released_at: .released_at

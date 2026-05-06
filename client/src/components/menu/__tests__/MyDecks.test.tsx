@@ -12,6 +12,10 @@ vi.mock("../../../hooks/useCardImage", () => ({
   useCardImage: () => ({ src: null, isLoading: false }),
 }));
 
+vi.mock("../../../hooks/useSetSymbols", () => ({
+  useSetSymbol: (setCode: string | undefined) => setCode ? `https://img.example/${setCode}.svg` : null,
+}));
+
 vi.mock("../../../services/deckCompatibility", () => ({
   evaluateDeckCompatibilityBatch: vi.fn(),
 }));
@@ -350,6 +354,7 @@ describe("MyDecks", () => {
     );
 
     expect(await screen.findByText("Secrets of Strixhaven (SOS)")).toBeInTheDocument();
+    expect(screen.getByAltText("SOS set icon")).toBeInTheDocument();
     expect(screen.queryByText("Precon 0 (P0)")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "Load More" }));
     expect(await screen.findByText("Precon 0 (P0)")).toBeInTheDocument();

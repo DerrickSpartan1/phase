@@ -46,6 +46,7 @@ async function legalCandidate(
   const result = await evaluateDeckCompatibility(candidate.deck, {
     selectedFormat: options.selectedFormat,
     selectedMatchType: options.selectedMatchType,
+    summaryOnly: true,
   });
   if (result.selected_format_compatible !== true) return null;
   return {

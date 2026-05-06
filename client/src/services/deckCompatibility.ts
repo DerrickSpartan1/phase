@@ -70,24 +70,14 @@ const summaryCompatibilityCache = new Map<string, DeckCompatibilityResult>();
 const fullCompatibilityInflight = new Map<string, Promise<DeckCompatibilityResult>>();
 const summaryCompatibilityInflight = new Map<string, Promise<DeckCompatibilityResult>>();
 
-function logCompatibilityStatus(message: string): void {
-  console.info(`[deck-compat] ${message}`);
-}
-
 async function getCompatibilityWorker(onStatus?: EvaluateOptions["onStatus"]): Promise<EngineWorkerClient> {
   if (!compatibilityWorkerPromise) {
     compatibilityWorkerPromise = (async () => {
-      logCompatibilityStatus("starting compatibility worker");
       onStatus?.("starting-worker");
-      const workerStartedAt = performance.now();
       const worker = new EngineWorkerClient();
       await worker.initialize();
-      logCompatibilityStatus(`compatibility worker initialized in ${Math.round(performance.now() - workerStartedAt)}ms`);
       onStatus?.("loading-card-database");
-      logCompatibilityStatus("loading compatibility card database");
-      const loadStartedAt = performance.now();
       await worker.loadCardDbFromUrl();
-      logCompatibilityStatus(`compatibility card database loaded in ${Math.round(performance.now() - loadStartedAt)}ms`);
       return worker;
     })();
   }
@@ -122,13 +112,11 @@ export async function evaluateDeckCompatibility(
   if (request.summary_only) {
     const cached = fullCompatibilityCache.get(cacheKey) ?? summaryCompatibilityCache.get(cacheKey);
     if (cached) {
-      logCompatibilityStatus(`cache hit (format=${request.selected_format ?? "none"}, summaryOnly=true)`);
       return cached;
     }
   } else {
     const cached = fullCompatibilityCache.get(cacheKey);
     if (cached) {
-      logCompatibilityStatus(`cache hit (format=${request.selected_format ?? "none"}, summaryOnly=false)`);
       return cached;
     }
   }
@@ -160,16 +148,7 @@ async function evaluateDeckCompatibilityUncached(
 ): Promise<DeckCompatibilityResult> {
   const worker = await getCompatibilityWorker(options.onStatus);
   options.onStatus?.("checking-deck");
-  const cardCount = request.main_deck.length + request.sideboard.length + request.commander.length;
-  logCompatibilityStatus(
-    `checking deck (${cardCount} cards, format=${request.selected_format ?? "none"}, summaryOnly=${request.summary_only})`,
-  );
-  const startedAt = performance.now();
-  const result = await worker.evaluateDeckCompatibility(request) as DeckCompatibilityResult;
-  logCompatibilityStatus(
-    `checked deck in ${Math.round(performance.now() - startedAt)}ms (compatible=${result.selected_format_compatible ?? "n/a"}, coverage=${result.coverage ? `${result.coverage.supported_unique}/${result.coverage.total_unique}` : "none"})`,
-  );
-  return result;
+  return await worker.evaluateDeckCompatibility(request) as DeckCompatibilityResult;
 }
 
 export async function evaluateDeckCompatibilityBatch(
@@ -178,13 +157,11 @@ export async function evaluateDeckCompatibilityBatch(
 ): Promise<Record<string, DeckCompatibilityResult>> {
   const results: Record<string, DeckCompatibilityResult> = {};
   for (const { name, deck } of decks) {
-    logCompatibilityStatus(`batch item start: ${name}`);
     const result = await evaluateDeckCompatibility(deck, {
       ...options,
       onStatus: (status) => options.onStatus?.(status, name),
     });
     results[name] = result;
-    logCompatibilityStatus(`batch item result: ${name}`);
     options.onResult?.(name, result);
   }
 

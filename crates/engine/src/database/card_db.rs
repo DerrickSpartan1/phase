@@ -13,6 +13,7 @@ use std::io::BufReader;
 pub struct CardDatabase {
     pub(crate) cards: HashMap<String, CardRules>,
     pub(crate) face_index: HashMap<String, CardFace>,
+    pub(crate) name_alias_index: HashMap<String, String>,
     pub(crate) oracle_id_index: HashMap<String, Vec<String>>,
     /// Maps oracle_id → runtime LayoutKind for multi-face cards.
     /// Populated only from the export path (the MTGJSON path uses `cards` directly).
@@ -87,10 +88,12 @@ impl CardDatabase {
                 legalities.insert(key, normalized);
             }
         }
+        let name_alias_index = build_name_alias_index(face_index.keys());
 
         Self {
             cards: HashMap::new(),
             face_index,
+            name_alias_index,
             oracle_id_index,
             layout_index,
             legalities,
@@ -101,11 +104,13 @@ impl CardDatabase {
     }
 
     pub fn get_by_name(&self, name: &str) -> Option<&CardRules> {
-        self.cards.get(&name.to_lowercase())
+        let key = self.lookup_key(name);
+        self.cards.get(&key)
     }
 
     pub fn get_face_by_name(&self, name: &str) -> Option<&CardFace> {
-        self.face_index.get(&name.to_lowercase())
+        let key = self.lookup_key(name);
+        self.face_index.get(&key)
     }
 
     pub fn get_face_by_printed_ref(&self, printed_ref: &PrintedCardRef) -> Option<&CardFace> {
@@ -131,7 +136,8 @@ impl CardDatabase {
     }
 
     pub fn get_legalities(&self, name: &str) -> Option<&CardLegalities> {
-        self.legalities.get(&name.to_lowercase())
+        let key = self.lookup_key(name);
+        self.legalities.get(&key)
     }
 
     pub fn legality_status(&self, name: &str, format: LegalityFormat) -> Option<LegalityStatus> {
@@ -142,9 +148,8 @@ impl CardDatabase {
     /// Returns the set codes a card has been printed in (e.g. `["M11", "LEA"]`),
     /// or `None` if the card was loaded via a path that doesn't record printings.
     pub fn printings_for(&self, name: &str) -> Option<&[String]> {
-        self.printings_index
-            .get(&name.to_lowercase())
-            .map(Vec::as_slice)
+        let key = self.lookup_key(name);
+        self.printings_index.get(&key).map(Vec::as_slice)
     }
 
     /// Returns the official WotC rulings for a card. Returns an empty slice
@@ -152,8 +157,9 @@ impl CardDatabase {
     /// path that doesn't record rulings, or when looking up a back-face name
     /// (rulings are attached to the front face only).
     pub fn rulings_for(&self, name: &str) -> &[Ruling] {
+        let key = self.lookup_key(name);
         self.rulings_index
-            .get(&name.to_lowercase())
+            .get(&key)
             .map(Vec::as_slice)
             .unwrap_or(&[])
     }
@@ -191,6 +197,80 @@ impl CardDatabase {
         names.sort();
         names
     }
+
+    fn lookup_key(&self, name: &str) -> String {
+        let lower = name.to_lowercase();
+        if self.face_index.contains_key(&lower) || self.cards.contains_key(&lower) {
+            return lower;
+        }
+        self.name_alias_index
+            .get(&fold_card_name_key(name))
+            .cloned()
+            .unwrap_or(lower)
+    }
+}
+
+pub(crate) fn build_name_alias_index<'a>(
+    keys: impl Iterator<Item = &'a String>,
+) -> HashMap<String, String> {
+    let mut aliases: HashMap<String, Option<String>> = HashMap::new();
+    for key in keys {
+        let folded = fold_card_name_key(key);
+        if folded == *key {
+            continue;
+        }
+        aliases
+            .entry(folded)
+            .and_modify(|existing| {
+                if existing.as_deref() != Some(key.as_str()) {
+                    *existing = None;
+                }
+            })
+            .or_insert_with(|| Some(key.clone()));
+    }
+    aliases
+        .into_iter()
+        .filter_map(|(alias, key)| key.map(|key| (alias, key)))
+        .collect()
+}
+
+fn fold_card_name_key(name: &str) -> String {
+    let mut folded = String::with_capacity(name.len());
+    for ch in name.chars() {
+        for lower in ch.to_lowercase() {
+            match lower {
+                'á' | 'à' | 'â' | 'ä' | 'ã' | 'å' | 'ā' | 'ă' | 'ą' => folded.push('a'),
+                'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => folded.push('c'),
+                'ď' | 'đ' => folded.push('d'),
+                'é' | 'è' | 'ê' | 'ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => folded.push('e'),
+                'ĝ' | 'ğ' | 'ġ' | 'ģ' => folded.push('g'),
+                'ĥ' | 'ħ' => folded.push('h'),
+                'í' | 'ì' | 'î' | 'ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => folded.push('i'),
+                'ĵ' => folded.push('j'),
+                'ķ' => folded.push('k'),
+                'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' => folded.push('l'),
+                'ñ' | 'ń' | 'ņ' | 'ň' | 'ŉ' => folded.push('n'),
+                'ó' | 'ò' | 'ô' | 'ö' | 'õ' | 'ō' | 'ŏ' | 'ő' | 'ø' => folded.push('o'),
+                'ŕ' | 'ŗ' | 'ř' => folded.push('r'),
+                'ś' | 'ŝ' | 'ş' | 'š' => folded.push('s'),
+                'ţ' | 'ť' | 'ŧ' => folded.push('t'),
+                'ú' | 'ù' | 'û' | 'ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => {
+                    folded.push('u')
+                }
+                'ŵ' => folded.push('w'),
+                'ý' | 'ÿ' | 'ŷ' => folded.push('y'),
+                'ź' | 'ż' | 'ž' => folded.push('z'),
+                'æ' => folded.push_str("ae"),
+                'œ' => folded.push_str("oe"),
+                'þ' => folded.push_str("th"),
+                'ð' => folded.push('d'),
+                'ß' => folded.push_str("ss"),
+                '’' | '‘' | '＇' => folded.push('\''),
+                _ => folded.push(lower),
+            }
+        }
+    }
+    folded
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -322,6 +402,35 @@ mod tests {
         assert_eq!(
             db.legality_status("Test Card", LegalityFormat::Commander),
             Some(LegalityStatus::NotLegal)
+        );
+    }
+
+    #[test]
+    fn name_lookup_accepts_unaccented_aliases() {
+        let mut map = HashMap::new();
+        map.insert("séance board".to_string(), test_face("Séance Board"));
+        let json = serde_json::to_string(&map).unwrap();
+
+        let db = CardDatabase::from_json_str(&json).unwrap();
+
+        assert_eq!(
+            db.get_face_by_name("Seance Board").map(|face| face.name.as_str()),
+            Some("Séance Board")
+        );
+    }
+
+    #[test]
+    fn name_aliases_skip_ambiguous_folds() {
+        let mut map = HashMap::new();
+        map.insert("café".to_string(), test_face("Café"));
+        map.insert("cafe".to_string(), test_face("Cafe"));
+        let json = serde_json::to_string(&map).unwrap();
+
+        let db = CardDatabase::from_json_str(&json).unwrap();
+
+        assert_eq!(
+            db.get_face_by_name("Cafe").map(|face| face.name.as_str()),
+            Some("Cafe")
         );
     }
 }

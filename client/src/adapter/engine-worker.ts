@@ -120,20 +120,13 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "loadCardDbFromUrl": {
-        const startedAt = performance.now();
         const resp = await fetch(__CARD_DATA_URL__);
         if (!resp.ok)
           throw new Error(
             `Failed to load card-data.json (${resp.status})`,
           );
-        const fetchedAt = performance.now();
         const text = await resp.text();
-        const decodedAt = performance.now();
         const count = load_card_database(text);
-        const loadedAt = performance.now();
-        console.info(
-          `[engine-worker] card database loaded (${count} cards, fetch=${Math.round(fetchedAt - startedAt)}ms, text=${Math.round(decodedAt - fetchedAt)}ms, rustLoad=${Math.round(loadedAt - decodedAt)}ms, total=${Math.round(loadedAt - startedAt)}ms)`,
-        );
         cardDbLoaded = true;
         result(msg.id, count);
         break;
@@ -147,11 +140,7 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
           );
           break;
         }
-        const startedAt = performance.now();
         const data = evaluate_deck_compatibility_js(msg.request);
-        console.info(
-          `[engine-worker] evaluateDeckCompatibility id=${msg.id} engine=${Math.round(performance.now() - startedAt)}ms`,
-        );
         result(msg.id, data);
         break;
       }

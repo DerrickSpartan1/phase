@@ -31,6 +31,7 @@ import { savePreconDeck } from "../../services/preconDecks";
 import type { DeckEntry as PreconDeckEntry } from "../../hooks/useDecks";
 import { MenuPanel } from "./MenuShell";
 import { menuButtonClass } from "./buttonStyles";
+import { useSetSymbol } from "../../hooks/useSetSymbols";
 import {
   COLOR_DOT_CLASS,
   getDeckCardCount,
@@ -42,6 +43,7 @@ import { BASIC_LAND_NAMES } from "../../constants/game";
 const PRECON_PREFIX = "[Pre-built] ";
 const PRECON_PAGE_SIZE = 12;
 const DECK_SCAN_BATCH_SIZE = 1;
+const COVERAGE_SCAN_BATCH_SIZE = 6;
 
 /** Tags that represent a format/archetype — shown with active (green) styling. */
 const FORMAT_TAGS = new Set([
@@ -53,13 +55,22 @@ const FORMAT_TAGS = new Set([
   "metagame",
 ]);
 const DECK_FORMATS = FORMAT_REGISTRY.filter((m) => m.group !== "Multiplayer");
+const BASIC_LAND_COLORS: Record<string, string> = {
+  Plains: "W",
+  Island: "U",
+  Swamp: "B",
+  Mountain: "R",
+  Forest: "G",
+  "Snow-Covered Plains": "W",
+  "Snow-Covered Island": "U",
+  "Snow-Covered Swamp": "B",
+  "Snow-Covered Mountain": "R",
+  "Snow-Covered Forest": "G",
+};
+const COLOR_ORDER = ["W", "U", "B", "R", "G"];
 
 type DeckFilter = "all" | GameFormat;
 type DeckSort = "alpha" | "recent" | "format";
-
-function logDeckWorkerStatus(message: string): void {
-  console.info(`[my-decks] ${message}`);
-}
 
 function coverageFromPct(coveragePct: number | null | undefined): DeckCompatibilityResult["coverage"] {
   if (coveragePct == null) return null;
@@ -68,6 +79,16 @@ function coverageFromPct(coveragePct: number | null | undefined): DeckCompatibil
     supported_unique: Math.max(0, Math.min(100, Math.round(coveragePct))),
     unsupported_cards: [],
   };
+}
+
+function getPreconColorIdentity(deck: PreconDeckEntry | undefined): string[] {
+  if (!deck) return [];
+  const colors = new Set<string>();
+  for (const entry of deck.mainBoard) {
+    const color = BASIC_LAND_COLORS[entry.name];
+    if (color) colors.add(color);
+  }
+  return COLOR_ORDER.filter((color) => colors.has(color));
 }
 
 function preconCandidateToDeckEntry(candidate: DeckCatalogCandidate): PreconDeckEntry {
@@ -151,7 +172,9 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
     ? compatibility.color_identity
     : feedDeckOverride?.colors?.length
       ? feedDeckOverride.colors
-      : getDeckColorIdentity(deckName);
+      : preconDeckOverride
+        ? getPreconColorIdentity(preconDeckOverride)
+        : getDeckColorIdentity(deckName);
   const count = feedDeckOverride
     ? feedDeckOverride.main.reduce((sum, e) => sum + e.count, 0)
     : preconDeckOverride
@@ -243,6 +266,11 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
       )}
 
       <div className="relative z-10 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-3 pb-3 pt-8">
+        {preconDeckOverride?.code && (
+          <div className="mb-1 flex justify-center">
+            <PreconSetBadge deck={preconDeckOverride} />
+          </div>
+        )}
         <p className="truncate text-sm font-semibold text-white">{displayName}</p>
         <div className="mt-1 flex items-center gap-2">
           <div className="flex gap-1">
@@ -263,12 +291,12 @@ const DeckTile = memo(function DeckTile({ deckName, isActive, compatibility, onC
           {feedDeckOverride?.tags?.map((tag) => (
             <StatusBadge key={tag} label={tag} active={FORMAT_TAGS.has(tag)} />
           ))}
-          {isPrecon && !feedDeckOverride?.tags?.length && (
+          {isPrecon && !preconDeckOverride && !feedDeckOverride?.tags?.length && (
             <StatusBadge label="precon" active />
           )}
           {/* Engine compatibility badges */}
           {compatibility?.standard.compatible && <StatusBadge label="STD" active />}
-          {compatibility?.commander.compatible && <StatusBadge label="CMD" active />}
+          {!preconDeckOverride && compatibility?.commander.compatible && <StatusBadge label="CMD" active />}
           {compatibility?.bo3_ready && <StatusBadge label="BO3" active />}
           {compatibility && compatibility.unknown_cards.length > 0 && (
             <span
@@ -389,6 +417,28 @@ const FeedDeckTile = memo(function FeedDeckTile({
     />
   );
 });
+
+function PreconSetBadge({ deck }: { deck: PreconDeckEntry | undefined }) {
+  const setIcon = useSetSymbol(deck?.code);
+  if (!deck?.code) return null;
+
+  return (
+    <span
+      className="flex h-7 min-w-7 items-center justify-center rounded-full bg-black/65 px-1.5 text-[10px] font-bold uppercase tracking-wide text-white/80 ring-1 ring-white/15 backdrop-blur-sm"
+      title={deck.code}
+    >
+      {setIcon ? (
+        <img
+          src={setIcon}
+          alt={`${deck.code} set icon`}
+          className="h-[18px] w-[18px] invert"
+        />
+      ) : (
+        deck.code
+      )}
+    </span>
+  );
+}
 
 interface MyDecksProps {
   mode: "manage" | "select";
@@ -567,22 +617,20 @@ export function MyDecks({
     for (const { name } of batch) {
       pendingCompatibility.current.add(name);
     }
-    logDeckWorkerStatus(`queued selected-deck compatibility scan for ${deckName}`);
     setCompatibilityStatus(`Checking ${deckName}…`);
 
     evaluateDeckCompatibilityBatch(batch, {
       selectedFormat: selectedFormatForCompatibility,
       selectedMatchType,
+      summaryOnly: true,
       onStatus: (status) => {
         if (cancelled || generation !== compatibilityGeneration.current) return;
-        logDeckWorkerStatus(`${status}: ${deckName}`);
         if (status === "starting-worker") setCompatibilityStatus("Starting compatibility worker…");
         if (status === "loading-card-database") setCompatibilityStatus("Loading compatibility database…");
         if (status === "checking-deck") setCompatibilityStatus(`Checking ${deckName}…`);
       },
       onResult: (name, result) => {
         if (cancelled || generation !== compatibilityGeneration.current) return;
-        logDeckWorkerStatus(`selected-deck compatibility result for ${name}`);
         setCompatibilityStatus(`Checked ${name}`);
         setCompatibilities((current) => {
           const next = { ...current, [name]: result };
@@ -591,7 +639,6 @@ export function MyDecks({
       },
     }).then((results) => {
       if (cancelled || generation !== compatibilityGeneration.current) return;
-      logDeckWorkerStatus(`selected-deck compatibility batch resolved for ${deckName}`);
       setCompatibilities((current) => {
         const next = { ...current, ...results };
         return next;
@@ -600,7 +647,6 @@ export function MyDecks({
       setDeckScanIndex((index) => index + batchNames.length);
     }).catch((error) => {
       if (cancelled || generation !== compatibilityGeneration.current) return;
-      logDeckWorkerStatus(`selected-deck compatibility failed for ${deckName}: ${error instanceof Error ? error.message : String(error)}`);
       setCompatibilityError(error instanceof Error ? error.message : String(error));
       setDeckScanIndex((index) => index + batchNames.length);
     }).finally(() => {
@@ -782,15 +828,15 @@ export function MyDecks({
     if (coverageInFlight.current) return;
     if (visibleCoverageDeckNames.length === 0) return;
 
-    const name = visibleCoverageDeckNames[0];
-    const candidate = deckCandidatesByName.get(name) ?? legalPreconByName.get(name);
-    if (!candidate || pendingCoverage.current.has(name)) return;
+    const batchNames = visibleCoverageDeckNames.slice(0, COVERAGE_SCAN_BATCH_SIZE);
+    const syntheticResults: Record<string, DeckCompatibilityResult> = {};
+    const batch = batchNames.flatMap((name) => {
+      const candidate = deckCandidatesByName.get(name) ?? legalPreconByName.get(name);
+      if (!candidate || pendingCoverage.current.has(name)) return [];
 
-    if (candidate.coveragePct != null) {
-      completedCoverage.current.add(name);
-      setCompatibilities((current) => ({
-        ...current,
-        [name]: {
+      if (candidate.coveragePct != null) {
+        completedCoverage.current.add(name);
+        syntheticResults[name] = {
           standard: { compatible: candidate.knownFormat === "Standard", reasons: [] },
           commander: { compatible: candidate.knownFormat === "Commander", reasons: [] },
           bo3_ready: candidate.deck.sideboard.length > 0,
@@ -799,52 +845,57 @@ export function MyDecks({
             ? candidate.knownFormat === selectedFormatForCompatibility
             : null,
           selected_format_reasons: [],
-          color_identity: getDeckColorIdentity(name),
+          color_identity: getPreconColorIdentity(candidate.preconDeck),
           coverage: coverageFromPct(candidate.coveragePct),
-        },
-      }));
+        };
+        return [];
+      }
+
+      pendingCoverage.current.add(name);
+      return [{ name, deck: candidate.deck }];
+    });
+
+    if (Object.keys(syntheticResults).length > 0) {
+      setCompatibilities((current) => ({ ...current, ...syntheticResults }));
+    }
+    if (batch.length === 0) {
       setCoverageQueueVersion((version) => version + 1);
       return;
     }
 
     const generation = compatibilityGeneration.current;
-    pendingCoverage.current.add(name);
     coverageInFlight.current = true;
     setIsEvaluating(true);
-    setCoverageStatus({ deckName: name, remaining: visibleCoverageDeckNames.length });
-    setCompatibilityStatus(`Loading coverage for ${name}…`);
-    logDeckWorkerStatus(`queued visible coverage scan for ${name}`);
+    const firstName = batch[0]?.name ?? "visible deck";
+    setCoverageStatus({ deckName: firstName, remaining: visibleCoverageDeckNames.length });
+    setCompatibilityStatus(`Loading coverage for ${firstName}…`);
 
-    evaluateDeckCompatibilityBatch([{ name, deck: candidate.deck }], {
+    evaluateDeckCompatibilityBatch(batch, {
       selectedFormat: selectedFormatForCompatibility,
       selectedMatchType,
       onStatus: (status, statusDeckName) => {
         if (generation !== compatibilityGeneration.current) return;
-        const currentDeckName = statusDeckName ?? name;
-        logDeckWorkerStatus(`${status}: ${currentDeckName}`);
+        const currentDeckName = statusDeckName ?? firstName;
         if (status === "starting-worker") setCompatibilityStatus("Starting compatibility worker…");
         if (status === "loading-card-database") setCompatibilityStatus("Loading compatibility database…");
         if (status === "checking-deck") setCompatibilityStatus(`Loading coverage for ${currentDeckName}…`);
       },
       onResult: (name, result) => {
         if (generation !== compatibilityGeneration.current) return;
-        logDeckWorkerStatus(`visible coverage result for ${name}`);
         completedCoverage.current.add(name);
         setCompatibilities((current) => ({ ...current, [name]: result }));
       },
     }).then((results) => {
       if (generation !== compatibilityGeneration.current) return;
-      logDeckWorkerStatus(`visible coverage batch resolved for ${name}`);
       for (const name of Object.keys(results)) {
         completedCoverage.current.add(name);
       }
       setCompatibilityError(null);
     }).catch((error) => {
       if (generation !== compatibilityGeneration.current) return;
-      logDeckWorkerStatus(`visible coverage failed for ${name}: ${error instanceof Error ? error.message : String(error)}`);
       setCompatibilityError(error instanceof Error ? error.message : String(error));
     }).finally(() => {
-      pendingCoverage.current.delete(name);
+      for (const { name } of batch) pendingCoverage.current.delete(name);
       coverageInFlight.current = false;
       if (generation !== compatibilityGeneration.current) return;
       setCompatibilityStatus(null);
@@ -1183,6 +1234,7 @@ export function MyDecks({
                   onTileClick={handleTileClick}
                   onEditDeck={onEditDeck}
                   onDeleteDeck={handleDeleteDeck}
+                  preconCandidate={legalPreconByName.get(deckName)}
                 />
               ))}
             </div>

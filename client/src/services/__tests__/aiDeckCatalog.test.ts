@@ -74,7 +74,7 @@ describe("buildLegalAiDeckCatalog", () => {
     expect(catalog.candidates.map((candidate) => candidate.id)).toContain("saved:PDH Legal");
     expect(evaluateDeckCompatibility).toHaveBeenCalledWith(
       expect.objectContaining({ commander: ["Murmuring Mystic"] }),
-      { selectedFormat: "PauperCommander", selectedMatchType: "Bo1" },
+      { selectedFormat: "PauperCommander", selectedMatchType: "Bo1", summaryOnly: true },
     );
   });
 

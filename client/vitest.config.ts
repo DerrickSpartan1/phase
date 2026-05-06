@@ -35,6 +35,7 @@ export default defineConfig({
   plugins: [wasmStubPlugin()],
   define: {
     __SCRYFALL_DATA_URL__: JSON.stringify("/scryfall-data.json"),
+    __SCRYFALL_SETS_URL__: JSON.stringify("/scryfall-sets.json"),
     __DECKS_URL__: JSON.stringify("/decks.json"),
     __APP_VERSION__: JSON.stringify("0.0.0-test"),
     __BUILD_HASH__: JSON.stringify("testhash"),

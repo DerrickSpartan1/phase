@@ -185,6 +185,25 @@ describe("feedDeckToParsedDeck", () => {
     expect(deck.commander).toEqual(["Zimone, Infinite Analyst"]);
     expect(deck.main).toEqual([{ count: 1, name: "Sol Ring" }]);
   });
+
+  it("strips MTGGoldfish card treatment and printing annotations", () => {
+    const deck = feedDeckToParsedDeck({
+      name: "Y'shtola, Night's Blessed",
+      colors: ["W", "B"],
+      commander: null,
+      main: [
+        { count: 1, name: "Y'shtola, Night's Blessed <surge foil> [FIC] (F)" },
+        { count: 1, name: "Sol Ring" },
+      ],
+      sideboard: [
+        { count: 1, name: "Krenko, Mob Boss <retro> [RVR] (F)" },
+      ],
+    });
+
+    expect(deck.commander).toEqual(["Y'shtola, Night's Blessed"]);
+    expect(deck.main).toEqual([{ count: 1, name: "Sol Ring" }]);
+    expect(deck.sideboard).toEqual([{ count: 1, name: "Krenko, Mob Boss" }]);
+  });
 });
 
 function mockFetchByUrl(feedMap: Record<string, unknown>) {
