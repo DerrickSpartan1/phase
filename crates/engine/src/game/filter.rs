@@ -563,6 +563,9 @@ fn filter_inner_for_object(
             .and_then(|t| t.as_object())
             .is_some_and(|attached| attached == object_id),
         TargetFilter::LastCreated => state.last_created_token_ids.contains(&object_id),
+        TargetFilter::CostPaidObject => ability
+            .and_then(|ability| ability.cost_paid_object.as_ref())
+            .is_some_and(|snapshot| snapshot.object_id == object_id),
         // CR 603.7: Match objects in a tracked set from the originating effect.
         TargetFilter::TrackedSet { id } => state
             .tracked_object_sets
@@ -801,6 +804,7 @@ fn zone_change_filter_inner(
             .iter()
             .any(|att| att.object_id == source_id),
         TargetFilter::LastCreated
+        | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -1010,6 +1014,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
+        | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource
@@ -1208,6 +1213,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::SpecificPlayer { .. }
         | TargetFilter::AttachedTo
         | TargetFilter::LastCreated
+        | TargetFilter::CostPaidObject
         | TargetFilter::TrackedSet { .. }
         | TargetFilter::TrackedSetFiltered { .. }
         | TargetFilter::ExiledBySource

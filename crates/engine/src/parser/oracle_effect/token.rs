@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{opt, rest, value};
+use nom::combinator::{map, opt, rest, value};
 use nom::Parser;
 use nom_language::error::VerboseError;
 
@@ -39,9 +39,12 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
     let lower = text.to_lowercase();
 
     // "create a token that's a copy of {target}"
-    if let Ok((_, (tapped, enters_attacking))) = parse_copy_token_entry_modifiers(&lower) {
+    if let Ok((_, (tapped, enters_attacking, count))) = parse_copy_token_entry_modifiers(&lower) {
         let tp = TextPair::new(&text, &lower);
-        let after_copy_tp = tp.strip_after("copy of ").unwrap_or(tp);
+        let after_copy_tp = tp
+            .strip_after("copy of ")
+            .or_else(|| tp.strip_after("copies of "))
+            .unwrap_or(tp);
         // Handle "another target ..." -- strip "another" prefix and add FilterProp::Another
         let has_another = nom_on_lower(after_copy_tp.original, after_copy_tp.lower, |i| {
             value((), tag("another ")).parse(i)
@@ -64,7 +67,12 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
         // `card_name` is empty (see `become_copy_except.rs::parse_name_override`).
         let (target_text, extra_keywords, additional_modifications) =
             split_token_except_clause(target_text, ctx);
-        let (mut target, _) = parse_target(target_text);
+        let target_lower = target_text.trim().to_lowercase();
+        let (mut target, _) = if parse_cost_paid_object_copy_target(&target_lower) {
+            (TargetFilter::CostPaidObject, "")
+        } else {
+            parse_target(target_text)
+        };
         if has_another {
             if let TargetFilter::Typed(ref mut typed) = target {
                 if !typed.properties.contains(&FilterProp::Another) {
@@ -77,7 +85,7 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
             source_filter: None,
             enters_attacking,
             tapped,
-            count: QuantityExpr::Fixed { value: 1 },
+            count,
             extra_keywords,
             additional_modifications,
         });
@@ -106,9 +114,25 @@ pub(super) fn try_parse_token(_lower: &str, text: &str, ctx: &mut ParseContext) 
     })
 }
 
-pub(super) fn parse_copy_token_entry_modifiers(input: &str) -> OracleResult<'_, (bool, bool)> {
+pub(super) fn parse_copy_token_entry_modifiers(
+    input: &str,
+) -> OracleResult<'_, (bool, bool, QuantityExpr)> {
     let (rest, _) = tag("create ").parse(input)?;
-    let (rest, _) = opt(alt((tag("a "), tag("one ")))).parse(rest)?;
+    let (rest, count) = opt(alt((
+        value(
+            QuantityExpr::Fixed { value: 1 },
+            alt((tag("a "), tag("one "))),
+        ),
+        map(nom_primitives::parse_number, |value| QuantityExpr::Fixed {
+            value: value as i32,
+        }),
+    )))
+    .parse(rest)?;
+    let (rest, _) = if count.is_some() {
+        opt(tag(" ")).parse(rest)?
+    } else {
+        (rest, None)
+    };
     let (rest, flags) = alt((
         value((true, true), tag("tapped and attacking ")),
         value((true, false), tag("tapped ")),
@@ -116,9 +140,27 @@ pub(super) fn parse_copy_token_entry_modifiers(input: &str) -> OracleResult<'_, 
         value((false, false), tag("")),
     ))
     .parse(rest)?;
-    let (rest, _) =
-        alt((tag("token that's a copy of"), tag("token thats a copy of"))).parse(rest)?;
-    Ok((rest, flags))
+    let (rest, _) = alt((
+        tag("token that's a copy of"),
+        tag("token thats a copy of"),
+        tag("tokens that are copies of"),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        (
+            flags.0,
+            flags.1,
+            count.unwrap_or(QuantityExpr::Fixed { value: 1 }),
+        ),
+    ))
+}
+
+fn parse_cost_paid_object_copy_target(lower: &str) -> bool {
+    matches!(
+        lower.trim_end_matches('.'),
+        "the exiled card" | "the card exiled this way"
+    )
 }
 
 /// CR 707.2 + CR 707.9: Split off a trailing `, except <body>` clause from a
@@ -844,6 +886,21 @@ pub(super) fn push_unique_string(values: &mut Vec<String>, value: impl Into<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copy_tokens_of_exiled_cost_card_use_cost_paid_object_source() {
+        let effect = try_parse_token(
+            "create two tokens that are copies of the exiled card",
+            "Create two tokens that are copies of the exiled card",
+            &mut ParseContext::default(),
+        )
+        .expect("expected CopyTokenOf");
+        let Effect::CopyTokenOf { target, count, .. } = effect else {
+            panic!("expected CopyTokenOf, got {effect:?}");
+        };
+        assert_eq!(target, TargetFilter::CostPaidObject);
+        assert_eq!(count, QuantityExpr::Fixed { value: 2 });
+    }
 
     #[test]
     fn keyword_clause_with_trailing_comma_before_where() {

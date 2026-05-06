@@ -231,6 +231,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::StackSpell => "spell on stack".into(),
         TargetFilter::AttachedTo => "attached permanent".into(),
         TargetFilter::LastCreated => "last created".into(),
+        TargetFilter::CostPaidObject => "cost-paid object".into(),
         TargetFilter::TriggeringSpellController => "triggering spell's controller".into(),
         TargetFilter::TriggeringSpellOwner => "triggering spell's owner".into(),
         TargetFilter::TriggeringPlayer => "triggering player".into(),

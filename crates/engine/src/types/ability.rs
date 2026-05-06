@@ -1805,6 +1805,10 @@ pub enum TargetFilter {
     /// Resolves to the most recently created token(s) from Effect::Token.
     /// Used for "create X and [verb] it" patterns (e.g. "create a token and suspect it").
     LastCreated,
+    /// CR 400.7j + CR 608.2k: Resolves to the object paid as a cost for the
+    /// resolving spell or ability. Used by effects such as "the exiled card"
+    /// after an exile-as-cost clause.
+    CostPaidObject,
     /// Matches exactly the objects in a tracked set.
     /// CR 603.7: Delayed triggers act on specific objects from the originating effect.
     TrackedSet {
@@ -5088,6 +5092,7 @@ impl TargetFilter {
                 | TargetFilter::TriggeringSource
                 | TargetFilter::DefendingPlayer
                 | TargetFilter::AttachedTo
+                | TargetFilter::CostPaidObject
                 | TargetFilter::ParentTarget
                 | TargetFilter::ParentTargetController
                 | TargetFilter::PostReplacementSourceController

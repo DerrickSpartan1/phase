@@ -92,6 +92,14 @@ pub fn resolve(
             .collect()
     } else if use_self {
         vec![ability.source_id]
+    } else if matches!(target_filter, TargetFilter::CostPaidObject) {
+        ability
+            .cost_paid_object
+            .as_ref()
+            .map(|snapshot| vec![snapshot.object_id])
+            .ok_or_else(|| {
+                EffectError::MissingParam("CopyTokenOf requires a cost-paid object".to_string())
+            })?
     } else {
         let ids: Vec<ObjectId> = ability
             .targets
@@ -399,7 +407,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        ControllerRef, Effect, FilterProp, TargetFilter, TargetRef, TypedFilter,
+        ControllerRef, CostPaidObjectSnapshot, Effect, FilterProp, TargetFilter, TargetRef,
+        TypedFilter,
     };
     use crate::types::card_type::{CardType, CoreType};
     use crate::types::identifiers::ObjectId;
@@ -531,6 +540,79 @@ mod tests {
         assert_eq!(token.power, Some(2));
         assert_eq!(token.toughness, Some(2));
         assert!(token.is_token);
+    }
+
+    #[test]
+    fn copy_token_of_cost_paid_object_creates_requested_copies() {
+        let mut state = GameState::new_two_player(42);
+
+        let source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Osgir, the Reconstructor".to_string(),
+            Zone::Battlefield,
+        );
+        let artifact_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Ichor Wellspring".to_string(),
+            Zone::Exile,
+        );
+        {
+            let artifact = state.objects.get_mut(&artifact_id).unwrap();
+            artifact.base_card_types = CardType {
+                supertypes: vec![],
+                core_types: vec![CoreType::Artifact],
+                subtypes: vec![],
+            };
+            artifact.card_types = artifact.base_card_types.clone();
+        }
+
+        let snapshot = {
+            let artifact = state.objects.get(&artifact_id).unwrap();
+            CostPaidObjectSnapshot {
+                object_id: artifact_id,
+                lki: artifact.snapshot_for_mana_spent(),
+            }
+        };
+        let mut ability = ResolvedAbility::new(
+            Effect::CopyTokenOf {
+                target: TargetFilter::CostPaidObject,
+                source_filter: None,
+                enters_attacking: false,
+                tapped: false,
+                count: crate::types::ability::QuantityExpr::Fixed { value: 2 },
+                extra_keywords: vec![],
+                additional_modifications: vec![],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        ability.set_cost_paid_object_recursive(snapshot);
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        let copies: Vec<_> = state
+            .objects
+            .values()
+            .filter(|object| object.is_token && object.name == "Ichor Wellspring")
+            .collect();
+        assert_eq!(copies.len(), 2);
+        assert!(copies.iter().all(|token| token.zone == Zone::Battlefield));
+        assert!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    GameEvent::TokenCreated { name, .. } if name == "Ichor Wellspring"
+                ))
+                .count()
+                >= 2
+        );
     }
 
     /// CR 603.10a / Vaultborn Tyrant + Ochre Jelly class: LTB self-copy triggers
