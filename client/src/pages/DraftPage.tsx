@@ -255,7 +255,7 @@ export function DraftPage() {
   }, [reset]);
 
   const handleStartDraft = useCallback(
-    async (setCode: string) => {
+    async (setCode: string, setName: string) => {
       const { difficulty, startDraft } = useDraftStore.getState();
 
       const resp = await fetch(__DRAFT_POOLS_URL__);
@@ -264,7 +264,7 @@ export function DraftPage() {
       const setPool = allPools[setCode.toLowerCase()] ?? allPools[setCode.toUpperCase()];
       if (!setPool) throw new Error(`No pool data for set: ${setCode}`);
 
-      await startDraft(JSON.stringify(setPool), setCode, difficulty);
+      await startDraft(JSON.stringify(setPool), setCode, setName, difficulty);
     },
     [],
   );
@@ -308,7 +308,9 @@ export function DraftPage() {
         {phase === "drafting" && introDismissed && (
           <div className="flex gap-4">
             <div className="flex-1">
-              <DraftProgress />
+              <div className="mb-4">
+                <DraftProgress />
+              </div>
               <PackDisplay onCardHover={setHoveredCardName} />
             </div>
             <PoolPanel onCardHover={setHoveredCardName} />

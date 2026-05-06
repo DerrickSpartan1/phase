@@ -11,6 +11,7 @@ export type DraftRunFormat = "single" | "bo3" | "run";
 export interface ActiveQuickDraftMeta {
   id: string;
   setCode: string;
+  setName?: string;
   difficulty: number;
   phase: "drafting" | "deckbuilding" | "playing" | "complete";
   pickCount: number;

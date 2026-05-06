@@ -40,6 +40,7 @@ interface DeckListProps {
   warnings?: string[];
   format?: string;
   compatibility?: DeckCompatibilityResult | null;
+  onChooseArt?: (cardName: string, x: number, y: number) => void;
 }
 
 
@@ -92,6 +93,7 @@ export function DeckList({
   warnings = [],
   format,
   compatibility,
+  onChooseArt,
 }: DeckListProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [showPasteModal, setShowPasteModal] = useState(false);
@@ -307,6 +309,7 @@ export function DeckList({
             onMove={onMoveCard}
             onCardHover={onCardHover}
             unsupportedMap={unsupportedMap}
+            onChooseArt={onChooseArt}
           />
         ))}
 
@@ -327,6 +330,7 @@ export function DeckList({
               alwaysShow
               emptyHint="Hover a main-deck card and click → to move it here."
               warning={sideboardWarning}
+              onChooseArt={onChooseArt}
             />
           </div>
         )}

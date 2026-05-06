@@ -3171,10 +3171,16 @@ fn parse_zone_position_ref<'a>(text: &'a str, lower: &str) -> Option<(TargetFilt
     let (after_card, card_is_terminal) =
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cards").parse(after_type) {
             let trimmed = rest.trim_start();
-            (rest, trimmed.is_empty() || tag::<_, _, OracleError<'_>>("of ").parse(trimmed).is_err())
+            (
+                rest,
+                trimmed.is_empty() || tag::<_, _, OracleError<'_>>("of ").parse(trimmed).is_err(),
+            )
         } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("card").parse(after_type) {
             let trimmed = rest.trim_start();
-            (rest, trimmed.is_empty() || tag::<_, _, OracleError<'_>>("of ").parse(trimmed).is_err())
+            (
+                rest,
+                trimmed.is_empty() || tag::<_, _, OracleError<'_>>("of ").parse(trimmed).is_err(),
+            )
         } else {
             return None;
         };

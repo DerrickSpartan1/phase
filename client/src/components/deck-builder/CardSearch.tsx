@@ -4,8 +4,9 @@ import {
   buildScryfallQuery,
   type ScryfallCard,
 } from "../../services/scryfall";
+import type { GameFormat } from "../../adapter/types";
+import { FORMAT_REGISTRY } from "../../data/formatRegistry";
 import { useSetList } from "../../hooks/useSetList";
-import type { DeckFormat } from "./FormatFilter";
 
 const DEBOUNCE_MS = 300;
 const MANA_COLORS = ["W", "U", "B", "R", "G"] as const;
@@ -33,18 +34,23 @@ const CARD_TYPES = [
   "Planeswalker",
 ];
 
-const BROWSER_FORMATS = [
-  { value: "all", label: "All cards" },
-  { value: "standard", label: "Standard" },
-  { value: "commander", label: "Commander" },
-  { value: "modern", label: "Modern" },
-  { value: "pioneer", label: "Pioneer" },
-  { value: "legacy", label: "Legacy" },
-  { value: "vintage", label: "Vintage" },
-  { value: "pauper", label: "Pauper" },
-] as const;
+const SCRYFALL_FORMAT_OVERRIDES: Partial<Record<GameFormat, string>> = {
+  DuelCommander: "duel",
+};
 
-export type BrowserLegalityFilter = "all" | DeckFormat;
+function scryfallFormatSlug(format: GameFormat): string {
+  return SCRYFALL_FORMAT_OVERRIDES[format] ?? format.toLowerCase();
+}
+
+const BROWSER_FORMATS: { value: BrowserLegalityFilter; label: string }[] = [
+  { value: "all", label: "All cards" },
+  ...FORMAT_REGISTRY.map(({ format, label }) => ({
+    value: format as BrowserLegalityFilter,
+    label,
+  })),
+];
+
+export type BrowserLegalityFilter = "all" | GameFormat;
 
 export interface CardSearchFilters {
   text: string;
@@ -134,7 +140,7 @@ export function CardSearch({
         type: type || undefined,
         cmcMax: cmc,
         sets,
-        format: browseFormat === "all" ? undefined : browseFormat,
+        format: browseFormat === "all" ? undefined : scryfallFormatSlug(browseFormat),
       });
 
       if (!query) {

@@ -24,6 +24,7 @@ export interface MoveListProps {
   /** Format-specific warning displayed below the title (e.g. "Sideboard
    *  exceeds 15-card limit"). */
   warning?: string;
+  onChooseArt?: (cardName: string, x: number, y: number) => void;
 }
 
 export function MoveList({
@@ -37,6 +38,7 @@ export function MoveList({
   alwaysShow = false,
   emptyHint,
   warning,
+  onChooseArt,
 }: MoveListProps) {
   if (entries.length === 0 && !alwaysShow) return null;
   const count = totalCards(entries);
@@ -69,6 +71,7 @@ export function MoveList({
             onRemove={onRemove}
             onCardHover={onCardHover}
             unsupported={unsupportedMap?.get(entry.name)}
+            onChooseArt={onChooseArt}
           />
         ))
       )}

@@ -84,7 +84,7 @@ describe("DeckBuilder", () => {
 
     render(
       <DeckBuilder
-        format="commander"
+        format="Commander"
         onFormatChange={vi.fn()}
         initialDeckName="[Pre-built] Secrets of Strixhaven (SOS)"
         searchFilters={{ text: "", colors: [], type: "", sets: [], browseFormat: "all" }}

@@ -114,8 +114,9 @@ export function GameSetupPage() {
 
   const handleEditDeck = (name: string) => {
     const returnTo = `${location.pathname}${location.search}`;
+    const formatParam = selectedFormat ? `&format=${selectedFormat.toLowerCase()}` : "";
     navigate(
-      `/deck-builder?deck=${encodeURIComponent(name)}&returnTo=${encodeURIComponent(returnTo)}`,
+      `/deck-builder?deck=${encodeURIComponent(name)}${formatParam}&returnTo=${encodeURIComponent(returnTo)}`,
     );
   };
 

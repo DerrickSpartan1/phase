@@ -233,10 +233,16 @@ export function MultiplayerPage() {
     }
     const returnSearch = returnParams.toString();
     const returnTo = `${location.pathname}${returnSearch ? `?${returnSearch}` : ""}`;
+    const fmt = pendingAction?.type === "host"
+      ? pendingAction.settings.formatConfig.format
+      : pendingAction?.type === "join"
+        ? pendingAction.format
+        : storeFormatConfig?.format;
+    const formatParam = fmt ? `&format=${fmt.toLowerCase()}` : "";
     navigate(
-      `/deck-builder?deck=${encodeURIComponent(name)}&returnTo=${encodeURIComponent(returnTo)}`,
+      `/deck-builder?deck=${encodeURIComponent(name)}${formatParam}&returnTo=${encodeURIComponent(returnTo)}`,
     );
-  }, [location.pathname, location.search, navigate, view]);
+  }, [location.pathname, location.search, navigate, pendingAction, storeFormatConfig, view]);
 
   const expandDeck = useCallback(() => {
     const deck = loadActiveDeck();

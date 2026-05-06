@@ -19,7 +19,7 @@ interface ScryfallSetEntry {
 }
 
 interface SetSelectorProps {
-  onStartDraft: (setCode: string) => void;
+  onStartDraft: (setCode: string, setName: string) => void;
 }
 
 // ── Constants ───────────────────────────────────────────────────────────
@@ -91,7 +91,7 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
   }, []);
 
   const handleSetClick = useCallback(
-    (code: string) => { onStartDraft(code); },
+    (code: string, name: string) => { onStartDraft(code, name); },
     [onStartDraft],
   );
 
@@ -144,7 +144,7 @@ export function SetSelector({ onStartDraft }: SetSelectorProps) {
           {sets.map(({ code, name, icon }) => (
             <button
               key={code}
-              onClick={() => handleSetClick(code)}
+              onClick={() => handleSetClick(code, name)}
               className="flex cursor-pointer flex-col items-center gap-2 rounded-[16px] border border-white/10 bg-black/18 p-4 backdrop-blur-md transition-colors hover:border-white/20 hover:bg-white/8"
             >
               {icon ? (

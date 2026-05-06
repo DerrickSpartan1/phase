@@ -35,8 +35,8 @@ const DIFFICULTY_LABELS = [
   "Very Hard",
 ] as const;
 
-function formatSetLabel(code: string): string {
-  return SET_LABELS[code.toLowerCase()] ?? code.toUpperCase();
+function formatSetLabel(code: string, name?: string): string {
+  return name ?? SET_LABELS[code.toLowerCase()] ?? code.toUpperCase();
 }
 
 function formatRelativeTime(timestamp: number): string {
@@ -170,7 +170,7 @@ function ActiveDraftCard({ meta }: { meta: ActiveQuickDraftMeta }) {
 
         <div className="min-w-0 flex-1">
           <div className="text-lg font-semibold text-white">
-            {formatSetLabel(meta.setCode)}
+            {formatSetLabel(meta.setCode, meta.setName)}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-sm text-white/45">
             <span className="rounded-md border border-amber-400/20 bg-amber-400/10 px-2 py-0.5 text-xs font-medium text-amber-200">

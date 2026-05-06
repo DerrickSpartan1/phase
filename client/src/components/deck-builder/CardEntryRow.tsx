@@ -2,6 +2,8 @@ import { useState } from "react";
 
 import type { DeckEntry } from "../../services/deckParser";
 import type { ParsedItem, UnsupportedCard } from "../../services/deckCompatibility";
+import { hasAlternatePrintingsSync, resolveOracleIdSync } from "../../services/scryfall";
+import { usePrintingsLoaded } from "../../hooks/usePrintingsLoaded";
 
 const CATEGORY_COLORS: Record<string, string> = {
   keyword: "text-sky-400",
@@ -46,6 +48,7 @@ export interface CardEntryRowProps {
   onRemove?: (name: string, section: "main" | "sideboard") => void;
   onCardHover?: (cardName: string | null) => void;
   unsupported?: UnsupportedCard;
+  onChooseArt?: (cardName: string, x: number, y: number) => void;
 }
 
 export function CardEntryRow({
@@ -55,8 +58,12 @@ export function CardEntryRow({
   onRemove,
   onCardHover,
   unsupported,
+  onChooseArt,
 }: CardEntryRowProps) {
   const [expanded, setExpanded] = useState(false);
+  const printingsLoaded = usePrintingsLoaded();
+  const oracleId = printingsLoaded ? resolveOracleIdSync(entry.name) : null;
+  const hasAlternates = oracleId ? hasAlternatePrintingsSync(oracleId) : false;
   const moveLabel = section === "main" ? "→" : "←";
   const moveAriaLabel =
     section === "main"
@@ -69,6 +76,12 @@ export function CardEntryRow({
         className="group flex items-center justify-between py-0.5 text-sm"
         onMouseEnter={() => onCardHover?.(entry.name)}
         onMouseLeave={() => onCardHover?.(null)}
+        onContextMenu={(e) => {
+          if (onChooseArt) {
+            e.preventDefault();
+            onChooseArt(entry.name, e.clientX, e.clientY);
+          }
+        }}
       >
         <span className={unsupported ? "text-amber-200/80" : "text-gray-300"}>
           <span className="mr-1 text-gray-500">{entry.count}x</span>
@@ -83,6 +96,14 @@ export function CardEntryRow({
             >
               !
             </button>
+          )}
+          {hasAlternates && (
+            <span
+              className="ml-1 inline-flex h-3.5 w-3.5 items-center justify-center rounded-sm bg-sky-500/60 text-[9px] leading-none text-sky-100"
+              title="Alternate art available — right-click to choose"
+            >
+              ✦
+            </span>
           )}
         </span>
         <span className="flex items-center">

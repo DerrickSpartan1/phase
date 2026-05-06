@@ -37,6 +37,7 @@ interface DraftStoreState {
   phase: DraftPhase;
   difficulty: number;
   selectedSet: string | null;
+  selectedSetName: string | null;
   mainDeck: string[];
   landCounts: Record<string, number>;
   poolSortMode: PoolSortMode;
@@ -46,7 +47,7 @@ interface DraftStoreState {
 }
 
 interface DraftStoreActions {
-  startDraft: (setPoolJson: string, setCode: string, difficulty: number) => Promise<void>;
+  startDraft: (setPoolJson: string, setCode: string, setName: string, difficulty: number) => Promise<void>;
   resumeDraft: () => Promise<void>;
   abandonDraft: () => Promise<void>;
   pickCard: (cardInstanceId: string) => Promise<void>;
@@ -80,6 +81,7 @@ const initialState: DraftStoreState = {
   phase: "setup",
   difficulty: 2,
   selectedSet: null,
+  selectedSetName: null,
   mainDeck: [],
   landCounts: {},
   poolSortMode: "color",
@@ -132,7 +134,7 @@ function pickBotSeat(usedSeats: number[]): number {
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 function persistDraft(): void {
-  const { adapter, draftId, phase, view, mainDeck, landCounts, poolSortMode, poolPanelOpen, difficulty, selectedSet } =
+  const { adapter, draftId, phase, view, mainDeck, landCounts, poolSortMode, poolPanelOpen, difficulty, selectedSet, selectedSetName } =
     useDraftStore.getState();
   if (!adapter || !draftId || !selectedSet || phase === "setup" || phase === "launching" || phase === "playing" || phase === "complete") return;
   const persistPhase = phase;
@@ -150,6 +152,7 @@ function persistDraft(): void {
       saveActiveQuickDraft({
         id: draftId,
         setCode: selectedSet,
+        setName: selectedSetName ?? undefined,
         difficulty,
         phase: persistPhase,
         pickCount: view?.pool.length ?? 0,
@@ -172,7 +175,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
   (set, get) => ({
     ...initialState,
 
-    startDraft: async (setPoolJson, setCode, difficulty) => {
+    startDraft: async (setPoolJson, setCode, setName, difficulty) => {
       const oldMeta = loadActiveQuickDraft();
       if (oldMeta) {
         void clearDraftRun(oldMeta.id);
@@ -197,6 +200,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
         phase: "drafting",
         difficulty,
         selectedSet: setCode,
+        selectedSetName: setName,
         selectedCard: null,
         mainDeck: [],
         landCounts: {},
@@ -244,6 +248,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
           phase: meta.phase,
           difficulty: meta.difficulty,
           selectedSet: meta.setCode,
+          selectedSetName: meta.setName ?? null,
           selectedCard: null,
           mainDeck: saved.mainDeck,
           landCounts: saved.landCounts,
@@ -279,6 +284,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
           phase: meta.phase,
           difficulty: meta.difficulty,
           selectedSet: meta.setCode,
+          selectedSetName: meta.setName ?? null,
           selectedCard: null,
           mainDeck: saved.mainDeck,
           landCounts: saved.landCounts,
@@ -408,7 +414,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
     },
 
     launchMatch: async (navigate) => {
-      const { adapter, mainDeck, landCounts, difficulty, draftId, selectedSet, runFormat } = get();
+      const { adapter, mainDeck, landCounts, difficulty, draftId, selectedSet, selectedSetName, runFormat } = get();
       if (!adapter || !draftId || !selectedSet) return;
 
       const fullDeck = [...mainDeck, ...expandLands(landCounts)];
@@ -440,6 +446,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       saveActiveQuickDraft({
         id: draftId,
         setCode: selectedSet,
+        setName: selectedSetName ?? undefined,
         difficulty,
         phase: "playing",
         pickCount: get().view?.pool.length ?? 0,
@@ -493,7 +500,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
     },
 
     launchNextMatch: async (navigate) => {
-      const { adapter, draftId, selectedSet, difficulty, runState, runFormat } = get();
+      const { adapter, draftId, selectedSet, selectedSetName, difficulty, runState, runFormat } = get();
       if (!adapter || !draftId || !selectedSet || !runState) return;
 
       const botSeat = pickBotSeat(runState.usedBotSeats);
@@ -525,6 +532,7 @@ export const useDraftStore = create<DraftStoreState & DraftStoreActions>()(
       saveActiveQuickDraft({
         id: draftId,
         setCode: selectedSet,
+        setName: selectedSetName ?? undefined,
         difficulty,
         phase: "playing",
         pickCount: get().view?.pool.length ?? 0,
