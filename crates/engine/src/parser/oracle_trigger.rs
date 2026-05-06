@@ -805,6 +805,13 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
         return (text.to_string(), None);
     }
 
+    if let Some((cost, payer)) =
+        parse_inferred_pronoun_unless_alt_cost(after_unless, &lower[..unless_pos])
+    {
+        let cleaned = text[..unless_pos].trim().to_string();
+        return (cleaned, Some(UnlessPayModifier { cost, payer }));
+    }
+
     // CR 118.12 + CR 608.2c + CR 119.4: Non-mana alternative costs ("you discard
     // a card", "you sacrifice a [filter]", "you pay N life") map to the existing
     // `UnlessCost::{DiscardCard, Sacrifice, PayLife}` variants — the runtime
@@ -825,7 +832,7 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
         .parse(after_unless)
         .ok()
         .and_then(|(rest, _)| {
-            infer_they_pay_payer(&lower[..unless_pos]).map(|payer| (rest, payer))
+            infer_pronoun_unless_payer(&lower[..unless_pos]).map(|payer| (rest, payer))
         });
 
     // Parse payer + payment verb as a single combinator: "(payer) pay(s) " → (TargetFilter, &str).
@@ -893,7 +900,7 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
     (cleaned, Some(UnlessPayModifier { cost, payer }))
 }
 
-fn infer_they_pay_payer(effect_before_unless: &str) -> Option<TargetFilter> {
+fn infer_pronoun_unless_payer(effect_before_unless: &str) -> Option<TargetFilter> {
     // CR 603.2 + CR 118.12: "that player/that opponent ... unless they pay"
     // refers to the player from the triggering event.
     if scan_contains(effect_before_unless, "that player ")
@@ -913,6 +920,21 @@ fn infer_they_pay_payer(effect_before_unless: &str) -> Option<TargetFilter> {
         return Some(TargetFilter::ParentTargetController);
     }
     None
+}
+
+fn parse_inferred_pronoun_unless_alt_cost(
+    after_unless: &str,
+    effect_before_unless: &str,
+) -> Option<(UnlessCost, TargetFilter)> {
+    let (rest, _) = tag::<_, _, OracleError<'_>>("they discard a card")
+        .parse(after_unless)
+        .ok()?;
+    let trailing = rest.trim().trim_end_matches('.').trim();
+    if !trailing.is_empty() {
+        return None;
+    }
+    let payer = infer_pronoun_unless_payer(effect_before_unless)?;
+    Some((UnlessCost::DiscardCard, payer))
 }
 
 /// CR 118.12 + CR 608.2c + CR 119.4: Recognize non-mana "unless" alternative
@@ -9120,6 +9142,41 @@ mod tests {
 
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+    }
+
+    #[test]
+    fn trigger_unless_they_discard_binds_that_player_to_triggering_player() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts a spell, that player loses 5 life unless they discard a card.",
+            "Painful Quandary",
+        );
+
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+        assert!(
+            matches!(unless_pay.cost, UnlessCost::DiscardCard),
+            "cost should be DiscardCard, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    #[test]
+    fn trigger_unless_they_discard_multi_sentence_branch_not_terminal_cost() {
+        let def = parse_trigger_line(
+            "At the beginning of your upkeep, each opponent loses 3 life unless they discard a card. If you're the monarch, instead each opponent loses 6 life unless they discard two cards.",
+            "Court of Ambition",
+        );
+
+        assert!(
+            def.unless_pay.is_none(),
+            "multi-sentence branch should not be stripped as one terminal unless cost, got {:?}",
+            def.unless_pay
+        );
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert!(
+            execute.sub_ability.is_some(),
+            "monarch branch should remain available for downstream parsing"
+        );
     }
 
     #[test]
