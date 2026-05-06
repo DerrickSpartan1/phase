@@ -5138,6 +5138,35 @@ mod tests {
     }
 
     #[test]
+    fn triggered_modal_commander_condition_caps_choose_both() {
+        let r = parse(
+            "At the beginning of combat on your turn, choose one. If you control a commander, you may choose both instead.\n• Create a 1/1 white Soldier creature token.\n• Put a +1/+1 counter on each Soldier you control.",
+            "SOLDIER Military Program",
+            &[],
+            &["Enchantment"],
+            &[],
+        );
+        assert_eq!(r.triggers.len(), 1);
+        let execute = r.triggers[0]
+            .execute
+            .as_ref()
+            .expect("trigger should have execute");
+        let modal = execute.modal.as_ref().expect("execute should be modal");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 2);
+        assert_eq!(modal.mode_count, 2);
+        assert_eq!(
+            modal.constraints,
+            vec![ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: ModalSelectionCondition::ControlsCommander,
+                max_choices: 2,
+                otherwise_max_choices: 1,
+            }]
+        );
+        assert!(r.parse_warnings.is_empty());
+    }
+
+    #[test]
     fn monument_to_endurance_parses_no_repeat_this_turn() {
         let r = parse(
             "At the beginning of your end step, choose one that hasn't been chosen this turn —\n• Put a +1/+1 counter on Monument to Endurance.\n• You gain 4 life.\n• Create a 0/0 green Hydra creature token with \"This creature gets +1/+1 for each counter on it.\"",

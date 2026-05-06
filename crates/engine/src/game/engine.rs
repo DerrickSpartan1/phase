@@ -19,6 +19,7 @@ use crate::types::zones::Zone;
 
 use super::ability_utils::{
     begin_target_selection_for_ability, build_target_slots, compute_unavailable_modes,
+    modal_choice_for_player,
 };
 use super::casting;
 use super::casting_costs;
@@ -3022,7 +3023,8 @@ pub(super) fn begin_pending_trigger_target_selection(
     // CR 700.2a: Modal trigger — prompt for mode selection before stack.
     if let Some(ref modal) = trigger.modal {
         if !trigger.mode_abilities.is_empty() {
-            let unavailable_modes = compute_unavailable_modes(state, trigger.source_id, modal);
+            let modal = modal_choice_for_player(state, trigger.controller, modal);
+            let unavailable_modes = compute_unavailable_modes(state, trigger.source_id, &modal);
 
             // CR 700.2: All modes already chosen — ability cannot be put on the stack
             // without a mode selection. Clear pending trigger and skip.
@@ -3033,7 +3035,7 @@ pub(super) fn begin_pending_trigger_target_selection(
 
             return Ok(Some(WaitingFor::AbilityModeChoice {
                 player: trigger.controller,
-                modal: modal.clone(),
+                modal,
                 source_id: trigger.source_id,
                 mode_abilities: trigger.mode_abilities.clone(),
                 is_activated: false,
@@ -8037,8 +8039,8 @@ mod trigger_target_tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ControllerRef, Effect, GainLifePlayer, ModalChoice,
-        ModalSelectionConstraint, QuantityExpr, ResolvedAbility, TargetFilter, TargetRef,
-        TypedFilter,
+        ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr, ResolvedAbility,
+        TargetFilter, TargetRef, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::TargetSelectionConstraint;
@@ -8449,6 +8451,89 @@ mod trigger_target_tests {
                 );
             }
             other => panic!("expected triggered ability on stack, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn triggered_commander_modal_cap_uses_controller_board_state() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(22);
+        state.pending_trigger = Some(crate::game::triggers::PendingTrigger {
+            source_id,
+            controller: PlayerId(0),
+            condition: None,
+            ability: ResolvedAbility::new(
+                Effect::Unimplemented {
+                    name: "modal_placeholder".to_string(),
+                    description: None,
+                },
+                vec![],
+                source_id,
+                PlayerId(0),
+            ),
+            timestamp: 1,
+            target_constraints: Vec::new(),
+            trigger_event: None,
+            modal: Some(ModalChoice {
+                min_choices: 1,
+                max_choices: 2,
+                mode_count: 2,
+                mode_descriptions: vec![
+                    "Create a token.".to_string(),
+                    "Put a counter.".to_string(),
+                ],
+                constraints: vec![ModalSelectionConstraint::ConditionalMaxChoices {
+                    condition: ModalSelectionCondition::ControlsCommander,
+                    max_choices: 2,
+                    otherwise_max_choices: 1,
+                }],
+                ..Default::default()
+            }),
+            mode_abilities: vec![
+                AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: GainLifePlayer::Controller,
+                    },
+                ),
+                AbilityDefinition::new(
+                    AbilityKind::Database,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                ),
+            ],
+            description: Some("Choose one or both with commander".to_string()),
+        });
+
+        let waiting = begin_pending_trigger_target_selection(&mut state)
+            .unwrap()
+            .expect("modal choice should be required");
+        match waiting {
+            WaitingFor::AbilityModeChoice { modal, .. } => {
+                assert_eq!(modal.max_choices, 1);
+            }
+            other => panic!("expected AbilityModeChoice, got {other:?}"),
+        }
+
+        let commander_id = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Commander".to_string(),
+            Zone::Battlefield,
+        );
+        state.objects.get_mut(&commander_id).unwrap().is_commander = true;
+        let waiting = begin_pending_trigger_target_selection(&mut state)
+            .unwrap()
+            .expect("modal choice should still be required");
+        match waiting {
+            WaitingFor::AbilityModeChoice { modal, .. } => {
+                assert_eq!(modal.max_choices, 2);
+            }
+            other => panic!("expected AbilityModeChoice, got {other:?}"),
         }
     }
 

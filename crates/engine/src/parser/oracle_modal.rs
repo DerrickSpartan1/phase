@@ -266,7 +266,8 @@ fn parse_commander_conditional_choose_both(
     let (rest, _) = tag("choose one.").parse(input.trim())?;
     let (rest, _) = tag(" if ").parse(rest)?;
     let (rest, _) = tag("you control a commander").parse(rest)?;
-    let (rest, _) = tag(" as you cast this spell,").parse(rest)?;
+    let (rest, _) = nom::combinator::opt(tag(" as you cast this spell")).parse(rest)?;
+    let (rest, _) = tag(",").parse(rest)?;
     let (rest, _) = tag(" you may ").parse(rest)?;
     let (rest, _) = tag("choose both instead").parse(rest)?;
     Ok((rest, ()))
