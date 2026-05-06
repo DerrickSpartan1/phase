@@ -34,7 +34,7 @@ use crate::types::player::PlayerCounterKind;
 use crate::types::statics::StaticMode;
 use crate::types::zones::Zone;
 
-use super::super::oracle_target::parse_target;
+use super::super::oracle_target::{parse_target, parse_target_with_ctx};
 use super::super::oracle_util::{
     contains_object_pronoun, contains_possessive, parse_count_expr, parse_mana_symbols,
     parse_ordinal, split_around, starts_with_possessive, strip_after, TextPair,
@@ -676,7 +676,7 @@ pub(super) fn parse_targeted_action_ast(
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
         value((), alt((tag("tap all "), tag("tap each ")))).parse(input)
     }) {
-        let (target, _rem) = parse_target(rest);
+        let (target, _rem) = parse_target_with_ctx(rest, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::TapAll { target });
@@ -684,7 +684,7 @@ pub(super) fn parse_targeted_action_ast(
     if let Some((_, rest)) = nom_on_lower(text, lower, |input| {
         value((), alt((tag("untap all "), tag("untap each ")))).parse(input)
     }) {
-        let (target, _rem) = parse_target(rest);
+        let (target, _rem) = parse_target_with_ctx(rest, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::UntapAll { target });
@@ -731,7 +731,7 @@ pub(super) fn parse_targeted_action_ast(
         } else if ctx.subject.is_some() && is_bare_object_pronoun(target_text.trim()) {
             resolve_it_pronoun(ctx)
         } else {
-            let (target, _rem) = parse_target(&target_text);
+            let (target, _rem) = parse_target_with_ctx(&target_text, ctx);
             #[cfg(debug_assertions)]
             assert_no_compound_remainder(_rem, text);
             target
@@ -759,7 +759,7 @@ pub(super) fn parse_targeted_action_ast(
         alt((value("tap", tag("tap ")), value("untap", tag("untap ")))).parse(input)
     }) {
         let (target_text, _) = super::strip_optional_target_prefix(strip_article(rest));
-        let (target, _rem) = parse_target(target_text);
+        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         return match verb {
@@ -910,7 +910,7 @@ pub(super) fn parse_targeted_action_ast(
     }) {
         let rest_lower = &lower[lower.len() - rest.len()..];
         let (target_text, dest) = super::strip_return_destination_ext(rest);
-        let (target, _rem) = parse_target(target_text);
+        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         let origin = super::infer_origin_zone(rest_lower);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
@@ -970,7 +970,7 @@ pub(super) fn parse_targeted_action_ast(
         nom_on_lower(text, lower, |input| value((), tag("fight ")).parse(input))
     {
         let (target_text, _) = super::strip_optional_target_prefix(rest);
-        let (target, _rem) = parse_target(target_text);
+        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::Fight { target });
@@ -1005,7 +1005,7 @@ pub(super) fn parse_targeted_action_ast(
             });
         }
         let (target_text, _) = super::strip_optional_target_prefix(rest);
-        let (target, _rem) = parse_target(target_text);
+        let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         #[cfg(debug_assertions)]
         assert_no_compound_remainder(_rem, text);
         return Some(TargetedImperativeAst::GainControl { target });
@@ -1027,7 +1027,7 @@ pub(super) fn parse_targeted_action_ast(
         nom_on_lower(text, lower, |input| value((), tag("airbend ")).parse(input))
     {
         let (target_text, _) = super::strip_optional_target_prefix(original_rest);
-        let (target, after_target) = parse_target(target_text);
+        let (target, after_target) = parse_target_with_ctx(target_text, ctx);
         let cost = parse_mana_symbols(after_target.trim_start())
             .map(|(c, _)| c)
             .unwrap_or(crate::types::mana::ManaCost::Cost {

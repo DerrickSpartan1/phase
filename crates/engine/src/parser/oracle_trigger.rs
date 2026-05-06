@@ -499,8 +499,10 @@ pub(crate) fn parse_trigger_line_with_index_ir(
     // Strip constraint sentences so they don't leak into effect parsing as sub-abilities
     let effect_final = strip_constraint_sentences(&effect_without_if);
 
+    let cond_lower = condition_text.to_lowercase();
+
     // CR 118.12: Detect "unless [player] pays {cost}" in effect text.
-    let (effect_for_parse, unless_pay) = extract_unless_pay_modifier(&effect_final);
+    let (effect_for_parse, unless_pay) = extract_unless_pay_modifier(&effect_final, &cond_lower);
 
     // CR 608.2k: Extract trigger subject for pronoun resolution in effect text.
     let trigger_subject = extract_trigger_subject_for_context(condition_text, ctx);
@@ -513,9 +515,10 @@ pub(crate) fn parse_trigger_line_with_index_ir(
 
     // CR 109.4 + CR 115.1 + CR 506.2: Set relative-player scope for
     // TargetPlayer resolution inside the trigger effect body.
-    let cond_lower = condition_text.to_lowercase();
     if condition_introduces_target_player(&cond_lower) {
         effect_ctx.relative_player_scope = Some(ControllerRef::TargetPlayer);
+    } else if condition_introduces_scoped_phase_player(&cond_lower) {
+        effect_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
     }
 
     // Parse the effect body
@@ -799,7 +802,10 @@ fn strip_constraint_sentences(text: &str) -> String {
 /// - "sacrifice it unless you discard a card at random"  (CR 608.2c — UnlessCost::DiscardCard)
 /// - "destroy it unless you sacrifice a creature"        (UnlessCost::Sacrifice)
 /// - "draw a card unless you pay 2 life"                 (CR 119.4 — UnlessCost::PayLife)
-fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>) {
+fn extract_unless_pay_modifier(
+    text: &str,
+    condition_lower: &str,
+) -> (String, Option<UnlessPayModifier>) {
     let lower = text.to_lowercase();
     let tp = TextPair::new(text, &lower);
     let Some(unless_pos) = tp.find(" unless ") else {
@@ -825,7 +831,7 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
     }
 
     if let Some((cost, payer)) =
-        parse_inferred_pronoun_unless_alt_cost(after_unless, &lower[..unless_pos])
+        parse_inferred_pronoun_unless_alt_cost(after_unless, &lower[..unless_pos], condition_lower)
     {
         let cleaned = text[..unless_pos].trim().to_string();
         return (cleaned, Some(UnlessPayModifier { cost, payer }));
@@ -851,7 +857,8 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
         .parse(after_unless)
         .ok()
         .and_then(|(rest, _)| {
-            infer_pronoun_unless_payer(&lower[..unless_pos]).map(|payer| (rest, payer))
+            infer_pronoun_unless_payer(&lower[..unless_pos], condition_lower)
+                .map(|payer| (rest, payer))
         });
 
     // Parse payer + payment verb as a single combinator: "(payer) pay(s) " → (TargetFilter, &str).
@@ -919,14 +926,46 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
     (cleaned, Some(UnlessPayModifier { cost, payer }))
 }
 
-fn infer_pronoun_unless_payer(effect_before_unless: &str) -> Option<TargetFilter> {
-    // CR 603.2 + CR 118.12: "that player/that opponent ... unless they pay"
-    // refers to the player from the triggering event.
-    if scan_contains(effect_before_unless, "that player ")
+fn condition_introduces_scoped_phase_player(cond_lower: &str) -> bool {
+    let phase_scope = preceded(
+        tag::<_, _, OracleError<'_>>("at the beginning of "),
+        alt((
+            tag("each player's "),
+            tag("each players "),
+            tag("each opponent's "),
+            tag("each opponents "),
+        )),
+    )
+    .parse(cond_lower);
+
+    let Ok((phase_text, _)) = phase_scope else {
+        return false;
+    };
+
+    scan_for_phase(phase_text).is_some()
+}
+
+fn effect_references_that_player(effect_before_unless: &str) -> bool {
+    scan_contains(effect_before_unless, "that player ")
         || scan_contains(effect_before_unless, "that opponent ")
         || scan_contains(effect_before_unless, "to that player")
         || scan_contains(effect_before_unless, "to that opponent")
+}
+
+fn infer_pronoun_unless_payer(
+    effect_before_unless: &str,
+    condition_lower: &str,
+) -> Option<TargetFilter> {
+    // CR 503.1a + CR 603.2: "At the beginning of each player's upkeep, that
+    // player ... unless they pay" refers to the active player for that phase.
+    if condition_introduces_scoped_phase_player(condition_lower)
+        && effect_references_that_player(effect_before_unless)
     {
+        return Some(TargetFilter::Controller);
+    }
+    // CR 603.2 + CR 118.12: "that player/that opponent ... unless they pay"
+    // refers to the player from the triggering event.
+    if effect_references_that_player(effect_before_unless) {
         return Some(TargetFilter::TriggeringPlayer);
     }
     // CR 608.2c: in "each opponent [does X] unless they pay", the lowered
@@ -944,14 +983,32 @@ fn infer_pronoun_unless_payer(effect_before_unless: &str) -> Option<TargetFilter
 fn parse_inferred_pronoun_unless_alt_cost(
     after_unless: &str,
     effect_before_unless: &str,
+    condition_lower: &str,
 ) -> Option<(UnlessCost, TargetFilter)> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("they discard ")
-        .parse(after_unless)
-        .ok()?;
-    let trailing = rest.trim().trim_end_matches('.').trim();
-    let cost = parse_unless_discard_cost(trailing)?;
-    let payer = infer_pronoun_unless_payer(effect_before_unless)?;
+    let cost = if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("they discard ").parse(after_unless)
+    {
+        parse_unless_discard_cost(rest)?
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they pay ").parse(after_unless) {
+        parse_unless_life_cost(rest)?
+    } else {
+        return None;
+    };
+    let payer = infer_pronoun_unless_payer(effect_before_unless, condition_lower)?;
     Some((cost, payer))
+}
+
+fn parse_unless_life_cost(rest: &str) -> Option<UnlessCost> {
+    let (amount, after_num) = parse_number(rest)?;
+    if tag::<_, _, OracleError<'_>>("life")
+        .parse(after_num.trim_start())
+        .is_ok()
+    {
+        return Some(UnlessCost::PayLife {
+            amount: amount as i32,
+        });
+    }
+    None
 }
 
 fn parse_unless_discard_cost(discard_tail: &str) -> Option<UnlessCost> {
@@ -1011,15 +1068,8 @@ fn parse_unless_alt_cost(after_unless: &str) -> Option<UnlessCost> {
 
     // "you pay N life" / "you pay N life." — life amount is bare integer.
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you pay ").parse(after_unless) {
-        if let Some((amount, after_num)) = parse_number(rest) {
-            if tag::<_, _, OracleError<'_>>("life")
-                .parse(after_num.trim_start())
-                .is_ok()
-            {
-                return Some(UnlessCost::PayLife {
-                    amount: amount as i32,
-                });
-            }
+        if let Some(cost) = parse_unless_life_cost(rest) {
+            return Some(cost);
         }
     }
 
@@ -8895,6 +8945,63 @@ mod tests {
             "cost should be PayLife {{ amount: 1 }}, got {:?}",
             unless_pay.cost
         );
+    }
+
+    #[test]
+    fn trigger_unless_they_pay_life_binds_phase_that_player_to_scoped_player() {
+        // Blood Clock — phase-scoped "that player" is the active player whose
+        // upkeep began, not an event player from a spell/action trigger.
+        let def = parse_trigger_line(
+            "At the beginning of each player's upkeep, that player returns a permanent they control to its owner's hand unless they pay 2 life.",
+            "Blood Clock",
+        );
+
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        assert!(
+            matches!(unless_pay.cost, UnlessCost::PayLife { amount: 2 }),
+            "cost should be PayLife {{ amount: 2 }}, got {:?}",
+            unless_pay.cost
+        );
+        let execute = def.execute.as_ref().expect("should have execute");
+        match execute.effect.as_ref() {
+            Effect::Bounce { target, .. } => match target {
+                TargetFilter::Typed(filter) => {
+                    assert_eq!(filter.controller, Some(ControllerRef::ScopedPlayer));
+                    assert!(
+                        filter.type_filters.contains(&TypeFilter::Permanent),
+                        "filter should include Permanent, got {:?}",
+                        filter.type_filters
+                    );
+                }
+                other => panic!("expected typed bounce filter, got {other:?}"),
+            },
+            other => panic!("expected Bounce effect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn trigger_unless_they_pay_life_keeps_event_that_player_as_triggering_player() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts a spell, that player loses 5 life unless they pay 2 life.",
+            "Test Card",
+        );
+
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+        assert!(
+            matches!(unless_pay.cost, UnlessCost::PayLife { amount: 2 }),
+            "cost should be PayLife {{ amount: 2 }}, got {:?}",
+            unless_pay.cost
+        );
+        let execute = def.execute.as_ref().expect("should have execute");
+        match execute.effect.as_ref() {
+            Effect::LoseLife { target, amount } => {
+                assert_eq!(*target, Some(TargetFilter::TriggeringPlayer));
+                assert_eq!(*amount, QuantityExpr::Fixed { value: 5 });
+            }
+            other => panic!("expected LoseLife effect, got {other:?}"),
+        }
     }
 
     #[test]

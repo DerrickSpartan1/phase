@@ -143,7 +143,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             .is_ok()
         {
             let original_rest = &text[lower.len() - after_article.len()..];
-            return parse_target(original_rest);
+            return parse_target_with_ctx(original_rest, ctx);
         }
     }
 
@@ -189,7 +189,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
                 || (!matches!(*prefix, "one " | "up to one ") && trimmed_rest.starts_with("of "));
             if quantified_target {
                 let original_rest = &text[lower.len() - rest.len()..];
-                return parse_target(original_rest);
+                return parse_target_with_ctx(original_rest, ctx);
             }
         }
     }
@@ -197,7 +197,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     for prefix in ["or untap ", "untap ", "or tap ", "tap "] {
         if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(lower.as_str()) {
             let original_rest = &text[lower.len() - rest.len()..];
-            return parse_target(original_rest);
+            return parse_target_with_ctx(original_rest, ctx);
         }
     }
 
@@ -264,7 +264,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             rest,
             "it" | "them" | "him" | "her" | "enchanted permanent" | "enchanted creature"
         ) {
-            return parse_target(original_rest);
+            return parse_target_with_ctx(original_rest, ctx);
         }
     }
     // "that [type phrase]" → anaphoric reference to a typed subject
@@ -619,7 +619,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
 
     // "each " + type phrase
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("each ").parse(lower.as_str()) {
-        let (filter, rest) = parse_type_phrase(&text[lower.len() - rest.len()..]);
+        let (filter, rest) = parse_type_phrase_with_ctx(&text[lower.len() - rest.len()..], ctx);
         return (filter, rest);
     }
 
@@ -637,7 +637,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     // "enchanted [type phrase]" → parse the type after "enchanted " and add EnchantedBy
     if let Ok((rest_lower, _)) = tag::<_, _, OracleError<'_>>("enchanted ").parse(lower.as_str()) {
         let after_enchanted = &text[lower.len() - rest_lower.len()..];
-        let (filter, rest) = parse_type_phrase(after_enchanted);
+        let (filter, rest) = parse_type_phrase_with_ctx(after_enchanted, ctx);
         if target_filter_has_meaningful_content(&filter) {
             let enchanted = match filter {
                 TargetFilter::Typed(mut tf) => {
@@ -740,7 +740,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
 
     // Bare type phrase fallback: try parse_type_phrase before giving up.
     // Handles "other nonland permanents you own and control" after quantifier stripping.
-    let (filter, rest) = parse_type_phrase(text);
+    let (filter, rest) = parse_type_phrase_with_ctx(text, ctx);
     if target_filter_has_meaningful_content(&filter) {
         let consumed_end = lower.len() - rest.len();
         (
@@ -1766,9 +1766,15 @@ fn parse_controller_suffix(text: &str, ctx: &ParseContext) -> Option<(Controller
         return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
     }
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("they control").parse(trimmed) {
-        // CR 608.2d: "they control" → ControllerRef::You, resolved against
-        // accepting_player during "any opponent may" resolution.
-        return Some((ControllerRef::You, leading_ws + trimmed.len() - rest.len()));
+        // "They control" is an anaphoric player reference when the surrounding
+        // parser supplies a relative player scope; otherwise keep the legacy
+        // ControllerRef::You fallback used by "any opponent may" accepting-
+        // player resolution.
+        let ctrl = ctx
+            .relative_player_scope
+            .clone()
+            .unwrap_or(ControllerRef::You);
+        return Some((ctrl, leading_ws + trimmed.len() - rest.len()));
     }
 
     None
