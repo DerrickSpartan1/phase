@@ -1,7 +1,7 @@
 import { useMemo, useCallback, useState, useEffect, useRef, type CSSProperties } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 
-import type { GameAction, ObjectId } from "../../adapter/types.ts";
+import type { ObjectId } from "../../adapter/types.ts";
 import { useCardImage } from "../../hooks/useCardImage.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import { usePlayerId } from "../../hooks/usePlayerId.ts";
@@ -34,7 +34,6 @@ const MAX_STACK_DEPTH = 5;
 export function ZoneHand({ zone }: ZoneHandProps) {
   const playerId = usePlayerId();
   const objects = useGameStore((s) => s.gameState?.objects);
-  const legalActions = useGameStore((s) => s.legalActions);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
   const waitingFor = useGameStore((s) => s.waitingFor);
   const setPendingAbilityChoice = useUiStore((s) => s.setPendingAbilityChoice);
@@ -57,23 +56,9 @@ export function ZoneHand({ zone }: ZoneHandProps) {
     });
   }, [zone, graveyard, exile, objects, playerId]);
 
-  // Build sets of castable object_ids and activatable object_ids from legal actions
-  const { castableObjectIds, activatableObjectIds } = useMemo(() => {
-    const castable = new Set<number>();
-    const activatable = new Set<number>();
-    for (const action of legalActions) {
-      if (action.type === "PlayLand" || action.type === "CastSpell") {
-        castable.add(Number((action as Extract<GameAction, { type: "PlayLand" | "CastSpell" }>).data.object_id));
-      }
-      if (action.type === "ActivateNinjutsu") {
-        castable.add(Number(action.data.ninjutsu_object_id));
-      }
-      if (action.type === "ActivateAbility") {
-        activatable.add(Number(action.data.source_id));
-      }
-    }
-    return { castableObjectIds: castable, activatableObjectIds: activatable };
-  }, [legalActions]);
+  const actionableObjectIds = useMemo(() => {
+    return new Set(Object.keys(legalActionsByObject ?? {}).map(Number));
+  }, [legalActionsByObject]);
 
   // Filter zone objects to only castable/activatable ones, excluding face-down cards
   const castableObjects = useMemo(() => {
@@ -84,10 +69,9 @@ export function ZoneHand({ zone }: ZoneHandProps) {
         (obj) =>
           obj &&
           !obj.face_down &&
-          (castableObjectIds.has(Number(obj.id)) ||
-            activatableObjectIds.has(Number(obj.id))),
+          actionableObjectIds.has(Number(obj.id)),
       );
-  }, [zoneObjectIds, objects, castableObjectIds, activatableObjectIds]);
+  }, [zoneObjectIds, objects, actionableObjectIds]);
 
   const playCard = useCallback(
     (objectId: number) => {

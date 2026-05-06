@@ -560,6 +560,18 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                 }
             }
 
+            // CR 702.188a: Web-slinging is a casting alternative cost, so tag
+            // the resolved permanent through the same cast-variant channel as
+            // other alternative-cost casting variants.
+            if let CastingVariant::WebSlinging { .. } = casting_variant {
+                if let Some(obj) = state.objects.get_mut(&entry.id) {
+                    obj.cast_variant_paid = Some((
+                        crate::types::ability::CastVariantPaid::WebSlinging,
+                        state.turn_number,
+                    ));
+                }
+            }
+
             // CR 702.74a: Evoke-cast permanent gets the `cast_variant_paid` tag
             // so the synthesized intervening-if ETB sacrifice trigger fires.
             if casting_variant == CastingVariant::Evoke {

@@ -1598,15 +1598,17 @@ pub(super) fn finalize_cast_with_phyrexian_choices(
         events,
     )?;
 
-    // CR 702.190a: Sneak alt-cost additionally requires returning an unblocked
-    // attacker to its owner's hand. The spell was announced to the stack above;
-    // the returned creature is paid here as part of cost payment, after mana
-    // but before the stack entry is finalized with its ResolvedAbility. Also
-    // scrub the returned creature from combat so it is no longer an attacker.
-    if let CastingVariant::Sneak {
-        returned_creature, ..
-    } = casting_variant
-    {
+    // CR 702.190a / CR 702.188a: Sneak and Web-slinging additionally require
+    // returning a creature to its owner's hand as part of paying the casting
+    // cost. Sneak's returned creature was an attacker, so remove it from combat.
+    let returned_creature = match casting_variant {
+        CastingVariant::Sneak {
+            returned_creature, ..
+        }
+        | CastingVariant::WebSlinging { returned_creature } => Some(returned_creature),
+        _ => None,
+    };
+    if let Some(returned_creature) = returned_creature {
         super::zones::move_to_zone(state, returned_creature, Zone::Hand, events);
         if let Some(combat) = state.combat.as_mut() {
             combat

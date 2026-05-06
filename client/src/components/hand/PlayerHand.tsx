@@ -11,7 +11,7 @@ import { useIsMobile } from "../../hooks/useIsMobile.ts";
 import { useIsCompactHeight } from "../../hooks/useIsCompactHeight.ts";
 import { useCanActForWaitingState, usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { dispatchAction } from "../../game/dispatch.ts";
-import type { GameAction, ManaCost, ObjectId } from "../../adapter/types.ts";
+import type { ManaCost, ObjectId } from "../../adapter/types.ts";
 import { collectObjectActions } from "../../viewmodel/cardActionChoice.ts";
 import { DRAG_PLAY_THRESHOLD } from "../../hooks/useDragToCast.ts";
 
@@ -37,7 +37,6 @@ export function PlayerHand() {
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null);
   const [draggingCardId, setDraggingCardId] = useState<number | null>(null);
 
-  const legalActions = useGameStore((s) => s.legalActions);
   const legalActionsByObject = useGameStore((s) => s.legalActionsByObject);
 
   // Hide the card being cast (shown on stack as preview during TargetSelection)
@@ -52,39 +51,9 @@ export function PlayerHand() {
     canActForWaitingState && s.waitingFor?.type === "Priority",
   );
 
-  // Build a set of object_ids that have PlayLand, CastSpell, Foretell, or
-  // CastSpellAsSneak legal actions. Sneak casts (CR 702.190a) originate from
-  // the hand via `hand_object` rather than `object_id`, so they need an
-  // explicit branch to light up the card's castable indicator.
-  // Coerce to Number since serde_wasm_bindgen may serialize u64 as BigInt.
   const playableObjectIds = useMemo(() => {
-    const ids = new Set<number>();
-    for (const action of legalActions) {
-      if (action.type === "PlayLand" || action.type === "CastSpell" || action.type === "Foretell") {
-        ids.add(
-          Number(
-            (action as Extract<GameAction, { type: "PlayLand" | "CastSpell" | "Foretell" }>).data.object_id,
-          ),
-        );
-      } else if (action.type === "CastSpellAsSneak") {
-        ids.add(Number(action.data.hand_object));
-      } else if (action.type === "ActivateNinjutsu") {
-        ids.add(Number(action.data.ninjutsu_object_id));
-      }
-    }
-    return ids;
-  }, [legalActions]);
-
-  // Build a set of object_ids that have ActivateAbility legal actions (Channel, etc.)
-  const activatableObjectIds = useMemo(() => {
-    const ids = new Set<number>();
-    for (const action of legalActions) {
-      if (action.type === "ActivateAbility") {
-        ids.add(Number(action.data.source_id));
-      }
-    }
-    return ids;
-  }, [legalActions]);
+    return new Set(Object.keys(legalActionsByObject ?? {}).map(Number));
+  }, [legalActionsByObject]);
 
   const playCard = useCallback(
     (objectId: number) => {
@@ -203,7 +172,7 @@ export function PlayerHand() {
       <AnimatePresence>
         {handObjects.map((obj, i) => {
           const rotation = (i - center) * 6;
-          const isPlayable = hasPriority && (playableObjectIds.has(Number(obj.id)) || activatableObjectIds.has(Number(obj.id)));
+          const isPlayable = hasPriority && playableObjectIds.has(Number(obj.id));
 
           return (
             <HandCard

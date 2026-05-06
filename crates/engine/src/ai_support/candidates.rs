@@ -18,6 +18,7 @@ use crate::types::mana::ManaType;
 use crate::types::match_config::DeckCardCount;
 use crate::types::phase::Phase;
 use crate::types::player::PlayerId;
+use crate::types::zones::Zone;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TacticalClass {
@@ -2360,6 +2361,59 @@ fn priority_actions(state: &GameState, player: PlayerId) -> Vec<CandidateAction>
         }
     }
 
+    // CR 702.188a: Offer Web-slinging casts from hand by pairing each
+    // Web-slinging spell with each tapped creature the caster controls.
+    // Unlike Sneak, Web-slinging grants no special timing permission; the
+    // casting helper below enforces normal spell timing plus restrictions.
+    if !split_second_active {
+        let tapped_creatures: Vec<ObjectId> = state
+            .objects
+            .iter()
+            .filter_map(|(&id, obj)| {
+                (obj.zone == Zone::Battlefield
+                    && obj.controller == player
+                    && obj.tapped
+                    && obj.card_types.core_types.contains(&CoreType::Creature))
+                .then_some(id)
+            })
+            .collect();
+        if !tapped_creatures.is_empty() {
+            let hand_ids: Vec<ObjectId> = state
+                .players
+                .iter()
+                .find(|p| p.id == player)
+                .map(|p| p.hand.iter().copied().collect::<Vec<_>>())
+                .unwrap_or_default();
+            for hand_id in hand_ids {
+                if keywords::effective_web_slinging_cost(state, hand_id).is_none() {
+                    continue;
+                }
+                let Some(card_id) = state.objects.get(&hand_id).map(|o| o.card_id) else {
+                    continue;
+                };
+                for &creature_id in &tapped_creatures {
+                    if !casting::can_cast_spell_as_web_slinging_now(
+                        state,
+                        player,
+                        hand_id,
+                        creature_id,
+                    ) {
+                        continue;
+                    }
+                    actions.push(candidate(
+                        GameAction::CastSpellAsWebSlinging {
+                            hand_object: hand_id,
+                            card_id,
+                            creature_to_return: creature_id,
+                        },
+                        TacticalClass::Spell,
+                        Some(player),
+                    ));
+                }
+            }
+        }
+    }
+
     actions
 }
 
@@ -3003,7 +3057,7 @@ mod tests {
         ManaContribution, ManaProduction, QuantityExpr, StaticDefinition, TargetFilter, TargetRef,
     };
     use crate::types::identifiers::CardId;
-    use crate::types::mana::{ManaColor, ManaCostShard};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard, ManaType, ManaUnit};
     use crate::types::zones::Zone;
 
     // CR 702.xxx: Prepare (Strixhaven) — the AI candidate enumerator must
@@ -3765,6 +3819,103 @@ mod tests {
             "only PassPriority should be offered while split second is on the stack"
         );
         assert!(matches!(actions[0].action, GameAction::PassPriority));
+    }
+
+    /// CR 702.188a: Web-slinging is an alternative casting cost, not a
+    /// Ninjutsu-family activated ability. Legal-action generation must expose
+    /// it as a cast action sourced from the hand object.
+    #[test]
+    fn web_slinging_candidates_are_cast_actions_grouped_under_hand_object() {
+        use crate::types::card_type::CoreType;
+        use crate::types::keywords::Keyword;
+
+        let mut state = GameState::new_two_player(42);
+        let player = PlayerId(0);
+        state.phase = Phase::PreCombatMain;
+        state.active_player = player;
+        state.priority_player = player;
+        state.waiting_for = WaitingFor::Priority { player };
+
+        let tapped_creature = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Tapped Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&tapped_creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.tapped = true;
+        }
+
+        let web_spell = create_object(
+            &mut state,
+            CardId(2),
+            player,
+            "Web-Slinger".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&web_spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.mana_cost = ManaCost::Cost {
+                generic: 7,
+                shards: vec![],
+            };
+            obj.keywords.push(Keyword::WebSlinging(ManaCost::Cost {
+                generic: 0,
+                shards: vec![ManaCostShard::Blue],
+            }));
+            obj.base_keywords = obj.keywords.clone();
+        }
+
+        state.players[0].mana_pool.add(ManaUnit {
+            color: ManaType::Blue,
+            source_id: ObjectId(0),
+            snow: false,
+            restrictions: Vec::new(),
+            grants: vec![],
+            expiry: None,
+        });
+
+        let (actions, _, grouped) = crate::ai_support::legal_actions_full(&state);
+        assert!(
+            actions.iter().any(|action| matches!(
+                action,
+                GameAction::CastSpellAsWebSlinging {
+                    hand_object,
+                    card_id,
+                    creature_to_return,
+                } if *hand_object == web_spell
+                    && *card_id == CardId(2)
+                    && *creature_to_return == tapped_creature
+            )),
+            "Web-slinging should be offered as a cast action from hand"
+        );
+        assert!(
+            !actions.iter().any(|action| matches!(
+                action,
+                GameAction::ActivateNinjutsu {
+                    ninjutsu_object_id,
+                    ..
+                } if *ninjutsu_object_id == web_spell
+            )),
+            "Web-slinging must not be routed through ActivateNinjutsu"
+        );
+        assert!(
+            grouped
+                .get(&web_spell)
+                .is_some_and(|actions| actions.iter().any(|action| matches!(
+                    action,
+                    GameAction::CastSpellAsWebSlinging {
+                        hand_object,
+                        creature_to_return,
+                        ..
+                    } if *hand_object == web_spell && *creature_to_return == tapped_creature
+                ))),
+            "Web-slinging should be grouped under the hand object for UI playability"
+        );
     }
 
     /// Issue #167: A sorcery in the graveyard without any graveyard-cast keyword

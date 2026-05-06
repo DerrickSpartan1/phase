@@ -2259,6 +2259,11 @@ pub enum CastingVariant {
         /// CR 702.190b data for permanent spells; `None` for instants/sorceries.
         placement: Option<SneakPlacement>,
     },
+    /// CR 702.188a: Cast from hand via Web-slinging's alternative cost by
+    /// returning a tapped creature you control to its owner's hand rather than
+    /// paying the spell's mana cost. Unlike Sneak, Web-slinging grants no
+    /// special timing permission and has no enter-attacking placement rule.
+    WebSlinging { returned_creature: ObjectId },
     /// CR 702.94a: Cast from hand via Miracle's alternative cost after revealing
     /// the card as the first card drawn this turn. The granting keyword carries
     /// the miracle mana cost, which `prepare_spell_cast_with_variant_override`

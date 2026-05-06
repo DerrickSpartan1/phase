@@ -177,7 +177,7 @@ pub enum GameAction {
     ActivateNinjutsu {
         /// The card object with Ninjutsu in hand or command zone.
         ninjutsu_object_id: ObjectId,
-        /// The creature to return — unblocked attacker (Ninjutsu) or tapped creature (WebSlinging).
+        /// The unblocked attacker to return.
         creature_to_return: ObjectId,
     },
     /// CR 702.190a: Cast a spell from HAND via the Sneak alternative cost.
@@ -193,6 +193,13 @@ pub enum GameAction {
     /// attacking alongside the returned creature. Non-permanent Sneak casts
     /// resolve normally.
     CastSpellAsSneak {
+        hand_object: ObjectId,
+        card_id: CardId,
+        creature_to_return: ObjectId,
+    },
+    /// CR 702.188a: Cast a spell from HAND via the Web-slinging alternative cost.
+    /// The returned creature must be a tapped creature controlled by the caster.
+    CastSpellAsWebSlinging {
         hand_object: ObjectId,
         card_id: CardId,
         creature_to_return: ObjectId,
@@ -574,6 +581,7 @@ impl GameAction {
             GameAction::CastSpell { object_id, .. } => Some(*object_id),
             GameAction::Foretell { object_id, .. } => Some(*object_id),
             GameAction::CastSpellAsSneak { hand_object, .. } => Some(*hand_object),
+            GameAction::CastSpellAsWebSlinging { hand_object, .. } => Some(*hand_object),
             GameAction::ActivateNinjutsu {
                 ninjutsu_object_id, ..
             } => Some(*ninjutsu_object_id),
@@ -781,6 +789,14 @@ mod tests {
             (
                 GameAction::ActivateNinjutsu {
                     ninjutsu_object_id: oid,
+                    creature_to_return: ObjectId(99),
+                },
+                Some(oid),
+            ),
+            (
+                GameAction::CastSpellAsWebSlinging {
+                    hand_object: oid,
+                    card_id: cid,
                     creature_to_return: ObjectId(99),
                 },
                 Some(oid),

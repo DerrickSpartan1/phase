@@ -229,16 +229,30 @@ export function abilityChoiceLabel(
     const keyword = object.keywords.find(
       (
         k,
-      ): k is { Ninjutsu?: ManaCost; CommanderNinjutsu?: ManaCost; WebSlinging?: ManaCost } =>
-        typeof k === "object" &&
-        ("Ninjutsu" in k || "CommanderNinjutsu" in k || "WebSlinging" in k),
+      ): k is { Ninjutsu?: ManaCost; CommanderNinjutsu?: ManaCost } =>
+        typeof k === "object" && ("Ninjutsu" in k || "CommanderNinjutsu" in k),
     );
-    const cost = keyword?.Ninjutsu ?? keyword?.CommanderNinjutsu ?? keyword?.WebSlinging;
+    const cost = keyword?.Ninjutsu ?? keyword?.CommanderNinjutsu;
     const costSymbols = cost ? manaCostToShards(cost).map((s) => `{${s}}`).join("") : "";
     const costSuffix = costSymbols ? ` (${costSymbols})` : "";
     return {
       label: `Ninjutsu — return ${returnedName}${costSuffix}`,
       description: `Activate ${object.name}'s ninjutsu ability and return ${returnedName} to your hand (CR 702.49a).`,
+    };
+  }
+  if (action.type === "CastSpellAsWebSlinging") {
+    const returnedId = action.data.creature_to_return;
+    const returnedName = objects?.[returnedId]?.name ?? `creature #${returnedId}`;
+    const webSlingingKeyword = object.keywords.find(
+      (k): k is { WebSlinging: ManaCost } => typeof k === "object" && "WebSlinging" in k,
+    );
+    const costSymbols = webSlingingKeyword
+      ? manaCostToShards(webSlingingKeyword.WebSlinging).map((s) => `{${s}}`).join("")
+      : "";
+    const costSuffix = costSymbols ? ` (${costSymbols})` : "";
+    return {
+      label: `Web-Slinging — return ${returnedName}${costSuffix}`,
+      description: `Cast ${object.name} by paying its Web-slinging cost and returning ${returnedName} to your hand (CR 702.188a).`,
     };
   }
   if (action.type === "ActivateAbility") {

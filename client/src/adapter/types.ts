@@ -888,6 +888,7 @@ export type GameAction =
   // Applies to any card type; CR 702.190b enter-attacking-alongside is
   // handled engine-side for permanent spells only.
   | { type: "CastSpellAsSneak"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId } }
+  | { type: "CastSpellAsWebSlinging"; data: { hand_object: ObjectId; card_id: CardId; creature_to_return: ObjectId } }
   | { type: "ActivateNinjutsu"; data: { ninjutsu_object_id: ObjectId; creature_to_return: ObjectId } }
   | { type: "DecideOptionalEffect"; data: { accept: boolean } }
   | { type: "PayUnlessCost"; data: { pay: boolean } }

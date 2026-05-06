@@ -2996,27 +2996,24 @@ pub enum PaymentCost {
 /// a creature in combat" pattern. This enum is the *activation-family dispatch*
 /// layer — it is used only by `activate_ninjutsu` and its supporting helpers
 /// (`ninjutsu_timing_ok`, `returnable_creatures_for_variant`, etc.) to pick
-/// the correct activation behavior. Sneak (CR 702.190a) is NOT an activated
-/// ability and therefore does not appear here; see `CastVariantPaid` for the
-/// trigger-tag layer that does include it.
+/// the correct activation behavior. Sneak (CR 702.190a) and Web-slinging
+/// (CR 702.188a) are NOT activated abilities and therefore do not appear here;
+/// see `CastVariantPaid` for the trigger-tag layer that does include them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NinjutsuVariant {
     /// CR 702.49a: Return unblocked attacker, declare blockers or later.
     Ninjutsu,
     /// CR 702.49d: Commander ninjutsu — activate from hand or command zone.
     CommanderNinjutsu,
-    /// CR 702.49 variant: Return any tapped creature you control.
-    WebSlinging,
 }
 
-/// CR 702.49 + CR 702.190a + CR 603.4: Which alternative-cost cast/activation
+/// CR 702.49 + CR 702.188a + CR 702.190a + CR 603.4: Which alternative-cost cast/activation
 /// variant was paid to put this permanent onto the battlefield. This is the
 /// *trigger-tag / ability-condition* layer — separate from `NinjutsuVariant`
-/// (activation-family dispatch) because it legitimately includes Sneak, which
-/// is a cast alt-cost rather than an activated ability.
+/// (activation-family dispatch) because it legitimately includes Sneak and
+/// Web-slinging, which are cast alt-costs rather than activated abilities.
 ///
-/// Populated by `casting::handle_cast_spell_as_sneak` (Sneak) and
-/// `keywords::activate_ninjutsu` (Ninjutsu / CommanderNinjutsu / WebSlinging)
+/// Populated by cast alt-cost handlers and `keywords::activate_ninjutsu`
 /// into `GameObject.cast_variant_paid` as the source permanent enters the
 /// battlefield. Read by `TriggerCondition::CastVariantPaid` and
 /// `AbilityCondition::CastVariantPaid` / `CastVariantPaidInstead`.
@@ -3027,9 +3024,9 @@ pub enum CastVariantPaid {
     /// CR 702.49d: Commander ninjutsu cost was paid (distinct from Ninjutsu for
     /// parser fidelity; triggers referencing "ninjutsu cost" match either).
     CommanderNinjutsu,
-    /// CR 702.190a: Sneak alternative cast cost was paid from graveyard.
+    /// CR 702.190a: Sneak alternative cast cost was paid from hand.
     Sneak,
-    /// CR 702.49 variant: Web-slinging cost was paid.
+    /// CR 702.188a: Web-slinging alternative cast cost was paid from hand.
     WebSlinging,
     /// CR 702.74a: Evoke alternative cast cost was paid from hand. Read by the
     /// synthesized intervening-if ETB sacrifice trigger.
@@ -3052,13 +3049,12 @@ pub enum CastVariantPaid {
 
 impl From<NinjutsuVariant> for CastVariantPaid {
     /// CR 702.49: Lift an activation-family variant into the cast-variant-paid tag
-    /// used by trigger conditions. Sneak is intentionally NOT in `NinjutsuVariant`
-    /// (it is a cast alt-cost, not an activation), so this conversion is total.
+    /// used by trigger conditions. Cast alt-costs are intentionally NOT in
+    /// `NinjutsuVariant`, so this conversion is total.
     fn from(v: NinjutsuVariant) -> Self {
         match v {
             NinjutsuVariant::Ninjutsu => CastVariantPaid::Ninjutsu,
             NinjutsuVariant::CommanderNinjutsu => CastVariantPaid::CommanderNinjutsu,
-            NinjutsuVariant::WebSlinging => CastVariantPaid::WebSlinging,
         }
     }
 }

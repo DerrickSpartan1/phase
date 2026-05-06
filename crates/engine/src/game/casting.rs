@@ -1146,6 +1146,11 @@ fn prepare_spell_cast_with_variant_override(
     } else {
         None
     };
+    let web_slinging_cost = if obj.zone == Zone::Hand {
+        super::keywords::effective_web_slinging_cost(state, object_id)
+    } else {
+        None
+    };
 
     // CR 702.34a + CR 118.8 + CR 601.2f: Split flashback into mana vs non-mana
     // components for the payment pipeline. Compound flashback costs
@@ -1270,6 +1275,12 @@ fn prepare_spell_cast_with_variant_override(
     } else {
         None
     };
+    let effective_web_slinging_cost_for_path =
+        if matches!(casting_variant, CastingVariant::WebSlinging { .. }) {
+            web_slinging_cost
+        } else {
+            None
+        };
     // CR 601.2b: HandPermission variant (A2 opt-in path for Zaffai) also pays
     // no mana cost — the granting static replaces the mana cost with nothing.
     let is_hand_permission_variant =
@@ -1319,6 +1330,7 @@ fn prepare_spell_cast_with_variant_override(
             .or(harmonize_cost)
             .or(flashback_mana_cost)
             .or(effective_sneak_cost_for_path)
+            .or(effective_web_slinging_cost_for_path)
             .or(alt_cost_from_exile)
             .or(warp_cost)
             .unwrap_or_else(|| obj.mana_cost.clone())
@@ -2236,6 +2248,93 @@ pub fn handle_cast_spell_as_sneak(
     let prepared =
         prepare_spell_cast_with_variant_override(state, player, hand_object, Some(variant))?;
     continue_with_prepared(state, player, prepared, events)
+}
+
+/// CR 702.188a: Cast a spell from HAND via the Web-slinging alternative cost.
+///
+/// Web-slinging returns a tapped creature the caster controls as part of the
+/// casting cost and substitutes the keyword's mana cost for the spell's printed
+/// mana cost. Unlike Sneak, it grants no special timing permission and does not
+/// put permanents onto the battlefield attacking.
+pub fn handle_cast_spell_as_web_slinging(
+    state: &mut GameState,
+    player: PlayerId,
+    hand_object: ObjectId,
+    card_id: CardId,
+    creature_to_return: ObjectId,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let obj = state.objects.get(&hand_object).ok_or_else(|| {
+        EngineError::InvalidAction(format!("Object {hand_object:?} does not exist"))
+    })?;
+    if obj.card_id != card_id {
+        return Err(EngineError::InvalidAction(format!(
+            "Object {hand_object:?} does not match card_id {card_id:?}",
+        )));
+    }
+    if obj.zone != Zone::Hand || obj.owner != player {
+        return Err(EngineError::ActionNotAllowed(
+            "Web-slinging requires a hand card owned by the caster".to_string(),
+        ));
+    }
+
+    if super::keywords::effective_web_slinging_cost(state, hand_object).is_none() {
+        return Err(EngineError::ActionNotAllowed(
+            "Card has no Web-slinging permission".to_string(),
+        ));
+    }
+
+    let returned_obj = state
+        .objects
+        .get(&creature_to_return)
+        .ok_or_else(|| EngineError::InvalidAction("Creature to return not found".to_string()))?;
+    if returned_obj.zone != Zone::Battlefield
+        || returned_obj.controller != player
+        || !returned_obj.tapped
+        || !returned_obj
+            .card_types
+            .core_types
+            .contains(&crate::types::card_type::CoreType::Creature)
+    {
+        return Err(EngineError::ActionNotAllowed(
+            "Web-slinging requires a tapped creature you control".to_string(),
+        ));
+    }
+
+    let variant = CastingVariant::WebSlinging {
+        returned_creature: creature_to_return,
+    };
+    let prepared =
+        prepare_spell_cast_with_variant_override(state, player, hand_object, Some(variant))?;
+    continue_with_prepared(state, player, prepared, events)
+}
+
+/// CR 702.188a + CR 601.2: Returns whether the player can cast this hand card
+/// via Web-slinging with the specified tapped creature as the return cost.
+///
+/// This deliberately routes through the real casting entry point on a cloned
+/// state so legal-action generation and action execution share timing, target,
+/// restriction, and auto-mana-payment behavior.
+pub fn can_cast_spell_as_web_slinging_now(
+    state: &GameState,
+    player: PlayerId,
+    hand_object: ObjectId,
+    creature_to_return: ObjectId,
+) -> bool {
+    let Some(card_id) = state.objects.get(&hand_object).map(|obj| obj.card_id) else {
+        return false;
+    };
+    let mut simulated = state.clone();
+    let mut events = Vec::new();
+    handle_cast_spell_as_web_slinging(
+        &mut simulated,
+        player,
+        hand_object,
+        card_id,
+        creature_to_return,
+        &mut events,
+    )
+    .is_ok()
 }
 
 /// CR 601.2b + CR 118.9a: Cast a spell from hand for free via a

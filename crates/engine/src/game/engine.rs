@@ -981,6 +981,7 @@ fn apply_action(
             | GameAction::CastSpell { .. }
             | GameAction::Foretell { .. }
             | GameAction::CastSpellAsSneak { .. }
+            | GameAction::CastSpellAsWebSlinging { .. }
             | GameAction::CastSpellForFree { .. }
             | GameAction::CastSpellAsMiracle { .. }
             | GameAction::CancelCast
@@ -2330,6 +2331,26 @@ fn apply_action(
         ) => {
             let p = *player;
             super::casting::handle_cast_spell_as_sneak(
+                state,
+                p,
+                hand_object,
+                card_id,
+                creature_to_return,
+                &mut events,
+            )?
+        }
+        // CR 702.188a: Web-slinging — cast a spell from hand by paying the
+        // Web-slinging cost and returning a tapped creature you control.
+        (
+            WaitingFor::Priority { player },
+            GameAction::CastSpellAsWebSlinging {
+                hand_object,
+                card_id,
+                creature_to_return,
+            },
+        ) => {
+            let p = *player;
+            super::casting::handle_cast_spell_as_web_slinging(
                 state,
                 p,
                 hand_object,

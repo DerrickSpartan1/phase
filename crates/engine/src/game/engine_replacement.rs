@@ -546,6 +546,15 @@ fn apply_pending_spell_resolution(
         }
     }
 
+    if let CastingVariant::WebSlinging { .. } = ctx.casting_variant {
+        if let Some(obj) = state.objects.get_mut(&ctx.object_id) {
+            obj.cast_variant_paid = Some((
+                crate::types::ability::CastVariantPaid::WebSlinging,
+                state.turn_number,
+            ));
+        }
+    }
+
     // CR 702.74a: Evoke-cast permanent gets the `cast_variant_paid` tag so the
     // synthesized intervening-if ETB sacrifice trigger fires once it enters.
     if ctx.casting_variant == CastingVariant::Evoke {
