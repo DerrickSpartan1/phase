@@ -7,13 +7,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ActivationRestriction,
-    AdditionalCost, CastingRestriction, Comparator, ContinuousModification, Effect, ManaProduction,
-    ModalChoice, QuantityExpr, ReplacementDefinition, SolveCondition, SpellCastingOption,
-    StaticCondition, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypedFilter,
+    AdditionalCost, CastingRestriction, Comparator, ContinuousModification,
+    DelayedTriggerCondition, Effect, ManaProduction, ModalChoice, QuantityExpr,
+    ReplacementDefinition, SolveCondition, SpellCastingOption, StaticCondition, StaticDefinition,
+    TargetFilter, TriggerCondition, TriggerDefinition, TypedFilter,
 };
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
 use crate::types::mana::ManaCost;
+use crate::types::phase::Phase;
+use crate::types::player::PlayerId;
 use crate::types::triggers::TriggerMode;
 use crate::types::zones::Zone;
 
@@ -35,7 +37,9 @@ use super::oracle_classifier::{
 use super::oracle_condition::parse_restriction_condition;
 use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
 use super::oracle_dispatch::{dispatch_line_nom, make_unimplemented_with_effect};
-use super::oracle_effect::{lower_effect_chain_ir, parse_effect_chain_with_context};
+use super::oracle_effect::{
+    lower_effect_chain_ir, parse_effect_chain, parse_effect_chain_with_context,
+};
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
 use super::oracle_ir::doc::{OracleDocIr, OracleItemIr};
@@ -176,6 +180,58 @@ pub fn oracle_text_allows_commander(oracle_text: &str, card_name: &str) -> bool 
     let normalized = normalize_card_name_refs(oracle_text, card_name);
     normalized.lines().any(is_commander_permission_sentence)
         || scan_contains(&oracle_text.to_ascii_lowercase(), "can be your commander")
+}
+
+fn try_parse_opening_hand_reveal_delayed_trigger(
+    line: &str,
+    lower: &str,
+) -> Option<AbilityDefinition> {
+    let (condition, rest) = nom_on_lower(line, lower, |input| {
+        let (input, _) =
+            tag("you may reveal this card from your opening hand. if you do, ").parse(input)?;
+        let (input, condition) = alt((
+            value(
+                DelayedTriggerCondition::AtNextPhaseForPlayer {
+                    phase: Phase::Upkeep,
+                    player: PlayerId(0),
+                },
+                tag("at the beginning of your first upkeep, "),
+            ),
+            value(
+                DelayedTriggerCondition::AtNextPhase {
+                    phase: Phase::Upkeep,
+                },
+                tag("at the beginning of the first upkeep, "),
+            ),
+        ))
+        .parse(input)?;
+        Ok((input, condition))
+    })?;
+
+    let effect = parse_effect_chain(rest, AbilityKind::Spell);
+    if has_unimplemented(&effect) {
+        return None;
+    }
+
+    let delayed = AbilityDefinition::new(
+        AbilityKind::Spell,
+        Effect::CreateDelayedTrigger {
+            condition,
+            effect: Box::new(effect),
+            uses_tracked_set: false,
+        },
+    );
+
+    let mut def = AbilityDefinition::new(
+        AbilityKind::BeginGame,
+        Effect::Reveal {
+            target: TargetFilter::SelfRef,
+        },
+    )
+    .sub_ability(delayed)
+    .description(line.to_string());
+    def.optional = true;
+    Some(def)
 }
 
 fn parsed_result_recently_granted_flashback(result: &ParsedAbilities) -> bool {
@@ -1718,6 +1774,12 @@ pub(crate) fn parse_oracle_ir(
                 i += 1;
                 continue;
             }
+        }
+
+        if let Some(def) = try_parse_opening_hand_reveal_delayed_trigger(&line, &lower) {
+            result.abilities.push(def);
+            i += 1;
+            continue;
         }
 
         // Priority 8c: "If this card is in your opening hand, you may begin the game with it on the battlefield"
@@ -3892,6 +3954,66 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn devourer_of_destiny_opening_hand_reveal_creates_first_upkeep_dig() {
+        let r = parse(
+            "You may reveal this card from your opening hand. If you do, at the beginning of your first upkeep, look at the top four cards of your library. You may put one of those cards back on top of your library. Exile the rest.\nWhen you cast this spell, exile target permanent that's one or more colors.",
+            "Devourer of Destiny",
+            &[],
+            &["Creature"],
+            &["Eldrazi"],
+        );
+
+        assert_eq!(r.abilities.len(), 1);
+        let begin_game = &r.abilities[0];
+        assert_eq!(begin_game.kind, AbilityKind::BeginGame);
+        assert!(begin_game.optional);
+        assert!(matches!(
+            &*begin_game.effect,
+            Effect::Reveal {
+                target: TargetFilter::SelfRef
+            }
+        ));
+
+        let delayed = begin_game
+            .sub_ability
+            .as_deref()
+            .expect("reveal should create a delayed first-upkeep trigger");
+        let Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } = &*delayed.effect
+        else {
+            panic!("expected CreateDelayedTrigger, got {:?}", delayed.effect);
+        };
+        assert_eq!(
+            condition,
+            &DelayedTriggerCondition::AtNextPhaseForPlayer {
+                phase: Phase::Upkeep,
+                player: PlayerId(0),
+            }
+        );
+
+        let Effect::Dig {
+            count,
+            destination,
+            keep_count,
+            up_to,
+            filter,
+            rest_destination,
+            reveal,
+        } = &*effect.effect
+        else {
+            panic!("expected Dig payload, got {:?}", effect.effect);
+        };
+        assert_eq!(*count, QuantityExpr::Fixed { value: 4 });
+        assert_eq!(*destination, Some(Zone::Library));
+        assert_eq!(*keep_count, Some(1));
+        assert!(*up_to);
+        assert!(matches!(filter, TargetFilter::Any));
+        assert_eq!(*rest_destination, Some(Zone::Exile));
+        assert!(!reveal);
     }
 
     #[test]

@@ -88,6 +88,33 @@ fn parse_put_all_back_in_any_order(lower: &str) -> bool {
         .is_ok()
 }
 
+fn parse_put_one_dig_card_on_top(lower: &str) -> bool {
+    (
+        alt((
+            tag::<_, _, VerboseError<&str>>("you may put "),
+            tag("may put "),
+            tag("put "),
+        )),
+        alt((tag("one of those cards"), tag("one of them"))),
+        tag(" back "),
+        alt((tag("on top of your library"), tag("on top"))),
+        opt(tag(".")),
+        eof,
+    )
+        .parse(lower.trim())
+        .is_ok()
+}
+
+fn parse_exile_rest_after_dig(lower: &str) -> bool {
+    (
+        tag::<_, _, VerboseError<&str>>("exile the rest"),
+        opt(tag(".")),
+        eof,
+    )
+        .parse(lower.trim())
+        .is_ok()
+}
+
 pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
     let mut chunks = Vec::new();
     let mut current = String::new();
@@ -1347,6 +1374,18 @@ pub(super) fn parse_followup_continuation_ast(
                 rest_destination: None,
             })
         }
+        // "You may put one of those cards back on top of your library" after
+        // Dig — keep up to one looked-at card on top, leaving the remainder
+        // for a following rest-placement clause.
+        Effect::Dig { .. } if parse_put_one_dig_card_on_top(&lower) => {
+            Some(ContinuationAst::DigFromAmong {
+                count: 1,
+                up_to: true,
+                filter: TargetFilter::Any,
+                destination: Some(Zone::Library),
+                rest_destination: None,
+            })
+        }
         // "put them back in any order" after Dig means all looked-at cards
         // stay in the library and the player's submitted order becomes the
         // new top order. Leave keep_count unset so runtime resolves dynamic N.
@@ -1354,6 +1393,14 @@ pub(super) fn parse_followup_continuation_ast(
             Some(ContinuationAst::PutRest {
                 destination: Zone::Library,
                 reorder_all: true,
+            })
+        }
+        // "Exile the rest" after Dig — sets rest_destination on the preceding
+        // looked-at pile while preserving any prior kept-card destination.
+        Effect::Dig { .. } if parse_exile_rest_after_dig(&lower) => {
+            Some(ContinuationAst::PutRest {
+                destination: Zone::Exile,
+                reorder_all: false,
             })
         }
         // "put the rest on the bottom" / "put those cards into your graveyard"
