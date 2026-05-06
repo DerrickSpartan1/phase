@@ -210,4 +210,93 @@ describe("PermanentCard attachments", () => {
       data: { target: { Object: 2 } },
     });
   });
+
+  it("opens the ability picker when a land has mana actions plus a non-mana activated ability", () => {
+    const kessig = makeObject({
+      id: 39,
+      name: "Kessig Wolf Run",
+      power: null,
+      toughness: null,
+      base_power: null,
+      base_toughness: null,
+      card_types: {
+        supertypes: [],
+        core_types: ["Land"],
+        subtypes: ["Plains", "Island", "Swamp", "Mountain", "Forest"],
+      },
+      mana_cost: { type: "NoCost" },
+      color: [],
+      base_color: [],
+      abilities: [
+        {
+          kind: "Activated",
+          cost: { type: "Tap" },
+          description: "{T}: Add {C}.",
+          effect: {
+            type: "Mana",
+            produced: { type: "Colorless" },
+          },
+        },
+        {
+          kind: "Activated",
+          cost: {
+            type: "Composite",
+            costs: [
+              {
+                type: "Mana",
+                cost: { type: "Cost", shards: ["X", "Red", "Green"], generic: 0 },
+              },
+              { type: "Tap" },
+            ],
+          },
+          description: "{X}{R}{G}, {T}: Target creature gets +X/+0 and gains trample until end of turn.",
+          effect: { type: "GenericEffect" },
+        },
+      ] as unknown as GameObject["abilities"],
+    });
+
+    const gameState = {
+      ...makeState(),
+      objects: { 39: kessig },
+      battlefield: [39],
+    } as unknown as GameState;
+    const manaAction = { type: "TapLandForMana", data: { object_id: 39 } } as const;
+    const abilityAction = {
+      type: "ActivateAbility",
+      data: { source_id: 39, ability_index: 1 },
+    } as const;
+
+    useGameStore.setState({
+      gameState,
+      waitingFor: gameState.waiting_for,
+      legalActions: [manaAction, abilityAction],
+      legalActionsByObject: { 39: [manaAction, abilityAction] },
+      spellCosts: {},
+    });
+
+    const { container } = render(
+      <BoardInteractionContext.Provider
+        value={{
+          activatableObjectIds: new Set([39]),
+          committedAttackerIds: new Set(),
+          incomingAttackerCounts: new Map(),
+          manaTappableObjectIds: new Set([39]),
+          selectableManaCostCreatureIds: new Set(),
+          undoableTapObjectIds: new Set(),
+          validAttackerIds: new Set(),
+          validTargetObjectIds: new Set(),
+        }}
+      >
+        <PermanentCard objectId={39} />
+      </BoardInteractionContext.Provider>,
+    );
+
+    fireEvent.click(container.querySelector('[data-object-id="39"]') as HTMLElement);
+
+    expect(dispatchAction).not.toHaveBeenCalled();
+    expect(useUiStore.getState().pendingAbilityChoice).toEqual({
+      objectId: 39,
+      actions: [abilityAction, manaAction],
+    });
+  });
 });
