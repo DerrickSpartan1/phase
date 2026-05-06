@@ -5627,13 +5627,14 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter) {
 
 /// CR 109.4: Map a player-reference `TargetFilter` to the `ControllerRef`
 /// variant a typed object filter should adopt to match "permanents that player
-/// controls". Only the two anaphoric variants used in trigger effects
-/// (`TriggeringPlayer`, `TargetPlayer`) produce a result — caster-scoped
-/// filters (`Controller`, `You`) should not rewrite an object filter because
-/// they reference the ability controller, not an acting player target.
+/// controls". `TriggeringPlayer` is event-contextual and must not create a
+/// target slot; explicit targeted subjects still use `TargetPlayer` in
+/// `inject_subject_target` below. Caster-scoped filters (`Controller`, `You`)
+/// should not rewrite an object filter because they reference the ability
+/// controller, not an acting player target.
 fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> {
     match filter {
-        TargetFilter::TriggeringPlayer => Some(ControllerRef::TargetPlayer),
+        TargetFilter::TriggeringPlayer => Some(ControllerRef::ScopedPlayer),
         TargetFilter::Typed(tf)
             if tf.type_filters.is_empty()
                 && tf.controller.is_some()

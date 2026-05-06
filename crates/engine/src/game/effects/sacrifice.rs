@@ -19,22 +19,21 @@ use crate::types::zones::Zone;
 ///   sacrifice. Per CR 701.16a, each affected player chooses their own
 ///   permanent; this resolver handles the single-opponent two-player case by
 ///   routing both filter scope and chooser to that opponent.
+/// - `ScopedPlayer`: an event-context player such as the active player for
+///   upkeep triggers.
 /// - `TargetPlayer`: the first `TargetRef::Player` in `ability.targets` —
-///   matches the "target player sacrifices" / "that player sacrifices" pattern
-///   used by Korvold, Ruthless Winnower, and similar cards.
+///   matches explicit "target player sacrifices" patterns.
 fn resolve_sacrifice_scope(
     state: &GameState,
     ability: &ResolvedAbility,
     filter: &TargetFilter,
 ) -> Vec<PlayerId> {
-    let scope = match filter {
-        TargetFilter::Typed(t) => t.controller.clone(),
-        _ => None,
-    };
+    let scope = sacrifice_controller_scope(filter);
     match scope {
         None | Some(ControllerRef::You) => vec![ability.controller],
         Some(ControllerRef::ScopedPlayer) => {
-            vec![ability.scoped_player.unwrap_or(ability.controller)]
+            let scoped = trigger_event_scoped_player(state, ability);
+            vec![scoped.unwrap_or(ability.controller)]
         }
         Some(ControllerRef::Opponent) => state
             .players
@@ -59,6 +58,22 @@ fn resolve_sacrifice_scope(
     }
 }
 
+fn sacrifice_controller_scope(filter: &TargetFilter) -> Option<ControllerRef> {
+    match filter {
+        TargetFilter::Typed(t) => t.controller.clone(),
+        _ => None,
+    }
+}
+
+fn trigger_event_scoped_player(state: &GameState, ability: &ResolvedAbility) -> Option<PlayerId> {
+    ability.scoped_player.or_else(|| {
+        state
+            .current_trigger_event
+            .as_ref()
+            .and_then(|event| crate::game::targeting::extract_player_from_event(event, state))
+    })
+}
+
 /// CR 701.21a: To sacrifice a permanent, its controller moves it to its owner's graveyard.
 pub fn resolve(
     state: &mut GameState,
@@ -81,6 +96,24 @@ pub fn resolve(
             (target, inner, up_to)
         }
         _ => (&TargetFilter::Any, &default_count, false),
+    };
+    let scoped_ability;
+    let ability = if matches!(
+        sacrifice_controller_scope(filter),
+        Some(ControllerRef::ScopedPlayer)
+    ) {
+        if let Some(player) = trigger_event_scoped_player(state, ability) {
+            scoped_ability = {
+                let mut scoped = ability.clone();
+                scoped.set_scoped_player_recursive(player);
+                scoped
+            };
+            &scoped_ability
+        } else {
+            ability
+        }
+    } else {
+        ability
     };
     let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as usize;
 
@@ -497,6 +530,49 @@ mod tests {
             WaitingFor::EffectZoneChoice { player, cards, .. } => {
                 assert_eq!(*player, PlayerId(1));
                 assert!(cards.contains(&tp_a) && cards.contains(&tp_b));
+                assert_eq!(cards.len(), 2);
+            }
+            other => panic!("expected EffectZoneChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scoped_player_scope_uses_trigger_event_player() {
+        let mut state = GameState::new_two_player(42);
+        state.active_player = PlayerId(1);
+        state.current_trigger_event = Some(GameEvent::PhaseChanged {
+            phase: crate::types::phase::Phase::Upkeep,
+        });
+        let _own = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Mine".to_string(),
+            Zone::Battlefield,
+        );
+        let scoped_a = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "ScopedA".to_string(),
+            Zone::Battlefield,
+        );
+        let scoped_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "ScopedB".to_string(),
+            Zone::Battlefield,
+        );
+        let ability = make_scoped_sacrifice_ability(ControllerRef::ScopedPlayer, vec![]);
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(1));
+                assert!(cards.contains(&scoped_a) && cards.contains(&scoped_b));
                 assert_eq!(cards.len(), 2);
             }
             other => panic!("expected EffectZoneChoice, got {other:?}"),

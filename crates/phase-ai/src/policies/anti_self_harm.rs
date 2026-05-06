@@ -2411,6 +2411,7 @@ mod tests {
             modal: None,
             mode_abilities: vec![],
             description: None,
+            may_trigger_origin: None,
         });
 
         let config = AiConfig::default();
@@ -2514,6 +2515,7 @@ mod tests {
             modal: None,
             mode_abilities: vec![],
             description: None,
+            may_trigger_origin: None,
         });
 
         let config = AiConfig::default();

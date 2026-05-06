@@ -2443,8 +2443,7 @@ pub(crate) fn parse_trigger_condition(
 /// CR 109.4 + CR 603.7c: Returns `true` when any filter inside the execute
 /// ability's effect chain references `ControllerRef::TargetPlayer`. Walks
 /// sub-abilities so triggers like Dokuchi Silencer (outer Discard, inner
-/// Destroy targeting "that player controls") and Ruthless Winnower
-/// (Sacrifice with `TargetPlayer`-scoped filter) both trigger the companion
+/// Destroy targeting "that player controls") trigger the companion
 /// `valid_target = Player` surface in `parse_trigger_line`.
 fn execute_references_target_player(effect: &crate::types::ability::Effect) -> bool {
     fn filter_references(filter: &TargetFilter) -> bool {
@@ -9581,6 +9580,27 @@ mod tests {
         assert_eq!(def.mode, TriggerMode::Phase);
         assert_eq!(def.phase, Some(Phase::Upkeep));
         assert_eq!(def.constraint, None);
+    }
+
+    #[test]
+    fn phase_trigger_that_player_sacrifices_uses_scoped_player_not_target_player() {
+        let def = parse_trigger_line(
+            "At the beginning of each player's upkeep, that player sacrifices a non-Elf creature of their choice.",
+            "Ruthless Winnower",
+        );
+
+        assert_eq!(def.mode, TriggerMode::Phase);
+        assert_eq!(def.phase, Some(Phase::Upkeep));
+        assert_eq!(def.valid_target, None);
+        match def.execute.as_ref().map(|ability| ability.effect.as_ref()) {
+            Some(Effect::Sacrifice { target, .. }) => match target {
+                TargetFilter::Typed(filter) => {
+                    assert_eq!(filter.controller, Some(ControllerRef::ScopedPlayer));
+                }
+                other => panic!("expected typed sacrifice filter, got {other:?}"),
+            },
+            other => panic!("expected Sacrifice effect, got {other:?}"),
+        }
     }
 
     #[test]
