@@ -1442,6 +1442,7 @@ fn try_parse_choose_one_of_inline(
     ctx: &mut ParseContext,
 ) -> Option<ParsedEffectClause> {
     let mut chooser = PlayerFilter::Controller;
+    let mut scoped_choice_player = false;
     let mut tp = tp;
     if let Some((prefix_chooser, rest_original)) = nom_on_lower(tp.original, tp.lower, |i| {
         alt((
@@ -1464,6 +1465,7 @@ fn try_parse_choose_one_of_inline(
         let consumed = tp.original.len() - rest_original.len();
         tp = TextPair::new(rest_original, &tp.lower[consumed..]);
         chooser = prefix_chooser;
+        scoped_choice_player = true;
     }
 
     // CR 115.1: bail on target phrases — "target creature or player" is a
@@ -1547,8 +1549,18 @@ fn try_parse_choose_one_of_inline(
     // gaps from a malformed branch (e.g., "return a red" left half from
     // splitting "return a red or green creature" at the wrong " or ").
     let diagnostics_snapshot = ctx.diagnostics.len();
-    let left_clause = parse_effect_clause(left_orig, ctx);
-    let right_clause = parse_effect_clause(right_orig, ctx);
+    let left_clause;
+    let right_clause;
+    if scoped_choice_player {
+        let mut branch_ctx = ctx.clone();
+        branch_ctx.relative_player_scope = Some(ControllerRef::ScopedPlayer);
+        left_clause = parse_effect_clause(left_orig, &mut branch_ctx);
+        right_clause = parse_effect_clause(right_orig, &mut branch_ctx);
+        ctx.diagnostics = branch_ctx.diagnostics;
+    } else {
+        left_clause = parse_effect_clause(left_orig, ctx);
+        right_clause = parse_effect_clause(right_orig, ctx);
+    }
 
     // Reject unless BOTH branches produce non-Unimplemented effects. This
     // prevents false positives on noun-phrase disjunctions and "and/or"
@@ -1593,6 +1605,25 @@ fn ability_definition_from_clause(
     def.multi_target = clause.multi_target;
     def.distribute = clause.distribute;
     def
+}
+
+fn parse_event_context_ref_with_ctx<'a>(
+    text: &'a str,
+    ctx: &ParseContext,
+) -> Option<(TargetFilter, &'a str)> {
+    let (target, rest) = parse_event_context_ref(text)?;
+    let target = if matches!(
+        (&target, ctx.relative_player_scope.as_ref()),
+        (
+            TargetFilter::TriggeringPlayer,
+            Some(ControllerRef::ScopedPlayer)
+        )
+    ) {
+        TargetFilter::ScopedPlayer
+    } else {
+        target
+    };
+    Some((target, rest))
 }
 
 fn try_parse_no_max_hand_size_effect(tp: TextPair<'_>) -> Option<Effect> {
@@ -5634,6 +5665,7 @@ fn apply_anchor_subject(effect: &mut Effect, anchor: &TargetFilter) {
 /// controller, not an acting player target.
 fn player_filter_as_controller_ref(filter: &TargetFilter) -> Option<ControllerRef> {
     match filter {
+        TargetFilter::ScopedPlayer => Some(ControllerRef::ScopedPlayer),
         TargetFilter::TriggeringPlayer => Some(ControllerRef::ScopedPlayer),
         TargetFilter::Typed(tf)
             if tf.type_filters.is_empty()
@@ -5729,6 +5761,7 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
     match filter {
         TargetFilter::Player
         | TargetFilter::Controller
+        | TargetFilter::ScopedPlayer
         | TargetFilter::TriggeringSpellController
         | TargetFilter::TriggeringSpellOwner
         | TargetFilter::TriggeringPlayer
@@ -10531,7 +10564,9 @@ fn try_parse_damage_with_remainder<'a>(
                         },
                         "",
                     ));
-                } else if let Some((target, ecr_rem)) = parse_event_context_ref(target_phrase) {
+                } else if let Some((target, ecr_rem)) =
+                    parse_event_context_ref_with_ctx(target_phrase, ctx)
+                {
                     let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
                     #[cfg(debug_assertions)]
                     assert_no_compound_remainder(ecr_rem, target_phrase);
@@ -10651,7 +10686,7 @@ fn try_parse_damage_with_remainder<'a>(
     }
 
     // CR 608.2k: Check for event-context references before standard target parsing.
-    if let Some((target, ecr_rem)) = parse_event_context_ref(after_to) {
+    if let Some((target, ecr_rem)) = parse_event_context_ref_with_ctx(after_to, ctx) {
         let (target, ecr_rem) = refine_damage_target_remainder(target, ecr_rem);
         return Some((
             Effect::DealDamage {
@@ -22478,7 +22513,13 @@ mod tests {
                 assert_eq!(*chooser, PlayerFilter::Opponent);
                 assert_eq!(branches.len(), 2);
                 assert!(matches!(&*branches[0].effect, Effect::Draw { .. }));
-                assert!(matches!(&*branches[1].effect, Effect::Discard { .. }));
+                assert!(matches!(
+                    &*branches[1].effect,
+                    Effect::Discard {
+                        target: TargetFilter::ScopedPlayer,
+                        ..
+                    }
+                ));
             }
             other => panic!("expected ChooseOneOf, got {other:?}"),
         }
@@ -22496,6 +22537,63 @@ mod tests {
                 assert_eq!(*chooser, PlayerFilter::DefendingPlayer);
                 assert_eq!(branches.len(), 2);
             }
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn villainous_choice_sacrifice_scopes_that_player_to_faced_player() {
+        let ability = parse_effect_chain(
+            "Each opponent faces a villainous choice — That player sacrifices a creature of their choice, or you create a 3/3 black Dalek artifact creature token with menace.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { branches, .. } => match &*branches[0].effect {
+                Effect::Sacrifice { target, .. } => match target {
+                    TargetFilter::Typed(filter) => {
+                        assert_eq!(filter.controller, Some(ControllerRef::ScopedPlayer));
+                    }
+                    other => panic!("expected typed sacrifice filter, got {other:?}"),
+                },
+                other => panic!("expected Sacrifice branch, got {other:?}"),
+            },
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn villainous_choice_they_life_loss_scopes_to_faced_player() {
+        let ability = parse_effect_chain(
+            "Each opponent faces a villainous choice — They lose 4 life, or you create a token that's a copy of that card.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { branches, .. } => match &*branches[0].effect {
+                Effect::LoseLife { target, .. } => {
+                    assert_eq!(target.as_ref(), Some(&TargetFilter::ScopedPlayer));
+                }
+                other => panic!("expected LoseLife branch, got {other:?}"),
+            },
+            other => panic!("expected ChooseOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn villainous_choice_damage_scopes_that_player_to_faced_player() {
+        let ability = parse_effect_chain(
+            "Each opponent faces a villainous choice — ~ deals 3 damage to that player, or you draw a card.",
+            AbilityKind::Spell,
+        );
+
+        match &*ability.effect {
+            Effect::ChooseOneOf { branches, .. } => match &*branches[0].effect {
+                Effect::DealDamage { target, .. } => {
+                    assert_eq!(*target, TargetFilter::ScopedPlayer);
+                }
+                other => panic!("expected DealDamage branch, got {other:?}"),
+            },
             other => panic!("expected ChooseOneOf, got {other:?}"),
         }
     }

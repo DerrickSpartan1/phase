@@ -654,7 +654,10 @@ pub(super) fn parse_subject_application(
             return None;
         };
         if matches!(ctx_filter, TargetFilter::TriggeringPlayer) {
-            let affected = if ctx.subject.is_some() {
+            let affected = if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer))
+            {
+                TargetFilter::ScopedPlayer
+            } else if ctx.subject.is_some() {
                 ctx_filter
             } else {
                 TargetFilter::Player
@@ -901,6 +904,9 @@ pub(super) fn parse_subject_application(
 /// to the triggering source. Without trigger context, "they" is an anaphoric
 /// reference to previously mentioned objects (`ParentTarget`).
 fn resolve_they_pronoun(ctx: &mut ParseContext) -> TargetFilter {
+    if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
+        return TargetFilter::ScopedPlayer;
+    }
     match &ctx.subject {
         // Player-type trigger subject: no type_filters, has controller ref
         Some(TargetFilter::Typed(tf)) if tf.type_filters.is_empty() && tf.controller.is_some() => {

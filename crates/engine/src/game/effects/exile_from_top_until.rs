@@ -31,10 +31,11 @@ pub fn resolve(
         _ => return Err(EffectError::MissingParam("filter".to_string())),
     };
 
+    let acting_player = ability.scoped_player.unwrap_or(ability.controller);
     let player = state
         .players
         .iter()
-        .find(|p| p.id == ability.controller)
+        .find(|p| p.id == acting_player)
         .ok_or(EffectError::PlayerNotFound)?;
 
     // Snapshot library (top = index 0) to iterate without borrow conflicts.
@@ -185,6 +186,46 @@ mod tests {
         assert!(linked.contains(&land2));
         assert!(linked.contains(&hit));
         assert!(!linked.contains(&unreached));
+    }
+
+    #[test]
+    fn scoped_player_exiles_from_faced_players_library() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(100),
+            PlayerId(0),
+            "Ensnared by the Mara".to_string(),
+            Zone::Battlefield,
+        );
+
+        let controller_hit = add_library_card(&mut state, PlayerId(0), "Controller Bear", false);
+        state.players[0].library = crate::im::vector![controller_hit];
+
+        let faced_land = add_library_card(&mut state, PlayerId(1), "Faced Forest", true);
+        let faced_hit = add_library_card(&mut state, PlayerId(1), "Faced Bear", false);
+        state.players[1].library = crate::im::vector![faced_land, faced_hit];
+
+        let mut ability = ResolvedAbility::new(
+            Effect::ExileFromTopUntil {
+                filter: nonland_filter(),
+            },
+            vec![],
+            source,
+            PlayerId(0),
+        );
+        ability.set_scoped_player_recursive(PlayerId(1));
+
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects.get(&controller_hit).unwrap().zone,
+            Zone::Library,
+            "controller library must not be used for a faced-player branch"
+        );
+        assert_eq!(state.objects.get(&faced_land).unwrap().zone, Zone::Exile);
+        assert_eq!(state.objects.get(&faced_hit).unwrap().zone, Zone::Exile);
     }
 
     /// CR 608.2 + CR 701.57a + CR 702.85a: Etali-shape — `player_scope: All`

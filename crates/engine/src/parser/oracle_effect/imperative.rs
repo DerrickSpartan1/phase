@@ -3222,6 +3222,9 @@ pub(super) fn parse_exile_ast(
 }
 
 fn that_player_library_filter(ctx: &ParseContext) -> TargetFilter {
+    if matches!(ctx.relative_player_scope, Some(ControllerRef::ScopedPlayer)) {
+        return TargetFilter::ScopedPlayer;
+    }
     if matches!(ctx.relative_player_scope, Some(ControllerRef::TargetPlayer)) {
         return TargetFilter::TriggeringPlayer;
     }

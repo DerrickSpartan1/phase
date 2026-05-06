@@ -135,6 +135,7 @@ pub(crate) fn resolve_branch(
     let mut resolved = build_resolved_from_def(branch, source_id, controller);
     resolved.context = context;
     resolved.targets = parent_targets;
+    resolved.set_scoped_player_recursive(player);
     if !resolved
         .targets
         .iter()

@@ -10957,6 +10957,80 @@ mod phase_trigger_regression_tests {
     }
 
     #[test]
+    fn choose_one_of_scoped_player_sacrifice_prompts_faced_opponent() {
+        let mut state = GameState::new_two_player(42);
+        state.turn_number = 2;
+        state.phase = Phase::PreCombatMain;
+        state.active_player = PlayerId(0);
+        state.priority_player = PlayerId(0);
+        state.waiting_for = WaitingFor::Priority {
+            player: PlayerId(0),
+        };
+        let source_id = ObjectId(100);
+        let own_creature = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Controller Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_creature = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let opp_creature_b = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Second Opponent Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [own_creature, opp_creature, opp_creature_b] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Creature);
+        }
+        let sacrifice_branch = AbilityDefinition::new(
+            AbilityKind::Spell,
+            Effect::Sacrifice {
+                target: TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::ScopedPlayer),
+                ),
+                count: QuantityExpr::Fixed { value: 1 },
+            },
+        );
+        let ability = ResolvedAbility::new(
+            Effect::ChooseOneOf {
+                chooser: PlayerFilter::Opponent,
+                branches: vec![sacrifice_branch, draw_ability(1)],
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+        apply_as_current(&mut state, GameAction::ChooseBranch { index: 0 }).unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::EffectZoneChoice { player, cards, .. } => {
+                assert_eq!(*player, PlayerId(1));
+                assert_eq!(cards, &vec![opp_creature, opp_creature_b]);
+                assert!(!cards.contains(&own_creature));
+            }
+            other => panic!("expected EffectZoneChoice for faced opponent, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn player_scope_all_uses_apnap_order_and_resumes_remaining_players() {
         let mut state = setup_game_at_main_phase();
         state.active_player = PlayerId(1);
