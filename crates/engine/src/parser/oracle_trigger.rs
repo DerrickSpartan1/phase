@@ -26,10 +26,10 @@ use super::oracle_util::{
 };
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    AbilityKind, AttachmentKind, CastVariantPaid, Comparator, ControllerRef, CounterTriggerFilter,
-    DamageKindFilter, FilterProp, PlayerFilter, QuantityExpr, QuantityRef, StaticCondition,
-    TargetFilter, TriggerCondition, TriggerConstraint, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessCost, UnlessPayModifier,
+    AbilityDefinition, AbilityKind, AttachmentKind, CastVariantPaid, Comparator, ControllerRef,
+    CounterTriggerFilter, DamageKindFilter, Effect, FilterProp, PlayerFilter, QuantityExpr,
+    QuantityRef, StaticCondition, TargetFilter, TriggerCondition, TriggerConstraint,
+    TriggerDefinition, TypeFilter, TypedFilter, UnlessCost, UnlessPayModifier,
 };
 use crate::types::card_type::CoreType;
 use crate::types::events::PlayerActionKind;
@@ -542,6 +542,17 @@ pub(crate) fn parse_trigger_line_with_index_ir(
                 ability.optional = true;
             }
             Some(TriggerBody::PreLowered(Box::new(ability)))
+        } else if unless_pay.is_none()
+            && scan_contains(&effect_for_parse_lower, "unless")
+            && !has_later_sentence_if(&effect_for_parse_lower)
+        {
+            Some(TriggerBody::PreLowered(Box::new(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Unimplemented {
+                    name: "Unsupported unless clause".to_string(),
+                    description: Some(effect_for_parse.clone()),
+                },
+            ))))
         } else {
             let ir = parse_effect_chain_ir(&effect_for_parse, AbilityKind::Spell, &mut effect_ctx);
             Some(TriggerBody::EffectChain(ir))
@@ -574,6 +585,14 @@ pub(crate) fn parse_trigger_line_with_index_ir(
         },
         source_text: text.to_string(),
     }
+}
+
+fn has_later_sentence_if(lower: &str) -> bool {
+    lower.split('.').skip(1).any(|sentence| {
+        tag::<_, _, OracleError<'_>>("if ")
+            .parse(sentence.trim_start())
+            .is_ok()
+    })
 }
 
 /// Lowering: assemble a `TriggerDefinition` from a `TriggerIr`.
