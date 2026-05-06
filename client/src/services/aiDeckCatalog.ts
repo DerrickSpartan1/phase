@@ -21,7 +21,7 @@ import { preconDeckEntryToParsedDeck } from "./preconDecks";
 export type AiDeckSource =
   | { type: "saved"; feedId?: string }
   | { type: "feed"; feedId: string }
-  | { type: "precon"; deckId: string; code: string };
+  | { type: "precon"; deckId: string; code: string; releaseDate?: string };
 
 export interface AiDeckCandidate {
   id: string;
@@ -145,7 +145,7 @@ async function collectPreconCandidates(
     return [{
       id: preconId(deckIdValue),
       name,
-      source: { type: "precon", deckId: deckIdValue, code: deck.code },
+      source: { type: "precon", deckId: deckIdValue, code: deck.code, releaseDate: deck.releaseDate },
       deck: preconDeckEntryToParsedDeck(deck),
     }];
   });

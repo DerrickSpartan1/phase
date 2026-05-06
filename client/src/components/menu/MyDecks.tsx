@@ -41,6 +41,7 @@ import {
 } from "./deckHelpers";
 import { BASIC_LAND_NAMES } from "../../constants/game";
 const PRECON_PREFIX = "[Pre-built] ";
+const PRECON_PAGE_SIZE = 12;
 
 /** Tags that represent a format/archetype — shown with active (green) styling. */
 const FORMAT_TAGS = new Set([
@@ -338,6 +339,7 @@ export function MyDecks({
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [compatibilityError, setCompatibilityError] = useState<string | null>(null);
   const [legalPreconCandidates, setLegalPreconCandidates] = useState<AiDeckCandidate[]>([]);
+  const [preconDisplayCount, setPreconDisplayCount] = useState(PRECON_PAGE_SIZE);
   const feedCache = useFeedCacheSnapshot();
 
   const contextualFilter = useMemo<DeckFilter | null>(() => {
@@ -361,6 +363,10 @@ export function MyDecks({
   useEffect(() => {
     setDeckNames(listSavedDeckNames());
   }, [selectedFormat]);
+
+  useEffect(() => {
+    setPreconDisplayCount(PRECON_PAGE_SIZE);
+  }, [selectedFormatForCompatibility, searchQuery]);
 
   useEffect(() => {
     if (!selectedFormatForCompatibility) {
@@ -497,13 +503,23 @@ export function MyDecks({
 
   const preconDeckNames = useMemo(() => {
     const saved = new Set(deckNames);
-    const names = Array.from(legalPreconByName.keys()).filter((name) =>
-      !saved.has(name) && !saved.has(name.slice(PRECON_PREFIX.length))
-    );
+    const names = Array.from(legalPreconByName.entries())
+      .filter(([name]) => !saved.has(name) && !saved.has(name.slice(PRECON_PREFIX.length)))
+      .sort(([, a], [, b]) => {
+        const dateCompare = (b.source.type === "precon" ? b.source.releaseDate ?? "" : "")
+          .localeCompare(a.source.type === "precon" ? a.source.releaseDate ?? "" : "");
+        return dateCompare || a.name.localeCompare(b.name);
+      })
+      .map(([name]) => name);
     if (!searchQuery) return names;
     const q = searchQuery.toLowerCase();
     return names.filter((name) => name.toLowerCase().includes(q));
   }, [deckNames, legalPreconByName, searchQuery]);
+
+  const displayedPreconDeckNames = useMemo(
+    () => preconDeckNames.slice(0, preconDisplayCount),
+    [preconDeckNames, preconDisplayCount],
+  );
 
   const { userDecks, bundledDecks } = useMemo(() => {
     const dir = sortAsc ? 1 : -1;
@@ -539,9 +555,9 @@ export function MyDecks({
     }
     return {
       userDecks: sortNames(user),
-      bundledDecks: sortNames([...bundled, ...preconDeckNames]),
+      bundledDecks: sortNames(bundled),
     };
-  }, [searchFiltered, activeSort, sortAsc, compatibilities, preconDeckNames]);
+  }, [searchFiltered, activeSort, sortAsc, compatibilities]);
 
   const noDeckSelected = mode === "select"
     ? !activeDeckName || (!searchFiltered.includes(activeDeckName) && !preconDeckNames.includes(activeDeckName))
@@ -888,6 +904,50 @@ export function MyDecks({
                   />
                 ))}
               </div>
+            </div>
+          )}
+
+          {preconDeckNames.length > 0 && (
+            <div className="rounded-[18px] border border-white/8 bg-black/10 p-3">
+              <div className="mb-3 flex items-center justify-between gap-3">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  Legal Precons
+                  <span className="ml-2 text-slate-600">{preconDeckNames.length}</span>
+                </h3>
+                <button
+                  onClick={() => setShowPrecon(true)}
+                  className="text-[11px] text-slate-500 transition-colors hover:text-slate-300"
+                >
+                  Browse All
+                </button>
+              </div>
+              <div className="grid w-full grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+                {displayedPreconDeckNames.map((deckName) => {
+                  const candidate = legalPreconByName.get(deckName);
+                  return (
+                    <DeckTile
+                      key={deckName}
+                      deckName={deckName}
+                      isActive={deckName === activeDeckName}
+                      compatibility={undefined}
+                      preconDeckOverride={candidate ? preconCandidateToDeckEntry(candidate) : undefined}
+                      onClick={() => handleTileClick(deckName)}
+                      onEdit={onEditDeck ? () => onEditDeck(deckName) : undefined}
+                    />
+                  );
+                })}
+              </div>
+              {displayedPreconDeckNames.length < preconDeckNames.length && (
+                <div className="mt-4 flex justify-center">
+                  <button
+                    type="button"
+                    onClick={() => setPreconDisplayCount((count) => count + PRECON_PAGE_SIZE)}
+                    className={menuButtonClass({ tone: "neutral", size: "sm" })}
+                  >
+                    Load More ({preconDeckNames.length - displayedPreconDeckNames.length})
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

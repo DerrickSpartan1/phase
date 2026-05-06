@@ -250,13 +250,18 @@ describe("MyDecks", () => {
     expect(onSelectDeck).not.toHaveBeenCalled();
   });
 
-  it("shows legal precons by default in format selection and saves one when selected", async () => {
+  it("shows legal precons in a newest-first load-more section and saves one when selected", async () => {
     vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({});
     vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
-      candidates: [{
-        id: "precon:secrets",
-        name: "Secrets of Strixhaven (SOS)",
-        source: { type: "precon", deckId: "secrets", code: "SOS" },
+      candidates: Array.from({ length: 13 }, (_, i) => ({
+        id: `precon:deck-${i}`,
+        name: i === 12 ? "Secrets of Strixhaven (SOS)" : `Precon ${i} (P${i})`,
+        source: {
+          type: "precon",
+          deckId: `deck-${i}`,
+          code: i === 12 ? "SOS" : `P${i}`,
+          releaseDate: `2026-01-${String(i + 1).padStart(2, "0")}`,
+        },
         deck: {
           main: [{ name: "Island", count: 99 }],
           sideboard: [],
@@ -264,7 +269,7 @@ describe("MyDecks", () => {
         },
         coveragePct: 100,
         archetype: "Control",
-      }],
+      })),
     });
     const onSelectDeck = vi.fn();
 
@@ -278,6 +283,9 @@ describe("MyDecks", () => {
     );
 
     expect(await screen.findByText("Secrets of Strixhaven (SOS)")).toBeInTheDocument();
+    expect(screen.queryByText("Precon 0 (P0)")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Load More (1)" }));
+    expect(await screen.findByText("Precon 0 (P0)")).toBeInTheDocument();
 
     await userEvent.click(screen.getByText("Secrets of Strixhaven (SOS)"));
 

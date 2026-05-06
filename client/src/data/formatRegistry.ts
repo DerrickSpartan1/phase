@@ -204,7 +204,7 @@ export const FORMAT_REGISTRY: readonly FormatMetadata[] = [
     group: "Commander",
     default_config: {
       format: "PauperCommander",
-      starting_life: 40,
+      starting_life: 30,
       min_players: 2,
       max_players: 6,
       deck_size: 100,
