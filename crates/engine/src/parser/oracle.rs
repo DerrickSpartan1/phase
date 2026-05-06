@@ -3130,7 +3130,7 @@ fn strip_x_cant_be_zero_suffix(line: &str) -> String {
 ///
 /// Create an Unimplemented fallback ability.
 pub(super) fn make_unimplemented(line: &str) -> AbilityDefinition {
-    tracing::warn!(oracle_text = line, "unimplemented ability line");
+    tracing::debug!(oracle_text = line, "unimplemented ability line");
     AbilityDefinition::new(
         AbilityKind::Spell,
         Effect::Unimplemented {

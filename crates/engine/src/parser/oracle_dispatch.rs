@@ -72,6 +72,6 @@ pub(super) fn make_unimplemented_with_effect(line: &str, effect: Effect) -> Abil
         return AbilityDefinition::new(AbilityKind::Spell, effect).description(line.to_string());
     }
 
-    tracing::warn!(oracle_text = line, "unimplemented ability line");
+    tracing::debug!(oracle_text = line, "unimplemented ability line");
     AbilityDefinition::new(AbilityKind::Spell, effect).description(line.to_string())
 }
