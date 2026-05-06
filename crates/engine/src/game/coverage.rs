@@ -2530,7 +2530,7 @@ fn normalize_oracle_pattern(text: &str) -> String {
     result.trim().to_string()
 }
 
-fn parse_warning_pattern(
+pub fn parse_warning_pattern(
     warning: &OracleDiagnostic,
     oracle_text: Option<&str>,
 ) -> (String, String) {
