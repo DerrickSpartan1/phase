@@ -9,7 +9,9 @@ use nom::Parser;
 use nom_language::error::VerboseError;
 
 use super::oracle_effect::become_copy_except::parse_except_clause;
-use super::oracle_effect::{parse_effect_chain, try_parse_named_choice};
+use super::oracle_effect::{
+    parse_effect_chain, parse_effect_chain_with_context, try_parse_named_choice,
+};
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::replacement::ReplacementIr;
 use super::oracle_nom::bridge::{nom_on_lower, split_once_on_lower};
@@ -189,6 +191,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "Prevent all/the next N damage" patterns (CR 615) ---
+    if let Some(def) = parse_damage_to_self_instead_followup(&norm_lower, &normalized, &text) {
+        return Some(def);
+    }
     if let Some(def) = parse_damage_prevention_replacement(&norm_lower, &text) {
         return Some(def);
     }
@@ -3299,6 +3304,42 @@ fn parse_damage_redirection_replacement(
     None
 }
 
+fn parse_damage_to_self_instead_followup(
+    norm_lower: &str,
+    normalized: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let total_len = norm_lower.len();
+    let ((effect_start, effect_len), rest) = nom_on_lower(normalized, norm_lower, |i| {
+        let (i, _) = tag("if damage would be dealt to ").parse(i)?;
+        let (i, _) = alt((tag("~"), tag("you"))).parse(i)?;
+        let (i, _) = tag(", ").parse(i)?;
+        let effect_start = total_len - i.len();
+        let (i, effect) = take_until::<_, _, VerboseError<&str>>(" instead").parse(i)?;
+        let (i, _) = tag(" instead").parse(i)?;
+        let (i, _) = opt(char('.')).parse(i)?;
+        Ok((i, (effect_start, effect.len())))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    let effect_text = normalized.get(effect_start..effect_start + effect_len)?;
+    let mut ctx = ParseContext {
+        subject: Some(TargetFilter::SelfRef),
+        in_replacement: true,
+        ..ParseContext::default()
+    };
+    let followup = parse_effect_chain_with_context(effect_text, AbilityKind::Spell, &mut ctx);
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::DealtDamage)
+            .prevention_shield(PreventionAmount::All)
+            .execute(followup)
+            .description(original_text.to_string()),
+    )
+}
+
 /// CR 615: Parse damage prevention replacement effects.
 /// Handles:
 /// - "prevent all combat damage that would be dealt [this turn]" (Fog, Moments Peace)
@@ -3967,6 +4008,56 @@ mod tests {
             }
             other => panic!("expected ChangeZone, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn damage_to_self_puts_that_many_counters_instead() {
+        let def = parse_replacement_line(
+            "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.",
+            "Phytohydra",
+        )
+        .expect("damage-to-self counter replacement should parse");
+
+        assert_eq!(def.event, ReplacementEvent::DealtDamage);
+        assert_eq!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+        let execute = def.execute.as_ref().expect("execute present");
+        assert!(matches!(
+            *execute.effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                target: TargetFilter::SelfRef,
+            } if counter_type == "P1P1"
+        ));
+    }
+
+    #[test]
+    fn damage_to_you_puts_that_many_counters_on_source_instead() {
+        let def = parse_replacement_line(
+            "If damage would be dealt to you, put that many delay counters on this enchantment instead.",
+            "Delaying Shield",
+        )
+        .expect("damage-to-controller counter replacement should parse");
+
+        assert_eq!(def.event, ReplacementEvent::DealtDamage);
+        let execute = def.execute.as_ref().expect("execute present");
+        assert!(matches!(
+            *execute.effect,
+            Effect::PutCounter {
+                ref counter_type,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+                target: TargetFilter::SelfRef,
+            } if counter_type == "delay"
+        ));
     }
 
     #[test]

@@ -5402,6 +5402,24 @@ mod tests {
     }
 
     #[test]
+    fn damage_to_self_counter_instead_is_replacement_not_spell_ability() {
+        let result = parse(
+            "If damage would be dealt to this creature, put that many +1/+1 counters on it instead.",
+            "Phytohydra",
+            &[],
+            &["Creature"],
+            &["Plant", "Hydra"],
+        );
+
+        assert_eq!(result.replacements.len(), 1);
+        assert!(result.abilities.is_empty());
+        assert!(result
+            .parse_warnings
+            .iter()
+            .all(|warning| warning.category_name() != "swallowed-clause"));
+    }
+
+    #[test]
     fn parse_saga_multi_chapter_line() {
         let oracle = "(Reminder text.)\nI, II — Draw a card.\nIII — Discard a card.";
         let result = parse_oracle_text(
