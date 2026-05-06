@@ -39,6 +39,11 @@ pub(super) fn handle_optional_effect_choice(
     }
 
     resume_pending_continuation_if_priority(state, events)?;
+    if state.resolving_begin_game_abilities
+        && matches!(state.waiting_for, WaitingFor::Priority { .. })
+    {
+        return Ok(super::mulligan::resume_begin_game_abilities(state, events));
+    }
     Ok(state.waiting_for.clone())
 }
 

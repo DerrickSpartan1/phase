@@ -906,6 +906,12 @@ pub struct PlayerDeckPool {
     pub current_commander: std::sync::Arc<Vec<DeckEntry>>,
 }
 
+/// CR 103.6: A beginning-of-game ability waiting to resolve after mulligans.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PendingBeginGameAbility {
+    pub ability: ResolvedAbility,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum WaitingFor {
@@ -2790,6 +2796,18 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_optional_effect: Option<Box<crate::types::ability::ResolvedAbility>>,
 
+    /// CR 103.6: Beginning-of-game abilities queued after all players finish
+    /// mulligans. Stored in reverse resolution order so `pop()` preserves APNAP
+    /// collection order without shifting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_begin_game_abilities: Vec<PendingBeginGameAbility>,
+
+    /// True while CR 103.6 beginning-of-game abilities are draining. Used by
+    /// optional-choice continuations to resume the queue instead of granting
+    /// turn priority early.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub resolving_begin_game_abilities: bool,
+
     /// The most recently chosen named value (creature type, color, etc.).
     /// Set by the NamedChoice handler, consumed by continuation effects.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3167,6 +3185,8 @@ impl GameState {
             pending_repeat_iteration: None,
             pending_choose_one_of: None,
             pending_optional_effect: None,
+            pending_begin_game_abilities: Vec::new(),
+            resolving_begin_game_abilities: false,
             last_named_choice: None,
             last_chosen_damage_source: None,
             all_creature_types: Vec::new(),
@@ -3346,6 +3366,8 @@ impl PartialEq for GameState {
             && self.pending_continuation == other.pending_continuation
             && self.pending_repeat_iteration == other.pending_repeat_iteration
             && self.pending_choose_one_of == other.pending_choose_one_of
+            && self.pending_begin_game_abilities == other.pending_begin_game_abilities
+            && self.resolving_begin_game_abilities == other.resolving_begin_game_abilities
             && self.pending_cast == other.pending_cast
             && self.last_named_choice == other.last_named_choice
             && self.last_revealed_ids == other.last_revealed_ids

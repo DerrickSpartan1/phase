@@ -436,15 +436,23 @@ mod tests {
         let (triggers, _etb, _consumed) = parse_saga_chapters(&lines, "Urza's Saga");
         assert_eq!(triggers.len(), 1);
         let exec = triggers[0].execute.as_ref().unwrap();
-        // The exact effect kind is whatever the existing parser produced — we
-        // only assert it is NOT a GenericEffect that the promoter touched.
-        if let Effect::GenericEffect { duration, .. } = &*exec.effect {
-            assert_ne!(
-                duration.as_ref(),
-                Some(&Duration::UntilHostLeavesPlay),
-                "one-shot chapter must not be promoted to a persistent grant"
-            );
-        }
+        let Effect::SearchLibrary { filter, .. } = &*exec.effect else {
+            panic!("expected SearchLibrary, got {:?}", exec.effect);
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected typed artifact filter, got {filter:?}");
+        };
+        assert!(typed
+            .type_filters
+            .contains(&crate::types::ability::TypeFilter::Artifact));
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            crate::types::ability::FilterProp::ManaCostIn { costs }
+                if costs == &vec![
+                    crate::types::mana::ManaCost::zero(),
+                    crate::types::mana::ManaCost::generic(1)
+                ]
+        )));
     }
 
     /// Detector unit test — `chapter_has_explicit_duration_suffix` must

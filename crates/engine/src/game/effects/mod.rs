@@ -1188,8 +1188,8 @@ pub fn resolve_ability_chain(
         state.player_actions_this_way.clear();
     }
 
-    // BeginGame abilities are handled at game-start setup, not during stack resolution
-    if matches!(ability.kind, AbilityKind::BeginGame) {
+    // BeginGame abilities are handled by mulligan setup, not normal stack resolution.
+    if matches!(ability.kind, AbilityKind::BeginGame) && !state.resolving_begin_game_abilities {
         return Ok(());
     }
 

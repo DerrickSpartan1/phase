@@ -1387,6 +1387,12 @@ pub enum FilterProp {
         comparator: Comparator,
         value: QuantityExpr,
     },
+    /// CR 202.1: Matches objects whose printed mana cost is exactly one of `costs`.
+    /// Distinct from `Cmc`/mana value (CR 202.3): "{0} or {1}" must not match
+    /// artifacts with colored one-mana costs like {W}.
+    ManaCostIn {
+        costs: Vec<ManaCost>,
+    },
     InZone {
         zone: Zone,
     },
@@ -8848,6 +8854,9 @@ mod tests {
             FilterProp::Cmc {
                 comparator: Comparator::GE,
                 value: QuantityExpr::Fixed { value: 4 },
+            },
+            FilterProp::ManaCostIn {
+                costs: vec![ManaCost::zero(), ManaCost::generic(1)],
             },
             FilterProp::InZone {
                 zone: Zone::Graveyard,

@@ -956,6 +956,21 @@ fn parse_search_name_reference_suffix(
     ))
 }
 
+fn parse_zero_or_one_mana_cost_suffix(
+    input: &str,
+) -> Result<(&str, FilterProp), nom::Err<VerboseError<&str>>> {
+    let (rest, _) = tag("with mana cost ").parse(input)?;
+    let (rest, first) = nom_primitives::parse_mana_cost(rest)?;
+    let (rest, _) = tag(" or ").parse(rest)?;
+    let (rest, second) = nom_primitives::parse_mana_cost(rest)?;
+    Ok((
+        rest,
+        FilterProp::ManaCostIn {
+            costs: vec![first, second],
+        },
+    ))
+}
+
 fn name_reference_filter(filter: TargetFilter) -> TargetFilter {
     owner_scope_non_battlefield_zones(add_default_battlefield_zone(filter))
 }
@@ -1216,6 +1231,12 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
+        if let Ok((rest, prop)) = parse_zero_or_one_mana_cost_suffix(remaining) {
+            suffix.properties.push(prop);
+            remaining = rest.trim_start();
+            continue;
+        }
+
         if let Ok((rest, _)) =
             tag::<_, _, VerboseError<&str>>("with a different name than each ").parse(remaining)
         {
@@ -1292,6 +1313,7 @@ mod tests {
     use super::*;
     use crate::types::ability::{Comparator, QuantityRef, SharedQuality, SharedQualityRelation};
     use crate::types::keywords::Keyword;
+    use crate::types::mana::ManaCost;
 
     #[test]
     fn search_target_opponent_library() {
@@ -1580,6 +1602,25 @@ mod tests {
                 value: QuantityExpr::Fixed { value: 9 }
             }
         )));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_zero_or_one_mana_cost() {
+        let filter = parse_search_filter(
+            "artifact card with mana cost {0} or {1}, put it onto the battlefield",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Artifact));
+        assert!(typed.properties.iter().any(|property| {
+            matches!(
+                property,
+                FilterProp::ManaCostIn { costs }
+                    if costs == &vec![ManaCost::zero(), ManaCost::generic(1)]
+            )
+        }));
     }
 
     #[test]

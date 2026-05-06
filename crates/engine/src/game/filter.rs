@@ -1380,6 +1380,10 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
                 false
             }
         },
+        // CR 202.1: Exact printed mana cost is not captured in cast-history
+        // snapshots. Fail closed rather than approximating with mana value
+        // (CR 202.3), which would conflate {W} with {1}.
+        FilterProp::ManaCostIn { .. } => false,
         // CR 107.3 + CR 202.1: The snapshot captured whether the printed mana
         // cost contained an `{X}` shard at cast time.
         FilterProp::HasXInManaCost => record.has_x_in_cost,
@@ -1618,6 +1622,8 @@ fn matches_filter_prop(
             let cmc = obj.mana_cost.mana_value() as i32;
             comparator.evaluate(cmc, resolve_filter_threshold(state, value, source))
         }
+        // CR 202.1: Compare exact printed mana cost, not mana value (CR 202.3).
+        FilterProp::ManaCostIn { costs } => costs.iter().any(|cost| cost == &obj.mana_cost),
         // CR 702.143c-d: Foretold is a designation of a card in exile, tracked
         // directly on the object. It is not equivalent to `KeywordKind::Foretell`.
         FilterProp::Foretold => obj.foretold,
@@ -2071,6 +2077,9 @@ fn zone_change_record_matches_property(
             record.mana_value as i32,
             resolve_filter_threshold(state, value, source),
         ),
+        // CR 202.1: Zone-change records currently snapshot mana value, not the
+        // full printed mana cost. Exact-cost predicates fail closed here.
+        FilterProp::ManaCostIn { .. } => false,
         // CR 105.1 / CR 202.2: Color membership on the event-time object.
         FilterProp::HasColor { color } => record.colors.contains(color),
         FilterProp::NotColor { color } => !record.colors.contains(color),
@@ -2653,7 +2662,7 @@ mod tests {
     use crate::types::game_state::{AttachmentSnapshot, ZoneChangeRecord};
     use crate::types::identifiers::{CardId, ObjectId};
     use crate::types::keywords::Keyword;
-    use crate::types::mana::{ManaColor, ManaCost};
+    use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
     use crate::types::zones::Zone;
 
@@ -2869,6 +2878,59 @@ mod tests {
             !spell_record_matches_filter(&non_x_record, &filter, PlayerId(0), &[]),
             "record without X in cost must NOT match HasXInManaCost filter"
         );
+    }
+
+    #[test]
+    fn exact_mana_cost_filter_does_not_match_same_mana_value() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let zero = create_object(
+            &mut state,
+            CardId(400),
+            PlayerId(0),
+            "Zero Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        let one = create_object(
+            &mut state,
+            CardId(401),
+            PlayerId(0),
+            "One Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        let white = create_object(
+            &mut state,
+            CardId(402),
+            PlayerId(0),
+            "White Artifact".to_string(),
+            Zone::Battlefield,
+        );
+
+        for id in [zero, one, white] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+        }
+        state.objects.get_mut(&zero).unwrap().mana_cost = ManaCost::zero();
+        state.objects.get_mut(&one).unwrap().mana_cost = ManaCost::generic(1);
+        state.objects.get_mut(&white).unwrap().mana_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::White],
+            generic: 0,
+        };
+
+        let filter = TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+            FilterProp::ManaCostIn {
+                costs: vec![ManaCost::zero(), ManaCost::generic(1)],
+            },
+        ]));
+
+        assert!(matches_target_filter(&state, zero, &filter, source));
+        assert!(matches_target_filter(&state, one, &filter, source));
+        assert!(!matches_target_filter(&state, white, &filter, source));
     }
 
     #[test]

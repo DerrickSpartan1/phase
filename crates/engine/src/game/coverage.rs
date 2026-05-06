@@ -365,6 +365,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 };
                 parts.push(format!("mv {}{}", fmt_quantity(value), suffix))
             }
+            FilterProp::ManaCostIn { costs } => {
+                parts.push(format!("mana cost in {costs:?}"));
+            }
             FilterProp::SameName => parts.push("same name".into()),
             FilterProp::SameNameAsParentTarget => parts.push("same name as parent target".into()),
             FilterProp::NameMatchesAnyPermanent { controller } => match controller {

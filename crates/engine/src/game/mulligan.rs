@@ -1,7 +1,8 @@
-use crate::game::effects::resolve_effect;
-use crate::types::ability::{AbilityKind, ResolvedAbility, TargetRef};
+use crate::game::ability_utils::build_resolved_from_def;
+use crate::game::effects::resolve_ability_chain;
+use crate::types::ability::AbilityKind;
 use crate::types::events::GameEvent;
-use crate::types::game_state::{GameState, WaitingFor};
+use crate::types::game_state::{GameState, PendingBeginGameAbility, WaitingFor};
 use crate::types::identifiers::ObjectId;
 use crate::types::player::PlayerId;
 use crate::types::zones::Zone;
@@ -169,11 +170,9 @@ fn advance_mulligan(
     }
 }
 
-/// Execute all BeginGame abilities for cards in each player's opening hand.
-/// Called once after all mulligan decisions are finalized.
-fn execute_begin_game_abilities(state: &mut GameState, events: &mut Vec<GameEvent>) {
-    // Collect first to avoid borrow conflict during mutation
-    let begin_game: Vec<(PlayerId, ObjectId, crate::types::ability::Effect)> = state
+/// Queue all BeginGame abilities for cards in each player's opening hand.
+fn queue_begin_game_abilities(state: &mut GameState) {
+    let mut begin_game: Vec<PendingBeginGameAbility> = state
         .seat_order
         .clone()
         .into_iter()
@@ -192,23 +191,40 @@ fn execute_begin_game_abilities(state: &mut GameState, events: &mut Vec<GameEven
                         .abilities
                         .iter()
                         .find(|a| a.kind == AbilityKind::BeginGame)?;
-                    Some((player_id, obj_id, *ability.effect.clone()))
+                    Some(PendingBeginGameAbility {
+                        ability: build_resolved_from_def(ability, obj_id, player_id),
+                    })
                 })
                 .collect::<Vec<_>>()
         })
         .collect();
 
-    for (player_id, obj_id, effect) in begin_game {
-        let ability =
-            ResolvedAbility::new(effect, vec![TargetRef::Object(obj_id)], obj_id, player_id);
-        let _ = resolve_effect(state, &ability, events);
+    begin_game.reverse();
+    state.pending_begin_game_abilities = begin_game;
+}
+
+/// CR 103.6: Drain beginning-of-game abilities after mulligans, prompting for
+/// optional abilities before the first turn receives priority.
+pub fn resume_begin_game_abilities(
+    state: &mut GameState,
+    events: &mut Vec<GameEvent>,
+) -> WaitingFor {
+    while let Some(pending) = state.pending_begin_game_abilities.pop() {
+        let _ = resolve_ability_chain(state, &pending.ability, events, 0);
+        if !matches!(state.waiting_for, WaitingFor::Priority { .. }) {
+            return state.waiting_for.clone();
+        }
     }
+
+    state.resolving_begin_game_abilities = false;
+    turns::auto_advance(state, events)
 }
 
 /// All players have kept. Start the game properly.
 fn finish_mulligans(state: &mut GameState, events: &mut Vec<GameEvent>) -> WaitingFor {
-    execute_begin_game_abilities(state, events);
-    turns::auto_advance(state, events)
+    queue_begin_game_abilities(state);
+    state.resolving_begin_game_abilities = true;
+    resume_begin_game_abilities(state, events)
 }
 
 fn shuffle_hand_into_library(state: &mut GameState, player: PlayerId, events: &mut Vec<GameEvent>) {
@@ -273,6 +289,8 @@ impl<T> Pipe for T {}
 mod tests {
     use super::*;
     use crate::game::zones::create_object;
+    use crate::types::ability::{AbilityDefinition, Effect, TargetFilter};
+    use crate::types::actions::GameAction;
     use crate::types::identifiers::CardId;
 
     fn setup_with_libraries(cards_per_player: usize) -> GameState {
@@ -447,6 +465,62 @@ mod tests {
 
         // Should auto-advance to PreCombatMain
         assert!(matches!(waiting, WaitingFor::Priority { .. }));
+    }
+
+    #[test]
+    fn optional_begin_game_ability_prompts_before_resolving() {
+        let mut state = setup_with_libraries(20);
+        let mut events = Vec::new();
+        state.waiting_for = start_mulligan(&mut state, &mut events);
+
+        let leyline_id = state.players[0].hand[0];
+        let mut begin_game = AbilityDefinition::new(
+            AbilityKind::BeginGame,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::SelfRef,
+                origin: Some(Zone::Hand),
+                owner_library: false,
+                enter_transformed: false,
+                under_your_control: false,
+                enter_tapped: false,
+                enters_attacking: false,
+                up_to: false,
+                enter_with_counters: vec![],
+            },
+        )
+        .description("If this card is in your opening hand, you may begin the game with it on the battlefield.".to_string());
+        begin_game.optional = true;
+        let abilities = &mut state
+            .objects
+            .get_mut(&leyline_id)
+            .expect("opening hand card exists")
+            .abilities;
+        std::sync::Arc::make_mut(abilities).push(begin_game);
+
+        state.waiting_for = handle_mulligan_decision(&mut state, PlayerId(0), true, 0, &mut events);
+        state.waiting_for = handle_mulligan_decision(&mut state, PlayerId(1), true, 0, &mut events);
+
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalEffectChoice {
+                player: PlayerId(0),
+                source_id,
+                ..
+            } if source_id == leyline_id
+        ));
+        assert_eq!(state.objects[&leyline_id].zone, Zone::Hand);
+
+        let result = crate::game::engine::apply(
+            &mut state,
+            PlayerId(0),
+            GameAction::DecideOptionalEffect { accept: true },
+        )
+        .expect("accepting begin-game effect should resolve");
+
+        assert_eq!(state.objects[&leyline_id].zone, Zone::Battlefield);
+        assert!(matches!(result.waiting_for, WaitingFor::Priority { .. }));
+        assert!(!state.resolving_begin_game_abilities);
     }
 
     #[test]
