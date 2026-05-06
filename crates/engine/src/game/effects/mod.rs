@@ -1441,7 +1441,7 @@ pub fn resolve_ability_chain(
             // mana resolution — pass through to UnlessPayment directly.
             match &unless_pay.cost {
                 UnlessCost::PayLife { .. }
-                | UnlessCost::DiscardCard
+                | UnlessCost::DiscardCard { .. }
                 | UnlessCost::Sacrifice { .. }
                 | UnlessCost::ReturnToHand { .. } => {
                     let mut pending = ability.clone();
@@ -1470,7 +1470,7 @@ pub fn resolve_ability_chain(
                 }
                 // Non-mana costs handled above.
                 UnlessCost::PayLife { .. }
-                | UnlessCost::DiscardCard
+                | UnlessCost::DiscardCard { .. }
                 | UnlessCost::Sacrifice { .. }
                 | UnlessCost::ReturnToHand { .. } => unreachable!(),
             };

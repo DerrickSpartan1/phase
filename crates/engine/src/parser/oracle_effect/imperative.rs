@@ -605,7 +605,7 @@ fn parse_discard_unless_filter<'a>(
 /// Mirrors `AbilityCost::Discard.filter` so the trigger-effect discard on
 /// Dokuchi Silencer ("you may discard a creature card") preserves the same
 /// filter data as cost-form discards like "Discard a creature card:".
-fn parse_discard_card_filter(tail: &str) -> Option<TargetFilter> {
+pub(crate) fn parse_discard_card_filter(tail: &str) -> Option<TargetFilter> {
     // Find the " card" / " cards" suffix — the type phrase lies before it.
     // No suffix or empty before-suffix → no type qualifier.
     let type_phrase = tail

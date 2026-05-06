@@ -926,15 +926,43 @@ fn parse_inferred_pronoun_unless_alt_cost(
     after_unless: &str,
     effect_before_unless: &str,
 ) -> Option<(UnlessCost, TargetFilter)> {
-    let (rest, _) = tag::<_, _, OracleError<'_>>("they discard a card")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("they discard ")
         .parse(after_unless)
         .ok()?;
     let trailing = rest.trim().trim_end_matches('.').trim();
-    if !trailing.is_empty() {
-        return None;
-    }
+    let cost = parse_unless_discard_cost(trailing)?;
     let payer = infer_pronoun_unless_payer(effect_before_unless)?;
-    Some((UnlessCost::DiscardCard, payer))
+    Some((cost, payer))
+}
+
+fn parse_unless_discard_cost(discard_tail: &str) -> Option<UnlessCost> {
+    let trailing = discard_tail.trim().trim_end_matches('.').trim();
+    let trailing = alt((
+        tag::<_, _, OracleError<'_>>("a "),
+        tag::<_, _, OracleError<'_>>("an "),
+    ))
+    .parse(trailing)
+    .map(|(rest, _)| rest.trim())
+    .unwrap_or(trailing);
+    if !trailing.is_empty() {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("card").parse(trailing) {
+            let rest = rest.trim().trim_end_matches('.').trim();
+            if rest.is_empty()
+                || tag::<_, _, OracleError<'_>>("at random")
+                    .parse(rest)
+                    .is_ok()
+            {
+                return Some(UnlessCost::DiscardCard { filter: None });
+            }
+        }
+        if let Some(filter) = super::oracle_effect::imperative::parse_discard_card_filter(trailing)
+        {
+            return Some(UnlessCost::DiscardCard {
+                filter: Some(filter),
+            });
+        }
+    }
+    None
 }
 
 /// CR 118.12 + CR 608.2c + CR 119.4: Recognize non-mana "unless" alternative
@@ -958,11 +986,8 @@ fn parse_unless_alt_cost(after_unless: &str) -> Option<UnlessCost> {
     // "you discard a card" — match prefix, accept any trailing modifiers
     // ("at random", trailing punctuation) since the caller strips the entire
     // unless-clause wholesale.
-    if tag::<_, _, OracleError<'_>>("you discard a card")
-        .parse(after_unless)
-        .is_ok()
-    {
-        return Some(UnlessCost::DiscardCard);
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("you discard ").parse(after_unless) {
+        return parse_unless_discard_cost(rest);
     }
 
     // "you pay N life" / "you pay N life." — life amount is bare integer.
@@ -8795,7 +8820,7 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::Controller);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::DiscardCard),
+            matches!(unless_pay.cost, UnlessCost::DiscardCard { filter: None }),
             "cost should be DiscardCard, got {:?}",
             unless_pay.cost
         );
@@ -8854,20 +8879,26 @@ mod tests {
     }
 
     #[test]
-    fn trigger_unless_you_discard_typed_does_not_match() {
-        // Drekavac — "unless you discard a noncreature card". UnlessCost::DiscardCard
-        // doesn't carry filter info, so we deliberately fall through (preserves
-        // rules-correctness; player-chosen any-card discard would violate the
-        // "noncreature card" restriction). Coverage waits, architecture wins.
+    fn trigger_unless_you_discard_typed_preserves_filter() {
+        // Drekavac — "unless you discard a noncreature card".
         let def = parse_trigger_line(
             "When ~ enters, sacrifice it unless you discard a noncreature card.",
             "Drekavac",
         );
-        assert!(
-            def.unless_pay.is_none(),
-            "typed discard should fall through (UnlessCost::DiscardCard has no filter), got {:?}",
-            def.unless_pay
-        );
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        match &unless_pay.cost {
+            UnlessCost::DiscardCard {
+                filter: Some(TargetFilter::Typed(typed)),
+            } => assert!(
+                typed
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Non(inner) if matches!(**inner, TypeFilter::Creature))),
+                "filter should include noncreature, got {:?}",
+                typed.type_filters
+            ),
+            other => panic!("cost should be filtered DiscardCard, got {:?}", other),
+        }
     }
 
     #[test]
@@ -9154,7 +9185,7 @@ mod tests {
         let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
         assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
         assert!(
-            matches!(unless_pay.cost, UnlessCost::DiscardCard),
+            matches!(unless_pay.cost, UnlessCost::DiscardCard { filter: None }),
             "cost should be DiscardCard, got {:?}",
             unless_pay.cost
         );

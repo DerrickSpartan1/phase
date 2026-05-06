@@ -72,7 +72,7 @@ fn ward_cost_to_unless_cost(ward_cost: &WardCost) -> UnlessCost {
             cost: mana_cost.clone(),
         },
         WardCost::PayLife(amount) => UnlessCost::PayLife { amount: *amount },
-        WardCost::DiscardCard => UnlessCost::DiscardCard,
+        WardCost::DiscardCard => UnlessCost::DiscardCard { filter: None },
         WardCost::Sacrifice { count, filter } => UnlessCost::Sacrifice {
             count: *count,
             filter: filter.clone(),
@@ -5110,7 +5110,7 @@ pub mod tests {
         // Discard
         let discard = WardCost::DiscardCard;
         let result = ward_cost_to_unless_cost(&discard);
-        assert!(matches!(result, UnlessCost::DiscardCard));
+        assert!(matches!(result, UnlessCost::DiscardCard { filter: None }));
 
         // Sacrifice
         let sacrifice = WardCost::Sacrifice {

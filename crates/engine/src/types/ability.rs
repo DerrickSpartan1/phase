@@ -3377,8 +3377,14 @@ pub enum UnlessCost {
     DynamicGeneric { quantity: QuantityExpr },
     /// CR 702.21a: Pay life as ward cost (e.g., "Ward—Pay 2 life")
     PayLife { amount: i32 },
-    /// CR 702.21a: Discard a card as ward cost (e.g., "Ward—Discard a card")
-    DiscardCard,
+    /// CR 701.9 + CR 702.21a: The resolved `UnlessPayModifier::payer`
+    /// discards a card as an unless/ward cost. `filter: None` means any card
+    /// in that payer's hand is eligible; `Some` restricts the eligible hand
+    /// cards by type/subtype/supertype.
+    DiscardCard {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        filter: Option<TargetFilter>,
+    },
     /// CR 702.21a: Sacrifice N permanents matching a filter as ward cost.
     Sacrifice { count: u32, filter: TargetFilter },
     /// CR 118.12: Return N objects matching a filter to their owner's hand

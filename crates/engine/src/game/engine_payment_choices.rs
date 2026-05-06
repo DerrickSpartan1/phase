@@ -252,13 +252,13 @@ pub(super) fn handle_unless_payment(
                     }
                 }
             }
-            UnlessCost::DiscardCard => {
-                let hand_cards: Vec<ObjectId> = state
-                    .players
-                    .iter()
-                    .find(|p| p.id == player)
-                    .map(|p| p.hand.iter().copied().collect::<Vec<_>>())
-                    .unwrap_or_default();
+            UnlessCost::DiscardCard { filter } => {
+                let hand_cards = crate::game::casting::find_eligible_discard_targets(
+                    state,
+                    player,
+                    pending_effect.source_id,
+                    filter.as_ref(),
+                );
                 if hand_cards.is_empty() {
                     payment_failed = true;
                 } else {

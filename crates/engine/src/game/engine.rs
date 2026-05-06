@@ -10860,6 +10860,65 @@ mod phase_trigger_regression_tests {
     }
 
     #[test]
+    fn unless_discard_payment_filters_eligible_hand_cards() {
+        let mut state = setup_game_at_main_phase();
+        let source_id = create_object(
+            &mut state,
+            CardId(900),
+            PlayerId(0),
+            "Source".to_string(),
+            Zone::Battlefield,
+        );
+        let land_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Land Card".to_string(),
+            Zone::Hand,
+        );
+        let creature_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Creature Card".to_string(),
+            Zone::Hand,
+        );
+        state
+            .objects
+            .get_mut(&land_id)
+            .expect("land object")
+            .card_types
+            .core_types = vec![CoreType::Land];
+        state
+            .objects
+            .get_mut(&creature_id)
+            .expect("creature object")
+            .card_types
+            .core_types = vec![CoreType::Creature];
+
+        state.waiting_for = WaitingFor::UnlessPayment {
+            player: PlayerId(0),
+            cost: UnlessCost::DiscardCard {
+                filter: Some(TargetFilter::Typed(TypedFilter {
+                    type_filters: vec![TypeFilter::Land],
+                    controller: None,
+                    properties: vec![],
+                })),
+            },
+            pending_effect: Box::new(draw_that_many(source_id, PlayerId(0))),
+            trigger_event: None,
+            effect_description: None,
+        };
+
+        let result = apply_as_current(&mut state, GameAction::PayUnlessCost { pay: true }).unwrap();
+
+        match result.waiting_for {
+            WaitingFor::WardDiscardChoice { cards, .. } => assert_eq!(cards, vec![land_id]),
+            other => panic!("expected filtered WardDiscardChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn multi_target_selection_preserves_nested_effect_zone_choice_continuation() {
         let mut state = setup_game_at_main_phase();
         let source_id = ObjectId(100);
