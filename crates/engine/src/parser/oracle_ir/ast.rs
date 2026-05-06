@@ -757,6 +757,8 @@ pub(crate) enum PutImperativeAst {
         under_your_control: bool,
         /// CR 603.6d: "enters tapped" — enters the battlefield tapped.
         enter_tapped: bool,
+        /// CR 701.28c: "transformed" — enters with its back face up.
+        enter_transformed: bool,
         /// CR 508.4: "tapped and attacking [<player_phrase>]" — the moved
         /// object enters the battlefield as an attacking creature (without
         /// having been declared as one). Set by the inline-tail patcher in

@@ -2383,6 +2383,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
         target,
         under_your_control,
         enter_tapped,
+        enter_transformed,
         enters_attacking,
         enter_with_counters,
         ..
@@ -2394,6 +2395,7 @@ pub(super) fn parse_put_ast(text: &str, lower: &str) -> Option<PutImperativeAst>
             target,
             under_your_control,
             enter_tapped,
+            enter_transformed,
             enters_attacking,
             enter_with_counters,
         });
@@ -2418,6 +2420,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
             target,
             under_your_control,
             enter_tapped,
+            enter_transformed,
             enters_attacking,
             enter_with_counters,
         } => {
@@ -2443,7 +2446,7 @@ pub(super) fn lower_put_ast(ast: PutImperativeAst) -> Effect {
                     destination,
                     target,
                     owner_library: false,
-                    enter_transformed: false,
+                    enter_transformed,
                     under_your_control,
                     enter_tapped,
                     // CR 508.4: Propagated from the inline-tail patcher in

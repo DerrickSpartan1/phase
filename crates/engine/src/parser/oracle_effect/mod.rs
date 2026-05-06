@@ -141,6 +141,46 @@ fn condition_refs_cost_paid_object(condition: &AbilityCondition) -> bool {
     }
 }
 
+fn merge_clause_conditions(
+    outer: AbilityCondition,
+    inner: Option<AbilityCondition>,
+) -> AbilityCondition {
+    let mut conditions = match inner {
+        Some(AbilityCondition::And { conditions }) => conditions,
+        Some(condition) => vec![condition],
+        None => Vec::new(),
+    };
+    match outer {
+        AbilityCondition::And {
+            conditions: outer_conditions,
+        } => {
+            for condition in outer_conditions {
+                if !conditions.contains(&condition) {
+                    conditions.push(condition);
+                }
+            }
+        }
+        condition => {
+            if !conditions.contains(&condition) {
+                conditions.insert(0, condition);
+            }
+        }
+    }
+    match conditions.len() {
+        0 => AbilityCondition::And { conditions },
+        1 => conditions.pop().unwrap(),
+        _ => AbilityCondition::And { conditions },
+    }
+}
+
+fn apply_outer_condition_to_clause(outer: &AbilityCondition, clause: &mut ClauseIr) {
+    let inner = clause
+        .condition
+        .take()
+        .or_else(|| clause.parsed.condition.clone());
+    clause.condition = Some(merge_clause_conditions(outer.clone(), inner));
+}
+
 pub(super) fn rewrite_cost_paid_object_quantities_in_definition(ability: &mut AbilityDefinition) {
     rewrite_cost_paid_object_quantities(&mut ability.effect);
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
@@ -7546,6 +7586,27 @@ pub(crate) fn parse_effect_chain_ir(
         } else {
             text
         };
+        // CR 608.2c: A leading "if [condition], ..." scopes over the whole
+        // conditional instruction, including comma/then subclauses in the body.
+        // Split the stripped body recursively so "If ..., exile it, then put it
+        // ..." emits both guarded zone-change effects instead of letting the
+        // first imperative parser swallow the tail.
+        if let Some(ref outer_condition) = condition {
+            let body_chunks = split_clause_sequence(&text);
+            if body_chunks.len() > 1 {
+                let mut body_ir = parse_effect_chain_ir(&text, kind, ctx);
+                if let Some(last) = body_ir.clauses.last_mut() {
+                    if last.boundary.is_none() {
+                        last.boundary = chunk.boundary_after;
+                    }
+                }
+                for clause in &mut body_ir.clauses {
+                    apply_outer_condition_to_clause(outer_condition, clause);
+                }
+                clauses.extend(body_ir.clauses);
+                continue;
+            }
+        }
         // CR 508.4 / CR 614.1: "If [condition], they/those tokens/it enter(s) tapped and
         // attacking" — conditional modifier on preceding Token/CopyTokenOf/ChangeZone.
         // Model as an "instead" swap: the modified Token (with tapped+attacking set)
@@ -11128,12 +11189,14 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
             } else {
                 (false, false)
             };
+            let enter_transformed = destination == Zone::Battlefield
+                && parse_battlefield_transformed_qualifier(after.lower);
             return Some(Effect::ChangeZone {
                 origin: infer_origin_zone(after_put_tp.lower),
                 destination,
                 target,
                 owner_library: false,
-                enter_transformed: false,
+                enter_transformed,
                 under_your_control,
                 enter_tapped,
                 enters_attacking,
@@ -11144,6 +11207,27 @@ fn try_parse_put_zone_change(lower: &str, text: &str) -> Option<Effect> {
     }
 
     None
+}
+
+fn parse_battlefield_transformed_qualifier(tail_lower: &str) -> bool {
+    fn transformed_boundary(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+        alt((
+            value((), nom::combinator::eof),
+            value((), tag(" ")),
+            value((), tag(",")),
+            value((), tag(".")),
+        ))
+        .parse(input)
+    }
+
+    fn transformed_clause(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+        preceded(tag(" transformed"), transformed_boundary).parse(input)
+    }
+
+    (0..tail_lower.len()).any(|pos| {
+        tail_lower.as_bytes().get(pos) == Some(&b' ')
+            && transformed_clause(&tail_lower[pos..]).is_ok()
+    })
 }
 
 /// CR 508.4 + CR 614.1: Detect inline entry-qualifier clauses ("tapped" or
@@ -23025,6 +23109,37 @@ mod tests {
         }
     }
 
+    /// CR 701.28c + CR 122.1 — Esper Origins class:
+    /// "put it onto the battlefield transformed ... with a finality counter"
+    /// must carry both the transformed entry flag and the counter replacement.
+    #[test]
+    fn put_zone_change_lifts_transformed_and_finality_counter_suffix() {
+        let text = "put it onto the battlefield transformed under its owner's control with a finality counter on it";
+        let lower = text.to_lowercase();
+        let effect = try_parse_put_zone_change(&lower, text)
+            .expect("expected ChangeZone for transformed put-onto-battlefield");
+        match effect {
+            Effect::ChangeZone {
+                destination,
+                target,
+                enter_transformed,
+                under_your_control,
+                enter_with_counters,
+                ..
+            } => {
+                assert_eq!(destination, Zone::Battlefield);
+                assert_eq!(target, TargetFilter::ParentTarget);
+                assert!(enter_transformed);
+                assert!(!under_your_control);
+                assert_eq!(
+                    enter_with_counters,
+                    vec![("finality".to_string(), QuantityExpr::Fixed { value: 1 })]
+                );
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
     /// CR 122.1 — Bare put-onto-battlefield without the counters suffix must
     /// emit an empty `enter_with_counters` slot. Regression-protects existing
     /// tutors / reanimation effects that place cards without counters.
@@ -23819,6 +23934,60 @@ mod snapshot_tests {
                 )
             })
         }));
+    }
+
+    #[test]
+    fn leading_cast_from_graveyard_condition_scopes_over_then_put_transformed_chain() {
+        let def = parse_effect_chain(
+            "If this spell was cast from a graveyard, exile it, then put it onto the battlefield transformed under its owner's control with a finality counter on it.",
+            AbilityKind::Spell,
+        );
+
+        assert_eq!(
+            def.condition,
+            Some(AbilityCondition::CastFromZone {
+                zone: Zone::Graveyard
+            })
+        );
+        assert!(matches!(
+            *def.effect,
+            Effect::ChangeZone {
+                destination: Zone::Exile,
+                target: TargetFilter::ParentTarget,
+                ..
+            }
+        ));
+
+        let put = def.sub_ability.as_ref().expect("expected then-put clause");
+        assert_eq!(
+            put.condition,
+            Some(AbilityCondition::CastFromZone {
+                zone: Zone::Graveyard
+            })
+        );
+        let Effect::ChangeZone {
+            destination,
+            target,
+            enter_transformed,
+            under_your_control,
+            enter_with_counters,
+            ..
+        } = &*put.effect
+        else {
+            panic!("expected transformed ChangeZone, got {:?}", put.effect);
+        };
+        assert_eq!(*destination, Zone::Battlefield);
+        assert_eq!(*target, TargetFilter::ParentTarget);
+        assert!(
+            *enter_transformed,
+            "expected transformed battlefield entry, got {:?}",
+            put.effect
+        );
+        assert!(!*under_your_control);
+        assert_eq!(
+            enter_with_counters,
+            &vec![("finality".to_string(), QuantityExpr::Fixed { value: 1 })]
+        );
     }
 
     #[test]
