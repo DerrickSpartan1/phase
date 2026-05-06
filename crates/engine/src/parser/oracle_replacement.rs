@@ -191,7 +191,7 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "Prevent all/the next N damage" patterns (CR 615) ---
-    if let Some(def) = parse_damage_to_player_exile_top_instead(&norm_lower, &text) {
+    if let Some(def) = parse_damage_to_player_instead_followup(&norm_lower, &text) {
         return Some(def);
     }
     if let Some(def) = parse_damage_to_self_instead_followup(&norm_lower, &normalized, &text) {
@@ -3343,35 +3343,34 @@ fn parse_damage_to_self_instead_followup(
     )
 }
 
-fn parse_damage_to_player_exile_top_instead(
+fn parse_damage_to_player_instead_followup(
     norm_lower: &str,
     original_text: &str,
 ) -> Option<ReplacementDefinition> {
-    let (_, rest) = nom_on_lower(original_text, norm_lower, |i| {
+    let total_len = norm_lower.len();
+    let ((effect_start, effect_len), rest) = nom_on_lower(original_text, norm_lower, |i| {
         let (i, _) = tag("if damage would be dealt to a player, ").parse(i)?;
-        let (i, _) =
-            tag("that player exiles that many cards from the top of their library").parse(i)?;
+        let effect_start = total_len - i.len();
+        let (i, _) = alt((tag("that player "), tag("the player "))).parse(i)?;
+        let (i, _) = take_until::<_, _, VerboseError<&str>>(" instead").parse(i)?;
+        let effect_end = total_len - i.len();
         let (i, _) = tag(" instead").parse(i)?;
         let (i, _) = opt(char('.')).parse(i)?;
-        Ok((i, ()))
+        Ok((i, (effect_start, effect_end - effect_start)))
     })?;
     if !rest.trim().is_empty() {
         return None;
     }
 
+    let effect_text = original_text.get(effect_start..effect_start + effect_len)?;
+    let mut followup = parse_effect_chain(effect_text, AbilityKind::Spell);
+    rewrite_damage_recipient_to_post_replacement_target(&mut followup);
+
     Some(
         ReplacementDefinition::new(ReplacementEvent::DamageDone)
             .prevention_shield(PreventionAmount::All)
             .damage_target_filter(damage_target_any_player())
-            .execute(AbilityDefinition::new(
-                AbilityKind::Spell,
-                Effect::ExileTop {
-                    player: TargetFilter::PostReplacementDamageTarget,
-                    count: QuantityExpr::Ref {
-                        qty: QuantityRef::EventContextAmount,
-                    },
-                },
-            ))
+            .execute(followup)
             .description(original_text.to_string()),
     )
 }
@@ -3521,6 +3520,25 @@ fn rewrite_parent_target_controller_to_post_replacement_source(def: &mut Ability
     }
     if let Some(else_branch) = def.else_ability.as_mut() {
         rewrite_parent_target_controller_to_post_replacement_source(else_branch);
+    }
+}
+
+/// CR 615.5: In a prevention follow-up attached to "damage would be dealt to a
+/// player", the surface subject "that player" refers to the prevented event's
+/// damage recipient. The ordinary effect parser has no active trigger event in
+/// this replacement context, so it lowers standalone "that player" subjects to
+/// `TargetFilter::Player`; rewrite that anaphoric recipient at the call site.
+fn rewrite_damage_recipient_to_post_replacement_target(def: &mut AbilityDefinition) {
+    super::oracle_effect::each_target_filter_mut(&mut def.effect, &mut |f| {
+        if matches!(f, TargetFilter::Player | TargetFilter::TriggeringPlayer) {
+            *f = TargetFilter::PostReplacementDamageTarget;
+        }
+    });
+    if let Some(sub) = def.sub_ability.as_mut() {
+        rewrite_damage_recipient_to_post_replacement_target(sub);
+    }
+    if let Some(else_branch) = def.else_ability.as_mut() {
+        rewrite_damage_recipient_to_post_replacement_target(else_branch);
     }
 }
 
@@ -4113,10 +4131,36 @@ mod tests {
         );
         assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
         let execute = def.execute.as_ref().expect("execute present");
+        assert!(
+            matches!(
+                *execute.effect,
+                Effect::ExileTop {
+                    player: TargetFilter::PostReplacementDamageTarget,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount
+                    },
+                }
+            ),
+            "expected ExileTop against prevented damage recipient, got {:?}",
+            execute.effect
+        );
+    }
+
+    #[test]
+    fn damage_to_player_followup_rewrites_that_player_draw_target() {
+        let def = parse_replacement_line(
+            "If damage would be dealt to a player, that player draws that many cards instead.",
+            "Damage Followup Test",
+        )
+        .expect("damage-to-player draw replacement should parse");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
+        let execute = def.execute.as_ref().expect("execute present");
         assert!(matches!(
             *execute.effect,
-            Effect::ExileTop {
-                player: TargetFilter::PostReplacementDamageTarget,
+            Effect::Draw {
+                target: TargetFilter::PostReplacementDamageTarget,
                 count: QuantityExpr::Ref {
                     qty: QuantityRef::EventContextAmount
                 },

@@ -27,8 +27,9 @@ use super::oracle_nom::error::OracleResult;
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::quantity as nom_quantity;
 use super::oracle_quantity::{
-    parse_cda_quantity, parse_for_each_clause, parse_for_each_clause_expr,
-    parse_for_each_clause_expr_with_context, parse_for_each_object_filter_clause,
+    parse_cda_quantity, parse_event_context_quantity, parse_for_each_clause,
+    parse_for_each_clause_expr, parse_for_each_clause_expr_with_context,
+    parse_for_each_object_filter_clause,
 };
 use super::oracle_target::{
     parse_event_context_ref, parse_target, parse_target_with_ctx, parse_type_phrase,
@@ -5377,23 +5378,7 @@ fn lower_subject_predicate_ast(
                 && scan_contains_phrase(&pred_lower, "top")
                 && scan_contains_phrase(&pred_lower, "library")
             {
-                let count = if let Some(after_top) = strip_after(&pred_lower, "top ") {
-                    // CR 107.1a: "half of their library, rounded up/down" composes
-                    // over `TargetZoneCardCount` via the shared quantity combinator.
-                    if let Ok((_, expr)) =
-                        super::oracle_nom::quantity::parse_half_rounded(after_top)
-                    {
-                        expr
-                    } else {
-                        let n = nom_primitives::parse_number
-                            .parse(after_top)
-                            .map(|(_, n)| n as i32)
-                            .unwrap_or(1);
-                        QuantityExpr::Fixed { value: n }
-                    }
-                } else {
-                    QuantityExpr::Fixed { value: 1 }
-                };
+                let count = parse_subject_exile_top_count(&pred_lower);
                 return parsed_clause(Effect::ExileTop {
                     player: subject.affected,
                     count,
@@ -5754,6 +5739,35 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
         }
         TargetFilter::Not { filter } => target_filter_can_target_player(filter),
         _ => false,
+    }
+}
+
+fn parse_subject_exile_top_count(pred_lower: &str) -> QuantityExpr {
+    if let Ok((_, qty_text)) = preceded(
+        alt((tag::<_, _, VerboseError<&str>>("exile "), tag("exiles "))),
+        take_until(" from the top"),
+    )
+    .parse(pred_lower)
+    {
+        if let Some(expr) = parse_event_context_quantity(qty_text.trim()) {
+            return expr;
+        }
+    }
+
+    if let Some(after_top) = strip_after(pred_lower, "top ") {
+        // CR 107.1a: "half of their library, rounded up/down" composes over
+        // `TargetZoneCardCount` via the shared quantity combinator.
+        if let Ok((_, expr)) = super::oracle_nom::quantity::parse_half_rounded(after_top) {
+            expr
+        } else {
+            let n = nom_primitives::parse_number
+                .parse(after_top)
+                .map(|(_, n)| n as i32)
+                .unwrap_or(1);
+            QuantityExpr::Fixed { value: n }
+        }
+    } else {
+        QuantityExpr::Fixed { value: 1 }
     }
 }
 
@@ -6860,7 +6874,11 @@ pub(crate) fn each_target_filter_mut(effect: &mut Effect, f: &mut impl FnMut(&mu
         | Effect::Discard { target, .. }
         | Effect::Mill { target, .. }
         | Effect::Scry { target, .. }
-        | Effect::Surveil { target, .. } => f(target),
+        | Effect::Surveil { target, .. }
+        | Effect::RevealTop { player: target, .. }
+        | Effect::ExileTop { player: target, .. }
+        | Effect::Manifest { target, .. }
+        | Effect::TargetOnly { target, .. } => f(target),
         Effect::PutCounter { target, .. }
         | Effect::AddCounter { target, .. }
         | Effect::RemoveCounter { target, .. } => f(target),
