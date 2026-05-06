@@ -821,6 +821,13 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
         );
     }
 
+    let they_pay_result = tag::<_, _, OracleError<'_>>("they pay ")
+        .parse(after_unless)
+        .ok()
+        .and_then(|(rest, _)| {
+            infer_they_pay_payer(&lower[..unless_pos]).map(|payer| (rest, payer))
+        });
+
     // Parse payer + payment verb as a single combinator: "(payer) pay(s) " → (TargetFilter, &str).
     let payer_result: Result<(&str, TargetFilter), _> = alt((
         value(
@@ -841,13 +848,16 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
     ))
     .parse(after_unless);
 
-    let (cost_str, payer) = match payer_result {
-        Ok((rest, p)) => (rest, p),
-        Err(_) => {
-            // No recognized payment pattern — strip the unless clause so the effect parses.
-            let cleaned = text[..unless_pos].trim().to_string();
-            return (cleaned, None);
-        }
+    let (cost_str, payer) = match they_pay_result {
+        Some((rest, payer)) => (rest, payer),
+        None => match payer_result {
+            Ok((rest, p)) => (rest, p),
+            Err(_) => {
+                // No recognized payment pattern — strip the unless clause so the effect parses.
+                let cleaned = text[..unless_pos].trim().to_string();
+                return (cleaned, None);
+            }
+        },
     };
 
     // Extract cost symbols
@@ -885,6 +895,25 @@ fn extract_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>
     let cleaned = text[..unless_pos].trim().to_string();
 
     (cleaned, Some(UnlessPayModifier { cost, payer }))
+}
+
+fn infer_they_pay_payer(effect_before_unless: &str) -> Option<TargetFilter> {
+    // CR 603.2 + CR 118.12: "that player/that opponent ... unless they pay"
+    // refers to the player from the triggering event.
+    if scan_contains(effect_before_unless, "that player ")
+        || scan_contains(effect_before_unless, "that opponent ")
+        || scan_contains(effect_before_unless, "to that player")
+        || scan_contains(effect_before_unless, "to that opponent")
+    {
+        return Some(TargetFilter::TriggeringPlayer);
+    }
+    // CR 608.2c: in "each opponent [does X] unless they pay", the lowered
+    // ability has `player_scope = Opponent`; runtime binds `Controller` to
+    // each scoped opponent before presenting the unless-payment choice.
+    if scan_contains(effect_before_unless, "each opponent ") {
+        return Some(TargetFilter::Controller);
+    }
+    None
 }
 
 /// CR 118.12 + CR 608.2c + CR 119.4: Recognize non-mana "unless" alternative
@@ -9035,6 +9064,64 @@ mod tests {
         assert!(
             def.condition.is_none(),
             "no intervening condition should be set when unless-pay handled it"
+        );
+    }
+
+    #[test]
+    fn trigger_unless_they_pay_binds_that_player_to_triggering_player() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts a creature spell, that player loses 2 life unless they pay {2}.",
+            "Isolation Cell",
+        );
+
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+        assert!(
+            matches!(unless_pay.cost, UnlessCost::Fixed { .. }),
+            "cost should be Fixed mana, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    #[test]
+    fn trigger_unless_they_pay_binds_to_that_player_damage_target() {
+        let def = parse_trigger_line(
+            "Whenever an opponent casts a creature spell, this enchantment deals 2 damage to that player unless they pay {2}.",
+            "Soul Barrier",
+        );
+
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::TriggeringPlayer);
+        assert!(
+            matches!(unless_pay.cost, UnlessCost::Fixed { .. }),
+            "cost should be Fixed mana, got {:?}",
+            unless_pay.cost
+        );
+    }
+
+    #[test]
+    fn trigger_unless_they_pay_binds_each_opponent_to_scoped_controller() {
+        let def = parse_trigger_line(
+            "When this creature enters, each opponent sacrifices a permanent of their choice unless they pay {2}.",
+            "Rishadan Footpad",
+        );
+
+        let unless_pay = def.unless_pay.as_ref().expect("should have unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::Controller);
+        let execute = def.execute.as_ref().expect("should have execute");
+        assert_eq!(execute.player_scope, Some(PlayerFilter::Opponent));
+    }
+
+    #[test]
+    fn trigger_unless_they_pay_keeps_ambiguous_controller_case_unbound() {
+        let def = parse_trigger_line(
+            "Whenever this creature deals combat damage to a creature, that creature's controller loses 2 life unless they pay {2}.",
+            "Death Charmer",
+        );
+
+        assert!(
+            def.unless_pay.is_none(),
+            "ambiguous controller pronoun should remain unbound until runtime payer support exists"
         );
     }
 
