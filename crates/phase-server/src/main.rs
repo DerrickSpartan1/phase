@@ -2366,6 +2366,7 @@ async fn handle_client_message(
                     commander: deck.commander.clone(),
                     selected_format: Some(fc.format),
                     selected_match_type: None,
+                    summary_only: false,
                 };
                 if let Err(reasons) = validate_deck_for_format(db, &validation_request) {
                     let msg = ServerMessage::Error {

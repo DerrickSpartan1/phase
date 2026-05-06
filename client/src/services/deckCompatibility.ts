@@ -53,11 +53,13 @@ interface DeckCompatibilityRequest {
   commander: string[];
   selected_format?: GameFormat | null;
   selected_match_type?: MatchType | null;
+  summary_only?: boolean;
 }
 
 interface EvaluateOptions {
   selectedFormat?: GameFormat | null;
   selectedMatchType?: MatchType | null;
+  summaryOnly?: boolean;
 }
 
 function buildRequest(deck: ParsedDeck, options: EvaluateOptions): DeckCompatibilityRequest {
@@ -65,6 +67,7 @@ function buildRequest(deck: ParsedDeck, options: EvaluateOptions): DeckCompatibi
     ...expandParsedDeck(deck),
     selected_format: options.selectedFormat ?? null,
     selected_match_type: options.selectedMatchType ?? null,
+    summary_only: options.summaryOnly ?? false,
   };
 }
 

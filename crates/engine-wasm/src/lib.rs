@@ -446,6 +446,7 @@ pub fn initialize_game(
                     commander: deck_list.player.commander.clone(),
                     selected_format: Some(game_format),
                     selected_match_type: None,
+                    summary_only: false,
                 };
                 if let Err(reasons) = validate_deck_for_format(db, &validation_request) {
                     return Some(reasons);

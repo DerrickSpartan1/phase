@@ -6,6 +6,8 @@ import { deduplicateEntries, resolveCommander } from "../../services/deckParser"
 import { evaluateDeckCompatibility, type DeckCompatibilityResult } from "../../services/deckCompatibility";
 import { STORAGE_KEY_PREFIX, loadSavedDeck, stampDeckMeta } from "../../constants/storage";
 import { BASIC_LAND_NAMES, hasUnlimitedCopies } from "../../constants/game";
+import { loadPreconDeckMap } from "../../hooks/useDecks";
+import { preconDeckEntryToParsedDeck } from "../../services/preconDecks";
 import { useDeckCardData } from "../../hooks/useDeckCardData";
 import { CardSearch } from "./CardSearch";
 import type { CardSearchFilters } from "./CardSearch";
@@ -44,6 +46,17 @@ interface DeckBuilderProps {
   onResetSearch: () => void;
 }
 
+const PRECON_PREFIX = "[Pre-built] ";
+
+function hasSearchCriteria(filters: CardSearchFilters): boolean {
+  return Boolean(
+    filters.text
+      || filters.colors.length > 0
+      || filters.type
+      || filters.cmcMax !== undefined
+      || filters.sets.length > 0,
+  );
+}
 
 export function DeckBuilder({
   onCardHover,
@@ -61,7 +74,7 @@ export function DeckBuilder({
   const [deckName, setDeckName] = useState("");
   const [savedDecks, setSavedDecks] = useState(listSavedDecks);
   const [commanders, setCommanders] = useState<string[]>([]);
-  const [isDeckViewExpanded, setIsDeckViewExpanded] = useState(true);
+  const [isDeckViewExpanded, setIsDeckViewExpanded] = useState(initialDeckName !== null);
   const { cardDataCache, cacheCards } = useDeckCardData([
     ...deck.main.map((entry) => entry.name),
     ...deck.sideboard.map((entry) => entry.name),
@@ -106,12 +119,14 @@ export function DeckBuilder({
   const maxCopies = isCommander ? 1 : 4;
 
   const handleSearchResults = useCallback(
-    (cards: ScryfallCard[], _total: number) => {
-      setIsDeckViewExpanded(false);
+    (cards: ScryfallCard[], total: number) => {
+      if (!initialDeckName || total > 0 || hasSearchCriteria(searchFilters)) {
+        setIsDeckViewExpanded(false);
+      }
       setSearchResults(cards);
       cacheCards(cards);
     },
-    [cacheCards],
+    [cacheCards, initialDeckName, searchFilters],
   );
 
   const handleSearchTrigger = useCallback(() => {
@@ -240,10 +255,21 @@ export function DeckBuilder({
   const handleLoad = useCallback(async (name: string) => {
     const parsed = loadSavedDeck(name);
     const data = localStorage.getItem(STORAGE_KEY_PREFIX + name);
-    if (!parsed || !data) return;
+    if (!parsed || !data) {
+      if (!name.startsWith(PRECON_PREFIX)) return;
+      const decks = await loadPreconDeckMap();
+      const deckEntry = Object.values(decks ?? {}).find((entry) => PRECON_PREFIX + `${entry.name} (${entry.code})` === name);
+      if (!deckEntry) return;
+      const resolved = await resolveCommander(preconDeckEntryToParsedDeck(deckEntry));
+      applyDeckToEditor(resolved);
+      setIsDeckViewExpanded(true);
+      setDeckName(`${deckEntry.name} (${deckEntry.code})`);
+      return;
+    }
     const persisted = JSON.parse(data) as ParsedDeck & { format?: DeckFormat };
     const resolved = await resolveCommander(parsed);
     applyDeckToEditor(resolved);
+    setIsDeckViewExpanded(true);
     if (persisted.format) {
       onFormatChange(persisted.format);
     } else if (resolved.commander?.length) {

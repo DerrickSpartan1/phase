@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { GameFormat, MatchType } from "../../adapter/types";
 import type { FeedDeck } from "../../types/feed";
@@ -24,11 +24,11 @@ import {
   type DeckCompatibilityResult,
 } from "../../services/deckCompatibility";
 import type { AiDeckCandidate } from "../../services/aiDeckCatalog";
-import { buildLegalAiDeckCatalog } from "../../services/aiDeckCatalog";
 import { ImportDeckModal } from "./ImportDeckModal";
 import { PreconDeckModal } from "./PreconDeckModal";
-import { savePreconDeck } from "../../services/preconDecks";
+import { preconDeckEntryToParsedDeck, savePreconDeck } from "../../services/preconDecks";
 import type { DeckEntry as PreconDeckEntry } from "../../hooks/useDecks";
+import { loadPreconDeckMap } from "../../hooks/useDecks";
 import { MenuPanel } from "./MenuShell";
 import { menuButtonClass } from "./buttonStyles";
 import {
@@ -42,6 +42,7 @@ import {
 import { BASIC_LAND_NAMES } from "../../constants/game";
 const PRECON_PREFIX = "[Pre-built] ";
 const PRECON_PAGE_SIZE = 12;
+const PRECON_SCAN_BATCH_SIZE = 48;
 
 /** Tags that represent a format/archetype — shown with active (green) styling. */
 const FORMAT_TAGS = new Set([
@@ -117,6 +118,7 @@ interface DeckTileProps {
   onEdit?: () => void;
   onDelete?: () => void;
   onAdopt?: () => void;
+  onVisible?: () => void;
   /** When true, suppress the feed badge (used in subscription view where the header already identifies the feed). */
   hideFeedBadge?: boolean;
   /** Provide feed deck data directly so the tile doesn't depend on localStorage. */
@@ -125,9 +127,23 @@ interface DeckTileProps {
   preconDeckOverride?: PreconDeckEntry;
 }
 
-function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, hideFeedBadge, feedDeckOverride, preconDeckOverride }: DeckTileProps) {
+function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete, onAdopt, onVisible, hideFeedBadge, feedDeckOverride, preconDeckOverride }: DeckTileProps) {
+  const tileRef = useRef<HTMLDivElement | null>(null);
   const [coverageHovered, setCoverageHovered] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+
+  useEffect(() => {
+    if (!onVisible) return;
+    const node = tileRef.current;
+    if (!node) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        onVisible();
+      }
+    }, { rootMargin: "360px 0px" });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [onVisible]);
 
   useEffect(() => {
     if (!confirmingDelete) return;
@@ -155,6 +171,7 @@ function DeckTile({ deckName, isActive, compatibility, onClick, onEdit, onDelete
 
   return (
     <div
+      ref={tileRef}
       role="button"
       tabIndex={0}
       onClick={onClick}
@@ -338,7 +355,11 @@ export function MyDecks({
   const [compatibilities, setCompatibilities] = useState<Record<string, DeckCompatibilityResult>>({});
   const [isEvaluating, setIsEvaluating] = useState(false);
   const [compatibilityError, setCompatibilityError] = useState<string | null>(null);
+  const pendingCompatibility = useRef(new Set<string>());
+  const compatibilityGeneration = useRef(0);
+  const [preconCandidates, setPreconCandidates] = useState<AiDeckCandidate[]>([]);
   const [legalPreconCandidates, setLegalPreconCandidates] = useState<AiDeckCandidate[]>([]);
+  const [preconScanIndex, setPreconScanIndex] = useState(0);
   const [preconDisplayCount, setPreconDisplayCount] = useState(PRECON_PAGE_SIZE);
   const feedCache = useFeedCacheSnapshot();
 
@@ -369,26 +390,28 @@ export function MyDecks({
   }, [selectedFormatForCompatibility, searchQuery]);
 
   useEffect(() => {
-    if (!selectedFormatForCompatibility) {
-      setLegalPreconCandidates([]);
-      return;
-    }
-
     let cancelled = false;
-    buildLegalAiDeckCatalog({
-      selectedFormat: selectedFormatForCompatibility,
-      selectedMatchType,
-    }).then((catalog) => {
+    loadPreconDeckMap().then((decks) => {
       if (cancelled) return;
-      setLegalPreconCandidates(catalog.candidates.filter((candidate) => candidate.source.type === "precon"));
-    }).catch(() => {
-      if (!cancelled) setLegalPreconCandidates([]);
+      if (!decks) {
+        setPreconCandidates([]);
+        return;
+      }
+      const candidates = Object.entries(decks).map(([deckId, deck]) => ({
+        id: `precon:${deckId}`,
+        name: `${deck.name} (${deck.code})`,
+        source: { type: "precon" as const, deckId, code: deck.code, releaseDate: deck.releaseDate },
+        deck: preconDeckEntryToParsedDeck(deck),
+        coveragePct: deck.coveragePct,
+        archetype: null,
+      }));
+      setPreconCandidates(candidates);
     });
 
     return () => {
       cancelled = true;
     };
-  }, [selectedFormatForCompatibility, selectedMatchType]);
+  }, []);
 
   useEffect(() => {
     if (mode !== "select") return;
@@ -399,70 +422,74 @@ export function MyDecks({
     onSelectDeck(stored);
   }, [mode, activeDeckName, deckNames, onSelectDeck]);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function evaluateCompat(): Promise<void> {
-      // Collect localStorage decks
-      const loadedDecks: Array<{ name: string; deck: ParsedDeck }> = [];
-      const seen = new Set<string>();
-      for (const name of deckNames) {
-        const deck = loadDeck(name);
-        if (deck) {
-          loadedDecks.push({ name, deck });
-          seen.add(name);
-        }
-      }
+  const deckByName = useMemo(() => {
+    const decks = new Map<string, ParsedDeck>();
+    const seen = new Set<string>();
+    for (const name of deckNames) {
+      const deck = loadDeck(name);
+      if (!deck) continue;
+      decks.set(name, deck);
+      seen.add(name);
+    }
 
-      // Collect feed decks not already in localStorage
-      for (const sub of listSubscriptions()) {
-        const feed = feedCache[sub.sourceId];
-        if (!feed) continue;
-        for (const feedDeck of feed.decks) {
-          if (!seen.has(feedDeck.name)) {
-            loadedDecks.push({ name: feedDeck.name, deck: feedDeckToParsedDeck(feedDeck) });
-            seen.add(feedDeck.name);
-          }
-        }
-      }
-
-      if (loadedDecks.length === 0) {
-        if (!cancelled) {
-          setCompatibilities({});
-          setCompatibilityError(null);
-          setIsEvaluating(false);
-        }
-        return;
-      }
-
-      try {
-        setIsEvaluating(true);
-        setCompatibilities({});
-        const results = await evaluateDeckCompatibilityBatch(loadedDecks, {
-          selectedFormat: selectedFormatForCompatibility,
-          selectedMatchType,
-        });
-        if (!cancelled) {
-          setCompatibilities(results);
-          setCompatibilityError(null);
-          onCompatibilityUpdate?.(results);
-        }
-      } catch (error) {
-        if (!cancelled) {
-          setCompatibilityError(error instanceof Error ? error.message : String(error));
-          setCompatibilities({});
-        }
-      } finally {
-        if (!cancelled) {
-          setIsEvaluating(false);
-        }
+    for (const sub of listSubscriptions()) {
+      const feed = feedCache[sub.sourceId];
+      if (!feed) continue;
+      for (const feedDeck of feed.decks) {
+        if (seen.has(feedDeck.name)) continue;
+        decks.set(feedDeck.name, feedDeckToParsedDeck(feedDeck));
+        seen.add(feedDeck.name);
       }
     }
 
-    evaluateCompat();
-    return () => {
-      cancelled = true;
-    };
-  }, [deckNames, selectedFormatForCompatibility, selectedMatchType, onCompatibilityUpdate, feedCache]);
+    return decks;
+  }, [deckNames, feedCache]);
+
+  useEffect(() => {
+    compatibilityGeneration.current += 1;
+    pendingCompatibility.current.clear();
+    setCompatibilities({});
+    setCompatibilityError(null);
+    setIsEvaluating(false);
+    onCompatibilityUpdate?.({});
+  }, [deckByName, selectedFormatForCompatibility, selectedMatchType, onCompatibilityUpdate]);
+
+  const requestDeckCompatibility = useCallback((deckName: string) => {
+    if (compatibilities[deckName] || pendingCompatibility.current.has(deckName)) return;
+    const deck = deckByName.get(deckName);
+    if (!deck) return;
+
+    const generation = compatibilityGeneration.current;
+    pendingCompatibility.current.add(deckName);
+    setIsEvaluating(true);
+
+    evaluateDeckCompatibilityBatch([{ name: deckName, deck }], {
+      selectedFormat: selectedFormatForCompatibility,
+      selectedMatchType,
+      summaryOnly: true,
+    }).then((results) => {
+      if (generation !== compatibilityGeneration.current) return;
+      setCompatibilities((current) => {
+        const next = { ...current, ...results };
+        onCompatibilityUpdate?.(next);
+        return next;
+      });
+      setCompatibilityError(null);
+    }).catch((error) => {
+      if (generation !== compatibilityGeneration.current) return;
+      setCompatibilityError(error instanceof Error ? error.message : String(error));
+    }).finally(() => {
+      if (generation !== compatibilityGeneration.current) return;
+      pendingCompatibility.current.delete(deckName);
+      setIsEvaluating(pendingCompatibility.current.size > 0);
+    });
+  }, [
+    compatibilities,
+    deckByName,
+    onCompatibilityUpdate,
+    selectedFormatForCompatibility,
+    selectedMatchType,
+  ]);
 
   const filteredDeckNames = useMemo(() => {
     return deckNames.filter((deckName) => {
@@ -493,6 +520,67 @@ export function MyDecks({
     return filteredDeckNames.filter((name) => name.toLowerCase().includes(q));
   }, [filteredDeckNames, searchQuery]);
 
+  const filteredPreconCandidates = useMemo(() => {
+    const saved = new Set(deckNames);
+    const q = searchQuery.toLowerCase();
+    return preconCandidates
+      .filter((candidate) => {
+        const prefixed = PRECON_PREFIX + candidate.name;
+        if (saved.has(prefixed) || saved.has(candidate.name)) return false;
+        return !q || prefixed.toLowerCase().includes(q);
+      })
+      .sort((a, b) => {
+        const dateCompare = (b.source.type === "precon" ? b.source.releaseDate ?? "" : "")
+          .localeCompare(a.source.type === "precon" ? a.source.releaseDate ?? "" : "");
+        return dateCompare || a.name.localeCompare(b.name);
+      });
+  }, [deckNames, preconCandidates, searchQuery]);
+
+  useEffect(() => {
+    setLegalPreconCandidates([]);
+    setPreconScanIndex(0);
+  }, [filteredPreconCandidates, selectedFormatForCompatibility, selectedMatchType]);
+
+  useEffect(() => {
+    if (!selectedFormatForCompatibility) {
+      setLegalPreconCandidates([]);
+      setPreconScanIndex(0);
+      return;
+    }
+    if (legalPreconCandidates.length >= preconDisplayCount) return;
+    if (preconScanIndex >= filteredPreconCandidates.length) return;
+
+    let cancelled = false;
+    const batch = filteredPreconCandidates.slice(
+      preconScanIndex,
+      preconScanIndex + PRECON_SCAN_BATCH_SIZE,
+    );
+    evaluateDeckCompatibilityBatch(
+      batch.map((candidate) => ({ name: candidate.id, deck: candidate.deck })),
+      { selectedFormat: selectedFormatForCompatibility, selectedMatchType, summaryOnly: true },
+    ).then((results) => {
+      if (cancelled) return;
+      const legal = batch.filter((candidate) => {
+        return results[candidate.id]?.selected_format_compatible === true;
+      });
+      setLegalPreconCandidates((current) => [...current, ...legal]);
+      setPreconScanIndex((index) => index + batch.length);
+    }).catch(() => {
+      if (!cancelled) setPreconScanIndex((index) => index + batch.length);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    filteredPreconCandidates,
+    legalPreconCandidates.length,
+    preconDisplayCount,
+    preconScanIndex,
+    selectedFormatForCompatibility,
+    selectedMatchType,
+  ]);
+
   const legalPreconByName = useMemo(() => {
     const entries = legalPreconCandidates.map((candidate) => [
       PRECON_PREFIX + candidate.name,
@@ -502,19 +590,8 @@ export function MyDecks({
   }, [legalPreconCandidates]);
 
   const preconDeckNames = useMemo(() => {
-    const saved = new Set(deckNames);
-    const names = Array.from(legalPreconByName.entries())
-      .filter(([name]) => !saved.has(name) && !saved.has(name.slice(PRECON_PREFIX.length)))
-      .sort(([, a], [, b]) => {
-        const dateCompare = (b.source.type === "precon" ? b.source.releaseDate ?? "" : "")
-          .localeCompare(a.source.type === "precon" ? a.source.releaseDate ?? "" : "");
-        return dateCompare || a.name.localeCompare(b.name);
-      })
-      .map(([name]) => name);
-    if (!searchQuery) return names;
-    const q = searchQuery.toLowerCase();
-    return names.filter((name) => name.toLowerCase().includes(q));
-  }, [deckNames, legalPreconByName, searchQuery]);
+    return Array.from(legalPreconByName.keys());
+  }, [legalPreconByName]);
 
   const displayedPreconDeckNames = useMemo(
     () => preconDeckNames.slice(0, preconDisplayCount),
@@ -579,7 +656,6 @@ export function MyDecks({
 
   const handleTileClick = (deckName: string) => {
     if (mode === "manage") {
-      materializePreconDeck(deckName);
       onEditDeck?.(deckName);
       return;
     }
@@ -864,6 +940,7 @@ export function MyDecks({
                   deckName={deckName}
                   isActive={deckName === activeDeckName}
                   compatibility={compatibilities[deckName]}
+                  onVisible={() => requestDeckCompatibility(deckName)}
                   onClick={() => handleTileClick(deckName)}
                   onEdit={onEditDeck ? () => onEditDeck(deckName) : undefined}
                   onDelete={mode === "manage" ? () => handleDeleteDeck(deckName) : undefined}
@@ -894,6 +971,7 @@ export function MyDecks({
                     deckName={deckName}
                     isActive={deckName === activeDeckName}
                     compatibility={compatibilities[deckName]}
+                    onVisible={() => requestDeckCompatibility(deckName)}
                     preconDeckOverride={
                       legalPreconByName.has(deckName)
                         ? preconCandidateToDeckEntry(legalPreconByName.get(deckName)!)
@@ -937,14 +1015,15 @@ export function MyDecks({
                   );
                 })}
               </div>
-              {displayedPreconDeckNames.length < preconDeckNames.length && (
+              {(displayedPreconDeckNames.length < preconDeckNames.length
+                || preconScanIndex < filteredPreconCandidates.length) && (
                 <div className="mt-4 flex justify-center">
                   <button
                     type="button"
                     onClick={() => setPreconDisplayCount((count) => count + PRECON_PAGE_SIZE)}
                     className={menuButtonClass({ tone: "neutral", size: "sm" })}
                   >
-                    Load More ({preconDeckNames.length - displayedPreconDeckNames.length})
+                    Load More
                   </button>
                 </div>
               )}
@@ -960,6 +1039,7 @@ export function MyDecks({
           compatibilities={compatibilities}
           onTileClick={handleTileClick}
           onAdopt={handleAdoptDeck}
+          onVisible={requestDeckCompatibility}
         />
       )}
 
@@ -1008,6 +1088,7 @@ interface SubscriptionsViewProps {
   compatibilities: Record<string, DeckCompatibilityResult>;
   onTileClick: (deckName: string) => void;
   onAdopt: (deckName: string) => void;
+  onVisible: (deckName: string) => void;
 }
 
 function SubscriptionsView({
@@ -1015,6 +1096,7 @@ function SubscriptionsView({
   compatibilities,
   onTileClick,
   onAdopt,
+  onVisible,
 }: SubscriptionsViewProps) {
   const subs = listSubscriptions();
   const feedCache = useFeedCacheSnapshot();
@@ -1063,6 +1145,7 @@ function SubscriptionsView({
                   deckName={deck.name}
                   isActive={deck.name === activeDeckName}
                   compatibility={compatibilities[deck.name]}
+                  onVisible={() => onVisible(deck.name)}
                   onClick={() => onTileClick(deck.name)}
                   onAdopt={() => onAdopt(deck.name)}
                   hideFeedBadge

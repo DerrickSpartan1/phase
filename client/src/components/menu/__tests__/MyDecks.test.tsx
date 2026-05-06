@@ -6,7 +6,7 @@ import { MyDecks } from "../MyDecks";
 import { STORAGE_KEY_PREFIX } from "../../../constants/storage";
 import type { ParsedDeck } from "../../../services/deckParser";
 import { evaluateDeckCompatibilityBatch } from "../../../services/deckCompatibility";
-import { buildLegalAiDeckCatalog } from "../../../services/aiDeckCatalog";
+import { loadPreconDeckMap } from "../../../hooks/useDecks";
 
 vi.mock("../../../hooks/useCardImage", () => ({
   useCardImage: () => ({ src: null, isLoading: false }),
@@ -16,8 +16,9 @@ vi.mock("../../../services/deckCompatibility", () => ({
   evaluateDeckCompatibilityBatch: vi.fn(),
 }));
 
-vi.mock("../../../services/aiDeckCatalog", () => ({
-  buildLegalAiDeckCatalog: vi.fn(),
+vi.mock("../../../hooks/useDecks", () => ({
+  loadPreconDeckMap: vi.fn(),
+  useDecks: vi.fn(() => null),
 }));
 
 function saveDeck(name: string, deck: ParsedDeck): void {
@@ -28,11 +29,27 @@ describe("MyDecks", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
-    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({ candidates: [] });
+    vi.mocked(loadPreconDeckMap).mockResolvedValue({});
+    vi.stubGlobal("IntersectionObserver", class {
+      private readonly callback: IntersectionObserverCallback;
+
+      constructor(callback: IntersectionObserverCallback) {
+        this.callback = callback;
+      }
+
+      observe(target: Element) {
+        this.callback([{ isIntersecting: true, target } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+      }
+
+      disconnect() {}
+      unobserve() {}
+      takeRecords(): IntersectionObserverEntry[] { return []; }
+    });
   });
 
   afterEach(() => {
     cleanup();
+    vi.unstubAllGlobals();
   });
 
   it("prefilters commander selection context and can reveal incompatible decks on demand", async () => {
@@ -214,7 +231,7 @@ describe("MyDecks", () => {
     expect(screen.getByText("PDH Ready")).toBeInTheDocument();
     expect(evaluateDeckCompatibilityBatch).toHaveBeenLastCalledWith(
       expect.any(Array),
-      { selectedFormat: "PauperCommander", selectedMatchType: undefined },
+      { selectedFormat: "PauperCommander", selectedMatchType: undefined, summaryOnly: true },
     );
   });
 
@@ -251,27 +268,41 @@ describe("MyDecks", () => {
   });
 
   it("shows legal precons in a newest-first load-more section and saves one when selected", async () => {
-    vi.mocked(evaluateDeckCompatibilityBatch).mockResolvedValue({});
-    vi.mocked(buildLegalAiDeckCatalog).mockResolvedValue({
-      candidates: Array.from({ length: 13 }, (_, i) => ({
-        id: `precon:deck-${i}`,
-        name: i === 12 ? "Secrets of Strixhaven (SOS)" : `Precon ${i} (P${i})`,
-        source: {
-          type: "precon",
-          deckId: `deck-${i}`,
-          code: i === 12 ? "SOS" : `P${i}`,
-          releaseDate: `2026-01-${String(i + 1).padStart(2, "0")}`,
-        },
-        deck: {
-          main: [{ name: "Island", count: 99 }],
-          sideboard: [],
-          commander: ["Zimone, Mystery Unraveler"],
-        },
+    vi.mocked(loadPreconDeckMap).mockResolvedValue({
+      ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`deck-${i}`, {
+        code: `P${i}`,
+        name: `Precon ${i}`,
+        type: "Commander",
+        releaseDate: `2026-01-${String(i + 1).padStart(2, "0")}`,
         coveragePct: 100,
-        archetype: "Control",
-      })),
+        mainBoard: [{ name: "Island", count: 99 }],
+        sideBoard: [],
+        commander: [{ name: "Zimone, Mystery Unraveler", count: 1 }],
+      }])),
+      secrets: {
+        code: "SOS",
+        name: "Secrets of Strixhaven",
+        type: "Commander",
+        releaseDate: "2026-02-01",
+        coveragePct: 100,
+        mainBoard: [{ name: "Island", count: 99 }],
+        sideBoard: [],
+        commander: [{ name: "Zimone, Mystery Unraveler", count: 1 }],
+      },
+    });
+    vi.mocked(evaluateDeckCompatibilityBatch).mockImplementation(async (decks) => {
+      return Object.fromEntries(decks.map(({ name }) => [name, {
+        standard: { compatible: false, reasons: [] },
+        commander: { compatible: true, reasons: [] },
+        bo3_ready: false,
+        unknown_cards: [],
+        selected_format_compatible: true,
+        selected_format_reasons: [],
+        color_identity: ["U"],
+      }]));
     });
     const onSelectDeck = vi.fn();
+    const onEditDeck = vi.fn();
 
     render(
       <MyDecks
@@ -279,21 +310,23 @@ describe("MyDecks", () => {
         selectedFormat="Commander"
         activeDeckName={null}
         onSelectDeck={onSelectDeck}
+        onEditDeck={onEditDeck}
       />,
     );
 
     expect(await screen.findByText("Secrets of Strixhaven (SOS)")).toBeInTheDocument();
     expect(screen.queryByText("Precon 0 (P0)")).not.toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Load More (1)" }));
+    await userEvent.click(screen.getByRole("button", { name: "Load More" }));
     expect(await screen.findByText("Precon 0 (P0)")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Edit Secrets of Strixhaven (SOS)" }));
+    expect(onEditDeck).toHaveBeenCalledWith("[Pre-built] Secrets of Strixhaven (SOS)");
+    expect(localStorage.getItem(`${STORAGE_KEY_PREFIX}[Pre-built] Secrets of Strixhaven (SOS)`)).toBeNull();
 
     await userEvent.click(screen.getByText("Secrets of Strixhaven (SOS)"));
 
     expect(onSelectDeck).toHaveBeenCalledWith("[Pre-built] Secrets of Strixhaven (SOS)");
     expect(localStorage.getItem(`${STORAGE_KEY_PREFIX}[Pre-built] Secrets of Strixhaven (SOS)`)).toBeTruthy();
-    expect(buildLegalAiDeckCatalog).toHaveBeenCalledWith({
-      selectedFormat: "Commander",
-      selectedMatchType: undefined,
-    });
+    expect(loadPreconDeckMap).toHaveBeenCalled();
   });
 });
