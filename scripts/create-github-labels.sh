@@ -15,7 +15,6 @@ create_label "status:needs-triage"           "c2e0c6" "Bug needs initial classif
 create_label "status:needs-repro"            "bfd4f2" "Needs reproduction steps"
 create_label "status:confirmed"              "0e8a16" "Confirmed bug"
 create_label "status:in-progress"            "fbca04" "Fix in progress"
-create_label "status:fixed-dirty-tree"       "d4c5f9" "Fixed locally, not merged"
 create_label "status:fixed-unreleased"       "c5def5" "Merged but not in public build"
 create_label "status:needs-card-data-regen"  "f9d0c4" "Needs card data regeneration"
 create_label "status:needs-runtime-verify"   "fef2c0" "May be fixed, needs runtime verification"

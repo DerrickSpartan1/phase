@@ -49,7 +49,7 @@ cat .claude/commands/review-impl.md
 
 Then apply the review checklist in `.claude/commands/review-impl.md` to the uncommitted diff. This is a required regression gate, not an optional cleanup pass. The review must look for missing sibling coverage, overly broad parser/runtime semantics, weak tests, hidden state leaks, rules-correctness gaps, and card-specific fixes that should have been modeled as reusable building blocks.
 
-If the review finds a gap, fix it immediately, rerun the relevant targeted tests, and run the review gate again. Do not transition GitHub issues to `fixed-dirty-tree`, `fixed-unreleased`, `needs-runtime-verify`, or closed until this review is clean.
+If the review finds a gap, fix it immediately, rerun the relevant targeted tests, and run the review gate again. Do not transition GitHub issues to `fixed-unreleased`, `needs-runtime-verify`, `verified`, or closed until this review is clean.
 
 ### GitHub Comment Standard
 
@@ -63,7 +63,6 @@ Keep raw command details in the local working notes or final Codex response when
 
 ```
 needs-triage → confirmed → in-progress → fixed-unreleased → needs-runtime-verify → verified → closed
-                                        → fixed-dirty-tree → fixed-unreleased → ...
                          → stale → closed
                          → wont-fix → closed
                          → duplicate → closed
@@ -151,7 +150,7 @@ Before calling any bug fixed, run the mandatory post-fix review gate above. Regr
 
 | Group | Labels | Purpose |
 |-------|--------|---------|
-| status | needs-triage, needs-repro, confirmed, in-progress, fixed-dirty-tree, fixed-unreleased, needs-card-data-regen, needs-runtime-verify, verified, stale, duplicate, wont-fix | Lifecycle |
+| status | needs-triage, needs-repro, confirmed, in-progress, fixed-unreleased, needs-card-data-regen, needs-runtime-verify, verified, stale, duplicate, wont-fix | Lifecycle |
 | area | engine, parser, frontend, ui, ai, card-data, deckbuilder, multiplayer, infra | Ownership |
 | priority | p0-softlock, p1-core-mechanic, p1-infinite-loop, p2-wrong-game-result, p2-interaction, p3-card-specific, p3-edge-case | Urgency |
 | mechanic | triggered-abilities, mana, combat, tokens, costs, zone-change, continuous-effects, keyword, replacement-effects, counters, layers, attachments, modal, search, card-data-regen, ai-policy, targeting | Subsystem |
