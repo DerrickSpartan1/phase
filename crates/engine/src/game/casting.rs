@@ -3994,6 +3994,14 @@ fn find_non_self_discard(cost: &AbilityCost) -> Option<(&QuantityExpr, Option<&T
     }
 }
 
+fn find_tap_creatures_cost(cost: &AbilityCost) -> Option<(u32, &TargetFilter)> {
+    match cost {
+        AbilityCost::TapCreatures { count, filter } => Some((*count, filter)),
+        AbilityCost::Composite { costs } => costs.iter().find_map(find_tap_creatures_cost),
+        _ => None,
+    }
+}
+
 /// Shared eligibility helper for hand-card cost payments — returns every card
 /// in `player`'s hand matching `filter` (if any), excluding the cast source.
 /// Used by both discard-as-cost (CR 601.2b) and exile-from-hand-as-cost
@@ -4094,6 +4102,32 @@ pub(crate) fn find_eligible_return_to_hand_targets(
                 obj.controller == player
                     && filter
                         .is_none_or(|f| super::filter::matches_target_filter(state, id, f, &ctx))
+            })
+        })
+        .collect()
+}
+
+fn find_eligible_tap_creatures_for_cost(
+    state: &GameState,
+    player: PlayerId,
+    source: ObjectId,
+    cost: &AbilityCost,
+    filter: &TargetFilter,
+) -> Vec<ObjectId> {
+    let ctx = super::filter::FilterContext::from_source(state, source);
+    let exclude_source = requires_untapped(cost);
+    state
+        .battlefield
+        .iter()
+        .copied()
+        .filter(|&id| {
+            if exclude_source && id == source {
+                return false;
+            }
+            state.objects.get(&id).is_some_and(|obj| {
+                obj.controller == player
+                    && !obj.tapped
+                    && super::filter::matches_target_filter(state, id, filter, &ctx)
             })
         })
         .collect()
@@ -4245,6 +4279,12 @@ fn can_pay_ability_cost_now(
     // activated abilities never appear as legal actions.
     if let Some(amount) = find_pay_life_cost(cost, state, player, source_id) {
         if !super::life_costs::can_pay_life_cost(state, player, amount) {
+            return false;
+        }
+    }
+    if let Some((count, filter)) = find_tap_creatures_cost(cost) {
+        let eligible = find_eligible_tap_creatures_for_cost(state, player, source_id, cost, filter);
+        if eligible.len() < count as usize {
             return false;
         }
     }
@@ -4443,6 +4483,11 @@ pub fn handle_activate_ability(
             EngineError::InvalidAction("Object not found during summoning-sickness check".into())
         })?;
         restrictions::check_summoning_sickness_for_cost(state, obj, cost)?;
+        if requires_untapped(cost) && obj.tapped {
+            return Err(EngineError::ActionNotAllowed(
+                "Cannot activate tap ability: permanent is tapped".to_string(),
+            ));
+        }
     }
 
     // CR 602.2b: Announce → choose modes → choose targets → pay costs.
@@ -4548,6 +4593,29 @@ pub fn handle_activate_ability(
                 count: count as usize,
                 permanents: eligible,
                 pending_cast: Box::new(pending_return),
+            });
+        }
+
+        // CR 118.3: Pre-check for tap-creatures activation costs. Non-mana
+        // activated abilities use the same WaitingFor flow as flashback tap
+        // costs; completion resumes through `finish_pending_cost_or_cast`.
+        if let Some((count, filter)) = find_tap_creatures_cost(cost) {
+            let eligible =
+                find_eligible_tap_creatures_for_cost(state, player, source_id, cost, filter);
+            if eligible.len() < count as usize {
+                return Err(EngineError::ActionNotAllowed(
+                    "Not enough eligible creatures to tap".into(),
+                ));
+            }
+            let mut pending_tap =
+                PendingCast::new(source_id, CardId(0), resolved, ManaCost::NoCost);
+            pending_tap.activation_cost = Some(cost.clone());
+            pending_tap.activation_ability_index = Some(ability_index);
+            return Ok(WaitingFor::TapCreaturesForSpellCost {
+                player,
+                count: count as usize,
+                creatures: eligible,
+                pending_cast: Box::new(pending_tap),
             });
         }
 

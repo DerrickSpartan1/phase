@@ -5511,6 +5511,9 @@ fn lower_subject_predicate_ast(
             }
             // CR 608.2c: Inject the subject's target into targeted effects that were
             // parsed via the imperative path (connive, phase out, force block, suspect).
+            if let Some(wrapped) = wrap_target_subject_damage(clause.clone(), &subject) {
+                return wrapped;
+            }
             inject_subject_target(&mut clause.effect, &subject);
             if let Effect::PayCost { payer, .. } = &mut clause.effect {
                 if matches!(
@@ -5722,6 +5725,30 @@ fn rewrite_quantity_controller(expr: &mut QuantityExpr, from: ControllerRef, to:
     }
 }
 
+fn rewrite_event_source_power_to_object_power(expr: &mut QuantityExpr, scope: ObjectScope) {
+    match expr {
+        QuantityExpr::Ref {
+            qty: QuantityRef::EventContextSourcePower,
+        } => {
+            *expr = QuantityExpr::Ref {
+                qty: QuantityRef::Power { scope },
+            };
+        }
+        QuantityExpr::HalfRounded { inner, .. }
+        | QuantityExpr::Multiply { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::UpTo { max: inner } => {
+            rewrite_event_source_power_to_object_power(inner, scope);
+        }
+        QuantityExpr::Sum { exprs } => {
+            for inner in exprs {
+                rewrite_event_source_power_to_object_power(inner, scope);
+            }
+        }
+        QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {}
+    }
+}
+
 fn rewrite_filter_controller(filter: &mut TargetFilter, from: &ControllerRef, to: &ControllerRef) {
     match filter {
         TargetFilter::Typed(tf) if tf.controller.as_ref() == Some(from) => {
@@ -5774,6 +5801,47 @@ fn target_filter_can_target_player(filter: &TargetFilter) -> bool {
         TargetFilter::Not { filter } => target_filter_can_target_player(filter),
         _ => false,
     }
+}
+
+fn wrap_target_subject_damage(
+    mut clause: ParsedEffectClause,
+    subject: &SubjectPhraseAst,
+) -> Option<ParsedEffectClause> {
+    let subject_target = subject.target.as_ref()?;
+    let Effect::DealDamage {
+        amount,
+        damage_source,
+        ..
+    } = &mut clause.effect
+    else {
+        return None;
+    };
+
+    // CR 608.2c + CR 120.3: "target creature deals damage equal to its
+    // power..." makes the chosen source object, not the spell card, deal the
+    // damage. "Its power" is therefore the first target's current power.
+    rewrite_event_source_power_to_object_power(amount, ObjectScope::Target);
+    *damage_source = Some(DamageSource::Target);
+
+    let mut damage_ability = AbilityDefinition::new(AbilityKind::Spell, clause.effect);
+    damage_ability.sub_ability = clause.sub_ability;
+    damage_ability.duration = clause.duration.clone();
+    damage_ability.condition = clause.condition.clone();
+    damage_ability.optional = clause.optional;
+    damage_ability.multi_target = clause.multi_target;
+    damage_ability.distribute = clause.distribute;
+
+    Some(ParsedEffectClause {
+        effect: Effect::TargetOnly {
+            target: subject_target.clone(),
+        },
+        duration: clause.duration,
+        sub_ability: Some(Box::new(damage_ability)),
+        distribute: None,
+        multi_target: subject.multi_target.clone(),
+        condition: None,
+        optional: subject.is_optional,
+    })
 }
 
 fn parse_subject_exile_top_count(pred_lower: &str) -> QuantityExpr {
@@ -5947,6 +6015,12 @@ fn inject_subject_target(effect: &mut Effect, subject: &SubjectPhraseAst) {
         // Guard on is_none() to only inject when no target was explicitly parsed.
         Effect::LoseLife { ref mut target, .. } if target.is_none() => {
             *target = Some(subject_filter);
+        }
+        // CR 608.2c + CR 120.3: When the stripped subject is the source object
+        // ("~ deals damage equal to its power..."), "its power" is the ability
+        // source's current power, not a triggering event's source power.
+        Effect::DealDamage { amount, .. } if subject_filter == TargetFilter::SelfRef => {
+            rewrite_event_source_power_to_object_power(amount, ObjectScope::Source);
         }
         // CR 701.23a: "Its controller may search their library..." — the subject
         // names the library owner (and, when the subject is a context-ref, the
@@ -12354,6 +12428,67 @@ mod tests {
             ),
             "expected DealDamage with TargetPower/ParentTarget, got: {:?}",
             clause.effect
+        );
+    }
+
+    #[test]
+    fn self_subject_damage_equal_to_its_power_uses_source_power() {
+        let clause = parse_effect_clause(
+            "~ deals damage equal to its power to target creature with flying",
+            &mut ParseContext::default(),
+        );
+
+        assert!(
+            matches!(
+                clause.effect,
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Source
+                        },
+                    },
+                    target: TargetFilter::Typed(_),
+                    damage_source: None,
+                }
+            ),
+            "expected source-power DealDamage, got: {:?}",
+            clause.effect
+        );
+    }
+
+    #[test]
+    fn target_subject_damage_equal_to_its_power_uses_target_source_power() {
+        let clause = parse_effect_clause(
+            "target creature you control deals damage equal to its power to target creature or planeswalker you don't control",
+            &mut ParseContext::default(),
+        );
+
+        let Effect::TargetOnly { target } = &clause.effect else {
+            panic!(
+                "expected TargetOnly source wrapper, got {:?}",
+                clause.effect
+            );
+        };
+        assert!(matches!(target, TargetFilter::Typed(_)));
+        let sub = clause
+            .sub_ability
+            .as_ref()
+            .expect("damage should be in sub-ability after source target");
+        assert!(
+            matches!(
+                sub.effect.as_ref(),
+                Effect::DealDamage {
+                    amount: QuantityExpr::Ref {
+                        qty: QuantityRef::Power {
+                            scope: ObjectScope::Target
+                        },
+                    },
+                    target: TargetFilter::Or { .. },
+                    damage_source: Some(DamageSource::Target),
+                }
+            ),
+            "expected target-source-power damage, got {:?}",
+            sub.effect
         );
     }
 

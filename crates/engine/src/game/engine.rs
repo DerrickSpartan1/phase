@@ -4336,8 +4336,9 @@ mod tests {
     use crate::game::game_object::{BackFaceData, RoomDoor};
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AbilityCost, AbilityDefinition, AbilityKind, Effect, ManaContribution, ManaProduction,
-        QuantityExpr, ResolvedAbility, TargetFilter, TriggerDefinition, TypedFilter,
+        AbilityCost, AbilityDefinition, AbilityKind, ControllerRef, Effect, GainLifePlayer,
+        ManaContribution, ManaProduction, QuantityExpr, ResolvedAbility, TargetFilter,
+        TriggerDefinition, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CardType;
     use crate::types::card_type::CoreType;
@@ -7211,6 +7212,174 @@ mod tests {
                 .mana_pool
                 .count_color(crate::types::mana::ManaType::Green),
             1
+        );
+    }
+
+    #[test]
+    fn non_mana_activation_tap_creatures_cost_prompts_then_pays() {
+        let mut state = setup_game_at_main_phase();
+
+        let lathril = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Lathril, Blade of the Elves".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&lathril).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 10 },
+                        player: GainLifePlayer::Controller,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Tap,
+                        AbilityCost::TapCreatures {
+                            count: 2,
+                            filter: TypedFilter::creature()
+                                .with_type(TypeFilter::Subtype("Elf".to_string()))
+                                .controller(ControllerRef::You)
+                                .into(),
+                        },
+                    ],
+                }),
+            );
+        }
+
+        let elf_a = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Elf A".to_string(),
+            Zone::Battlefield,
+        );
+        let elf_b = create_object(
+            &mut state,
+            CardId(202),
+            PlayerId(0),
+            "Elf B".to_string(),
+            Zone::Battlefield,
+        );
+        let non_elf = create_object(
+            &mut state,
+            CardId(203),
+            PlayerId(0),
+            "Bear".to_string(),
+            Zone::Battlefield,
+        );
+        for (id, subtype) in [(elf_a, "Elf"), (elf_b, "Elf"), (non_elf, "Bear")] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push(subtype.to_string());
+        }
+
+        let result = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: lathril,
+                ability_index: 0,
+            },
+        )
+        .unwrap();
+
+        match result.waiting_for {
+            WaitingFor::TapCreaturesForSpellCost {
+                player,
+                count,
+                creatures,
+                ..
+            } => {
+                assert_eq!(player, PlayerId(0));
+                assert_eq!(count, 2);
+                assert_eq!(creatures, vec![elf_a, elf_b]);
+            }
+            other => panic!("expected TapCreaturesForSpellCost, got {other:?}"),
+        }
+        assert!(!state.objects.get(&lathril).unwrap().tapped);
+
+        apply_as_current(
+            &mut state,
+            GameAction::SelectCards {
+                cards: vec![elf_a, elf_b],
+            },
+        )
+        .unwrap();
+
+        assert!(state.objects.get(&lathril).unwrap().tapped);
+        assert!(state.objects.get(&elf_a).unwrap().tapped);
+        assert!(state.objects.get(&elf_b).unwrap().tapped);
+        assert!(!state.objects.get(&non_elf).unwrap().tapped);
+        assert_eq!(state.stack.len(), 1);
+    }
+
+    #[test]
+    fn non_mana_activation_tap_creatures_cost_rejects_tapped_source_before_prompt() {
+        let mut state = setup_game_at_main_phase();
+
+        let source = create_object(
+            &mut state,
+            CardId(204),
+            PlayerId(0),
+            "Tapped Elf Caller".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&source).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.tapped = true;
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: GainLifePlayer::Controller,
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Tap,
+                        AbilityCost::TapCreatures {
+                            count: 1,
+                            filter: TypedFilter::creature()
+                                .with_type(TypeFilter::Subtype("Elf".to_string()))
+                                .controller(ControllerRef::You)
+                                .into(),
+                        },
+                    ],
+                }),
+            );
+        }
+
+        let elf = create_object(
+            &mut state,
+            CardId(205),
+            PlayerId(0),
+            "Elf".to_string(),
+            Zone::Battlefield,
+        );
+        let obj = state.objects.get_mut(&elf).unwrap();
+        obj.card_types.core_types.push(CoreType::Creature);
+        obj.card_types.subtypes.push("Elf".to_string());
+
+        let err = apply_as_current(
+            &mut state,
+            GameAction::ActivateAbility {
+                source_id: source,
+                ability_index: 0,
+            },
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, EngineError::ActionNotAllowed(message) if message == "Cannot activate tap ability: permanent is tapped")
         );
     }
 

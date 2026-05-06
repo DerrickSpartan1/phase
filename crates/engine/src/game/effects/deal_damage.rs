@@ -511,8 +511,12 @@ pub fn resolve(
     // Resolve effective targets: use explicit targets if present, otherwise derive
     // implicit target from the TargetFilter for non-targeted damage ("to you", "to itself").
     let implicit;
-    let effective_targets = if !ability.targets.is_empty() {
-        &ability.targets
+    let effective_targets: &[TargetRef] = if !ability.targets.is_empty() {
+        if matches!(damage_source, Some(DamageSource::Target)) && ability.targets.len() > 1 {
+            &ability.targets[1..]
+        } else {
+            &ability.targets
+        }
     } else {
         implicit = match target_filter {
             TargetFilter::Controller => vec![TargetRef::Player(ability.controller)],
@@ -908,7 +912,7 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        FilterProp, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+        FilterProp, ObjectScope, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::events::GameEvent;
@@ -948,6 +952,51 @@ mod tests {
         resolve(&mut state, &ability, &mut events).unwrap();
 
         assert_eq!(state.objects[&obj_id].damage_marked, 3);
+    }
+
+    #[test]
+    fn target_damage_source_damages_recipient_targets_only() {
+        let mut state = GameState::new_two_player(42);
+        let source = create_object(
+            &mut state,
+            CardId(10),
+            PlayerId(0),
+            "Source Creature".to_string(),
+            Zone::Battlefield,
+        );
+        let recipient = create_object(
+            &mut state,
+            CardId(11),
+            PlayerId(1),
+            "Recipient Creature".to_string(),
+            Zone::Battlefield,
+        );
+        for id in [source, recipient] {
+            let obj = state.objects.get_mut(&id).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.power = Some(3);
+            obj.base_power = Some(3);
+        }
+        let ability = ResolvedAbility::new(
+            Effect::DealDamage {
+                amount: QuantityExpr::Ref {
+                    qty: QuantityRef::Power {
+                        scope: ObjectScope::Target,
+                    },
+                },
+                target: TargetFilter::Typed(TypedFilter::creature()),
+                damage_source: Some(DamageSource::Target),
+            },
+            vec![TargetRef::Object(source), TargetRef::Object(recipient)],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let mut events = Vec::new();
+
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.objects[&source].damage_marked, 0);
+        assert_eq!(state.objects[&recipient].damage_marked, 3);
     }
 
     #[test]

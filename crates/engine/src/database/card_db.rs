@@ -414,7 +414,8 @@ mod tests {
         let db = CardDatabase::from_json_str(&json).unwrap();
 
         assert_eq!(
-            db.get_face_by_name("Seance Board").map(|face| face.name.as_str()),
+            db.get_face_by_name("Seance Board")
+                .map(|face| face.name.as_str()),
             Some("Séance Board")
         );
     }
