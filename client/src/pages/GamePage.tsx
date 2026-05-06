@@ -47,6 +47,7 @@ import { WarpCostModal } from "../components/modal/WarpCostModal.tsx";
 import { MiracleRevealModal } from "../components/modal/MiracleRevealModal.tsx";
 import { CardChoiceModal } from "../components/modal/CardChoiceModal.tsx";
 import { ChoiceModal } from "../components/modal/ChoiceModal.tsx";
+import { OptionalEffectModalContent } from "../components/modal/OptionalEffectModal.tsx";
 import { ChooseOneOfBranchModal } from "../components/modal/ChooseOneOfBranchModal.tsx";
 import { ModeChoiceModal } from "../components/modal/ModeChoiceModal.tsx";
 import { ReplacementModal } from "../components/modal/ReplacementModal.tsx";
@@ -2035,23 +2036,7 @@ function OptionalEffectModal() {
 
   if (waitingFor?.type !== "OptionalEffectChoice" && waitingFor?.type !== "OpponentMayChoice") return null;
 
-  const sourceObj = objects?.[waitingFor.data.source_id];
-  const sourceName = sourceObj?.name ?? "Effect";
-  const description = waitingFor.data.description as string | undefined;
-
-  return (
-    <ChoiceModal
-      title={`${sourceName} — Optional Effect`}
-      subtitle={description}
-      options={[
-        { id: "accept", label: "Yes" },
-        { id: "decline", label: "No" },
-      ]}
-      onChoose={(id) =>
-        dispatch({ type: "DecideOptionalEffect", data: { accept: id === "accept" } })
-      }
-    />
-  );
+  return <OptionalEffectModalContent waitingFor={waitingFor} objects={objects} dispatch={dispatch} />;
 }
 
 // ── Unless Payment Modal (CR 118.12) ────────────────────────────────────

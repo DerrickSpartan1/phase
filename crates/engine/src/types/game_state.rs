@@ -18,7 +18,7 @@ use super::counter::CounterType;
 use super::events::{GameEvent, PlayerActionKind};
 use super::format::FormatConfig;
 use super::identifiers::{CardId, ObjectId, TrackedSetId};
-use super::keywords::Keyword;
+use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, ManaType};
 use super::match_config::{MatchConfig, MatchPhase, MatchScore};
 use super::phase::Phase;
@@ -359,6 +359,33 @@ pub struct BattlefieldEntryRecord {
     pub subtypes: Vec<String>,
     pub supertypes: Vec<Supertype>,
     pub controller: PlayerId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum AutoMayChoice {
+    Accept,
+    Decline,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum MayTriggerOrigin {
+    Printed { trigger_index: usize },
+    Keyword { keyword: KeywordKind },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MayTriggerAutoChoiceKey {
+    pub player: PlayerId,
+    pub source_id: ObjectId,
+    pub origin: MayTriggerOrigin,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MayTriggerAutoChoiceRecord {
+    pub key: MayTriggerAutoChoiceKey,
+    pub choice: AutoMayChoice,
 }
 
 /// CR 609.7a: A source of damage chosen while creating a prevention or
@@ -1368,6 +1395,8 @@ pub enum WaitingFor {
         /// Human-readable description of the effect (e.g. "draw a card").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         description: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        may_trigger_key: Option<MayTriggerAutoChoiceKey>,
     },
     /// CR 702.104a: The chosen opponent of a Tribute creature must decide whether
     /// to place the Tribute +1/+1 counters. `source_id` is the entering Tribute
@@ -2796,6 +2825,9 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_optional_effect: Option<Box<crate::types::ability::ResolvedAbility>>,
 
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub may_trigger_auto_choices: Vec<MayTriggerAutoChoiceRecord>,
+
     /// CR 103.6: Beginning-of-game abilities queued after all players finish
     /// mulligans. Stored in reverse resolution order so `pop()` preserves APNAP
     /// collection order without shifting.
@@ -3185,6 +3217,7 @@ impl GameState {
             pending_repeat_iteration: None,
             pending_choose_one_of: None,
             pending_optional_effect: None,
+            may_trigger_auto_choices: Vec::new(),
             pending_begin_game_abilities: Vec::new(),
             resolving_begin_game_abilities: false,
             last_named_choice: None,
@@ -3232,6 +3265,30 @@ impl GameState {
         let ts = self.next_timestamp;
         self.next_timestamp += 1;
         ts
+    }
+
+    pub fn may_trigger_auto_choice(&self, key: &MayTriggerAutoChoiceKey) -> Option<AutoMayChoice> {
+        self.may_trigger_auto_choices
+            .iter()
+            .find(|record| record.key == *key)
+            .map(|record| record.choice)
+    }
+
+    pub fn set_may_trigger_auto_choice(
+        &mut self,
+        key: MayTriggerAutoChoiceKey,
+        choice: AutoMayChoice,
+    ) {
+        if let Some(record) = self
+            .may_trigger_auto_choices
+            .iter_mut()
+            .find(|record| record.key == key)
+        {
+            record.choice = choice;
+        } else {
+            self.may_trigger_auto_choices
+                .push(MayTriggerAutoChoiceRecord { key, choice });
+        }
     }
 
     /// Register a transient continuous effect and mark layers dirty.
@@ -3366,6 +3423,7 @@ impl PartialEq for GameState {
             && self.pending_continuation == other.pending_continuation
             && self.pending_repeat_iteration == other.pending_repeat_iteration
             && self.pending_choose_one_of == other.pending_choose_one_of
+            && self.may_trigger_auto_choices == other.may_trigger_auto_choices
             && self.pending_begin_game_abilities == other.pending_begin_game_abilities
             && self.resolving_begin_game_abilities == other.resolving_begin_game_abilities
             && self.pending_cast == other.pending_cast
@@ -3975,10 +4033,35 @@ mod tests {
             modal: None,
             mode_abilities: vec![],
             description: None,
+            may_trigger_origin: None,
         };
         let json = serde_json::to_string(&trigger).unwrap();
         let deserialized: PendingTrigger = serde_json::from_str(&json).unwrap();
         assert_eq!(trigger, deserialized);
+    }
+
+    #[test]
+    fn may_trigger_auto_choices_roundtrip_and_default_empty() {
+        let empty = GameState::new_two_player(42);
+        assert!(empty.may_trigger_auto_choices.is_empty());
+
+        let mut state = GameState::new_two_player(42);
+        let key = MayTriggerAutoChoiceKey {
+            player: PlayerId(0),
+            source_id: ObjectId(5),
+            origin: MayTriggerOrigin::Printed { trigger_index: 1 },
+        };
+        state.set_may_trigger_auto_choice(key, AutoMayChoice::Accept);
+
+        let serialized = serde_json::to_string(&state).unwrap();
+        let mut deserialized: GameState = serde_json::from_str(&serialized).unwrap();
+        deserialized.rng = ChaCha20Rng::seed_from_u64(deserialized.rng_seed);
+
+        assert_eq!(
+            deserialized.may_trigger_auto_choice(&key),
+            Some(AutoMayChoice::Accept)
+        );
+        assert_eq!(state, deserialized);
     }
 
     #[test]
@@ -4013,6 +4096,7 @@ mod tests {
             modal: None,
             mode_abilities: vec![],
             description: None,
+            may_trigger_origin: None,
         });
 
         let json = serde_json::to_string(&state).unwrap();

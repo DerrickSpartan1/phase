@@ -172,6 +172,7 @@ pub fn resolve_tally(
             chosen_x: None,
             cost_paid_object: None,
             ability_index: None,
+            may_trigger_origin: None,
         };
         resolve_ability_chain(state, &chain, events, 0)?;
     }
@@ -219,6 +220,7 @@ fn resolved_from_def(
         chosen_x: None,
         cost_paid_object: None,
         ability_index: None,
+        may_trigger_origin: None,
     }
 }
 
@@ -349,6 +351,7 @@ mod tests {
             chosen_x: None,
             cost_paid_object: None,
             ability_index: None,
+            may_trigger_origin: None,
         };
 
         let mut events = Vec::new();

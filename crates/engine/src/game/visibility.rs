@@ -304,6 +304,9 @@ pub fn filter_state_for_viewer(state: &GameState, viewer: PlayerId) -> GameState
     filtered.auto_pass.retain(|pid, _| *pid == viewer);
     filtered.phase_stops.retain(|pid, _| *pid == viewer);
     filtered
+        .may_trigger_auto_choices
+        .retain(|record| record.key.player == viewer);
+    filtered
         .lands_tapped_for_mana
         .retain(|pid, _| *pid == viewer);
     filtered
@@ -361,7 +364,10 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{Effect, ResolvedAbility};
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{CastingVariant, PendingBeginGameAbility, PendingCast};
+    use crate::types::game_state::{
+        AutoMayChoice, CastingVariant, MayTriggerAutoChoiceKey, MayTriggerOrigin,
+        PendingBeginGameAbility, PendingCast,
+    };
     use crate::types::identifiers::CardId;
     use crate::types::mana::ManaCost;
     use crate::types::zones::{ExileCostSourceZone, Zone};
@@ -394,6 +400,32 @@ mod tests {
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         })
+    }
+
+    #[test]
+    fn filters_other_players_may_trigger_auto_choices() {
+        let mut state = GameState::new_two_player(42);
+        state.set_may_trigger_auto_choice(
+            MayTriggerAutoChoiceKey {
+                player: PlayerId(0),
+                source_id: ObjectId(10),
+                origin: MayTriggerOrigin::Printed { trigger_index: 0 },
+            },
+            AutoMayChoice::Accept,
+        );
+        state.set_may_trigger_auto_choice(
+            MayTriggerAutoChoiceKey {
+                player: PlayerId(1),
+                source_id: ObjectId(11),
+                origin: MayTriggerOrigin::Printed { trigger_index: 0 },
+            },
+            AutoMayChoice::Decline,
+        );
+
+        let filtered = filter_state_for_viewer(&state, PlayerId(0));
+
+        assert_eq!(filtered.may_trigger_auto_choices.len(), 1);
+        assert_eq!(filtered.may_trigger_auto_choices[0].key.player, PlayerId(0));
     }
 
     #[test]

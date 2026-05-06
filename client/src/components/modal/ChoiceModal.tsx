@@ -1,3 +1,5 @@
+import type { ReactNode } from "react";
+
 import type { CardType } from "../../adapter/types.ts";
 import { RichLabel } from "../mana/RichLabel.tsx";
 import { CardTextboxPreview } from "./CardTextboxPreview.tsx";
@@ -20,6 +22,7 @@ interface ChoiceModalProps {
   /** Card type info for the preview. The preview uses this to pick the right
    * rules-text band for non-standard frames (saga, planeswalker, battle, etc.). */
   previewCardTypes?: CardType;
+  footer?: ReactNode;
 }
 
 export function ChoiceModal({
@@ -30,6 +33,7 @@ export function ChoiceModal({
   onClose,
   previewCardName,
   previewCardTypes,
+  footer,
 }: ChoiceModalProps) {
   return (
     <DialogShell
@@ -64,6 +68,7 @@ export function ChoiceModal({
             </button>
           ))}
         </div>
+        {footer && <div className="mt-3">{footer}</div>}
       </div>
     </DialogShell>
   );

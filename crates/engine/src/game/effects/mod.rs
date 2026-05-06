@@ -9,7 +9,9 @@ use crate::types::ability::{
     TargetFilter, TargetRef, UnlessCost,
 };
 use crate::types::events::GameEvent;
-use crate::types::game_state::{DayNight, GameState, PendingContinuation, WaitingFor};
+use crate::types::game_state::{
+    AutoMayChoice, DayNight, GameState, MayTriggerAutoChoiceKey, PendingContinuation, WaitingFor,
+};
 use crate::types::identifiers::{ObjectId, TrackedSetId};
 use crate::types::mana::ManaCost;
 use crate::types::player::PlayerId;
@@ -394,6 +396,30 @@ fn waits_for_resolution_choice(waiting_for: &WaitingFor) -> bool {
             | WaitingFor::LearnChoice { .. }
             | WaitingFor::PopulateChoice { .. }
     )
+}
+
+pub(super) fn resolve_optional_effect_decision(
+    state: &mut GameState,
+    mut ability: ResolvedAbility,
+    choice: AutoMayChoice,
+    events: &mut Vec<GameEvent>,
+    depth: u32,
+) -> Result<(), EffectError> {
+    ability.optional = false;
+    match choice {
+        AutoMayChoice::Accept => {
+            ability.context.optional_effect_performed = true;
+            resolve_ability_chain(state, &ability, events, depth)?;
+        }
+        AutoMayChoice::Decline => {
+            if let Some(ref sub) = ability.sub_ability {
+                let mut sub_resolved = sub.as_ref().clone();
+                sub_resolved.context = ability.context.clone();
+                resolve_ability_chain(state, &sub_resolved, events, depth)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn is_player_scope_local_continuation(parent: &Effect, child: &Effect) -> bool {
@@ -1379,11 +1405,31 @@ pub fn resolve_ability_chain(
     if ability.optional {
         let description = ability.description.clone();
         let prompt_player = optional_prompt_player(state, ability);
+        let may_trigger_key = ability
+            .may_trigger_origin
+            .map(|origin| MayTriggerAutoChoiceKey {
+                player: prompt_player,
+                source_id: ability.source_id,
+                origin,
+            });
+        if let Some(key) = may_trigger_key {
+            if let Some(choice) = state.may_trigger_auto_choice(&key) {
+                resolve_optional_effect_decision(
+                    state,
+                    ability.clone(),
+                    choice,
+                    events,
+                    depth + 1,
+                )?;
+                return Ok(());
+            }
+        }
         state.pending_optional_effect = Some(Box::new(ability.clone()));
         state.waiting_for = WaitingFor::OptionalEffectChoice {
             player: prompt_player,
             source_id: ability.source_id,
             description,
+            may_trigger_key,
         };
         return Ok(());
     }
@@ -1865,6 +1911,7 @@ pub fn resolve_ability_chain(
                         modal: None,
                         mode_abilities: vec![],
                         description: trigger_description.clone(),
+                        may_trigger_origin: None,
                     });
                     state.waiting_for = WaitingFor::TriggerTargetSelection {
                         player: ability.controller,
@@ -2458,7 +2505,10 @@ mod tests {
     use crate::types::card_type::CoreType;
     use crate::types::counter::CounterType;
     use crate::types::format::FormatConfig;
-    use crate::types::game_state::{ExileLink, ExileLinkKind, LinkedExileSnapshot};
+    use crate::types::game_state::{
+        AutoMayChoice, ExileLink, ExileLinkKind, LinkedExileSnapshot, MayTriggerAutoChoiceKey,
+        MayTriggerOrigin,
+    };
     use crate::types::identifiers::{CardId, ObjectId, TrackedSetId};
     use crate::types::mana::ManaColor;
     use crate::types::mana::ManaCost;
@@ -2503,6 +2553,137 @@ mod tests {
         let mut events = Vec::new();
         let result = resolve_effect(&mut state, &ability, &mut events);
         assert!(result.is_ok());
+    }
+
+    fn optional_gain_life(
+        source_id: ObjectId,
+        controller: PlayerId,
+        amount: i32,
+    ) -> ResolvedAbility {
+        let mut ability = ResolvedAbility::new(
+            Effect::GainLife {
+                amount: QuantityExpr::Fixed { value: amount },
+                player: GainLifePlayer::Controller,
+            },
+            vec![],
+            source_id,
+            controller,
+        );
+        ability.optional = true;
+        ability
+    }
+
+    #[test]
+    fn optional_trigger_prompt_includes_may_trigger_key() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(100);
+        let mut ability = optional_gain_life(source_id, PlayerId(0), 1);
+        ability.set_may_trigger_origin_recursive(MayTriggerOrigin::Printed { trigger_index: 2 });
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+
+        match state.waiting_for {
+            WaitingFor::OptionalEffectChoice {
+                may_trigger_key: Some(key),
+                ..
+            } => {
+                assert_eq!(key.player, PlayerId(0));
+                assert_eq!(key.source_id, source_id);
+                assert_eq!(key.origin, MayTriggerOrigin::Printed { trigger_index: 2 });
+            }
+            other => panic!("expected keyed OptionalEffectChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn saved_accept_for_may_trigger_resolves_without_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(100);
+        let origin = MayTriggerOrigin::Printed { trigger_index: 0 };
+        let key = MayTriggerAutoChoiceKey {
+            player: PlayerId(0),
+            source_id,
+            origin,
+        };
+        state.set_may_trigger_auto_choice(key, AutoMayChoice::Accept);
+        let mut ability = optional_gain_life(source_id, PlayerId(0), 3);
+        ability.set_may_trigger_origin_recursive(origin);
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.players[0].life, 23);
+    }
+
+    #[test]
+    fn saved_decline_for_may_trigger_resolves_without_prompt() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(100);
+        let origin = MayTriggerOrigin::Printed { trigger_index: 0 };
+        let key = MayTriggerAutoChoiceKey {
+            player: PlayerId(0),
+            source_id,
+            origin,
+        };
+        state.set_may_trigger_auto_choice(key, AutoMayChoice::Decline);
+        let mut ability = optional_gain_life(source_id, PlayerId(0), 3);
+        ability.set_may_trigger_origin_recursive(origin);
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.players[0].life, 20);
+    }
+
+    #[test]
+    fn saved_may_trigger_choice_is_scoped_to_prompt_player() {
+        let mut state = GameState::new_two_player(42);
+        let source_id = ObjectId(100);
+        let origin = MayTriggerOrigin::Printed { trigger_index: 0 };
+        state.set_may_trigger_auto_choice(
+            MayTriggerAutoChoiceKey {
+                player: PlayerId(0),
+                source_id,
+                origin,
+            },
+            AutoMayChoice::Accept,
+        );
+        let mut ability = optional_gain_life(source_id, PlayerId(1), 3);
+        ability.set_may_trigger_origin_recursive(origin);
+
+        resolve_ability_chain(&mut state, &ability, &mut Vec::new(), 0).unwrap();
+
+        match state.waiting_for {
+            WaitingFor::OptionalEffectChoice {
+                may_trigger_key: Some(key),
+                ..
+            } => assert_eq!(key.player, PlayerId(1)),
+            other => panic!("expected prompt for player 1, got {other:?}"),
+        }
+        assert_eq!(state.players[1].life, 20);
+    }
+
+    #[test]
+    fn may_trigger_origin_stamps_optional_sub_abilities() {
+        let source_id = ObjectId(100);
+        let origin = MayTriggerOrigin::Printed { trigger_index: 4 };
+        let mut root = ResolvedAbility::new(
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+            vec![],
+            source_id,
+            PlayerId(0),
+        );
+        root.sub_ability = Some(Box::new(optional_gain_life(source_id, PlayerId(0), 1)));
+        root.set_may_trigger_origin_recursive(origin);
+
+        assert_eq!(root.may_trigger_origin, Some(origin));
+        assert_eq!(
+            root.sub_ability.as_ref().unwrap().may_trigger_origin,
+            Some(origin)
+        );
     }
 
     #[test]

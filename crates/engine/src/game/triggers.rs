@@ -8,11 +8,12 @@ use crate::types::ability::{
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::{
-    DelayedTrigger, GameState, StackEntry, StackEntryKind, TargetSelectionConstraint,
+    DelayedTrigger, GameState, MayTriggerOrigin, StackEntry, StackEntryKind,
+    TargetSelectionConstraint,
 };
 use crate::types::identifiers::ObjectId;
-use crate::types::keywords::Keyword;
 use crate::types::keywords::WardCost;
+use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::phase::Phase;
 use crate::types::player::{Player, PlayerId};
 use crate::types::statics::{StaticMode, TriggerCause};
@@ -60,6 +61,8 @@ pub struct PendingTrigger {
     /// Human-readable trigger description from the Oracle text.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub may_trigger_origin: Option<MayTriggerOrigin>,
 }
 
 /// CR 702.21a: Convert a WardCost to an UnlessCost for the counter effect.
@@ -266,6 +269,9 @@ fn collect_matching_triggers(
                         modal: modal.clone(),
                         mode_abilities: mode_abilities.clone(),
                         description: trig_def.description.clone(),
+                        may_trigger_origin: Some(MayTriggerOrigin::Printed {
+                            trigger_index: trig_idx,
+                        }),
                     },
                     trigger_events,
                     batched: trig_def.batched,
@@ -542,6 +548,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             modal: None,
                             mode_abilities: vec![],
                             description: None,
+                            may_trigger_origin: None,
                         }));
                     }
                 }
@@ -585,6 +592,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             modal: None,
                             mode_abilities: vec![],
                             description: ravenous_trigger.description,
+                            may_trigger_origin: None,
                         }));
                     }
                 }
@@ -621,6 +629,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             modal: None,
                             mode_abilities: vec![],
                             description: None,
+                            may_trigger_origin: None,
                         }));
                         // Track bending type for Avatar Aang's "if you've done all four"
                         if let Some(player) = state.players.iter_mut().find(|p| p.id == controller)
@@ -668,6 +677,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         modal: None,
                         mode_abilities: vec![],
                         description: decayed_trigger.description,
+                        may_trigger_origin: None,
                     }));
                 }
             }
@@ -708,6 +718,9 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             modal: None,
                             mode_abilities: vec![],
                             description: None,
+                            may_trigger_origin: Some(MayTriggerOrigin::Keyword {
+                                keyword: KeywordKind::Exploit,
+                            }),
                         }));
                     }
                 }
@@ -763,6 +776,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                                         modal: None,
                                         mode_abilities: vec![],
                                         description: None,
+                                        may_trigger_origin: None,
                                     }));
                                 }
                             }
@@ -920,6 +934,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         modal: None,
                         mode_abilities: vec![],
                         description: storm_trig_def.description,
+                        may_trigger_origin: None,
                     }));
                 }
             }
@@ -959,6 +974,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     modal: None,
                     mode_abilities: vec![],
                     description: cascade_trig_def.description,
+                    may_trigger_origin: None,
                 }));
             }
         }
@@ -987,6 +1003,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         modal: None,
                         mode_abilities: vec![],
                         description: None,
+                        may_trigger_origin: None,
                     }));
                 }
             }
@@ -1018,6 +1035,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                         modal: None,
                         mode_abilities: vec![],
                         description: None,
+                        may_trigger_origin: None,
                     }));
                 }
             }
@@ -1057,6 +1075,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             modal: None,
                             mode_abilities: vec![],
                             description: None,
+                            may_trigger_origin: None,
                         }));
                     }
                 }
@@ -1095,6 +1114,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                             modal: None,
                             mode_abilities: vec![],
                             description: None,
+                            may_trigger_origin: None,
                         }));
                     }
                 }
@@ -1134,6 +1154,7 @@ pub fn process_triggers(state: &mut GameState, events: &[GameEvent]) {
                     modal: None,
                     mode_abilities: vec![],
                     description: None,
+                    may_trigger_origin: None,
                 }));
                 mark_speed_trigger_used(state, trigger_controller);
             }
@@ -1296,6 +1317,21 @@ fn push_pending_trigger_to_stack_with_event_batch(
     trigger_events: Vec<GameEvent>,
     events: &mut Vec<GameEvent>,
 ) {
+    let PendingTrigger {
+        source_id,
+        controller,
+        condition,
+        mut ability,
+        trigger_event,
+        description,
+        may_trigger_origin,
+        ..
+    } = trigger;
+
+    if let Some(origin) = may_trigger_origin {
+        ability.set_may_trigger_origin_recursive(origin);
+    }
+
     let entry_id = ObjectId(state.next_object_id);
     state.next_object_id += 1;
     if trigger_events.len() > 1 {
@@ -1305,14 +1341,14 @@ fn push_pending_trigger_to_stack_with_event_batch(
     }
     let entry = StackEntry {
         id: entry_id,
-        source_id: trigger.source_id,
-        controller: trigger.controller,
+        source_id,
+        controller,
         kind: StackEntryKind::TriggeredAbility {
-            source_id: trigger.source_id,
-            ability: Box::new(trigger.ability),
-            condition: trigger.condition,
-            trigger_event: trigger.trigger_event,
-            description: trigger.description,
+            source_id,
+            ability: Box::new(ability),
+            condition,
+            trigger_event,
+            description,
         },
     };
     stack::push_to_stack(state, entry, events);
@@ -1511,6 +1547,7 @@ pub fn check_state_triggers(state: &mut GameState) {
                     modal: None,
                     mode_abilities: vec![],
                     description: trigger.description.clone(),
+                    may_trigger_origin: None,
                 });
             }
         }
@@ -1602,6 +1639,7 @@ pub fn check_delayed_triggers(state: &mut GameState, events: &[GameEvent]) -> Ve
             modal: None,
             mode_abilities: vec![],
             description: None,
+            may_trigger_origin: None,
         };
         push_pending_trigger_to_stack(state, pending, &mut new_events);
     }
@@ -2520,7 +2558,7 @@ pub mod tests {
         GameState, SpellCastRecord, StackEntry, StackEntryKind, ZoneChangeRecord,
     };
     use crate::types::identifiers::{CardId, ObjectId};
-    use crate::types::keywords::Keyword;
+    use crate::types::keywords::{Keyword, KeywordKind};
     use crate::types::mana::ManaColor;
     use crate::types::phase::Phase;
     use crate::types::player::PlayerId;
@@ -2573,6 +2611,47 @@ pub mod tests {
                 ..ZoneChangeRecord::test_minimal(object_id, None, Zone::Battlefield)
             }),
         }
+    }
+
+    #[test]
+    fn exploit_trigger_receives_typed_may_trigger_origin() {
+        let mut state = setup();
+        let player = PlayerId(0);
+        let exploiter = create_object(
+            &mut state,
+            CardId(1),
+            player,
+            "Exploit Creature".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&exploiter).unwrap();
+            obj.keywords.push(Keyword::Exploit);
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        process_triggers(
+            &mut state,
+            &[zone_changed_event(
+                exploiter,
+                Zone::Stack,
+                Zone::Battlefield,
+                vec![CoreType::Creature],
+                vec![],
+            )],
+        );
+
+        let Some(StackEntryKind::TriggeredAbility { ability, .. }) =
+            state.stack.back().map(|entry| &entry.kind)
+        else {
+            panic!("expected exploit trigger on stack");
+        };
+        assert_eq!(
+            ability.may_trigger_origin,
+            Some(MayTriggerOrigin::Keyword {
+                keyword: KeywordKind::Exploit,
+            })
+        );
     }
 
     #[test]

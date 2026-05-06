@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::ability::TargetRef;
 use super::card_type::CoreType;
 use super::counter::CounterType;
-use super::game_state::{AutoPassRequest, CombatDamageAssignmentMode, ShardChoice};
+use super::game_state::{AutoMayChoice, AutoPassRequest, CombatDamageAssignmentMode, ShardChoice};
 use super::identifiers::{CardId, ObjectId};
 use super::keywords::Keyword;
 use super::mana::{ManaColor, ManaType};
@@ -238,6 +238,9 @@ pub enum GameAction {
     /// CR 609.3: Accept or decline an optional effect ("You may X").
     DecideOptionalEffect {
         accept: bool,
+    },
+    DecideOptionalEffectAndRemember {
+        choice: AutoMayChoice,
     },
     /// CR 118.12: Pay or decline an "unless pays" cost (e.g., Mana Leak, No More Lies).
     PayUnlessCost {
@@ -627,6 +630,7 @@ impl GameAction {
             | GameAction::ChooseEvokeCost { .. }
             | GameAction::ChooseOverloadCost { .. }
             | GameAction::DecideOptionalEffect { .. }
+            | GameAction::DecideOptionalEffectAndRemember { .. }
             | GameAction::PayUnlessCost { .. }
             | GameAction::PayCombatTax { .. }
             | GameAction::ChooseDungeon { .. }

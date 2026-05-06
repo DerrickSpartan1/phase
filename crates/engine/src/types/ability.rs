@@ -7,7 +7,7 @@ use thiserror::Error;
 use super::card_type::{CardType, CoreType, Supertype};
 use super::counter::{CounterMatch, CounterType};
 use super::events::BendingType;
-use super::game_state::{DistributionUnit, LKISnapshot, RetargetScope};
+use super::game_state::{DistributionUnit, LKISnapshot, MayTriggerOrigin, RetargetScope};
 use super::identifiers::ObjectId;
 use super::keywords::{Keyword, KeywordKind};
 use super::mana::{ManaColor, ManaCost, ManaType};
@@ -8010,6 +8010,8 @@ pub struct ResolvedAbility {
     /// abilities for which nth-resolution gating is not yet wired through.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ability_index: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub may_trigger_origin: Option<MayTriggerOrigin>,
 }
 
 impl ResolvedAbility {
@@ -8046,6 +8048,17 @@ impl ResolvedAbility {
             chosen_x: None,
             cost_paid_object: None,
             ability_index: None,
+            may_trigger_origin: None,
+        }
+    }
+
+    pub fn set_may_trigger_origin_recursive(&mut self, origin: MayTriggerOrigin) {
+        self.may_trigger_origin = Some(origin);
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_may_trigger_origin_recursive(origin);
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_may_trigger_origin_recursive(origin);
         }
     }
 

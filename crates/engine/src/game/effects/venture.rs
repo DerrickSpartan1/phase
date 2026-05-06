@@ -250,6 +250,7 @@ fn queue_room_trigger(state: &mut GameState, player: PlayerId, dungeon: DungeonI
         modal: None,
         mode_abilities: vec![],
         description: Some(format!("{}: {name}", dungeon::get_definition(dungeon).name)),
+        may_trigger_origin: None,
     });
 }
 

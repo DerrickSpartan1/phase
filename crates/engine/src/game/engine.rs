@@ -1644,6 +1644,15 @@ fn apply_action(
         (WaitingFor::OptionalEffectChoice { .. }, GameAction::DecideOptionalEffect { accept }) => {
             engine_payment_choices::handle_optional_effect_choice(state, accept, &mut events)?
         }
+        (
+            waiting_for @ WaitingFor::OptionalEffectChoice { .. },
+            GameAction::DecideOptionalEffectAndRemember { choice },
+        ) => engine_payment_choices::handle_optional_effect_choice_and_remember(
+            state,
+            waiting_for.clone(),
+            choice,
+            &mut events,
+        )?,
         // CR 608.2d: Opponent decided on "any opponent may" effect.
         (
             waiting_for @ WaitingFor::OpponentMayChoice { .. },
@@ -2438,6 +2447,7 @@ fn apply_action(
                 modal: None,
                 mode_abilities: vec![],
                 description: Some("Miracle — you may cast this card".to_string()),
+                may_trigger_origin: None,
             };
             super::triggers::push_pending_trigger_to_stack(state, trigger, &mut events);
 
@@ -8135,6 +8145,7 @@ mod trigger_target_tests {
             modal: None,
             mode_abilities: vec![],
             description: None,
+            may_trigger_origin: None,
         });
 
         let legal_targets = vec![TargetRef::Object(target1), TargetRef::Object(target2)];
@@ -8224,6 +8235,7 @@ mod trigger_target_tests {
             modal: None,
             mode_abilities: vec![],
             description: None,
+            may_trigger_origin: None,
         });
 
         state.waiting_for = WaitingFor::TriggerTargetSelection {
@@ -8292,6 +8304,7 @@ mod trigger_target_tests {
                 },
             )],
             description: Some("Choose two target players".to_string()),
+            may_trigger_origin: None,
         });
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
@@ -8397,6 +8410,7 @@ mod trigger_target_tests {
                 ),
             ],
             description: Some("Whenever you cast your second spell each turn".to_string()),
+            may_trigger_origin: None,
         });
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
@@ -8507,6 +8521,7 @@ mod trigger_target_tests {
                 ),
             ],
             description: Some("Choose one or both with commander".to_string()),
+            may_trigger_origin: None,
         });
 
         let waiting = begin_pending_trigger_target_selection(&mut state)
@@ -8574,6 +8589,7 @@ mod trigger_target_tests {
             modal: None,
             mode_abilities: vec![],
             description: None,
+            may_trigger_origin: None,
         });
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
@@ -8690,6 +8706,7 @@ mod trigger_target_tests {
             modal: None,
             mode_abilities: vec![],
             description: None,
+            may_trigger_origin: None,
         });
         state.waiting_for = WaitingFor::TriggerTargetSelection {
             player: PlayerId(0),
@@ -8780,6 +8797,7 @@ mod trigger_target_tests {
                 },
             )],
             description: Some("Choose different target players".to_string()),
+            may_trigger_origin: None,
         });
         state.waiting_for = WaitingFor::AbilityModeChoice {
             player: PlayerId(0),
@@ -8879,6 +8897,7 @@ mod trigger_target_tests {
                 ),
             ],
             description: None,
+            may_trigger_origin: None,
         });
 
         // Call the private function via the engine path.
@@ -10563,6 +10582,7 @@ mod phase_trigger_regression_tests {
             player: PlayerId(0),
             source_id,
             description: None,
+            may_trigger_key: None,
         };
 
         let result = apply_as_current(

@@ -156,6 +156,13 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::OptionalCostChoice { .. }, GameAction::DecideOptionalCost { .. })
         | (WaitingFor::DefilerPayment { .. }, GameAction::DecideOptionalCost { .. })
         | (WaitingFor::OptionalEffectChoice { .. }, GameAction::DecideOptionalEffect { .. })
+        | (
+            WaitingFor::OptionalEffectChoice {
+                may_trigger_key: Some(_),
+                ..
+            },
+            GameAction::DecideOptionalEffectAndRemember { .. },
+        )
         | (WaitingFor::OpponentMayChoice { .. }, GameAction::DecideOptionalEffect { .. })
         | (WaitingFor::TributeChoice { .. }, GameAction::DecideOptionalEffect { .. })
         | (WaitingFor::UnlessPayment { .. }, GameAction::PayUnlessCost { .. })
