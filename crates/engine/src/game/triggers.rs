@@ -3785,6 +3785,85 @@ pub mod tests {
         let _ = (gy1, gy2, gy3);
     }
 
+    /// CR 603.3 + CR 115.1b: Nurturing Pixie's ETB uses "up to one target
+    /// non-Faerie, nonland permanent you control." Multiple legal optional
+    /// targets must produce a trigger target-selection prompt, not suppress
+    /// the trigger.
+    #[test]
+    fn nurturing_pixie_etb_prompts_for_optional_non_faerie_nonland_target() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+
+        for (card_id, name) in [
+            (CardId(10), "Llanowar Elves"),
+            (CardId(11), "Badgermole Cub"),
+        ] {
+            let target = create_object(
+                &mut state,
+                card_id,
+                PlayerId(0),
+                name.to_string(),
+                Zone::Battlefield,
+            );
+            let obj = state.objects.get_mut(&target).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+        }
+
+        let pixie = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Nurturing Pixie".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&pixie).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Faerie".to_string());
+            obj.card_types.subtypes.push("Rogue".to_string());
+            obj.entered_battlefield_turn = Some(1);
+            let mut execute = AbilityDefinition::new(
+                AbilityKind::Database,
+                Effect::Bounce {
+                    target: TargetFilter::Typed(
+                        TypedFilter::permanent()
+                            .with_type(TypeFilter::Non(Box::new(TypeFilter::Subtype(
+                                "Faerie".to_string(),
+                            ))))
+                            .with_type(TypeFilter::Non(Box::new(TypeFilter::Land)))
+                            .controller(ControllerRef::You),
+                    ),
+                    destination: None,
+                },
+            );
+            execute.optional_targeting = true;
+            execute.multi_target = Some(MultiTargetSpec::fixed(0, 1));
+            obj.trigger_definitions.push(
+                TriggerDefinition::new(TriggerMode::ChangesZone)
+                    .execute(execute)
+                    .valid_card(TargetFilter::SelfRef)
+                    .destination(Zone::Battlefield),
+            );
+        }
+
+        let events = vec![zone_changed_event(
+            pixie,
+            Zone::Hand,
+            Zone::Battlefield,
+            vec![CoreType::Creature],
+            vec!["Faerie", "Rogue"],
+        )];
+        process_triggers(&mut state, &events);
+
+        assert!(state.pending_trigger.is_some(), "pending_trigger set");
+        let pending = state.pending_trigger.as_ref().unwrap();
+        let slots = super::super::ability_utils::build_target_slots(&state, &pending.ability)
+            .expect("slot build");
+        assert_eq!(slots.len(), 1);
+        assert!(slots[0].optional);
+        assert_eq!(slots[0].legal_targets.len(), 2);
+    }
+
     /// CR 115.1b + CR 609: Exercise end-to-end ChooseTarget flow for Pit of Offerings.
     /// After firing the ETB trigger, the engine must accept three sequential ChooseTarget
     /// actions, then resolve by exiling all three selected cards.
