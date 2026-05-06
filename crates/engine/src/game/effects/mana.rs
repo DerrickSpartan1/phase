@@ -212,7 +212,7 @@ pub(crate) fn resolve_restrictions(
                 .get(&source_id)
                 .and_then(|obj| obj.chosen_creature_type())
                 .map(|ct| ManaRestriction::OnlyForCreatureType(ct.to_string())),
-            // CR 106.12: Combined spell type + ability activation restriction.
+            // CR 106.6: Combined spell type + ability activation restriction.
             ManaSpendRestriction::SpellTypeOrAbilityActivation(t) => {
                 Some(ManaRestriction::OnlyForTypeSpellsOrAbilities(t.clone()))
             }

@@ -1917,6 +1917,60 @@ mod tests {
     }
 
     #[test]
+    fn can_pay_colorless_eldrazi_spell_with_eldrazi_temple_restricted_mana() {
+        let mut pool = ManaPool::default();
+        for _ in 0..2 {
+            pool.add(ManaUnit {
+                color: ManaType::Colorless,
+                source_id: ObjectId(1),
+                snow: false,
+                restrictions: vec![ManaRestriction::OnlyForTypeSpellsOrAbilities(
+                    "Colorless Eldrazi".to_string(),
+                )],
+                grants: vec![],
+                expiry: None,
+            });
+        }
+        for _ in 0..2 {
+            pool.add(make_unit(ManaType::Colorless));
+        }
+
+        let thought_knot_cost = ManaCost::Cost {
+            shards: vec![ManaCostShard::Colorless],
+            generic: 3,
+        };
+        let thought_knot = SpellMeta {
+            types: vec!["Creature".to_string(), "Colorless".to_string()],
+            subtypes: vec!["Eldrazi".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        let thought_knot_ctx = PaymentContext::Spell(&thought_knot);
+        assert!(can_pay_for_spell(
+            &pool,
+            &thought_knot_cost,
+            Some(&thought_knot_ctx),
+            false,
+            0
+        ));
+
+        let colored_eldrazi = SpellMeta {
+            types: vec!["Creature".to_string()],
+            subtypes: vec!["Eldrazi".to_string()],
+            keyword_kinds: vec![],
+            cast_from_zone: None,
+        };
+        let colored_eldrazi_ctx = PaymentContext::Spell(&colored_eldrazi);
+        assert!(!can_pay_for_spell(
+            &pool,
+            &thought_knot_cost,
+            Some(&colored_eldrazi_ctx),
+            false,
+            0
+        ));
+    }
+
+    #[test]
     fn can_pay_for_spell_respects_flashback_keyword_restriction() {
         let mut pool = ManaPool::default();
         pool.add(ManaUnit {

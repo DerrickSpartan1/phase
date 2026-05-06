@@ -588,12 +588,17 @@ pub(super) fn build_spell_meta(
 }
 
 fn object_type_names(obj: &crate::game::game_object::GameObject) -> Vec<String> {
-    obj.card_types
+    let mut names = obj
+        .card_types
         .supertypes
         .iter()
         .map(|st| st.to_string())
         .chain(obj.card_types.core_types.iter().map(|ct| ct.to_string()))
-        .collect()
+        .collect::<Vec<_>>();
+    if obj.color.is_empty() {
+        names.push("Colorless".to_string());
+    }
+    names
 }
 
 fn effective_spell_keyword_kinds(

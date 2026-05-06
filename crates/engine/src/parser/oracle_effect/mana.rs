@@ -848,6 +848,37 @@ pub(super) fn all_mana_colors() -> Vec<ManaColor> {
     ]
 }
 
+fn parse_restricted_spell_type_phrase(spell_part: &str) -> Option<String> {
+    let (rest, phrase) = terminated(
+        take_until::<_, _, VerboseError<&str>>(" spell"),
+        alt((tag(" spells"), tag(" spell"))),
+    )
+    .parse(spell_part)
+    .ok()?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+    Some(
+        phrase
+            .split_whitespace()
+            .map(super::capitalize)
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn split_restricted_spell_and_activation(rest: &str) -> (&str, bool) {
+    match terminated(
+        take_until::<_, _, VerboseError<&str>>(" or activate abilities"),
+        tag(" or activate abilities"),
+    )
+    .parse(rest)
+    {
+        Ok((_, spell_part)) => (spell_part.trim(), true),
+        Err(_) => (rest.trim(), false),
+    }
+}
+
 /// Parse a "Spend this mana only to cast..." clause into a `ManaSpendRestriction`.
 /// Parse a "Spend this mana only to cast..." clause into a restriction and optional spell grants.
 ///
@@ -929,14 +960,9 @@ pub(crate) fn parse_mana_spend_restriction(
         ));
     }
 
-    // CR 106.12: Check for "or activate abilities of [type]" suffix.
+    // CR 106.6: Check for "or activate abilities of [type]" suffix.
     // If present, emit a combined SpellTypeOrAbilityActivation restriction.
-    let has_ability_activation = rest.contains(" or activate abilities");
-    let spell_part = rest
-        .split(" or activate abilities")
-        .next()
-        .unwrap_or(rest)
-        .trim();
+    let (spell_part, has_ability_activation) = split_restricted_spell_and_activation(rest);
 
     if spell_part.contains("of the chosen type") {
         return Some((ManaSpendRestriction::ChosenCreatureType, grants));
@@ -948,40 +974,15 @@ pub(crate) fn parse_mana_spend_restriction(
         .map(|(_, rest)| rest)
         .unwrap_or(spell_part);
 
-    // Handle compound type: "instant or sorcery spells" -> "Instant or Sorcery"
-    // Check for "[type] or [type] spell(s)" pattern
-    if let Some((first, second_with_spells)) = spell_part.split_once(" or ") {
-        let second = second_with_spells
-            .strip_suffix(" spells")
-            .or_else(|| second_with_spells.strip_suffix(" spell"))
-            .unwrap_or(second_with_spells);
-        // Only treat as compound if second part is a single type word
-        if !second.contains(' ') || second.ends_with("creature") {
-            let compound = format!(
-                "{} or {}",
-                super::capitalize(first),
-                super::capitalize(second)
-            );
-            if has_ability_activation {
-                return Some((
-                    ManaSpendRestriction::SpellTypeOrAbilityActivation(compound),
-                    grants,
-                ));
-            }
-            return Some((ManaSpendRestriction::SpellType(compound), grants));
-        }
-    }
-
-    let type_word = spell_part.split_whitespace().next()?;
-    let type_name = super::capitalize(type_word);
+    let type_phrase = parse_restricted_spell_type_phrase(spell_part)?;
 
     if has_ability_activation {
         Some((
-            ManaSpendRestriction::SpellTypeOrAbilityActivation(type_name),
+            ManaSpendRestriction::SpellTypeOrAbilityActivation(type_phrase),
             grants,
         ))
     } else {
-        Some((ManaSpendRestriction::SpellType(type_name), grants))
+        Some((ManaSpendRestriction::SpellType(type_phrase), grants))
     }
 }
 

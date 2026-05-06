@@ -7245,6 +7245,21 @@ mod tests {
     }
 
     #[test]
+    fn mana_spend_restriction_colorless_eldrazi_spell_or_activation() {
+        use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
+        use crate::types::ability::ManaSpendRestriction;
+        let result = parse_mana_spend_restriction(
+            "spend this mana only to cast colorless eldrazi spells or activate abilities of colorless eldrazi",
+        );
+        assert_eq!(
+            result.map(|(r, _)| r),
+            Some(ManaSpendRestriction::SpellTypeOrAbilityActivation(
+                "Colorless Eldrazi".to_string()
+            ))
+        );
+    }
+
+    #[test]
     fn mana_spend_restriction_flashback_spells() {
         use crate::parser::oracle_effect::mana::parse_mana_spend_restriction;
         let result =
