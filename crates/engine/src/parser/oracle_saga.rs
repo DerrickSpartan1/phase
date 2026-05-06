@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, CounterTriggerFilter, Duration, Effect, QuantityExpr,
@@ -57,17 +57,16 @@ pub(crate) fn parse_chapter_line(line: &str) -> Option<(Vec<u32>, String)> {
 /// fallback `" - "`), returning `(prefix_before_separator, body_after_separator)`.
 ///
 /// Uses `take_until` + `alt(tag,tag)` so the separator alternatives live in a single
-/// composable combinator with structured `VerboseError` diagnostics, rather than
+/// composable combinator with structured `OracleError` diagnostics, rather than
 /// chained `split_once` calls.
 fn split_on_chapter_separator(line: &str) -> Option<(&str, &str)> {
     for sep in [" — ", " - "] {
-        let parse = nom::bytes::complete::take_until::<_, _, VerboseError<&str>>(sep).and(tag::<
-            _,
-            _,
-            VerboseError<&str>,
-        >(
-            sep
-        ));
+        let parse =
+            nom::bytes::complete::take_until::<_, _, OracleError<'_>>(sep).and(tag::<
+                _,
+                _,
+                OracleError<'_>,
+            >(sep));
         let mut parser = parse;
         if let Ok((body, (prefix, _))) = parser.parse(line) {
             return Some((prefix, body));
@@ -109,8 +108,7 @@ fn strip_chapter_title(effect: &str) -> &str {
 /// creature's keyword set and must flow through the general dispatcher's keyword
 /// extractor (priority 1b in `oracle.rs`).
 fn is_chapter_body_continuation(line: &str) -> bool {
-    let result: nom::IResult<&str, &str, VerboseError<&str>> =
-        alt((tag("•"), tag("·"))).parse(line);
+    let result: nom::IResult<&str, &str, OracleError<'_>> = alt((tag("•"), tag("·"))).parse(line);
     result.is_ok()
 }
 

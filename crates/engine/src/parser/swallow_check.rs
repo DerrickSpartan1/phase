@@ -1387,6 +1387,10 @@ fn detect_duration_this_turn(
         // wording is implicit in the spell-level replacement lifetime,
         // not a separate `duration` slot.
         "\"event\":\"DamageDone\"",
+        // CR 615.1: `PreventDamage` creates the prevention shield described
+        // by "prevent [damage] this turn"; the lifetime is inherent to the
+        // one-shot prevention effect.
+        "PreventDamage",
         "AddTargetReplacement",
         // CR 603.7c: A `CreateDelayedTrigger` with `WhenNextEvent` condition
         // IS the "next [event] this turn" delayed-trigger scope (Chandra,
@@ -1764,6 +1768,17 @@ mod tests {
             "{T}: Add {C}.\n\
              {1}, {T}, Sacrifice this land: You may cast spells this turn as though they had flash.",
             &["Land"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    #[test]
+    fn duration_this_turn_accepts_prevention_shield_scope() {
+        let parsed = parse(
+            "Prevent the next 3 damage that would be dealt to any target this turn by a source of your choice. \
+             You gain 3 life.",
+            &["Instant"],
         );
 
         assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));

@@ -10,7 +10,7 @@ use nom::combinator::{map, opt, value};
 use nom::sequence::preceded;
 use nom::Parser;
 
-use super::error::OracleResult;
+use super::error::{OracleError, OracleResult};
 use super::primitives::{parse_article, parse_color, parse_mana_cost, parse_number};
 use super::quantity as nom_quantity;
 use crate::parser::oracle_target::parse_type_phrase;
@@ -93,12 +93,10 @@ fn parse_control_presence_tail(input: &str) -> OracleResult<'_, StaticCondition>
 
     let (filter, remainder) = parse_type_phrase(input);
     if matches!(filter, TargetFilter::Any) {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     let filter = inject_controller_you(filter);
     let consumed = input.len() - remainder.len();
@@ -433,12 +431,10 @@ fn parse_typed_counter_noun(input: &str) -> OracleResult<'_, CounterMatch> {
     let (rest_after_noun, type_slice) = take_until(" counter").parse(input)?;
     if type_slice.is_empty() {
         // Fail so the caller's `Any` branch (bare "counter[s]") can try.
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::TakeUntil),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     let (rest, _) =
         preceded(tag(" "), alt((tag("counters"), tag("counter")))).parse(rest_after_noun)?;
@@ -546,9 +542,7 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you have ").parse(input)?;
 
     // "you have no cards in hand" → HandSize EQ 0
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("no cards in hand").parse(rest)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("no cards in hand").parse(rest) {
         return Ok((
             rest,
             StaticCondition::QuantityComparison {
@@ -567,9 +561,7 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, n) = parse_number(rest)?;
 
     // Try each quantity suffix
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>(" or more cards in hand").parse(rest)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or more cards in hand").parse(rest) {
         return Ok((
             rest,
             make_quantity_ge(
@@ -581,14 +573,11 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         ));
     }
     if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>(" or more cards in your graveyard")
-            .parse(rest)
+        tag::<_, _, OracleError<'_>>(" or more cards in your graveyard").parse(rest)
     {
         return Ok((rest, make_quantity_ge(QuantityRef::GraveyardSize, n)));
     }
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>(" or more life").parse(rest)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or more life").parse(rest) {
         return Ok((
             rest,
             make_quantity_ge(
@@ -600,9 +589,7 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         ));
     }
     // "you have N or less life" → LifeTotal LE N
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>(" or less life").parse(rest)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or less life").parse(rest) {
         return Ok((
             rest,
             make_quantity_comparison(
@@ -615,9 +602,7 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         ));
     }
     // "you have N or fewer cards in hand" → HandSize LE N
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>(" or fewer cards in hand").parse(rest)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or fewer cards in hand").parse(rest) {
         return Ok((
             rest,
             make_quantity_comparison(
@@ -630,12 +615,10 @@ fn parse_you_have_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         ));
     }
 
-    Err(nom::Err::Error(nom_language::error::VerboseError {
-        errors: vec![(
-            input,
-            nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-        )],
-    }))
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Fail,
+    )))
 }
 
 /// Build a QuantityComparison: qty [comparator] n.
@@ -750,12 +733,10 @@ fn parse_control_count_ge_distinct_names(input: &str) -> OracleResult<'_, Static
     let type_text = rest.trim_end_matches('.');
     let (filter, remainder) = parse_type_phrase(type_text);
     if matches!(filter, TargetFilter::Any) {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     // Require the exact "with different names" suffix on the remainder.
     let trimmed = remainder.trim_start();
@@ -785,12 +766,10 @@ pub fn parse_control_count_ge(input: &str) -> OracleResult<'_, StaticCondition> 
     let type_text = rest.trim_end_matches('.');
     let (filter, remainder) = parse_type_phrase(type_text);
     if matches!(filter, TargetFilter::Any) {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     let filter = inject_controller_you(filter);
     // Map remainder back to original input slice — parse_type_phrase consumed
@@ -822,21 +801,17 @@ fn parse_you_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you control ").parse(input)?;
     // Must start with an article or "another" — reject bare "you control creatures" (that's count)
     if !rest.starts_with("a ") && !rest.starts_with("an ") && !rest.starts_with("another ") {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     let (filter, remainder) = parse_type_phrase(rest);
     if matches!(filter, TargetFilter::Any) {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     let filter = inject_controller_you(filter);
     let consumed = input.len() - remainder.len();
@@ -857,12 +832,10 @@ fn parse_control_count_le(input: &str) -> OracleResult<'_, StaticCondition> {
     let type_text = rest.trim_end_matches('.');
     let (filter, remainder) = parse_type_phrase(type_text);
     if matches!(filter, TargetFilter::Any) {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     let filter = inject_controller_you(filter);
     let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
@@ -877,12 +850,10 @@ fn parse_you_control_no(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("you control no ").parse(input)?;
     let (filter, remainder) = parse_type_phrase(rest);
     if matches!(filter, TargetFilter::Any) {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     let filter = inject_controller_you(filter);
     let consumed = input.len() - remainder.len();
@@ -902,12 +873,10 @@ fn parse_you_dont_control_a(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = parse_article(rest)?;
     let (filter, remainder) = parse_type_phrase(rest);
     if matches!(filter, TargetFilter::Any) {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     let filter = inject_controller_you(filter);
     let consumed = input.len() - remainder.len();
@@ -957,9 +926,7 @@ fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
 
     let (rest, n) = parse_number(rest)?;
     // Try "or less" then "or greater"
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>(" or less").parse(rest)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or less").parse(rest) {
         return Ok((
             rest,
             StaticCondition::QuantityComparison {
@@ -995,7 +962,7 @@ fn parse_life_total_comparator(input: &str) -> OracleResult<'_, Comparator> {
     alt((
         value(
             Comparator::LE,
-            tag::<_, _, nom_language::error::VerboseError<&str>>("less than or equal to "),
+            tag::<_, _, OracleError<'_>>("less than or equal to "),
         ),
         value(Comparator::GE, tag("greater than or equal to ")),
         value(Comparator::LT, tag("less than ")),
@@ -1460,12 +1427,10 @@ fn parse_defending_player_controls(input: &str) -> OracleResult<'_, StaticCondit
     // parse_type_phrase returns (filter, remaining_str) — bridge to nom remainder
     let (filter, type_rest) = parse_type_phrase(rest);
     if matches!(filter, TargetFilter::Any) {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     let consumed = rest.len() - type_rest.len();
     Ok((
@@ -1486,22 +1451,21 @@ fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticConditio
 
     // Map event verbs to their QuantityRef for the shared "life this turn" object.
     fn life_verb(v: &str) -> Option<QuantityRef> {
-        let result: nom::IResult<&str, QuantityRef, nom_language::error::VerboseError<&str>> =
-            alt((
-                value(
-                    QuantityRef::LifeGainedThisTurn {
-                        player: PlayerScope::Controller,
-                    },
-                    tag("gained"),
-                ),
-                value(
-                    QuantityRef::LifeLostThisTurn {
-                        player: PlayerScope::Controller,
-                    },
-                    tag("lost"),
-                ),
-            ))
-            .parse(v);
+        let result: nom::IResult<&str, QuantityRef, OracleError<'_>> = alt((
+            value(
+                QuantityRef::LifeGainedThisTurn {
+                    player: PlayerScope::Controller,
+                },
+                tag("gained"),
+            ),
+            value(
+                QuantityRef::LifeLostThisTurn {
+                    player: PlayerScope::Controller,
+                },
+                tag("lost"),
+            ),
+        ))
+        .parse(v);
         let (rest, qty) = result.ok()?;
         rest.is_empty().then_some(qty)
     }
@@ -1525,12 +1489,10 @@ fn parse_compound_verb_condition(input: &str) -> OracleResult<'_, StaticConditio
         }
     }
 
-    Err(nom::Err::Error(nom_language::error::VerboseError {
-        errors: vec![(
-            input,
-            nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-        )],
-    }))
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Fail,
+    )))
 }
 
 /// Parse "you gained [N or more] life this turn".
@@ -1539,9 +1501,7 @@ fn parse_you_gained_life_this_turn(input: &str) -> OracleResult<'_, StaticCondit
     // Try "N or more life this turn"
     if let Ok((after_n, n)) = parse_number(rest) {
         let after_n = after_n.trim_start();
-        if let Ok((rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("or more life this turn")
-                .parse(after_n)
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("or more life this turn").parse(after_n)
         {
             return Ok((
                 rest,
@@ -1620,9 +1580,7 @@ fn parse_you_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticConditi
     if let Ok((rest, condition)) = parse_another_spell_this_turn(rest, 2) {
         return Ok((rest, condition));
     }
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("another spell this turn").parse(rest)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("another spell this turn").parse(rest) {
         return Ok((
             rest,
             make_quantity_ge(
@@ -1653,12 +1611,10 @@ fn parse_you_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticConditi
             ));
         }
     }
-    Err(nom::Err::Error(nom_language::error::VerboseError {
-        errors: vec![(
-            input,
-            nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-        )],
-    }))
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Fail,
+    )))
 }
 
 fn parse_opponent_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -1667,12 +1623,10 @@ fn parse_opponent_cast_spell_this_turn(input: &str) -> OracleResult<'_, StaticCo
     let (rest, type_text) = take_until(" spell this turn").parse(rest)?;
     let (rest, _) = tag(" spell this turn").parse(rest)?;
     let Some(filter) = parse_spell_history_filter(type_text) else {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     };
     Ok((
         rest,
@@ -1695,9 +1649,7 @@ fn parse_another_spell_cast_this_turn(
 }
 
 fn parse_another_spell_this_turn(input: &str, minimum: u32) -> OracleResult<'_, StaticCondition> {
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("spell this turn").parse(input)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("spell this turn").parse(input) {
         return Ok((
             rest,
             make_quantity_ge(
@@ -1712,12 +1664,10 @@ fn parse_another_spell_this_turn(input: &str, minimum: u32) -> OracleResult<'_, 
     let (rest, type_text) = take_until(" spell this turn").parse(input)?;
     let (rest, _) = tag(" spell this turn").parse(rest)?;
     let Some(filter) = parse_spell_history_filter(type_text) else {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     };
     Ok((
         rest,
@@ -1766,10 +1716,8 @@ pub(crate) fn parse_spell_history_filter(type_text: &str) -> Option<TargetFilter
 /// Parse "two or more spells were cast last turn" / "a player cast two or more spells last turn".
 fn parse_spells_cast_last_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     // "two or more spells were cast last turn"
-    if let Ok((rest, _)) = tag::<_, _, nom_language::error::VerboseError<&str>>(
-        "two or more spells were cast last turn",
-    )
-    .parse(input)
+    if let Ok((rest, _)) =
+        tag::<_, _, OracleError<'_>>("two or more spells were cast last turn").parse(input)
     {
         return Ok((rest, make_quantity_ge(QuantityRef::SpellsCastLastTurn, 2)));
     }
@@ -1849,12 +1797,10 @@ fn parse_no_on_battlefield(input: &str) -> OracleResult<'_, StaticCondition> {
             ));
         }
     }
-    Err(nom::Err::Error(nom_language::error::VerboseError {
-        errors: vec![(
-            input,
-            nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-        )],
-    }))
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Fail,
+    )))
 }
 
 /// Parse "[N or more / a / an] [type] entered the battlefield under your control this turn".
@@ -1867,12 +1813,9 @@ fn parse_entered_this_turn(input: &str) -> OracleResult<'_, StaticCondition> {
     // Branch 1: "N or more [type] entered..."
     if let Ok((after_n, n)) = parse_number(input) {
         let after_n = after_n.trim_start();
-        if let Ok((type_and_rest, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>("or more ").parse(after_n)
-        {
+        if let Ok((type_and_rest, _)) = tag::<_, _, OracleError<'_>>("or more ").parse(after_n) {
             if let Ok((rest, type_text)) =
-                take_until::<_, _, nom_language::error::VerboseError<&str>>(entered_suffix)
-                    .parse(type_and_rest)
+                take_until::<_, _, OracleError<'_>>(entered_suffix).parse(type_and_rest)
             {
                 let (rest, _) = tag(entered_suffix).parse(rest)?;
                 let (filter, _) = parse_type_phrase(type_text.trim());
@@ -1957,9 +1900,7 @@ fn parse_subject_first_zone_count(input: &str) -> OracleResult<'_, StaticConditi
 }
 
 fn parse_subject_first_card_subject(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("cards are in ").parse(input)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cards are in ").parse(input) {
         return Ok((rest, vec![]));
     }
 
@@ -2118,8 +2059,7 @@ fn parse_there_exists_condition(input: &str) -> OracleResult<'_, StaticCondition
 /// adds the combat-context controller axis for the LHS.
 fn parse_defending_player_comparison_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     let (rest, _) = tag("defending player controls more ").parse(input)?;
-    let (rest, type_text) =
-        take_until::<_, _, nom_language::error::VerboseError<&str>>(" than you").parse(rest)?;
+    let (rest, type_text) = take_until::<_, _, OracleError<'_>>(" than you").parse(rest)?;
     let (rest, _) = tag(" than you").parse(rest)?;
 
     let (filter, _) = parse_type_phrase(type_text.trim());
@@ -2165,9 +2105,7 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
     // `you control` arms so both idioms work uniformly. Defense of the Heart
     // ("if an opponent controls three or more creatures") is the canonical
     // card for this pattern.
-    if let Ok((rest2, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("controls ").parse(rest)
-    {
+    if let Ok((rest2, _)) = tag::<_, _, OracleError<'_>>("controls ").parse(rest) {
         if let Ok((rest3, n)) = parse_ge_threshold(rest2) {
             let type_text = rest3.trim_end_matches('.');
             let (filter, remainder) = parse_type_phrase(type_text);
@@ -2194,11 +2132,9 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
     }
 
     // "an opponent controls more [type] than you"
-    if let Ok((rest2, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("controls more ").parse(rest)
-    {
+    if let Ok((rest2, _)) = tag::<_, _, OracleError<'_>>("controls more ").parse(rest) {
         if let Ok((rest3, type_text)) =
-            take_until::<_, _, nom_language::error::VerboseError<&str>>(" than you").parse(rest2)
+            take_until::<_, _, OracleError<'_>>(" than you").parse(rest2)
         {
             let (rest3, _) = tag(" than you").parse(rest3)?;
             let (filter, _) = parse_type_phrase(type_text.trim());
@@ -2230,9 +2166,7 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
     }
 
     // "an opponent has more life than you"
-    if let Ok((rest2, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("has more life than you").parse(rest)
-    {
+    if let Ok((rest2, _)) = tag::<_, _, OracleError<'_>>("has more life than you").parse(rest) {
         return Ok((
             rest2,
             StaticCondition::QuantityComparison {
@@ -2255,8 +2189,7 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
 
     // "an opponent has more cards in hand than you"
     if let Ok((rest2, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("has more cards in hand than you")
-            .parse(rest)
+        tag::<_, _, OracleError<'_>>("has more cards in hand than you").parse(rest)
     {
         return Ok((
             rest2,
@@ -2278,12 +2211,10 @@ fn parse_opponent_comparison_conditions(input: &str) -> OracleResult<'_, StaticC
         ));
     }
 
-    Err(nom::Err::Error(nom_language::error::VerboseError {
-        errors: vec![(
-            input,
-            nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-        )],
-    }))
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Fail,
+    )))
 }
 
 /// CR 118.12a: Parse "[player] pays {cost}" → UnlessPay { cost }.
@@ -2352,12 +2283,10 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
     // (Aura, Equipment, …) via the lowercase oracle subtype dictionary.
     let (filter, after_filter) = parse_type_phrase(rest);
     if matches!(filter, TargetFilter::Any) {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
 
     // `parse_type_phrase` returns a slice of `rest`; trim any leading whitespace
@@ -2367,10 +2296,7 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
 
     // tense: "is" | "was" | "wasn't" | "is not" | "was not" | "isn't"
     let (rest, negated) = alt((
-        value(
-            true,
-            tag::<_, _, nom_language::error::VerboseError<&str>>("wasn't "),
-        ),
+        value(true, tag::<_, _, OracleError<'_>>("wasn't ")),
         value(true, tag("isn't ")),
         value(true, tag("was not ")),
         value(true, tag("is not ")),
@@ -2383,7 +2309,7 @@ pub fn parse_zone_changed_this_way_clause(input: &str) -> OracleResult<'_, (Targ
     // "put onto the battlefield". The verb itself is value-discarded; the
     // " this way" suffix is the discriminator.
     let (rest, _) = alt((
-        tag::<_, _, nom_language::error::VerboseError<&str>>("put onto the battlefield"),
+        tag::<_, _, OracleError<'_>>("put onto the battlefield"),
         tag("destroyed"),
         tag("exiled"),
         tag("sacrificed"),

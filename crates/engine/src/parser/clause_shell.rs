@@ -51,11 +51,11 @@
 //! produce the correct AST. The shell treats these as opaque and leaves the
 //! `you may ` prefix attached, deferring to those parsers.
 
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::value;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::oracle_effect::conditions::strip_leading_general_conditional;
 use super::oracle_effect::strip_trailing_duration;
@@ -183,7 +183,7 @@ fn peel_inner(text: String, mut ctx: ClauseContext) -> (String, ClauseContext) {
 fn strip_optional_prefix(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
     let (_, rest) = nom_on_lower(text, &lower, |i| {
-        value((), tag::<_, _, VerboseError<&str>>("you may ")).parse(i)
+        value((), tag::<_, _, OracleError<'_>>("you may ")).parse(i)
     })?;
     let rest_lower = rest.to_lowercase();
     if is_specialized_you_may_phrase(&rest_lower) {
@@ -204,7 +204,7 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
     use nom::branch::alt;
     use nom::bytes::complete::tag;
     use nom::combinator::value;
-    let head: nom::IResult<&str, (), VerboseError<&str>> = alt((
+    let head: nom::IResult<&str, (), OracleError<'_>> = alt((
         // CR 400.7i — impulse-draw bare form (post strip_optional_effect_prefix
         // in the chunk loop). `try_parse_play_from_exile` requires the
         // duration suffix to disambiguate vs. `Effect::CastFromZone`.
@@ -237,42 +237,42 @@ fn is_specialized_duration_carrier(text_lower: &str) -> bool {
 fn is_specialized_you_may_phrase(rest_lower: &str) -> bool {
     let head = alt((
         // "you may have target creature get ..." — causative
-        value((), tag::<_, _, VerboseError<&str>>("have ")),
+        value((), tag::<_, _, OracleError<'_>>("have ")),
         // "you may cast ... as though ..." — static permission grant
-        value((), tag::<_, _, VerboseError<&str>>("cast ")),
+        value((), tag::<_, _, OracleError<'_>>("cast ")),
         // "you may play that card ..." — impulse draw permission
-        value((), tag::<_, _, VerboseError<&str>>("play ")),
+        value((), tag::<_, _, OracleError<'_>>("play ")),
         // "you may choose new targets for ..." — retarget effect
-        value((), tag::<_, _, VerboseError<&str>>("choose new targets ")),
-        value((), tag::<_, _, VerboseError<&str>>("choose new target ")),
+        value((), tag::<_, _, OracleError<'_>>("choose new targets ")),
+        value((), tag::<_, _, OracleError<'_>>("choose new target ")),
         // "you may instead ..." — Dig alternative selection
-        value((), tag::<_, _, VerboseError<&str>>("instead ")),
+        value((), tag::<_, _, OracleError<'_>>("instead ")),
         // "you may repeat this process" — repetition directive
-        value((), tag::<_, _, VerboseError<&str>>("repeat ")),
+        value((), tag::<_, _, OracleError<'_>>("repeat ")),
         // "you may pay {X} rather than pay this spell's mana cost" — alt cost
-        value((), tag::<_, _, VerboseError<&str>>("pay ")),
+        value((), tag::<_, _, OracleError<'_>>("pay ")),
         // "you may search ... for ..." — search-with-may; specialized search parser
-        value((), tag::<_, _, VerboseError<&str>>("search ")),
+        value((), tag::<_, _, OracleError<'_>>("search ")),
         // "you may reveal a [type] card from your hand" — reveal-with-may
-        value((), tag::<_, _, VerboseError<&str>>("reveal ")),
+        value((), tag::<_, _, OracleError<'_>>("reveal ")),
         // "you may look at ..." — peek-with-may
-        value((), tag::<_, _, VerboseError<&str>>("look ")),
+        value((), tag::<_, _, OracleError<'_>>("look ")),
     ))
     .parse(rest_lower);
     head.is_ok() || is_specialized_you_may_put_phrase(rest_lower)
 }
 
 fn is_specialized_you_may_put_phrase(rest_lower: &str) -> bool {
-    let Ok((after_put, _)) = tag::<_, _, VerboseError<&str>>("put ").parse(rest_lower) else {
+    let Ok((after_put, _)) = tag::<_, _, OracleError<'_>>("put ").parse(rest_lower) else {
         return false;
     };
-    take_until::<_, _, VerboseError<&str>>("from among")
+    take_until::<_, _, OracleError<'_>>("from among")
         .parse(after_put)
         .is_ok()
-        || take_until::<_, _, VerboseError<&str>>(" of them")
+        || take_until::<_, _, OracleError<'_>>(" of them")
             .parse(after_put)
             .is_ok()
-        || take_until::<_, _, VerboseError<&str>>(" of those cards")
+        || take_until::<_, _, OracleError<'_>>(" of those cards")
             .parse(after_put)
             .is_ok()
 }

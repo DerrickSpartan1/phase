@@ -1,8 +1,8 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{all_consuming, opt, value};
 use nom::Parser;
-use nom_language::error::VerboseError;
 use serde::{Deserialize, Serialize};
 
 use crate::types::ability::{
@@ -151,15 +151,13 @@ fn definition_grants_flashback(def: &AbilityDefinition) -> bool {
             .is_some_and(definition_grants_flashback)
 }
 
-fn parse_commander_permission_sentence(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+fn parse_commander_permission_sentence(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     let (input, subject) = take_until(" can be your commander").parse(input)?;
     if subject.trim().is_empty() {
-        return Err(nom::Err::Error(VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::TakeUntil),
-            )],
-        }));
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     let (input, _) = tag(" can be your commander").parse(input)?;
     let (input, _) = opt(tag(".")).parse(input)?;
@@ -433,9 +431,9 @@ fn is_self_exile_cleanup_line(line: &str, card_name: &str) -> bool {
         value(
             (),
             (
-                tag::<_, _, VerboseError<&str>>("exile "),
-                tag::<_, _, VerboseError<&str>>("~"),
-                opt(tag::<_, _, VerboseError<&str>>(".")),
+                tag::<_, _, OracleError<'_>>("exile "),
+                tag::<_, _, OracleError<'_>>("~"),
+                opt(tag::<_, _, OracleError<'_>>(".")),
             ),
         )
         .parse(i)
@@ -464,8 +462,8 @@ fn is_standalone_spell_keyword_action_line(line: &str) -> bool {
     let parsed = all_consuming(value(
         (),
         (
-            tag::<_, _, VerboseError<&str>>("time travel"),
-            opt(tag::<_, _, VerboseError<&str>>(".")),
+            tag::<_, _, OracleError<'_>>("time travel"),
+            opt(tag::<_, _, OracleError<'_>>(".")),
         ),
     ))
     .parse(lower.as_str())
@@ -629,7 +627,7 @@ fn is_spell_resolution_instruction_line(
         || lower_starts_with(&lower, "buyback")
         || lower_starts_with(&lower, "this spell costs ")
         || alt((
-            tag::<_, _, VerboseError<&str>>("kicker"),
+            tag::<_, _, OracleError<'_>>("kicker"),
             tag("multikicker"),
             tag("replicate"),
             tag("mayhem"),
@@ -1894,7 +1892,7 @@ pub(crate) fn parse_oracle_ir(
         // Note: "mayhem" IS in is_keyword_cost_line and is handled at Priority 1b via MTGJSON
         // keywords when present; this guard catches it when keywords[] is empty.
         if alt((
-            tag::<_, _, VerboseError<&str>>("kicker"),
+            tag::<_, _, OracleError<'_>>("kicker"),
             tag("multikicker"),
             tag("replicate"),
             tag("mayhem"),
@@ -2127,12 +2125,9 @@ pub(crate) fn parse_oracle_ir(
         }
 
         // Priority 13b: Kicker/Multikicker — skip (handled by keywords)
-        if alt((
-            tag::<_, _, VerboseError<&str>>("kicker"),
-            tag("multikicker"),
-        ))
-        .parse(lower.as_str())
-        .is_ok()
+        if alt((tag::<_, _, OracleError<'_>>("kicker"), tag("multikicker")))
+            .parse(lower.as_str())
+            .is_ok()
         {
             i += 1;
             continue;
@@ -2332,7 +2327,7 @@ fn parsed_abilities_to_doc_ir(
 /// creates a fresh `ParseContext` internally so diagnostics start empty;
 /// they flow through `OracleDocIr.diagnostics` → `ParsedAbilities.parse_warnings`.
 #[tracing::instrument(
-    level = "info",
+    level = "debug",
     skip(oracle_text, mtgjson_keyword_names, types, subtypes)
 )]
 pub fn parse_oracle_text(
@@ -2416,7 +2411,7 @@ fn try_parse_equip(line: &str) -> Option<AbilityDefinition> {
 fn parse_equip_target_filter(cost_text: &str) -> Option<TargetFilter> {
     let lower = cost_text.to_ascii_lowercase();
     let Ok((_, descriptor)) =
-        nom::sequence::terminated(take_until::<_, _, VerboseError<&str>>("{"), tag("{"))
+        nom::sequence::terminated(take_until::<_, _, OracleError<'_>>("{"), tag("{"))
             .parse(lower.as_str())
     else {
         return Some(default_equip_target_filter());
@@ -2426,7 +2421,7 @@ fn parse_equip_target_filter(cost_text: &str) -> Option<TargetFilter> {
         return Some(default_equip_target_filter());
     }
 
-    if tag::<_, _, VerboseError<&str>>("pay")
+    if tag::<_, _, OracleError<'_>>("pay")
         .parse(descriptor)
         .is_ok()
     {
@@ -2434,8 +2429,8 @@ fn parse_equip_target_filter(cost_text: &str) -> Option<TargetFilter> {
     }
 
     if alt((
-        tag::<_, _, VerboseError<&str>>("abilities"),
-        tag::<_, _, VerboseError<&str>>("costs"),
+        tag::<_, _, OracleError<'_>>("abilities"),
+        tag::<_, _, OracleError<'_>>("costs"),
     ))
     .parse(descriptor)
     .is_ok()
@@ -2443,7 +2438,7 @@ fn parse_equip_target_filter(cost_text: &str) -> Option<TargetFilter> {
         return None;
     }
 
-    if all_consuming(tag::<_, _, VerboseError<&str>>("commander"))
+    if all_consuming(tag::<_, _, OracleError<'_>>("commander"))
         .parse(descriptor)
         .is_ok()
     {
@@ -2513,7 +2508,7 @@ fn parse_equip_cost(cost_text: &str) -> AbilityCost {
 fn parse_first_mana_cost_in_text(text: &str) -> Option<ManaCost> {
     let upper = text.to_ascii_uppercase();
     let (_, cost) = nom::sequence::preceded(
-        take_until::<_, _, VerboseError<&str>>("{"),
+        take_until::<_, _, OracleError<'_>>("{"),
         super::oracle_nom::primitives::parse_mana_cost,
     )
     .parse(upper.as_str())
@@ -3089,9 +3084,9 @@ fn strip_condition_suffix(
     restrictions: &mut Vec<ActivationRestriction>,
 ) -> bool {
     let lower = condition_text.to_lowercase();
-    let suffix_len = match take_until::<_, _, VerboseError<&str>>(suffix).parse(lower.as_str()) {
+    let suffix_len = match take_until::<_, _, OracleError<'_>>(suffix).parse(lower.as_str()) {
         Ok((rest, _))
-            if all_consuming(tag::<_, _, VerboseError<&str>>(suffix))
+            if all_consuming(tag::<_, _, OracleError<'_>>(suffix))
                 .parse(rest)
                 .is_ok() =>
         {

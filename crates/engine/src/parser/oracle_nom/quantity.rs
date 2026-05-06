@@ -4,12 +4,12 @@
 //! like "the number of creatures you control", "its power", "your life total",
 //! "equal to" phrases, and "for each" phrases.
 
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
 use nom::combinator::{map, opt, value};
 use nom::sequence::{pair, preceded};
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::context::ParseContext;
 use super::error::OracleResult;
@@ -438,12 +438,10 @@ fn parse_counters_among_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let type_text = rest.trim_end_matches('.').trim_end_matches(',');
     let (filter, remainder) = parse_type_phrase(type_text);
     if matches!(filter, TargetFilter::Any) {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     // Map remainder back to original input slice — parse_type_phrase may have
     // consumed from a trimmed copy, so use pointer arithmetic for the correct
@@ -687,12 +685,10 @@ fn parse_distinct_card_types_among_objects(input: &str) -> OracleResult<'_, Quan
     let type_text = rest.trim_end_matches('.').trim_end_matches(',');
     let (filter, remainder) = parse_type_phrase(type_text);
     if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Nom(nom::error::ErrorKind::Tag),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     let consumed = remainder.as_ptr() as usize - input.as_ptr() as usize;
     Ok((
@@ -830,10 +826,10 @@ fn parse_type_filter_list(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
     let (mut rest, first) = parse_type_filter_word(input)?;
     let mut filters = vec![first];
     loop {
-        let sep = tag::<_, _, nom_language::error::VerboseError<&str>>(" and/or ")
+        let sep = tag::<_, _, OracleError<'_>>(" and/or ")
             .parse(rest)
-            .or_else(|_| tag::<_, _, nom_language::error::VerboseError<&str>>(" and ").parse(rest))
-            .or_else(|_| tag::<_, _, nom_language::error::VerboseError<&str>>(" or ").parse(rest));
+            .or_else(|_| tag::<_, _, OracleError<'_>>(" and ").parse(rest))
+            .or_else(|_| tag::<_, _, OracleError<'_>>(" or ").parse(rest));
         let Ok((next_rest, _)) = sep else { break };
         let Ok((after_type, next)) = parse_type_filter_word(next_rest) else {
             break;
@@ -1351,9 +1347,7 @@ fn parse_basic_land_type_count(input: &str) -> OracleResult<'_, QuantityRef> {
 /// Parse devotion references.
 fn parse_devotion_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("your devotion to ").parse(input)?;
-    if let Ok((rest, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>("that color").parse(rest)
-    {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("that color").parse(rest) {
         return Ok((
             rest,
             QuantityRef::Devotion {
@@ -1363,9 +1357,7 @@ fn parse_devotion_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     }
     let (rest, color) = super::primitives::parse_color(rest)?;
     // Check for " and [color]" for multi-color devotion
-    if let Ok((rest2, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>(" and ").parse(rest)
-    {
+    if let Ok((rest2, _)) = tag::<_, _, OracleError<'_>>(" and ").parse(rest) {
         if let Ok((rest3, color2)) = super::primitives::parse_color(rest2) {
             return Ok((
                 rest3,
@@ -1464,12 +1456,10 @@ fn parse_entered_this_turn_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, (type_text, inject_you)) = parse_entered_this_turn_clause(input)?;
     let (filter, remainder) = parse_type_phrase(type_text.trim());
     if matches!(filter, TargetFilter::Any) || !remainder.trim().is_empty() {
-        return Err(nom::Err::Error(VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Context("entered this turn quantity"),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     let filter = if inject_you {
         inject_controller(filter, ControllerRef::You)
@@ -1524,9 +1514,7 @@ fn inject_controller(filter: TargetFilter, controller: ControllerRef) -> TargetF
 /// quantities. Used by Converge token creation and Sunburst/ETB-counter
 /// cousins.
 fn parse_for_each_mana_spent(input: &str) -> OracleResult<'_, QuantityRef> {
-    if let Ok((rest, _)) =
-        pair(tag::<_, _, VerboseError<&str>>("color"), opt(tag("s"))).parse(input)
-    {
+    if let Ok((rest, _)) = pair(tag::<_, _, OracleError<'_>>("color"), opt(tag("s"))).parse(input) {
         let (rest, _) = tag(" of mana spent to cast ").parse(rest)?;
         let (rest, _) = parse_mana_spent_self_subject(rest)?;
         return Ok((
@@ -1573,12 +1561,10 @@ pub(crate) fn parse_mana_from_source_spent_to_cast(input: &str) -> OracleResult<
 pub(crate) fn parse_mana_source_filter(input: &str) -> OracleResult<'_, TargetFilter> {
     let (source_filter, rest) = parse_type_phrase(input);
     if rest.len() == input.len() {
-        return Err(nom::Err::Error(VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Context("mana source filter"),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     let (rest, _) = opt(alt((tag(" sources"), tag(" source")))).parse(rest)?;
     Ok((rest, source_filter))
@@ -1897,20 +1883,16 @@ fn parse_for_each_subtype_died_this_turn(input: &str) -> OracleResult<'_, Quanti
     let (rest, subtype_text) = take_until(" that died").parse(input)?;
     let (rest, _) = alt((tag(" that died this turn"), tag(" that died"))).parse(rest)?;
     let Some((subtype, consumed)) = parse_subtype(subtype_text) else {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Context("creature subtype"),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     };
     if consumed != subtype_text.len() {
-        return Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Context("creature subtype"),
-            )],
-        }));
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
     }
     Ok((
         rest,
@@ -1942,9 +1924,7 @@ fn creatures_died_this_turn_ref() -> QuantityRef {
 fn parse_for_each_attached_to_source(input: &str) -> OracleResult<'_, QuantityRef> {
     let (mut rest, first) = parse_type_filter_word(input)?;
     let mut types = vec![first];
-    while let Ok((after_and, _)) =
-        tag::<_, _, nom_language::error::VerboseError<&str>>(" and ").parse(rest)
-    {
+    while let Ok((after_and, _)) = tag::<_, _, OracleError<'_>>(" and ").parse(rest) {
         let (after_type, next) = parse_type_filter_word(after_and)?;
         types.push(next);
         rest = after_type;
@@ -2069,10 +2049,7 @@ fn parse_for_each_controlled_type(input: &str) -> OracleResult<'_, QuantityRef> 
     // self-exclusion semantic at runtime via filter evaluation against the
     // source object's identity.
     let (rest, has_other) = nom::combinator::opt(alt((
-        nom::combinator::value(
-            (),
-            tag::<_, _, nom_language::error::VerboseError<&str>>("other "),
-        ),
+        nom::combinator::value((), tag::<_, _, OracleError<'_>>("other ")),
         nom::combinator::value((), tag("another ")),
     )))
     .parse(input)?;

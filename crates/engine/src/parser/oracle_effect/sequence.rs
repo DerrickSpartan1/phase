@@ -1,8 +1,8 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{eof, opt, value};
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_target::parse_target;
@@ -37,7 +37,7 @@ use crate::types::zones::Zone;
 /// `SubjectApplication` on the hot continuation path.
 fn strip_search_result_subject(lower: &str) -> &str {
     alt((
-        tag::<_, _, VerboseError<&str>>("those players "),
+        tag::<_, _, OracleError<'_>>("those players "),
         tag("that player "),
         tag("each player "),
     ))
@@ -54,12 +54,12 @@ fn parse_choose_count_from_text(lower: &str) -> u32 {
     let rest = alt((tag("an opponent chooses "), tag("target opponent chooses ")))
         .parse(lower)
         .map(|(rest, _)| rest)
-        .unwrap_or_else(|_: nom::Err<VerboseError<&str>>| {
-            let s = tag::<_, _, VerboseError<&str>>("you ")
+        .unwrap_or_else(|_: nom::Err<OracleError<'_>>| {
+            let s = tag::<_, _, OracleError<'_>>("you ")
                 .parse(lower)
                 .map(|(rest, _)| rest)
                 .unwrap_or(lower);
-            alt((tag::<_, _, VerboseError<&str>>("choose "), tag("chooses ")))
+            alt((tag::<_, _, OracleError<'_>>("choose "), tag("chooses ")))
                 .parse(s)
                 .map(|(rest, _)| rest)
                 .unwrap_or(s)
@@ -73,7 +73,7 @@ fn parse_choose_count_from_text(lower: &str) -> u32 {
 
 fn parse_put_all_back_in_any_order(lower: &str) -> bool {
     (
-        tag::<_, _, VerboseError<&str>>("put "),
+        tag::<_, _, OracleError<'_>>("put "),
         alt((tag("them"), tag("those cards"), tag("the cards"))),
         tag(" back"),
         alt((
@@ -91,7 +91,7 @@ fn parse_put_all_back_in_any_order(lower: &str) -> bool {
 fn parse_put_one_dig_card_on_top(lower: &str) -> bool {
     (
         alt((
-            tag::<_, _, VerboseError<&str>>("you may put "),
+            tag::<_, _, OracleError<'_>>("you may put "),
             tag("may put "),
             tag("put "),
         )),
@@ -107,7 +107,7 @@ fn parse_put_one_dig_card_on_top(lower: &str) -> bool {
 
 fn parse_exile_rest_after_dig(lower: &str) -> bool {
     (
-        tag::<_, _, VerboseError<&str>>("exile the rest"),
+        tag::<_, _, OracleError<'_>>("exile the rest"),
         opt(tag(".")),
         eof,
     )
@@ -193,7 +193,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     // "tap target creature ... and put a stun counter on it".
                     let targeted_compound_continuation =
                         nom_primitives::scan_contains(&before_lower, "target")
-                            && tag::<_, _, VerboseError<&str>>("put ")
+                            && tag::<_, _, OracleError<'_>>("put ")
                                 .parse(remainder_trimmed)
                                 .is_ok();
                     // CR 701.18a + CR 701.23: "search [zones] for [filter] and exile them"
@@ -205,7 +205,7 @@ pub(super) fn split_clause_sequence(text: &str) -> Vec<ClauseChunk> {
                     let search_with_that_name = has_search_prefix
                         && (before_lower.ends_with("with that name")
                             || before_lower.ends_with("with the same name as that card"))
-                        && tag::<_, _, VerboseError<&str>>("exile them")
+                        && tag::<_, _, OracleError<'_>>("exile them")
                             .parse(remainder_trimmed)
                             .is_ok();
                     // CR 707.9: ", except <body> and <body> [and …]" — inside
@@ -256,7 +256,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     // The search verb may follow a sequence connector like "Then" from a prior sentence.
     // CR 701.18a: Enumerated "search" prefixes — do NOT use contains(" search ").
     let search_start = alt((
-        tag::<_, _, VerboseError<&str>>("search "),
+        tag::<_, _, OracleError<'_>>("search "),
         tag("then search "),
         tag("you may search "),
         tag("you search "),
@@ -266,14 +266,14 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
     .parse(current_lower.as_str())
     .is_ok();
     if search_start
-        && alt((tag::<_, _, VerboseError<&str>>("reveal "), tag("put ")))
+        && alt((tag::<_, _, OracleError<'_>>("reveal "), tag("put ")))
             .parse(trimmed_lower.as_str())
             .is_ok()
     {
         return None;
     }
 
-    if tag::<_, _, VerboseError<&str>>("then ")
+    if tag::<_, _, OracleError<'_>>("then ")
         .parse(trimmed_lower.as_str())
         .is_ok()
     {
@@ -292,9 +292,7 @@ fn split_comma_clause_boundary(current: &str, remainder: &str) -> Option<(Clause
 
     // Strip "and " connector before checking clause start
     // Handles patterns like ", and get {E}{E}" or ", and draw a card"
-    if let Ok((after_and, _)) =
-        tag::<_, _, VerboseError<&str>>("and ").parse(trimmed_lower.as_str())
-    {
+    if let Ok((after_and, _)) = tag::<_, _, OracleError<'_>>("and ").parse(trimmed_lower.as_str()) {
         if starts_clause_text(after_and) || starts_with_damage_clause(after_and) {
             return Some((ClauseBoundary::Comma, whitespace_len));
         }
@@ -307,7 +305,7 @@ fn starts_prefix_clause(current_lower: &str) -> bool {
     // CR 603.7a: Temporal prefix clauses must not be split on their internal comma.
     // CR 611.2b: "For as long as [condition], [effect]" — duration prefix clause.
     alt((
-        tag::<_, _, VerboseError<&str>>("until "),
+        tag::<_, _, OracleError<'_>>("until "),
         tag("after "),
         tag("if "),
         tag("when "),
@@ -393,7 +391,7 @@ fn starts_clause_text_lower(s: &str) -> bool {
     // pronoun/determiner clause starters.  Split into multiple alt() groups
     // chained with .or() to stay within nom's 21-tuple limit.
     alt((
-        value((), tag::<_, _, VerboseError<&str>>("add ")),
+        value((), tag::<_, _, OracleError<'_>>("add ")),
         value((), tag("all ")),
         value((), tag("attach ")),
         value((), tag("airbend ")),
@@ -462,7 +460,7 @@ fn starts_clause_text_lower(s: &str) -> bool {
 
 fn starts_multiword_keyword_continuation(s: &str) -> bool {
     let Ok((rest, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("double strike"),
+        tag::<_, _, OracleError<'_>>("double strike"),
         tag("double team"),
     ))
     .parse(s) else {
@@ -483,7 +481,7 @@ fn is_inside_temporal_prefix(lower: &str) -> bool {
     // from a prior clause boundary). The temporal prefix starts the clause.
     let trimmed = lower.trim_start_matches(|c: char| c == ',' || c.is_whitespace());
     alt((
-        tag::<_, _, VerboseError<&str>>("at the beginning of the next "),
+        tag::<_, _, OracleError<'_>>("at the beginning of the next "),
         tag("at the beginning of your next "),
         tag("at the end of "),
     ))
@@ -508,7 +506,7 @@ pub(crate) fn starts_bare_and_clause(text: &str) -> bool {
 fn starts_bare_and_clause_lower(s: &str) -> bool {
     // Split into multiple alt() groups chained with .or() for nom's tuple limit.
     let has_verb_prefix = alt((
-        value((), tag::<_, _, VerboseError<&str>>("create ")),
+        value((), tag::<_, _, OracleError<'_>>("create ")),
         value((), tag("destroy ")),
         value((), tag("draw ")),
         value((), tag("discard ")),
@@ -559,7 +557,7 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         // noun phrase. "doesn't"/"can't"/"cannot" are restriction predicates; "gains"/
         // "gets"/"has" are continuous modification predicates. Safe to split because
         // a bare pronoun followed by a conjugated verb cannot be part of a noun phrase.
-        value((), tag::<_, _, VerboseError<&str>>("it doesn't ")),
+        value((), tag::<_, _, OracleError<'_>>("it doesn't ")),
         value((), tag("it can't ")),
         value((), tag("it cannot ")),
         value((), tag("it gains ")),
@@ -579,10 +577,10 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
     // Solemn Visitor, Soul of Theros, Jeskai Charm, ~14 cards). Discriminator:
     // the token after the verb must be a count expression (digits or "X"
     // followed by a word boundary), not a keyword name.
-    if let Ok((rest, _)) = alt((tag::<_, _, VerboseError<&str>>("gain "), tag("lose "))).parse(s) {
+    if let Ok((rest, _)) = alt((tag::<_, _, OracleError<'_>>("gain "), tag("lose "))).parse(s) {
         // Reject conjugated "gains"/"loses" (handled separately above).
-        let conjugated = tag::<_, _, VerboseError<&str>>("gains ").parse(s).is_ok()
-            || tag::<_, _, VerboseError<&str>>("loses ").parse(s).is_ok();
+        let conjugated = tag::<_, _, OracleError<'_>>("gains ").parse(s).is_ok()
+            || tag::<_, _, OracleError<'_>>("loses ").parse(s).is_ok();
         if !conjugated && next_token_is_count(rest) {
             return true;
         }
@@ -618,16 +616,16 @@ fn next_token_is_count(s: &str) -> bool {
 /// Used by `starts_bare_and_clause` to split patterns like
 /// "sacrifice ~ and it deals 3 damage to target player".
 fn starts_with_damage_clause(lower: &str) -> bool {
-    if let Ok((_, before)) = take_until::<_, _, VerboseError<&str>>("deals ")
+    if let Ok((_, before)) = take_until::<_, _, OracleError<'_>>("deals ")
         .parse(lower)
-        .or_else(|_| take_until::<_, _, VerboseError<&str>>("deal ").parse(lower))
+        .or_else(|_| take_until::<_, _, OracleError<'_>>("deal ").parse(lower))
     {
         let subject = before.trim();
         subject.is_empty() // bare "deals N damage"
             || subject == "it" // "it deals N damage"
             || subject == "~" // "~ deals N damage"
             || alt((
-                tag::<_, _, VerboseError<&str>>("this "),
+                tag::<_, _, OracleError<'_>>("this "),
                 tag("that "),
             ))
             .parse(subject)
@@ -1094,7 +1092,7 @@ pub(super) fn parse_intrinsic_continuation_ast(
             if let Some(then_pos) = lower.rfind(", then ") {
                 let after_then = lower[then_pos + ", then ".len()..].trim_end_matches('.');
                 let is_shuffle_clause = alt((
-                    value((), tag::<_, _, VerboseError<&str>>("shuffle")),
+                    value((), tag::<_, _, OracleError<'_>>("shuffle")),
                     value((), tag("that player shuffles")),
                 ))
                 .parse(after_then)
@@ -1155,16 +1153,16 @@ pub(super) fn parse_dig_from_among(lower: &str, _original: &str) -> Option<Conti
 
     // "put N of them into your hand [and the rest on the bottom]" — no filter, count explicit.
     // Must be checked BEFORE the "from among" path since "of them" appears in both forms.
-    if let Ok((_, before_of)) = take_until::<_, _, VerboseError<&str>>(" of them").parse(lower) {
+    if let Ok((_, before_of)) = take_until::<_, _, OracleError<'_>>(" of them").parse(lower) {
         let before_of = before_of.trim();
-        let after_put = alt((tag::<_, _, VerboseError<&str>>("you may put "), tag("put ")))
+        let after_put = alt((tag::<_, _, OracleError<'_>>("you may put "), tag("put ")))
             .parse(before_of)
             .map(|(rest, _)| rest)
             .unwrap_or(before_of);
 
         // Delegate to nom combinator (input already lowercase from lower).
         let (count, up_to) =
-            if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("up to ").parse(after_put) {
+            if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("up to ").parse(after_put) {
                 nom_primitives::parse_number
                     .parse(rest)
                     .map_or((1, true), |(_, n)| (n, true))
@@ -1188,14 +1186,14 @@ pub(super) fn parse_dig_from_among(lower: &str, _original: &str) -> Option<Conti
     }
 
     // Find "from among" to split the text into count+filter vs destination
-    let (_, before_from) = take_until::<_, _, VerboseError<&str>>("from among")
+    let (_, before_from) = take_until::<_, _, OracleError<'_>>("from among")
         .parse(lower)
         .ok()?;
     let before_from = &before_from.trim();
 
     // Strip leading "put " or "you may reveal " using nom combinators.
     let after_put = alt((
-        tag::<_, _, VerboseError<&str>>("you may put "),
+        tag::<_, _, OracleError<'_>>("you may put "),
         tag("you may reveal "),
         tag("put "),
         tag("reveal "),
@@ -1207,15 +1205,14 @@ pub(super) fn parse_dig_from_among(lower: &str, _original: &str) -> Option<Conti
     // Parse "up to N" or "a/an" or just a number
     // Delegate to nom combinator (input already lowercase from lower).
     let (count, up_to, filter_text) = if let Ok((rest, _)) =
-        tag::<_, _, VerboseError<&str>>("up to ").parse(after_put)
+        tag::<_, _, OracleError<'_>>("up to ").parse(after_put)
     {
         if let Ok((remainder, n)) = nom_primitives::parse_number.parse(rest) {
             (n, true, remainder.trim())
         } else {
             (1, true, rest)
         }
-    } else if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("any number of ").parse(after_put)
-    {
+    } else if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("any number of ").parse(after_put) {
         // "any number of creatures" → up_to with a high cap
         (255, true, rest)
     } else if let Ok((rest, _)) = nom_primitives::parse_article.parse(after_put) {
@@ -1287,19 +1284,16 @@ pub(super) fn parse_followup_continuation_ast(
                 || nom_primitives::scan_contains(&lower, "one of them")
                 || nom_primitives::scan_contains(&lower, "one of those") =>
         {
-            let card_filter = if alt((
-                tag::<_, _, VerboseError<&str>>("you choose "),
-                tag("choose "),
-            ))
-            .parse(lower.as_str())
-            .is_ok()
+            let card_filter = if alt((tag::<_, _, OracleError<'_>>("you choose "), tag("choose ")))
+                .parse(lower.as_str())
+                .is_ok()
             {
                 super::parse_choose_filter(&lower, ctx)
             } else {
                 super::parse_choose_filter_from_sentence(&lower, ctx)
             };
             let choice_optional = alt((
-                tag::<_, _, VerboseError<&str>>("you may choose "),
+                tag::<_, _, OracleError<'_>>("you may choose "),
                 tag("may choose "),
             ))
             .parse(lower.as_str())
@@ -1525,7 +1519,7 @@ pub(super) fn parse_followup_continuation_ast(
         }
         // "create a ... token and suspect it" → chain suspect on last created token
         Effect::Token { .. }
-            if tag::<_, _, VerboseError<&str>>("suspect ")
+            if tag::<_, _, OracleError<'_>>("suspect ")
                 .parse(lower.as_str())
                 .is_ok() =>
         {
@@ -1556,7 +1550,7 @@ pub(super) fn parse_followup_continuation_ast(
             if (nom_primitives::scan_contains(&lower, "of them")
                 || nom_primitives::scan_contains(&lower, "of those"))
                 && alt((
-                    tag::<_, _, VerboseError<&str>>("choose "),
+                    tag::<_, _, OracleError<'_>>("choose "),
                     tag("you choose "),
                     tag("an opponent chooses "),
                     tag("target opponent chooses "),
@@ -1566,7 +1560,7 @@ pub(super) fn parse_followup_continuation_ast(
         {
             let count = parse_choose_count_from_text(&lower);
             let chooser = if alt((
-                tag::<_, _, VerboseError<&str>>("an opponent chooses "),
+                tag::<_, _, OracleError<'_>>("an opponent chooses "),
                 tag("target opponent chooses "),
             ))
             .parse(lower.as_str())
@@ -1711,7 +1705,7 @@ pub(super) fn parse_followup_continuation_ast(
 fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> {
     // Match subject prefix: "the token enters with " / "it enters with "
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("the token enters with "),
+        tag::<_, _, OracleError<'_>>("the token enters with "),
         tag("it enters with "),
     ))
     .parse(lower)
@@ -1720,12 +1714,12 @@ fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> 
     // Parse count: could be "x", a number, or "a number of"
     let (rest, count_prefix) = alt((
         // "x " — variable resolved later via "where X is"
-        value(None, tag::<_, _, VerboseError<&str>>("x ")),
+        value(None, tag::<_, _, OracleError<'_>>("x ")),
         // "a number of " — dynamic count resolved via suffix
         value(None, tag("a number of ")),
     ))
     .parse(rest)
-    .unwrap_or_else(|_: nom::Err<VerboseError<&str>>| {
+    .unwrap_or_else(|_: nom::Err<OracleError<'_>>| {
         // Try parsing a fixed number
         if let Ok((r, n)) = nom_primitives::parse_number(rest) {
             let r = r.trim_start();
@@ -1737,10 +1731,7 @@ fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> 
 
     // Parse counter type: "+1/+1 " is the most common
     let (rest, counter_type) = alt((
-        value(
-            "P1P1".to_string(),
-            tag::<_, _, VerboseError<&str>>("+1/+1 "),
-        ),
+        value("P1P1".to_string(), tag::<_, _, OracleError<'_>>("+1/+1 ")),
         value("M1M1".to_string(), tag("-1/-1 ")),
     ))
     .parse(rest)
@@ -1748,7 +1739,7 @@ fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> 
 
     // Consume "counter(s) on it"
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("counters on it"),
+        tag::<_, _, OracleError<'_>>("counters on it"),
         tag("counter on it"),
     ))
     .parse(rest)
@@ -1756,13 +1747,13 @@ fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> 
 
     // Parse optional ", where x is [quantity]"
     let quantity = if let Ok((rest_where, _)) =
-        tag::<_, _, VerboseError<&str>>(", where x is ").parse(rest.trim_start_matches(['.', ' ']))
+        tag::<_, _, OracleError<'_>>(", where x is ").parse(rest.trim_start_matches(['.', ' ']))
     {
         let qty_text = rest_where.trim().trim_end_matches('.');
         parse_cda_quantity(qty_text)
             .or_else(|| parse_quantity_ref(qty_text).map(|q| QuantityExpr::Ref { qty: q }))
     } else if let Ok((rest_equal, _)) =
-        tag::<_, _, VerboseError<&str>>("equal to ").parse(rest.trim_start_matches(['.', ' ']))
+        tag::<_, _, OracleError<'_>>("equal to ").parse(rest.trim_start_matches(['.', ' ']))
     {
         let qty_text = rest_equal.trim().trim_end_matches('.');
         parse_cda_quantity(qty_text)
@@ -1803,22 +1794,22 @@ fn try_parse_token_enters_with_counters(lower: &str) -> Option<ContinuationAst> 
 fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationAst> {
     // Optional leading "and " (rare — usually consumed by the splitter),
     // then the imperative "put " verb.
-    let (rest, _) = nom::combinator::opt(tag::<_, _, VerboseError<&str>>("and "))
+    let (rest, _) = nom::combinator::opt(tag::<_, _, OracleError<'_>>("and "))
         .parse(lower)
         .ok()?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("put ").parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("put ").parse(rest).ok()?;
 
     // Parse count: "x ", "a ", "an ", "a number of ", or a literal number.
     // Word "a"/"an" is a singular article (count = 1).
     let (rest, count_prefix) = alt((
         // "x " — variable resolved later via "where X is" or by caller payment
-        value(None, tag::<_, _, VerboseError<&str>>("x ")),
+        value(None, tag::<_, _, OracleError<'_>>("x ")),
         value(None, tag("a number of ")),
         value(Some(1u32), tag("a ")),
         value(Some(1u32), tag("an ")),
     ))
     .parse(rest)
-    .unwrap_or_else(|_: nom::Err<VerboseError<&str>>| {
+    .unwrap_or_else(|_: nom::Err<OracleError<'_>>| {
         if let Ok((r, n)) = nom_primitives::parse_number(rest) {
             (r.trim_start(), Some(n))
         } else {
@@ -1829,10 +1820,7 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
     // Parse counter type: only +1/+1 and -1/-1 are common in token contexts
     // (matches the AST scope of the existing enters-with-counters helper).
     let (rest, counter_type) = alt((
-        value(
-            "P1P1".to_string(),
-            tag::<_, _, VerboseError<&str>>("+1/+1 "),
-        ),
+        value("P1P1".to_string(), tag::<_, _, OracleError<'_>>("+1/+1 ")),
         value("M1M1".to_string(), tag("-1/-1 ")),
     ))
     .parse(rest)
@@ -1841,7 +1829,7 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
     // Consume "counter(s) on it" — the "on it" anaphor pinning the counters
     // to the just-created token.
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("counters on it"),
+        tag::<_, _, OracleError<'_>>("counters on it"),
         tag("counter on it"),
     ))
     .parse(rest)
@@ -1851,7 +1839,7 @@ fn try_parse_put_counters_on_token_followup(lower: &str) -> Option<ContinuationA
     // followup clause is already trimmed by the splitter, so no leading
     // punctuation cleanup is needed before the comma.
     let quantity =
-        if let Ok((rest_where, _)) = tag::<_, _, VerboseError<&str>>(", where x is ").parse(rest) {
+        if let Ok((rest_where, _)) = tag::<_, _, OracleError<'_>>(", where x is ").parse(rest) {
             // allow-noncombinator: trailing-period cleanup on a pre-tokenized
             // suffix; not parsing dispatch.
             let qty_text = rest_where.trim().trim_end_matches('.');

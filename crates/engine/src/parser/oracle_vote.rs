@@ -19,11 +19,11 @@
 //!   `AbilityDefinition`. Failure to match returns `None`, leaving the caller
 //!   free to fall back to the standard chain parser.
 
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::combinator::value;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use crate::types::ability::{AbilityDefinition, AbilityKind, ControllerRef, Effect};
 
@@ -83,7 +83,7 @@ pub(crate) fn parse_vote_block(text: &str, kind: AbilityKind) -> Option<AbilityD
 /// with the player to your left") map to `ControllerRef::You` until we model
 /// player-position refs.
 fn parse_starting_with(input: &str) -> Option<(&str, ControllerRef)> {
-    let res: nom::IResult<&str, (), VerboseError<&str>> = value(
+    let res: nom::IResult<&str, (), OracleError<'_>> = value(
         (),
         alt((tag("starting with you, "), tag("starting with you "))),
     )
@@ -100,7 +100,7 @@ fn parse_starting_with(input: &str) -> Option<(&str, ControllerRef)> {
 /// Generalized to N>=2 choices via repeated " or " / ", " separators —
 /// covers cards like Capital Punishment that vote on three options.
 fn parse_each_player_votes_clause(input: &str) -> Option<(&str, Vec<String>)> {
-    let res: nom::IResult<&str, (), VerboseError<&str>> = value(
+    let res: nom::IResult<&str, (), OracleError<'_>> = value(
         (),
         alt((
             tag("each player votes for "),
@@ -126,7 +126,7 @@ fn parse_for_each_vote_clause<'a>(
     choices: &[String],
 ) -> Option<(&'a str, (String, &'a str))> {
     let lower = input.to_lowercase();
-    let res: nom::IResult<&str, (), VerboseError<&str>> =
+    let res: nom::IResult<&str, (), OracleError<'_>> =
         value((), alt((tag("for each "),))).parse(lower.as_str());
     let (lower_rest, ()) = res.ok()?;
     // Slice the original input at the same offset.
@@ -143,7 +143,7 @@ fn parse_for_each_vote_clause<'a>(
     // Consume " vote, " (singular) — plural "votes" would imply the resolver
     // re-tally pattern that Council's dilemma never uses; reject to keep the
     // detector tight.
-    let (after_vote, _): (&str, &str) = tag::<_, _, VerboseError<&str>>(" vote, ")
+    let (after_vote, _): (&str, &str) = tag::<_, _, OracleError<'_>>(" vote, ")
         .parse(after_choice)
         .ok()?;
     // Read up to terminator: either next "For each " OR end-of-string,
@@ -215,7 +215,7 @@ fn split_choices(input: &str) -> Option<Vec<String>> {
     let mut rest: &str = lower.as_str();
     loop {
         let (after_word, word) =
-            nom::bytes::complete::take_while1::<_, &str, VerboseError<&str>>(word_chars)
+            nom::bytes::complete::take_while1::<_, &str, OracleError<'_>>(word_chars)
                 .parse(rest)
                 .ok()?;
         choices.push(word.to_string());
@@ -224,7 +224,7 @@ fn split_choices(input: &str) -> Option<Vec<String>> {
             break;
         }
         // Consume separator; try longest match first to avoid partial matches.
-        let sep_res: nom::IResult<&str, (), VerboseError<&str>> =
+        let sep_res: nom::IResult<&str, (), OracleError<'_>> =
             value((), alt((tag(", or "), tag(" or "), tag(", ")))).parse(rest);
         let (after_sep, ()) = sep_res.ok()?;
         rest = after_sep;

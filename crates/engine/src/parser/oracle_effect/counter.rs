@@ -1,9 +1,9 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::multispace0;
 use nom::combinator::value;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use crate::types::ability::{
     CounterTransferMode, DoublePTMode, DoubleTarget, Effect, MultiTargetSpec, QuantityExpr,
@@ -90,7 +90,7 @@ pub(super) fn try_parse_put_counter_chain<'a>(
         // Counter types can be multi-word (e.g., "first strike", "double strike"),
         // so use `take_until(" counter")` to consume the full type phrase rather
         // than splitting on the first whitespace.
-        let (at_counter, raw_type) = take_until::<_, _, VerboseError<&str>>(" counter")
+        let (at_counter, raw_type) = take_until::<_, _, OracleError<'_>>(" counter")
             .parse(rest)
             .ok()?;
         if raw_type.is_empty() {
@@ -210,7 +210,7 @@ fn try_consume_counter_list_separator(input: &str) -> Option<&str> {
     // Peek ahead: after the article there must be "<type> counter(s)". The
     // counter-type phrase may be multi-word ("first strike"), so delimit it
     // with `take_until(" counter")` instead of splitting on whitespace.
-    let (at_counter, raw_type) = take_until::<_, _, VerboseError<&str>>(" counter")
+    let (at_counter, raw_type) = take_until::<_, _, OracleError<'_>>(" counter")
         .parse(after_article)
         .ok()?;
     if raw_type.is_empty() {
@@ -330,7 +330,7 @@ fn parse_counter_for_each_suffix(remainder: &str) -> Option<(QuantityExpr, &str)
     let remainder_lower = remainder.to_lowercase();
     let ((), for_each_clause) = nom_on_lower(remainder, &remainder_lower, |input| {
         let (rest, _) = multispace0.parse(input)?;
-        let (rest, _) = tag::<_, _, VerboseError<&str>>("for each ").parse(rest)?;
+        let (rest, _) = tag::<_, _, OracleError<'_>>("for each ").parse(rest)?;
         Ok((rest, ()))
     })?;
     let clause_lower = for_each_clause.to_lowercase();
@@ -341,7 +341,7 @@ fn parse_counter_for_each_suffix(remainder: &str) -> Option<(QuantityExpr, &str)
 /// CR 122.1: Consume the "a number of " prefix used in dynamic counter-count
 /// phrases, returning the remainder. Returns None when the prefix is absent.
 fn try_strip_a_number_of(input: &str) -> Option<&str> {
-    tag::<_, _, nom_language::error::VerboseError<&str>>("a number of ")
+    tag::<_, _, OracleError<'_>>("a number of ")
         .parse(input)
         .map(|(rest, _)| rest)
         .ok()
@@ -489,7 +489,7 @@ fn resolve_counter_target(text: &str, ctx: &mut ParseContext) -> TargetFilter {
 /// the legacy `ParentTarget` semantics — used for spells/abilities like
 /// Twinflame Strive where "that creature" refers back to the parent target.
 fn resolve_that_creature_in_trigger<'a>(text: &'a str, ctx: &mut ParseContext) -> Option<&'a str> {
-    let (rest, _): (&'a str, &'a str) = tag::<_, _, VerboseError<&'a str>>("that creature")
+    let (rest, _): (&'a str, &'a str) = tag::<_, _, OracleError<'a>>("that creature")
         .parse(text)
         .ok()?;
     match &ctx.subject {

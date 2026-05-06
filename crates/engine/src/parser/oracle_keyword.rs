@@ -1,11 +1,11 @@
 use std::borrow::Cow;
 
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::character::complete::space0;
 use nom::combinator::{opt, value};
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::oracle_cost::parse_oracle_cost;
 use super::oracle_nom::primitives as nom_primitives;
@@ -26,10 +26,10 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
     if !parts.iter().any(|p| {
         let l = p.to_ascii_lowercase();
         scan_contains(&l, "and from ")
-            || tag::<_, _, VerboseError<&str>>("from ")
+            || tag::<_, _, OracleError<'_>>("from ")
                 .parse(l.as_str())
                 .is_ok()
-            || tag::<_, _, VerboseError<&str>>("and from ")
+            || tag::<_, _, OracleError<'_>>("and from ")
                 .parse(l.as_str())
                 .is_ok()
     }) {
@@ -48,7 +48,7 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
         let prefix_match: Option<&str> = alt((
             value(
                 "protection from",
-                tag::<_, _, VerboseError<&str>>("protection from "),
+                tag::<_, _, OracleError<'_>>("protection from "),
             ),
             value("hexproof from", tag("hexproof from ")),
         ))
@@ -68,8 +68,8 @@ pub(crate) fn expand_protection_parts<'a>(parts: &[&'a str]) -> Vec<Cow<'a, str>
             expanded.push(Cow::Owned(format!("{prefix} {}", remainder.trim())));
             active_prefix = Some(prefix);
         } else if let Some(pfx) = active_prefix {
-            if let Ok((rest, _)) = alt((tag::<_, _, VerboseError<&str>>("and from "), tag("from ")))
-                .parse(lower.as_str())
+            if let Ok((rest, _)) =
+                alt((tag::<_, _, OracleError<'_>>("and from "), tag("from "))).parse(lower.as_str())
             {
                 // ", and from Zombies" or ", from Werewolves" — continuation
                 expanded.push(Cow::Owned(format!("{pfx} {}", rest.trim())));
@@ -93,7 +93,7 @@ pub(crate) fn parse_kicker_additional_cost_line(raw: &str, lower: &str) -> Optio
         value(
             true,
             alt((
-                tag::<_, _, VerboseError<&str>>("multikicker "),
+                tag::<_, _, OracleError<'_>>("multikicker "),
                 tag("multikicker—"),
             )),
         ),
@@ -195,7 +195,7 @@ pub(crate) fn extract_keyword_line(
         let mtgjson_match = mtgjson_keyword_names.iter().any(|name| {
             lower == *name
                 || lower.strip_prefix(name.as_str()).is_some_and(|rest| {
-                    alt((tag::<_, _, VerboseError<&str>>(" "), tag("\u{2014}")))
+                    alt((tag::<_, _, OracleError<'_>>(" "), tag("\u{2014}")))
                         .parse(rest)
                         .is_ok()
                 })
@@ -242,7 +242,7 @@ pub(crate) fn extract_keyword_line(
 // CR 702.181a: "Mobilize N" creates N tapped and attacking Warrior tokens.
 fn parse_mobilize_keyword_line(line: &str) -> Option<Keyword> {
     let lower = line.trim().trim_end_matches('.').to_ascii_lowercase();
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("mobilize ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("mobilize ")
         .parse(lower.as_str())
         .ok()?;
     let rest = rest.trim();
@@ -255,10 +255,10 @@ fn parse_mobilize_keyword_line(line: &str) -> Option<Keyword> {
         }
     }
 
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("x").parse(rest).ok()?;
-    let (rest, _) = space0::<_, VerboseError<&str>>.parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("x").parse(rest).ok()?;
+    let (rest, _) = space0::<_, OracleError<'_>>.parse(rest).ok()?;
     let (quantity_text, _) = alt((
-        tag::<_, _, VerboseError<&str>>(", where x is "),
+        tag::<_, _, OracleError<'_>>(", where x is "),
         tag("where x is "),
     ))
     .parse(rest)
@@ -269,7 +269,7 @@ fn parse_mobilize_keyword_line(line: &str) -> Option<Keyword> {
 /// Nom leaf combinator: match one of the six enchantable core types and yield
 /// the corresponding `TypeFilter`. Driven by `value()` + `alt()` so additional
 /// types slot in as one-line extensions.
-fn parse_enchant_type_leg(input: &str) -> nom::IResult<&str, TypeFilter, VerboseError<&str>> {
+fn parse_enchant_type_leg(input: &str) -> nom::IResult<&str, TypeFilter, OracleError<'_>> {
     alt((
         value(TypeFilter::Creature, tag("creature")),
         value(TypeFilter::Land, tag("land")),
@@ -284,7 +284,7 @@ fn parse_enchant_type_leg(input: &str) -> nom::IResult<&str, TypeFilter, Verbose
 /// Nom combinator: separator between enchant list legs. Covers serial-comma
 /// (", or "/", and "), bare comma (", "), and bare conjunction (" or "/" and ")
 /// forms so "A, B, or C", "A, B, C", and "A or B" all compose uniformly.
-fn parse_enchant_list_sep(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+fn parse_enchant_list_sep(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     value(
         (),
         alt((
@@ -300,7 +300,7 @@ fn parse_enchant_list_sep(input: &str) -> nom::IResult<&str, (), VerboseError<&s
 
 /// Nom combinator: parse a leg list with serial-comma or bare-conjunction
 /// separators. Returns the list in source order.
-fn parse_enchant_type_list(input: &str) -> nom::IResult<&str, Vec<TypeFilter>, VerboseError<&str>> {
+fn parse_enchant_type_list(input: &str) -> nom::IResult<&str, Vec<TypeFilter>, OracleError<'_>> {
     use nom::multi::many0;
     use nom::sequence::preceded;
 
@@ -317,7 +317,7 @@ fn parse_enchant_type_list(input: &str) -> nom::IResult<&str, Vec<TypeFilter>, V
 /// so "an opponent controls" isn't shadowed by "opponent controls".
 fn parse_enchant_controller_suffix(
     input: &str,
-) -> nom::IResult<&str, ControllerRef, VerboseError<&str>> {
+) -> nom::IResult<&str, ControllerRef, OracleError<'_>> {
     alt((
         value(ControllerRef::You, tag(" you control")),
         value(ControllerRef::Opponent, tag(" an opponent controls")),
@@ -338,7 +338,7 @@ fn try_parse_multi_type_enchant(line: &str) -> Option<Keyword> {
     let lower = line.trim().trim_end_matches('.').to_ascii_lowercase();
 
     // `enchant ` + list + optional controller + terminator.
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("enchant ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("enchant ")
         .parse(lower.as_str())
         .ok()?;
     let (rest, legs) = parse_enchant_type_list(rest).ok()?;
@@ -398,7 +398,7 @@ fn parse_ward_cost(cost_text: &str) -> Option<Keyword> {
 /// Parse a single ward cost component (not compound).
 fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
     // "pay N life"
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("pay ").parse(lower) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("pay ").parse(lower) {
         if let Some(life_str) = rest.strip_suffix(" life") {
             if let Ok(n) = life_str.trim().parse::<i32>() {
                 return Some(WardCost::PayLife(n));
@@ -407,15 +407,12 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
     }
 
     // "discard a card" / "discard two cards" etc.
-    if tag::<_, _, VerboseError<&str>>("discard")
-        .parse(lower)
-        .is_ok()
-    {
+    if tag::<_, _, OracleError<'_>>("discard").parse(lower).is_ok() {
         return Some(WardCost::DiscardCard);
     }
 
     // "sacrifice [N] permanent(s)/creature(s)/etc." — extract count and filter
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("sacrifice ").parse(lower) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("sacrifice ").parse(lower) {
         let (count, after_count) = nom_primitives::parse_number
             .parse(rest)
             .map(|(rem, n)| (n, rem.trim_start()))
@@ -430,7 +427,7 @@ fn parse_ward_cost_single(lower: &str) -> Option<WardCost> {
     }
 
     // CR 702.21a + CR 701.67: "waterbend {N}" — ward cost paid via waterbend mechanic.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("waterbend").parse(lower) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("waterbend").parse(lower) {
         let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(rest.trim());
         return Some(WardCost::Waterbend(cost));
     }
@@ -479,7 +476,7 @@ fn split_outside_braces(text: &str) -> Vec<&str> {
 fn parse_flashback_cost(cost_text: &str) -> Option<FlashbackCost> {
     let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
     // Strip reminder text in parentheses: take everything before the first " (".
-    let clean = opt(take_until::<_, _, VerboseError<&str>>(" ("))
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
         .parse(trimmed)
         .map(|(_, before)| before.unwrap_or(trimmed))
         .unwrap_or(trimmed)
@@ -512,7 +509,7 @@ fn parse_flashback_cost(cost_text: &str) -> Option<FlashbackCost> {
 /// otherwise.
 fn parse_buyback_cost(cost_text: &str) -> Option<BuybackCost> {
     let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
-    let clean = opt(take_until::<_, _, VerboseError<&str>>(" ("))
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
         .parse(trimmed)
         .map(|(_, before)| before.unwrap_or(trimmed))
         .unwrap_or(trimmed)
@@ -531,7 +528,7 @@ fn parse_buyback_cost(cost_text: &str) -> Option<BuybackCost> {
 fn parse_cycling_cost(cost_text: &str) -> Option<CyclingCost> {
     let trimmed = cost_text.trim().trim_end_matches('.').trim_end_matches(')');
     // Strip reminder text in parentheses: take everything before the first " (".
-    let clean = opt(take_until::<_, _, VerboseError<&str>>(" ("))
+    let clean = opt(take_until::<_, _, OracleError<'_>>(" ("))
         .parse(trimmed)
         .map(|(_, before)| before.unwrap_or(trimmed))
         .unwrap_or(trimmed)
@@ -560,7 +557,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     if let Ok((_, result)) = alt((
         value(
             Some(Keyword::Partner(PartnerType::CharacterSelect)),
-            tag::<_, _, VerboseError<&str>>("partner\u{2014}character select"),
+            tag::<_, _, OracleError<'_>>("partner\u{2014}character select"),
         ),
         value(
             Some(Keyword::Partner(PartnerType::FriendsForever)),
@@ -592,7 +589,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
 
     // CR 702.29e: "basic landcycling {cost}" — multi-word typecycling variant.
     // Must be checked before the single-word typecycling guard below.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("basic landcycling").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("basic landcycling").parse(text) {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
             let colon_form = format!("typecycling:Basic Land:{cost_str}");
@@ -609,7 +606,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // compose into `AbilityCost::Composite`; synthesis then appends the mandatory
     // "discard this card" sub-cost. Placed before typecycling so the empty-subtype
     // guard never has to consider em-dash forms.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("cycling\u{2014}").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cycling\u{2014}").parse(text) {
         if let Some(cyc_cost) = parse_cycling_cost(rest) {
             return Some(Keyword::Cycling(cyc_cost));
         }
@@ -632,7 +629,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
 
     // CR 702.21a: Ward with non-mana costs uses em-dash separator (U+2014).
     // "ward—pay N life", "ward—discard a card", "ward—sacrifice a permanent"
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("ward\u{2014}").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("ward\u{2014}").parse(text) {
         return parse_ward_cost(rest);
     }
 
@@ -643,7 +640,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // comma-separated parts into `AbilityCost::Composite` so the runtime split
     // (`split_flashback_cost` in casting.rs) can route mana sub-costs through the
     // mana-payment flow and residual sub-costs through `pay_additional_cost`.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("flashback\u{2014}").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("flashback\u{2014}").parse(text) {
         if let Some(fb_cost) = parse_flashback_cost(rest) {
             return Some(Keyword::Flashback(fb_cost));
         }
@@ -652,7 +649,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     // CR 702.27a: Buyback with em-dash cost — non-mana costs like
     // "buyback—sacrifice a land" (Constant Mists). Pure-mana buyback
     // ("Buyback {3}") is handled by the direct `FromStr` path above.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("buyback\u{2014}").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("buyback\u{2014}").parse(text) {
         if let Some(bb_cost) = parse_buyback_cost(rest) {
             return Some(Keyword::Buyback(bb_cost));
         }
@@ -660,7 +657,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
 
     // CR 702.74a: "hideaway N" — parameterized keyword.
     // Delegates to nom combinator for number parsing.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("hideaway ").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("hideaway ").parse(text) {
         if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest.trim()) {
             if rem.is_empty() {
                 return Some(Keyword::Hideaway(n));
@@ -669,7 +666,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     }
 
     // CR 702.87a: "level up {cost}" — two-word keyword name.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("level up ").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("level up ").parse(text) {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
@@ -679,7 +676,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
 
     // CR 701.57a: "discover N"
     // Delegates to nom combinator for number parsing.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("discover ").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("discover ").parse(text) {
         if let Ok((rem, n)) = nom_primitives::parse_number.parse(rest.trim()) {
             if rem.is_empty() {
                 return Some(Keyword::Discover(n));
@@ -688,7 +685,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     }
 
     // Gift keyword: "gift a card", "gift a treasure", "gift a food", "gift a tapped fish"
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("gift a ").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("gift a ").parse(text) {
         use crate::types::keywords::GiftKind;
         let kind = match rest.trim() {
             "card" => GiftKind::Card,
@@ -701,7 +698,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     }
 
     // CR 702.49d: Commander ninjutsu — multi-word keyword name (like "level up").
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("commander ninjutsu ").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("commander ninjutsu ").parse(text) {
         let cost_str = rest.trim();
         if !cost_str.is_empty() {
             let cost = crate::database::mtgjson::parse_mtgjson_mana_cost(cost_str);
@@ -711,7 +708,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
 
     // CR 702.62a: Suspend N—{cost} — "suspend N—{cost}" with em-dash or ascii dash.
     // Format: "suspend 4—{u}" or "suspend 1—{r}".
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("suspend ").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("suspend ").parse(text) {
         // Parse the count (digits before the em-dash)
         if let Ok((after_count, count)) = nom_primitives::parse_number.parse(rest.trim()) {
             // Strip em-dash (U+2014) or ASCII dash separators
@@ -729,7 +726,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     }
 
     // CR 702.113a: Awaken N—{cost} — same N—{cost} format as Suspend.
-    if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("awaken ").parse(text) {
+    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("awaken ").parse(text) {
         if let Ok((after_count, count)) = nom_primitives::parse_number.parse(rest.trim()) {
             let cost_str = after_count
                 .strip_prefix('\u{2014}') // allow-noncombinator: em-dash punctuation separator
@@ -751,7 +748,7 @@ pub(crate) fn parse_keyword_from_oracle(text: &str) -> Option<Keyword> {
     let rest = rest.trim();
 
     // Strip "from" preposition (used by protection keywords)
-    let param = tag::<_, _, VerboseError<&str>>("from ")
+    let param = tag::<_, _, OracleError<'_>>("from ")
         .parse(rest)
         .map_or(rest, |(rem, _)| rem);
 
@@ -1077,13 +1074,13 @@ pub(crate) fn is_keyword_cost_line(lower: &str) -> bool {
         "devoid",
     ];
     keyword_costs.iter().any(|kw| {
-        tag::<_, _, VerboseError<&str>>(*kw)
+        tag::<_, _, OracleError<'_>>(*kw)
             .parse(lower)
             .is_ok_and(|(rest, _)| {
                 rest.is_empty()
                     || rest.as_bytes().first() == Some(&b' ')
                     || rest.as_bytes().first() == Some(&b'\t')
-                    || tag::<_, _, VerboseError<&str>>("\u{2014}")
+                    || tag::<_, _, OracleError<'_>>("\u{2014}")
                         .parse(rest)
                         .is_ok()
             })

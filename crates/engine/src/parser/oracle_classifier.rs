@@ -1,8 +1,8 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::combinator::verify;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::oracle_nom::primitives as nom_primitives;
 use super::oracle_nom::primitives::scan_contains;
@@ -29,7 +29,7 @@ pub(crate) fn is_instead_replacement_line(text: &str) -> bool {
 
 pub(crate) fn has_trigger_prefix(lower: &str) -> bool {
     alt((
-        tag::<_, _, VerboseError<&str>>("when "),
+        tag::<_, _, OracleError<'_>>("when "),
         tag("whenever "),
         tag("at "),
     ))
@@ -38,7 +38,7 @@ pub(crate) fn has_trigger_prefix(lower: &str) -> bool {
 }
 
 pub(crate) fn lower_starts_with(lower: &str, prefix: &str) -> bool {
-    tag::<_, _, VerboseError<&str>>(prefix).parse(lower).is_ok()
+    tag::<_, _, OracleError<'_>>(prefix).parse(lower).is_ok()
 }
 
 pub(crate) fn is_flashback_equal_mana_cost(lower: &str) -> bool {
@@ -92,7 +92,7 @@ pub(crate) fn should_defer_spell_to_effect(lower: &str) -> bool {
 
 fn is_spell_resolution_cast_from_hand_free(lower: &str) -> bool {
     alt((
-        tag::<_, _, VerboseError<&str>>("you may cast "),
+        tag::<_, _, OracleError<'_>>("you may cast "),
         tag("you may play "),
     ))
     .parse(lower)
@@ -105,7 +105,7 @@ fn is_spell_resolution_cast_from_hand_free(lower: &str) -> bool {
 
 fn is_self_spell_cost_modification(lower: &str) -> bool {
     let Ok((after_subject, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("this spell costs "),
+        tag::<_, _, OracleError<'_>>("this spell costs "),
         tag("this card costs "),
         tag("~ costs "),
     ))
@@ -117,7 +117,7 @@ fn is_self_spell_cost_modification(lower: &str) -> bool {
     };
     let after_cost = after_cost.trim_start();
     alt((
-        tag::<_, _, VerboseError<&str>>("less to cast"),
+        tag::<_, _, OracleError<'_>>("less to cast"),
         tag("more to cast"),
     ))
     .parse(after_cost)
@@ -259,7 +259,7 @@ fn is_static_compound_pattern(lower: &str) -> bool {
         return true;
     }
     if alt((
-        tag::<_, _, VerboseError<&str>>("you may play"),
+        tag::<_, _, OracleError<'_>>("you may play"),
         tag("you may cast"),
     ))
     .parse(lower)
@@ -388,15 +388,15 @@ fn is_replacement_compound_pattern(lower: &str) -> bool {
 
 fn is_as_enters_choose_pattern(lower: &str) -> bool {
     let has_as = nom_primitives::scan_at_word_boundaries(lower, |i| {
-        tag::<_, _, VerboseError<&str>>("as ").parse(i)
+        tag::<_, _, OracleError<'_>>("as ").parse(i)
     })
     .is_some();
     let has_enters = nom_primitives::scan_at_word_boundaries(lower, |i| {
-        tag::<_, _, VerboseError<&str>>("enters").parse(i)
+        tag::<_, _, OracleError<'_>>("enters").parse(i)
     })
     .is_some();
     let has_choose = nom_primitives::scan_at_word_boundaries(lower, |i| {
-        verify(tag::<_, _, VerboseError<&str>>("choose "), |_: &&str| {
+        verify(tag::<_, _, OracleError<'_>>("choose "), |_: &&str| {
             try_parse_named_choice(i).is_some()
         })
         .parse(i)

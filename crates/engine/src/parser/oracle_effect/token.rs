@@ -1,10 +1,10 @@
 use std::str::FromStr;
 
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
 use nom::combinator::{map, opt, rest, value};
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use crate::parser::oracle_ir::context::ParseContext;
 use crate::parser::oracle_nom::error::OracleResult;
@@ -700,8 +700,8 @@ fn extract_token_where_x_expression(text: &str) -> Option<String> {
     // expression has no trailing period.
     let after = tp.strip_after("where x is ")?.original.trim();
     let (_, x_expr) = alt((
-        take_until::<_, _, VerboseError<&str>>("."),
-        rest::<_, VerboseError<&str>>,
+        take_until::<_, _, OracleError<'_>>("."),
+        rest::<_, OracleError<'_>>,
     ))
     .parse(after)
     .ok()?;

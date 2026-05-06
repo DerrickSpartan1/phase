@@ -8,7 +8,7 @@ use nom::multi::{many0, separated_list1};
 use nom::sequence::{pair, preceded};
 use nom::Parser;
 
-use super::super::oracle_nom::error::OracleResult;
+use super::super::oracle_nom::error::{OracleError, OracleResult};
 use super::super::oracle_nom::primitives as nom_primitives;
 use super::super::oracle_nom::quantity as nom_quantity;
 use super::super::oracle_util::split_around;
@@ -442,7 +442,7 @@ fn try_parse_type_sequence_with_suffix(input: &str) -> Option<Vec<AnimationTypeT
 /// to select between the two CR 205.3 variants (creature-types form is the
 /// longer alternative and listed first per nom short-circuit semantics).
 fn split_in_addition_tail(input: &str) -> Option<(&str, &str)> {
-    type VE<'a> = nom_language::error::VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
     // Longer alternative first (nom short-circuit).
     let (_, prefix) =
         nom::bytes::complete::take_until::<_, _, VE<'_>>(" in addition to its other")(input)

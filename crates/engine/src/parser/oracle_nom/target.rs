@@ -10,7 +10,7 @@ use nom::combinator::{opt, value};
 use nom::sequence::preceded;
 use nom::Parser;
 
-use super::error::OracleResult;
+use super::error::{OracleError, OracleResult};
 use super::primitives::parse_color;
 use crate::parser::oracle_util::parse_subtype;
 use crate::types::ability::{ControllerRef, FilterProp, TargetFilter, TypeFilter, TypedFilter};
@@ -126,9 +126,7 @@ fn parse_type_list(input: &str) -> OracleResult<'_, Vec<TypeFilter>> {
 
     let mut remaining = rest;
     loop {
-        if let Ok((r, _)) =
-            tag::<_, _, nom_language::error::VerboseError<&str>>(" or ").parse(remaining)
-        {
+        if let Ok((r, _)) = tag::<_, _, OracleError<'_>>(" or ").parse(remaining) {
             if let Ok((r2, t)) = parse_type_filter_word(r) {
                 types.push(t);
                 remaining = r2;
@@ -182,12 +180,10 @@ pub fn parse_type_filter_word(input: &str) -> OracleResult<'_, TypeFilter> {
         return Ok((&input[consumed..], TypeFilter::Subtype(subtype)));
     }
 
-    Err(nom::Err::Error(nom_language::error::VerboseError {
-        errors: vec![(
-            input,
-            nom_language::error::VerboseErrorKind::Context("type filter word"),
-        )],
-    }))
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Fail,
+    )))
 }
 
 /// Parse a self-reference from Oracle text: "~", "it", "this creature",
@@ -216,14 +212,10 @@ fn parse_it_self_reference(input: &str) -> OracleResult<'_, TargetFilter> {
         None | Some(' ' | ',' | ';' | '.' | ':' | ')' | '/' | '\'' | '"') => {
             Ok((rest, TargetFilter::SelfRef))
         }
-        _ => Err(nom::Err::Error(nom_language::error::VerboseError {
-            errors: vec![(
-                input,
-                nom_language::error::VerboseErrorKind::Context(
-                    "self-reference 'it' requires word boundary",
-                ),
-            )],
-        })),
+        _ => Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        ))),
     }
 }
 

@@ -1,8 +1,8 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::combinator::value;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, Effect, ModalChoice, ModalSelectionCondition,
@@ -12,7 +12,7 @@ use crate::types::ability::{
 use super::oracle::find_activated_colon;
 use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context};
 use super::oracle_ir::context::ParseContext;
-use super::oracle_nom::primitives as nom_primitives;
+use super::oracle_nom::primitives::{self as nom_primitives, scan_preceded};
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text};
 use crate::parser::oracle_ir::ast::{ModalHeaderAst, ModeAst, OracleBlockAst};
 use crate::types::ability::TargetFilter;
@@ -51,7 +51,7 @@ pub(crate) fn parse_oracle_block(lines: &[&str], start: usize) -> Option<(Oracle
     if let Some(header) = parse_modal_header_ast(&candidate) {
         // Reject trigger prefixes — these are triggered modals, not plain modals
         if alt((
-            tag::<_, _, VerboseError<&str>>("when "),
+            tag::<_, _, OracleError<'_>>("when "),
             tag("whenever "),
             tag("at "),
         ))
@@ -168,8 +168,8 @@ fn parse_mode_ast(text: &str) -> ModeAst {
 fn strip_mode_separator(text: &str) -> &str {
     let trimmed = text.trim();
     alt((
-        tag::<_, _, VerboseError<&str>>("—"),
-        tag::<_, _, VerboseError<&str>>("–"),
+        tag::<_, _, OracleError<'_>>("—"),
+        tag::<_, _, OracleError<'_>>("–"),
     ))
     .parse(trimmed)
     .map(|(rest, _)| rest.trim())
@@ -198,13 +198,13 @@ pub(super) fn split_short_label_prefix(text: &str, max_words: usize) -> Option<(
 fn is_modal_header_text(lower: &str) -> bool {
     let lower = lower.trim();
     alt((
-        tag::<_, _, VerboseError<&str>>("choose "),
+        tag::<_, _, OracleError<'_>>("choose "),
         tag("you may choose "),
     ))
     .parse(lower)
     .is_ok()
-        || (tag::<_, _, VerboseError<&str>>("if ").parse(lower).is_ok()
-            && lower.contains("choose "))
+        || (tag::<_, _, OracleError<'_>>("if ").parse(lower).is_ok()
+            && scan_preceded(lower, |i| tag::<_, _, OracleError<'_>>("choose ").parse(i)).is_some())
 }
 
 pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
@@ -260,9 +260,7 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
     })
 }
 
-fn parse_commander_conditional_choose_both(
-    input: &str,
-) -> nom::IResult<&str, (), VerboseError<&str>> {
+fn parse_commander_conditional_choose_both(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     let (rest, _) = tag("choose one.").parse(input.trim())?;
     let (rest, _) = tag(" if ").parse(rest)?;
     let (rest, _) = tag("you control a commander").parse(rest)?;
@@ -616,16 +614,19 @@ pub(super) const ABILITY_WORD_NAMES: &[&str] = &[
 /// open paren.
 pub(super) fn parse_known_ability_word_name(
     input: &str,
-) -> nom::IResult<&str, &'static str, VerboseError<&str>> {
+) -> nom::IResult<&str, &'static str, OracleError<'_>> {
     for name in ABILITY_WORD_NAMES {
-        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>(*name).parse(input) {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(*name).parse(input) {
             // Word-boundary guard: next char must be non-alphanumeric or end.
             if rest.is_empty() || !rest.chars().next().unwrap().is_alphanumeric() {
                 return Ok((rest, *name));
             }
         }
     }
-    Err(nom::Err::Error(VerboseError { errors: vec![] }))
+    Err(nom::Err::Error(nom::error::Error::new(
+        "",
+        nom::error::ErrorKind::Fail,
+    )))
 }
 
 /// Pattern A (CR 207.2c): Detect a line of the form `<ability-word> (<body>)`
@@ -676,7 +677,7 @@ fn scan_modal_count_override(text: &str) -> Option<(usize, usize)> {
         alt((
             value(
                 (1, usize::MAX),
-                tag::<_, _, VerboseError<&str>>("choose any number instead"),
+                tag::<_, _, OracleError<'_>>("choose any number instead"),
             ),
             value((1, 2), tag("choose both instead")),
             value((1, 2), tag("choose two instead")),

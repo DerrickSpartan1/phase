@@ -1,9 +1,9 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till};
 use nom::combinator::{all_consuming, value, verify};
 use nom::sequence::preceded;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::animation::{animation_modifications, parse_animation_spec};
 use super::{resolve_it_pronoun, ParseContext};
@@ -157,7 +157,7 @@ fn extract_subject_text(text: &str) -> Option<String> {
 }
 
 fn try_parse_subject_additive_type_clause(text: &str, ctx: &mut ParseContext) -> Option<ClauseAst> {
-    type VE<'a> = VerboseError<&'a str>;
+    type VE<'a> = OracleError<'a>;
 
     let lower = text.to_lowercase();
     let (subject_lower, predicate_lower) = nom_primitives::scan_split_at_phrase(&lower, |i| {
@@ -268,7 +268,7 @@ fn try_parse_subject_become_clause(
     let subject = text[..verb_start].trim();
     let predicate = deconjugate_verb(text[verb_start..].trim());
     let predicate_lower = predicate.to_lowercase();
-    tag::<_, _, VerboseError<&str>>("become ")
+    tag::<_, _, OracleError<'_>>("become ")
         .parse(predicate_lower.as_str())
         .ok()?;
     let application = parse_subject_application(subject, ctx)?;
@@ -431,7 +431,7 @@ pub(super) fn parse_subject_application(
     let lower = subject.to_lowercase();
 
     if let Ok((_, _)) = all_consuming((
-        tag::<_, _, VerboseError<&str>>("you"),
+        tag::<_, _, OracleError<'_>>("you"),
         tag(" and "),
         tag("permanents you control"),
     ))
@@ -453,7 +453,7 @@ pub(super) fn parse_subject_application(
 
     // CR 115.10a: "another target X" — target with Another filter property,
     // excluding the source object from legal targets.
-    if tag::<_, _, VerboseError<&str>>("another target ")
+    if tag::<_, _, OracleError<'_>>("another target ")
         .parse(lower.as_str())
         .is_ok()
     {
@@ -461,14 +461,14 @@ pub(super) fn parse_subject_application(
         let filter = add_another_property(filter);
         return subject_filter_application(filter, true);
     }
-    if tag::<_, _, VerboseError<&str>>("target ")
+    if tag::<_, _, OracleError<'_>>("target ")
         .parse(lower.as_str())
         .is_ok()
     {
         let (filter, _) = parse_target(subject);
         return subject_filter_application(filter, true);
     }
-    if tag::<_, _, VerboseError<&str>>("up to ")
+    if tag::<_, _, OracleError<'_>>("up to ")
         .parse(lower.as_str())
         .is_ok()
     {
@@ -484,11 +484,11 @@ pub(super) fn parse_subject_application(
     // Strip "any number of " prefix, delegate to parse_target for the filter,
     // and attach MultiTargetSpec { min: 0, max: None } (unlimited).
     if let Ok((after_prefix, _)) =
-        tag::<_, _, VerboseError<&str>>("any number of ").parse(lower.as_str())
+        tag::<_, _, OracleError<'_>>("any number of ").parse(lower.as_str())
     {
         let consumed = lower.len() - after_prefix.len();
         let target_text = &subject[consumed..];
-        if tag::<_, _, VerboseError<&str>>("target ")
+        if tag::<_, _, OracleError<'_>>("target ")
             .parse(after_prefix)
             .is_ok()
         {
@@ -507,9 +507,8 @@ pub(super) fn parse_subject_application(
         ("one or two ", 1usize, 2usize),
         ("one, two, or three ", 1, 3),
     ] {
-        if let Ok((after_prefix, _)) = tag::<_, _, VerboseError<&str>>(prefix).parse(lower.as_str())
-        {
-            if tag::<_, _, VerboseError<&str>>("target ")
+        if let Ok((after_prefix, _)) = tag::<_, _, OracleError<'_>>(prefix).parse(lower.as_str()) {
+            if tag::<_, _, OracleError<'_>>("target ")
                 .parse(after_prefix)
                 .is_ok()
             {
@@ -525,9 +524,9 @@ pub(super) fn parse_subject_application(
     // "each of your opponents" / "each of those creatures" / "each of them" — variant of
     // "each" with an interposed "of" that parse_target doesn't handle directly.
     // Must check before "each " to avoid the generic "each" path swallowing "each of".
-    if let Ok((remainder, _)) = tag::<_, _, VerboseError<&str>>("each of ").parse(lower.as_str()) {
+    if let Ok((remainder, _)) = tag::<_, _, OracleError<'_>>("each of ").parse(lower.as_str()) {
         if alt((
-            tag::<_, _, VerboseError<&str>>("your opponents"),
+            tag::<_, _, OracleError<'_>>("your opponents"),
             tag("your opponent"),
         ))
         .parse(remainder)
@@ -540,7 +539,7 @@ pub(super) fn parse_subject_application(
         }
         // "each of those [creatures/players/...]" / "each of them" — anaphoric reference
         // to the targets declared in the parent ability's sub_ability chain.
-        if alt((tag::<_, _, VerboseError<&str>>("those "), tag("them")))
+        if alt((tag::<_, _, OracleError<'_>>("those "), tag("them")))
             .parse(remainder)
             .is_ok()
         {
@@ -552,7 +551,7 @@ pub(super) fn parse_subject_application(
         return subject_filter_application(filter, false);
     }
     if let Ok((rest_lower, _)) =
-        alt((tag::<_, _, VerboseError<&str>>("all "), tag("each "))).parse(lower.as_str())
+        alt((tag::<_, _, OracleError<'_>>("all "), tag("each "))).parse(lower.as_str())
     {
         let consumed = lower.len() - rest_lower.len();
         let phrase = &subject[consumed..];
@@ -561,7 +560,7 @@ pub(super) fn parse_subject_application(
         return subject_filter_application(filter, false);
     }
     if alt((
-        tag::<_, _, VerboseError<&str>>("enchanted creature"),
+        tag::<_, _, OracleError<'_>>("enchanted creature"),
         tag("enchanted permanent"),
         tag("equipped creature"),
     ))
@@ -579,20 +578,20 @@ pub(super) fn parse_subject_application(
     }
     // "those creatures" / "those lands" — anaphoric reference to previous targets.
     // Maps to ParentTarget so the restriction applies to the same objects.
-    if let Ok((_, _)) = tag::<_, _, VerboseError<&str>>("those ").parse(lower.as_str()) {
+    if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("those ").parse(lower.as_str()) {
         return subject_filter_application(TargetFilter::ParentTarget, false);
     }
 
     // Bare plural noun phrase subjects ("creatures you control", "other creatures you control")
     // are implicit "all X" forms — strip any "other " prefix and route through parse_target.
     let (had_other, noun_subject) =
-        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("other ").parse(lower.as_str()) {
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("other ").parse(lower.as_str()) {
             (true, rest)
         } else {
             (false, lower.as_str())
         };
     if alt((
-        tag::<_, _, VerboseError<&str>>("target "),
+        tag::<_, _, OracleError<'_>>("target "),
         tag("all "),
         tag("each "),
     ))
@@ -641,7 +640,7 @@ pub(super) fn parse_subject_application(
     let player_subject = all_consuming(alt((
         value(
             ("that player", true),
-            tag::<_, _, VerboseError<&str>>("that player may"),
+            tag::<_, _, OracleError<'_>>("that player may"),
         ),
         value(("the player", true), tag("the player may")),
         value(("that player", false), tag("that player")),
@@ -685,7 +684,7 @@ pub(super) fn parse_subject_application(
         });
     }
     // "an opponent" as subject — single opponent (two-player: equivalent to "each opponent").
-    if tag::<_, _, VerboseError<&str>>("an opponent")
+    if tag::<_, _, OracleError<'_>>("an opponent")
         .parse(lower.as_str())
         .is_ok()
     {
@@ -725,7 +724,7 @@ pub(super) fn parse_subject_application(
     // etc.) which already handle the subject-ignorant "reveals cards from the
     // top of their library until …" pattern as RevealUntil.
     if let Ok((after_head, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("its controller may"),
+        tag::<_, _, OracleError<'_>>("its controller may"),
         tag("their controller may"),
     ))
     .parse(lower.as_str())
@@ -759,7 +758,7 @@ pub(super) fn parse_subject_application(
     // `ends_with` check on the remainder (post-tokenization classification, not
     // parsing dispatch).
     if let Ok((after_det, _)) =
-        alt((tag::<_, _, VerboseError<&str>>("that "), tag("the "))).parse(lower.as_str())
+        alt((tag::<_, _, OracleError<'_>>("that "), tag("the "))).parse(lower.as_str())
     {
         // structural: not dispatch — the nom `alt(tag(...))` above is the dispatch
         // step that consumes the determiner; this `ends_with` is a post-tokenization
@@ -819,7 +818,7 @@ pub(super) fn parse_subject_application(
     // CR 608.2c: "that creature/permanent/land" — anaphoric back-reference to a
     // previously mentioned object in the same effect sequence. Strip "that " and parse
     // the remainder as a type phrase. Covers all "that [type]" patterns generically.
-    if let Ok((rest_subject, _)) = tag::<_, _, VerboseError<&str>>("that ").parse(lower.as_str()) {
+    if let Ok((rest_subject, _)) = tag::<_, _, OracleError<'_>>("that ").parse(lower.as_str()) {
         // CR 608.2c: "that creature/permanent/land" — anaphoric back-reference to a
         // previously mentioned object in the same effect sequence. Strip "that " and parse
         // the remainder as a type phrase. Covers all "that [type]" patterns generically.
@@ -863,7 +862,7 @@ pub(super) fn parse_subject_application(
     // "each player's life total", etc. Map to the player filter so that
     // try_parse_set_life_total can produce the correct SetLifeTotal target.
     if alt((
-        tag::<_, _, VerboseError<&str>>("your life total"),
+        tag::<_, _, OracleError<'_>>("your life total"),
         tag("your life totals"),
     ))
     .parse(lower.as_str())
@@ -872,7 +871,7 @@ pub(super) fn parse_subject_application(
         return subject_filter_application(TargetFilter::Controller, false);
     }
     if alt((
-        tag::<_, _, VerboseError<&str>>("each player's life total"),
+        tag::<_, _, OracleError<'_>>("each player's life total"),
         tag("all players' life totals"),
         tag("all players' life total"),
         tag("each player's life totals"),
@@ -883,7 +882,7 @@ pub(super) fn parse_subject_application(
         return subject_filter_application(TargetFilter::Any, false);
     }
     if alt((
-        tag::<_, _, VerboseError<&str>>("that player's life total"),
+        tag::<_, _, OracleError<'_>>("that player's life total"),
         tag("the player's life total"),
         tag("their life total"),
     ))
@@ -1088,7 +1087,7 @@ fn build_continuous_clause(
     // B15: Guard against "becomes" predicates routing through continuous clause parsing.
     // Creature-land animations ("becomes a 3/3 Dinosaur creature with trample") must
     // fall through to try_parse_subject_become_clause for correct animation handling.
-    if alt((tag::<_, _, VerboseError<&str>>("become "), tag("become\n")))
+    if alt((tag::<_, _, OracleError<'_>>("become "), tag("become\n")))
         .parse(normalized.as_str())
         .is_ok()
     {
@@ -1227,7 +1226,7 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
     // `eof`, consumes the head text from some byte offset. Scan forward at
     // word boundaries inside `head_lower` and try the tag-then-eof
     // combinator at each — the first match wins.
-    let duration_alt = |i| -> nom::IResult<&str, Duration, VerboseError<&str>> {
+    let duration_alt = |i| -> nom::IResult<&str, Duration, OracleError<'_>> {
         alt((
             value(Duration::UntilEndOfTurn, tag(" until end of turn")),
             value(Duration::UntilEndOfTurn, tag(" this turn")),
@@ -1263,7 +1262,7 @@ fn strip_pre_except_duration(text: &str) -> (String, Option<Duration>) {
             continue;
         }
         if let Ok((rest, duration)) = duration_alt(&head_lower[idx..]) {
-            if eof::<_, VerboseError<&str>>(rest).is_ok() {
+            if eof::<_, OracleError<'_>>(rest).is_ok() {
                 let head = text[..idx].trim_end();
                 let tail = &text[except_pos..];
                 return (format!("{head}{tail}"), Some(duration));
@@ -1282,7 +1281,7 @@ fn build_become_clause(
     let (predicate, duration) = super::strip_trailing_duration(&normalized);
     // CR 725.1: "become the monarch" sets the monarch designation, not an animation.
     let predicate_lower = predicate.to_lowercase();
-    let (become_rest, _) = tag::<_, _, VerboseError<&str>>("become ")
+    let (become_rest, _) = tag::<_, _, OracleError<'_>>("become ")
         .parse(predicate_lower.as_str())
         .ok()?;
     let consumed = predicate_lower.len() - become_rest.len();
@@ -1327,7 +1326,7 @@ fn build_become_clause(
     if let Ok((_, kind)) = all_consuming(alt((
         value(
             PreparedKind::Unprepared,
-            tag::<_, _, VerboseError<&str>>("unprepared"),
+            tag::<_, _, OracleError<'_>>("unprepared"),
         ),
         value(PreparedKind::Prepared, tag("prepared")),
     )))
@@ -1356,7 +1355,7 @@ fn build_become_clause(
     // `become_copy_except` module so the trigger and replacement paths
     // contribute to the same building block.
     if let Ok((after_copy, _)) =
-        tag::<_, _, VerboseError<&str>>("a copy of ").parse(become_lower.as_str())
+        tag::<_, _, OracleError<'_>>("a copy of ").parse(become_lower.as_str())
     {
         // CR 611.2b + CR 707.9: Sarkhan-class triggers carry a mid-sentence
         // duration directly before the optional ", except <body>" clause
@@ -1462,7 +1461,7 @@ fn try_parse_become_and_attack_if_able(
     let lower = become_text.to_lowercase();
     let (before_attack, attack_duration, rest) = nom_primitives::scan_preceded(&lower, |i| {
         preceded(
-            tag::<_, _, VerboseError<&str>>("and "),
+            tag::<_, _, OracleError<'_>>("and "),
             parse_attack_if_able_duration,
         )
         .parse(i)
@@ -1542,36 +1541,36 @@ fn try_parse_set_life_total(
     let lower = become_text.to_lowercase();
 
     // Parse the amount expression
-    let amount =
-        if let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("half ").parse(lower.as_str()) {
-            // "half their starting life total" / "half that player's starting life total"
-            if nom_primitives::scan_contains(rest, "starting life total") {
-                QuantityExpr::HalfRounded {
-                    inner: Box::new(QuantityExpr::Ref {
-                        qty: QuantityRef::StartingLifeTotal,
-                    }),
-                    rounding: RoundingMode::Down,
-                }
-            } else {
-                return None;
+    let amount = if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("half ").parse(lower.as_str())
+    {
+        // "half their starting life total" / "half that player's starting life total"
+        if nom_primitives::scan_contains(rest, "starting life total") {
+            QuantityExpr::HalfRounded {
+                inner: Box::new(QuantityExpr::Ref {
+                    qty: QuantityRef::StartingLifeTotal,
+                }),
+                rounding: RoundingMode::Down,
             }
-        } else if nom_primitives::scan_contains(&lower, "starting life total") {
-            QuantityExpr::Ref {
-                qty: QuantityRef::StartingLifeTotal,
-            }
-        } else if let Some((n, rest)) = parse_number(&lower) {
-            // Guard: reject if substantial text remains after the number.
-            // "a 3/3 red goblin creature" matches "a" as 1 but the rest
-            // "3/3 red goblin creature" indicates this is an animation, not
-            // a life total. Genuine life total patterns: "10", "1", bare numbers.
-            let rest_trimmed = rest.trim().trim_end_matches('.');
-            if !rest_trimmed.is_empty() {
-                return None;
-            }
-            QuantityExpr::Fixed { value: n as i32 }
         } else {
             return None;
-        };
+        }
+    } else if nom_primitives::scan_contains(&lower, "starting life total") {
+        QuantityExpr::Ref {
+            qty: QuantityRef::StartingLifeTotal,
+        }
+    } else if let Some((n, rest)) = parse_number(&lower) {
+        // Guard: reject if substantial text remains after the number.
+        // "a 3/3 red goblin creature" matches "a" as 1 but the rest
+        // "3/3 red goblin creature" indicates this is an animation, not
+        // a life total. Genuine life total patterns: "10", "1", bare numbers.
+        let rest_trimmed = rest.trim().trim_end_matches('.');
+        if !rest_trimmed.is_empty() {
+            return None;
+        }
+        QuantityExpr::Fixed { value: n as i32 }
+    } else {
+        return None;
+    };
 
     // CR 119.5: Use the parsed target if targeted ("target player's life total"),
     // otherwise fall back to the subject's affected filter ("each player's life total"
@@ -1596,8 +1595,8 @@ fn try_parse_set_life_total(
 fn try_parse_set_day_night(become_text: &str) -> Option<ParsedEffectClause> {
     let lower = become_text.to_lowercase();
     let (_, to) = alt((
-        value(DayNight::Night, tag::<_, _, VerboseError<&str>>("night")),
-        value(DayNight::Day, tag::<_, _, VerboseError<&str>>("day")),
+        value(DayNight::Night, tag::<_, _, OracleError<'_>>("night")),
+        value(DayNight::Day, tag::<_, _, OracleError<'_>>("day")),
     ))
     .parse(lower.trim_start())
     .ok()?;
@@ -1838,7 +1837,7 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     // "can't block this creature" / "can't block ~" — source-referential variant used in
     // activated abilities; grants CantBlock to the targeted creature (CR 509.1a).
     if let Ok((rest, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("can't block "),
+        tag::<_, _, OracleError<'_>>("can't block "),
         tag("cannot block "),
     ))
     .parse(lower)
@@ -1868,7 +1867,7 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     }
     // CR 509.1c: "can't be blocked except by ..." — evasion restriction
     if let Ok((except_text, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("can't be blocked except by "),
+        tag::<_, _, OracleError<'_>>("can't be blocked except by "),
         tag("cannot be blocked except by "),
     ))
     .parse(lower)
@@ -1879,7 +1878,7 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     }
     // CR 509.1b: "can't be blocked by <filter>" — blocker restriction
     if let Ok((by_rest, _)) = alt((
-        tag::<_, _, VerboseError<&str>>("can't be blocked by "),
+        tag::<_, _, OracleError<'_>>("can't be blocked by "),
         tag("cannot be blocked by "),
     ))
     .parse(lower)
@@ -1892,7 +1891,7 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     }
     // CR 115.4: "can't be the target of ..." — hexproof variant
     if alt((
-        tag::<_, _, VerboseError<&str>>("can't be the target of "),
+        tag::<_, _, OracleError<'_>>("can't be the target of "),
         tag("cannot be the target of "),
     ))
     .parse(lower)
@@ -1906,7 +1905,7 @@ pub(crate) fn parse_restriction_modes(lower: &str) -> Option<Vec<StaticMode>> {
     }
     // CR 302.6: "doesn't untap during [controller's] untap step"
     if alt((
-        tag::<_, _, VerboseError<&str>>("doesn't untap"),
+        tag::<_, _, OracleError<'_>>("doesn't untap"),
         tag("don't untap"),
     ))
     .parse(lower)
@@ -1943,7 +1942,7 @@ fn extract_pump_modifiers(
 /// the targeted permanent's controller gains life based on the permanent's stats.
 pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<ParsedEffectClause> {
     let lower = text.to_lowercase();
-    tag::<_, _, VerboseError<&str>>("its controller ")
+    tag::<_, _, OracleError<'_>>("its controller ")
         .parse(lower.as_str())
         .ok()?;
     if !lower.contains("gain") || !lower.contains("life") {
@@ -1966,7 +1965,7 @@ pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<Pars
     } else {
         // Try to parse a fixed amount: "its controller gains 3 life"
         let after = &lower["its controller ".len()..];
-        let after = alt((tag::<_, _, VerboseError<&str>>("gains "), tag("gain ")))
+        let after = alt((tag::<_, _, OracleError<'_>>("gains "), tag("gain ")))
             .parse(after)
             .map(|(rest, _)| rest)
             .unwrap_or(after);
@@ -1992,7 +1991,7 @@ pub(super) fn try_parse_targeted_controller_gain_life(text: &str) -> Option<Pars
 /// would scan past non-predicate tokens (e.g. `~ enters with a token copy of
 /// Pacifism attached to it.`) and match a later PREDICATE_VERB, stripping the
 /// wrong clause.
-fn parse_tilde_subject_with_predicate(input: &str) -> nom::IResult<&str, (), VerboseError<&str>> {
+fn parse_tilde_subject_with_predicate(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
     verify(
         preceded(tag("~ "), take_till(|c: char| c == ' ')),
         |first_word: &str| {
@@ -2032,7 +2031,7 @@ pub(super) fn deconjugate_verb(text: &str) -> String {
 pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
     alt((
         alt((
-            value((), tag::<_, _, VerboseError<&str>>("all ")),
+            value((), tag::<_, _, OracleError<'_>>("all ")),
             value((), tag("an opponent ")),
             value((), tag("any number of ")),
             value((), tag("defending player ")),
@@ -2046,7 +2045,7 @@ pub(crate) fn starts_with_subject_prefix(lower: &str) -> bool {
             value((), tag("its controller ")),
         )),
         alt((
-            value((), tag::<_, _, VerboseError<&str>>("its owner ")),
+            value((), tag::<_, _, OracleError<'_>>("its owner ")),
             value((), tag("~'s owner ")),
             value((), tag("target ")),
             value((), tag("that ")),

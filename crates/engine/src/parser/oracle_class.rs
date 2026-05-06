@@ -1,6 +1,6 @@
+use crate::parser::oracle_nom::error::OracleError;
 use nom::bytes::complete::tag;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use crate::types::ability::{
     AbilityDefinition, AbilityKind, ActivationRestriction, Effect, StaticCondition,
@@ -262,7 +262,7 @@ pub(crate) fn parse_class_oracle_text(
 /// parser entry point (e.g. direct tests passing pre-normalization text).
 pub(crate) fn is_class_level_trigger(lower: &str, card_name: &str) -> bool {
     // Prefix: CR 603 trigger phrase "when ".
-    let Ok((rest, _)) = tag::<_, _, VerboseError<&str>>("when ").parse(lower) else {
+    let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("when ").parse(lower) else {
         return false;
     };
     // Required body phrase "becomes level ".

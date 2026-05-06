@@ -61,12 +61,12 @@
 
 use std::str::FromStr;
 
+use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
 use nom::character::complete::char;
 use nom::combinator::opt;
 use nom::Parser;
-use nom_language::error::VerboseError;
 
 use super::super::oracle_keyword::parse_keyword_from_oracle;
 use super::super::oracle_nom::primitives as nom_primitives;
@@ -98,7 +98,7 @@ pub(crate) fn parse_except_clause<'a>(
     ctx: &ParseContext,
 ) -> Option<(&'a str, Vec<ContinuousModification>)> {
     // ", except " — if missing, there are no modifications to extract.
-    let (mut rest, _) = tag::<_, _, VerboseError<&str>>(", except ")
+    let (mut rest, _) = tag::<_, _, OracleError<'_>>(", except ")
         .parse(input)
         .ok()?;
     let mut modifications = Vec::new();
@@ -119,7 +119,7 @@ pub(crate) fn parse_except_clause<'a>(
         // ", and " before the last). Consume the longest match so the next
         // body starts cleanly.
         if let Ok((after, _)) = alt((
-            tag::<_, _, VerboseError<&str>>(", and "),
+            tag::<_, _, OracleError<'_>>(", and "),
             tag(" and "),
             tag(", "),
         ))
@@ -136,7 +136,7 @@ pub(crate) fn parse_except_clause<'a>(
         }
     }
 
-    let (rest, _) = opt(char::<_, VerboseError<&str>>('.')).parse(rest).ok()?;
+    let (rest, _) = opt(char::<_, OracleError<'_>>('.')).parse(rest).ok()?;
     Some((rest, modifications))
 }
 
@@ -203,7 +203,7 @@ fn parse_name_override<'a>(
         return None;
     }
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("his name is "),
+        tag::<_, _, OracleError<'_>>("his name is "),
         tag("her name is "),
         tag("its name is "),
     ))
@@ -212,7 +212,7 @@ fn parse_name_override<'a>(
     // Accept "~" (normalised self-ref) as the name target. This keeps the
     // parser strict — "except its name is Whatever" should only emit SetName
     // when the name is the card's own (which is what normalisation produces).
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("~").parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("~").parse(rest).ok()?;
     Some((
         rest,
         ContinuousModification::SetName {
@@ -231,7 +231,7 @@ fn parse_name_override<'a>(
 /// own types via timestamp order.
 fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("he's a "),
+        tag::<_, _, OracleError<'_>>("he's a "),
         tag("he\u{2019}s a "),
         tag("she's a "),
         tag("she\u{2019}s a "),
@@ -243,7 +243,7 @@ fn parse_subject_pt_and_types(input: &str) -> Option<(&str, Vec<ContinuousModifi
 
     // Parse "N/M " — both components are positive integers.
     let (rest, (power, toughness)) = parse_pt_pair(rest)?;
-    let (rest, _) = tag::<_, _, VerboseError<&str>>(" ").parse(rest).ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>(" ").parse(rest).ok()?;
 
     // Grab the type list up to " in addition to its/his/her other types".
     let (type_text, rest) = split_on_first_of(
@@ -301,7 +301,7 @@ fn parse_has_this_ability<'a>(
     ctx: &ParseContext,
 ) -> Option<(&'a str, ContinuousModification)> {
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("he has this ability"),
+        tag::<_, _, OracleError<'_>>("he has this ability"),
         tag("she has this ability"),
         tag("it has this ability"),
         tag("they have this ability"),
@@ -322,7 +322,7 @@ fn parse_has_this_ability<'a>(
 /// or anything else → treated as a subtype and canonicalized.
 fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, ContinuousModification)> {
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("it's an "),
+        tag::<_, _, OracleError<'_>>("it's an "),
         tag("it's a "),
         tag("it\u{2019}s an "),
         tag("it\u{2019}s a "),
@@ -349,9 +349,7 @@ fn parse_its_a_type_in_addition(input: &str) -> Option<(&str, ContinuousModifica
 /// "it has {keyword[, keyword, ...]}" — each keyword becomes `AddKeyword`.
 /// Terminates at the next body separator (" and it ", end-of-string, or '.').
 fn parse_it_has_keywords(input: &str) -> Option<(&str, Vec<ContinuousModification>)> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("it has ")
-        .parse(input)
-        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("it has ").parse(input).ok()?;
     // Keyword list terminates at " and it " (next body), the period, or end.
     let (kw_text, remainder) = split_at_body_boundary(rest);
     let mut modifications = Vec::new();
@@ -377,7 +375,7 @@ fn parse_it_has_keywords(input: &str) -> Option<(&str, Vec<ContinuousModificatio
 /// replacement-form variant).
 fn parse_isnt_supertype(input: &str) -> Option<(&str, ContinuousModification)> {
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("the token isn't "),
+        tag::<_, _, OracleError<'_>>("the token isn't "),
         tag("the token isnt "),
         tag("the token is not "),
         tag("it isn't "),
@@ -404,7 +402,7 @@ fn parse_isnt_supertype(input: &str) -> Option<(&str, ContinuousModification)> {
 /// addition to its other types"` is the canonical case.
 fn parse_is_supertype_in_addition(input: &str) -> Option<(&str, ContinuousModification)> {
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>("it's "),
+        tag::<_, _, OracleError<'_>>("it's "),
         tag("it\u{2019}s "),
         tag("he's "),
         tag("he\u{2019}s "),
@@ -415,7 +413,7 @@ fn parse_is_supertype_in_addition(input: &str) -> Option<(&str, ContinuousModifi
     .ok()?;
     let (rest, supertype) = parse_supertype_word(rest)?;
     let (rest, _) = alt((
-        tag::<_, _, VerboseError<&str>>(" in addition to its other types"),
+        tag::<_, _, OracleError<'_>>(" in addition to its other types"),
         tag(" in addition to his other types"),
         tag(" in addition to her other types"),
     ))
@@ -429,7 +427,7 @@ fn parse_is_supertype_in_addition(input: &str) -> Option<(&str, ContinuousModifi
 /// don't have to remember the casing rules of [`Supertype::from_str`].
 fn parse_supertype_word(input: &str) -> Option<(&str, Supertype)> {
     let (rest, word) = alt((
-        tag::<_, _, VerboseError<&str>>("legendary"),
+        tag::<_, _, OracleError<'_>>("legendary"),
         tag("basic"),
         tag("snow"),
         tag("world"),
@@ -461,7 +459,7 @@ fn parse_supertype_word(input: &str) -> Option<(&str, Supertype)> {
 /// counter clause and the parent `parse_except_clause` loop chains across
 /// `" and "` for the multi-clause sequence.
 fn parse_enters_with_additional_counter(input: &str) -> Option<(&str, ContinuousModification)> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("it enters with ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("it enters with ")
         .parse(input)
         .ok()?;
     // CR 122.1: "an additional N counter[s]" — N defaults to 1 for "an
@@ -504,7 +502,7 @@ fn parse_enters_with_additional_counter(input: &str) -> Option<(&str, Continuous
 /// counter clause. Returns the count and remainder positioned at the start of
 /// the counter-type word.
 fn parse_additional_count(input: &str) -> Option<(&str, i32)> {
-    let (rest, _) = tag::<_, _, VerboseError<&str>>("an additional ")
+    let (rest, _) = tag::<_, _, OracleError<'_>>("an additional ")
         .parse(input)
         .ok()?;
     // Try a leading number first (covers Spark Double's "an additional +1/+1
@@ -512,9 +510,9 @@ fn parse_additional_count(input: &str) -> Option<(&str, i32)> {
     // For texts like "an additional 2 +1/+1 counters" the explicit-N branch
     // grabs the count.
     use nom::character::complete::digit1;
-    let digit_parser = |i| -> nom::IResult<&str, &str, VerboseError<&str>> {
+    let digit_parser = |i| -> nom::IResult<&str, &str, OracleError<'_>> {
         let (i, n) = digit1(i)?;
-        let (i, _) = tag::<_, _, VerboseError<&str>>(" ").parse(i)?;
+        let (i, _) = tag::<_, _, OracleError<'_>>(" ").parse(i)?;
         Ok((i, n))
     };
     if let Ok((rest, n)) = digit_parser(rest) {
@@ -530,7 +528,7 @@ fn parse_additional_count(input: &str) -> Option<(&str, i32)> {
 /// guard the absence case.
 fn parse_optional_if_type(input: &str) -> (&str, Option<CoreType>) {
     let prefix = match alt((
-        tag::<_, _, VerboseError<&str>>(" if it's a "),
+        tag::<_, _, OracleError<'_>>(" if it's a "),
         tag(" if it\u{2019}s a "),
         tag(" if it's an "),
         tag(" if it\u{2019}s an "),
@@ -602,7 +600,7 @@ fn split_on_first_of<'a>(text: &'a str, candidates: &[&str]) -> Option<(&'a str,
 /// following space) and the `(power, toughness)` pair.
 fn parse_pt_pair(input: &str) -> Option<(&str, (i32, i32))> {
     use nom::character::complete::digit1;
-    let parser = |i| -> nom::IResult<&str, (&str, &str), VerboseError<&str>> {
+    let parser = |i| -> nom::IResult<&str, (&str, &str), OracleError<'_>> {
         let (i, p) = digit1(i)?;
         let (i, _) = char('/')(i)?;
         let (i, t) = digit1(i)?;

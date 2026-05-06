@@ -1,5 +1,6 @@
 use nom::Parser;
 
+use super::oracle_nom::error::OracleError;
 use super::oracle_nom::primitives as nom_primitives;
 use crate::types::ability::{Comparator, QuantityExpr, QuantityRef, TargetFilter};
 use crate::types::card_type::CoreType;
@@ -309,9 +310,7 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         nom::branch::alt((
             nom::combinator::value(
                 2i32,
-                nom::bytes::complete::tag::<_, _, nom_language::error::VerboseError<&str>>(
-                    "twice ",
-                ),
+                nom::bytes::complete::tag::<_, _, OracleError<'_>>("twice "),
             ),
             nom::combinator::value(3i32, nom::bytes::complete::tag("three times ")),
         ))
@@ -333,7 +332,7 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
     if let Some(((), rest_lower)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
         nom::combinator::value(
             (),
-            nom::bytes::complete::tag::<_, _, nom_language::error::VerboseError<&str>>("equal to "),
+            nom::bytes::complete::tag::<_, _, OracleError<'_>>("equal to "),
         )
         .parse(i)
     }) {
@@ -352,9 +351,7 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
         nom::combinator::value(
             (),
             nom::branch::alt((
-                nom::bytes::complete::tag::<_, _, nom_language::error::VerboseError<&str>>(
-                    "that many",
-                ),
+                nom::bytes::complete::tag::<_, _, OracleError<'_>>("that many"),
                 nom::bytes::complete::tag("that much"),
             )),
         )
@@ -375,7 +372,7 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
     if let Some(((), rest)) = super::oracle_nom::bridge::nom_on_lower(text, &lower, |i| {
         nom::combinator::value(
             (),
-            nom::bytes::complete::tag::<_, _, nom_language::error::VerboseError<&str>>("another "),
+            nom::bytes::complete::tag::<_, _, OracleError<'_>>("another "),
         )
         .parse(i)
     }) {
