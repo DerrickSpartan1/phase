@@ -5507,6 +5507,7 @@ fn lower_subject_predicate_ast(
                         | TargetFilter::TriggeringSpellOwner
                         | TargetFilter::DefendingPlayer
                         | TargetFilter::PostReplacementSourceController
+                        | TargetFilter::PostReplacementDamageTarget
                         | TargetFilter::Owner
                         | TargetFilter::SpecificPlayer { .. }
                 ) {

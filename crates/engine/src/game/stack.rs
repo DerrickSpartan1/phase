@@ -403,6 +403,7 @@ pub fn resolve_top(state: &mut GameState, events: &mut Vec<GameEvent>) {
                     if let Some(effect_def) = state.post_replacement_effect.take() {
                         state.post_replacement_source = None;
                         state.post_replacement_event_source = None;
+                        state.post_replacement_event_target = None;
                         let _ = super::engine_replacement::apply_post_replacement_effect(
                             state,
                             &effect_def,

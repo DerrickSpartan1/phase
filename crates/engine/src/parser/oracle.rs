@@ -3120,9 +3120,10 @@ mod tests {
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
         FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionCondition,
-        ModalSelectionConstraint, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope, PtValue,
-        QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode, SharedQuality,
-        SharedQualityRelation, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
+        ModalSelectionConstraint, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope,
+        PreventionAmount, PtValue, QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode,
+        SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition, TargetFilter,
+        TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -9249,6 +9250,43 @@ mod tests {
                         if type_filters == &vec![TypeFilter::Sorcery]
                 ))
             )));
+    }
+
+    #[test]
+    fn crumbling_sanctuary_parses_as_replacement_without_swallowed_clause() {
+        let parsed = parse(
+            "If damage would be dealt to a player, that player exiles that many cards from the top of their library instead.",
+            "Crumbling Sanctuary",
+            &[],
+            &["Artifact"],
+            &[],
+        );
+
+        assert!(parsed.abilities.is_empty());
+        assert_eq!(parsed.replacements.len(), 1);
+        assert!(parsed.parse_warnings.iter().all(|warning| {
+            warning.category_name() != "swallowed-clause"
+                && warning.category_name() != "ignored-remainder"
+        }));
+
+        let replacement = &parsed.replacements[0];
+        assert_eq!(replacement.event, ReplacementEvent::DamageDone);
+        assert_eq!(
+            replacement.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+        let execute = replacement.execute.as_ref().expect("execute present");
+        assert!(matches!(
+            *execute.effect,
+            Effect::ExileTop {
+                player: TargetFilter::PostReplacementDamageTarget,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+            }
+        ));
     }
 
     #[test]

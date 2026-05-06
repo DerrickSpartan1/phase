@@ -185,6 +185,7 @@ pub(crate) fn apply_damage_to_target(
                     events,
                 );
                 state.post_replacement_event_source = None;
+                state.post_replacement_event_target = None;
             }
             Ok(DamageResult::Applied(0))
         }
@@ -1105,6 +1106,103 @@ mod tests {
                 .any(|e| matches!(e, GameEvent::DamageDealt { .. })),
             "must not emit DamageDealt for fully prevented damage"
         );
+    }
+
+    /// CR 615.5: Crumbling Sanctuary-class prevention follow-ups resolve "that
+    /// player" from the prevented damage event's target and "that many" from
+    /// the prevented damage amount.
+    #[test]
+    fn damage_to_player_prevention_exiles_from_that_players_library() {
+        use crate::types::ability::{
+            AbilityDefinition, AbilityKind, DamageTargetFilter, DamageTargetPlayerScope,
+            PreventionAmount, QuantityExpr, QuantityRef, ReplacementDefinition,
+        };
+        use crate::types::replacements::ReplacementEvent;
+
+        let mut state = GameState::new_two_player(42);
+        let sanctuary = create_object(
+            &mut state,
+            CardId(42),
+            PlayerId(0),
+            "Crumbling Sanctuary".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&sanctuary)
+            .unwrap()
+            .replacement_definitions
+            .push(
+                ReplacementDefinition::new(ReplacementEvent::DamageDone)
+                    .prevention_shield(PreventionAmount::All)
+                    .damage_target_filter(DamageTargetFilter::Player {
+                        player: DamageTargetPlayerScope::Any,
+                    })
+                    .execute(AbilityDefinition::new(
+                        AbilityKind::Spell,
+                        Effect::ExileTop {
+                            player: TargetFilter::PostReplacementDamageTarget,
+                            count: QuantityExpr::Ref {
+                                qty: QuantityRef::EventContextAmount,
+                            },
+                        },
+                    ))
+                    .description("Crumbling Sanctuary prevention shield".to_string()),
+            );
+
+        let first = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(1),
+            "First card".to_string(),
+            Zone::Library,
+        );
+        let second = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(1),
+            "Second card".to_string(),
+            Zone::Library,
+        );
+        let third = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(1),
+            "Third card".to_string(),
+            Zone::Library,
+        );
+
+        let life_before = state.players[1].life;
+        let ability = make_ability(2, vec![TargetRef::Player(PlayerId(1))]);
+        let mut events = Vec::new();
+        resolve(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(state.players[1].life, life_before);
+        assert_eq!(
+            state.objects.get(&first).map(|obj| obj.zone),
+            Some(Zone::Exile)
+        );
+        assert_eq!(
+            state.objects.get(&second).map(|obj| obj.zone),
+            Some(Zone::Exile)
+        );
+        assert_eq!(
+            state.objects.get(&third).map(|obj| obj.zone),
+            Some(Zone::Library)
+        );
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                GameEvent::DamagePrevented {
+                    target: TargetRef::Player(PlayerId(1)),
+                    amount: 2,
+                    ..
+                }
+            )
+        }));
+        assert!(!events
+            .iter()
+            .any(|event| matches!(event, GameEvent::DamageDealt { .. })));
     }
 
     /// CR 615.5: A 0-damage event should not fire the post-replacement

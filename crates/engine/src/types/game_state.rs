@@ -2426,6 +2426,13 @@ pub struct GameState {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_replacement_event_source: Option<crate::types::identifiers::ObjectId>,
 
+    /// CR 615.5: Target of the prevented event itself. Used by
+    /// `TargetFilter::PostReplacementDamageTarget` for follow-ups like
+    /// "that player exiles that many cards" after damage to a player is
+    /// prevented and replaced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_replacement_event_target: Option<crate::types::ability::TargetRef>,
+
     /// Transient: post-resolution context for a permanent spell whose ETB replacement
     /// needs a player choice (NeedsChoice). Consumed by `handle_replacement_choice`
     /// after the zone change completes.
@@ -3082,6 +3089,7 @@ impl GameState {
             post_replacement_effect: None,
             post_replacement_source: None,
             post_replacement_event_source: None,
+            post_replacement_event_target: None,
             pending_spell_resolution: None,
             layers_dirty: true,
             next_timestamp: 1,

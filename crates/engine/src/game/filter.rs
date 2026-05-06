@@ -614,7 +614,8 @@ fn filter_inner_for_object(
         // at resolution time, not via object matching.
         TargetFilter::ParentTarget
         | TargetFilter::ParentTargetController
-        | TargetFilter::PostReplacementSourceController => false,
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget => false,
         // "card with the chosen name" — match against source's ChosenAttribute::CardName.
         TargetFilter::HasChosenName => {
             let chosen_name = state.objects.get(&source_id).and_then(|obj| {
@@ -815,6 +816,7 @@ fn zone_change_filter_inner(
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
         | TargetFilter::StackAbility
         | TargetFilter::StackSpell
@@ -1025,6 +1027,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource
@@ -1224,6 +1227,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::ParentTarget
         | TargetFilter::ParentTargetController
         | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget
         | TargetFilter::DefendingPlayer
         | TargetFilter::HasChosenName
         | TargetFilter::ChosenDamageSource

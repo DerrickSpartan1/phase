@@ -1869,6 +1869,11 @@ pub enum TargetFilter {
     /// controller" can stay consolidated in `parse_target` for non-prevention
     /// callers.
     PostReplacementSourceController,
+    /// CR 615.5: Resolves to the player or permanent that was the target of the
+    /// prevented damage event. Used by prevention follow-up sentences such as
+    /// "that player exiles that many cards" where the affected player is the
+    /// damage recipient, not the replacement source or damage source.
+    PostReplacementDamageTarget,
     /// CR 506.3d: Resolves to the player being attacked by the source creature.
     /// Looked up from `state.combat.attackers` using the trigger's source_id.
     DefendingPlayer,
@@ -5097,6 +5102,7 @@ impl TargetFilter {
                 | TargetFilter::ParentTarget
                 | TargetFilter::ParentTargetController
                 | TargetFilter::PostReplacementSourceController
+                | TargetFilter::PostReplacementDamageTarget
         )
     }
 

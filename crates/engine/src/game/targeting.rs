@@ -258,7 +258,8 @@ pub fn resolve_event_context_target(
     match filter {
         TargetFilter::DefendingPlayer
         | TargetFilter::AttachedTo
-        | TargetFilter::PostReplacementSourceController => {
+        | TargetFilter::PostReplacementSourceController
+        | TargetFilter::PostReplacementDamageTarget => {
             resolve_event_context_target_for_event_or_state(state, filter, source_id, None)
         }
         _ => {
@@ -356,6 +357,7 @@ pub(crate) fn resolve_event_context_target_for_event_or_state(
             let controller = state.objects.get(&source_obj_id)?.controller;
             Some(TargetRef::Player(controller))
         }
+        TargetFilter::PostReplacementDamageTarget => state.post_replacement_event_target.clone(),
         _ => None,
     }
 }

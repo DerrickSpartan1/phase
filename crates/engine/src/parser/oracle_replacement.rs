@@ -191,6 +191,9 @@ fn parse_replacement_line_inner(text: &str, card_name: &str) -> Option<Replaceme
     }
 
     // --- "Prevent all/the next N damage" patterns (CR 615) ---
+    if let Some(def) = parse_damage_to_player_exile_top_instead(&norm_lower, &text) {
+        return Some(def);
+    }
     if let Some(def) = parse_damage_to_self_instead_followup(&norm_lower, &normalized, &text) {
         return Some(def);
     }
@@ -3340,6 +3343,39 @@ fn parse_damage_to_self_instead_followup(
     )
 }
 
+fn parse_damage_to_player_exile_top_instead(
+    norm_lower: &str,
+    original_text: &str,
+) -> Option<ReplacementDefinition> {
+    let (_, rest) = nom_on_lower(original_text, norm_lower, |i| {
+        let (i, _) = tag("if damage would be dealt to a player, ").parse(i)?;
+        let (i, _) =
+            tag("that player exiles that many cards from the top of their library").parse(i)?;
+        let (i, _) = tag(" instead").parse(i)?;
+        let (i, _) = opt(char('.')).parse(i)?;
+        Ok((i, ()))
+    })?;
+    if !rest.trim().is_empty() {
+        return None;
+    }
+
+    Some(
+        ReplacementDefinition::new(ReplacementEvent::DamageDone)
+            .prevention_shield(PreventionAmount::All)
+            .damage_target_filter(damage_target_any_player())
+            .execute(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::ExileTop {
+                    player: TargetFilter::PostReplacementDamageTarget,
+                    count: QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                },
+            ))
+            .description(original_text.to_string()),
+    )
+}
+
 /// CR 615: Parse damage prevention replacement effects.
 /// Handles:
 /// - "prevent all combat damage that would be dealt [this turn]" (Fog, Moments Peace)
@@ -4057,6 +4093,34 @@ mod tests {
                 },
                 target: TargetFilter::SelfRef,
             } if counter_type == "delay"
+        ));
+    }
+
+    #[test]
+    fn damage_to_player_exiles_that_many_cards_from_that_players_library_instead() {
+        let def = parse_replacement_line(
+            "If damage would be dealt to a player, that player exiles that many cards from the top of their library instead.",
+            "Crumbling Sanctuary",
+        )
+        .expect("damage-to-player exile-top replacement should parse");
+
+        assert_eq!(def.event, ReplacementEvent::DamageDone);
+        assert_eq!(
+            def.shield_kind,
+            ShieldKind::Prevention {
+                amount: PreventionAmount::All
+            }
+        );
+        assert_eq!(def.damage_target_filter, Some(damage_target_any_player()));
+        let execute = def.execute.as_ref().expect("execute present");
+        assert!(matches!(
+            *execute.effect,
+            Effect::ExileTop {
+                player: TargetFilter::PostReplacementDamageTarget,
+                count: QuantityExpr::Ref {
+                    qty: QuantityRef::EventContextAmount
+                },
+            }
         ));
     }
 

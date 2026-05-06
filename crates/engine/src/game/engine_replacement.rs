@@ -285,6 +285,7 @@ pub(super) fn handle_replacement_choice(
                 // replacement.
                 state.post_replacement_source = None;
                 state.post_replacement_event_source = None;
+                state.post_replacement_event_target = None;
                 if let Some(next_waiting_for) = apply_post_replacement_effect(
                     state,
                     &effect_def,

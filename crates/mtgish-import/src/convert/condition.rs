@@ -1017,6 +1017,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::ParentTarget => "ParentTarget",
         TargetFilter::ParentTargetController => "ParentTargetController",
         TargetFilter::PostReplacementSourceController => "PostReplacementSourceController",
+        TargetFilter::PostReplacementDamageTarget => "PostReplacementDamageTarget",
         TargetFilter::DefendingPlayer => "DefendingPlayer",
         TargetFilter::HasChosenName => "HasChosenName",
         TargetFilter::ChosenDamageSource => "ChosenDamageSource",
