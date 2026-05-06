@@ -1,27 +1,16 @@
 import { useEffect, useState } from "react";
 
 import type { GameFormat, MatchType } from "../adapter/types";
-import {
-  listSavedDeckNames,
-  loadDeckOrigins,
-  loadSavedDeck,
-} from "../constants/storage";
-import { loadPreconDeckMap } from "../hooks/useDecks";
-import type { ParsedDeck } from "./deckParser";
 import { evaluateDeckCompatibility } from "./deckCompatibility";
-import { classifyDeck } from "./engineRuntime";
-import type { DeckArchetype } from "./engineRuntime";
 import {
-  feedDeckToParsedDeck,
-  getCachedFeed,
-  listSubscriptions,
-} from "./feedService";
-import { preconDeckEntryToParsedDeck } from "./preconDecks";
+  buildDeckCatalog,
+  savedDeckCatalogId,
+  type DeckCatalogSource,
+} from "./deckCatalog";
+import type { DeckArchetype } from "./engineRuntime";
+import type { ParsedDeck } from "./deckParser";
 
-export type AiDeckSource =
-  | { type: "saved"; feedId?: string }
-  | { type: "feed"; feedId: string }
-  | { type: "precon"; deckId: string; code: string; releaseDate?: string };
+export type AiDeckSource = DeckCatalogSource;
 
 export interface AiDeckCandidate {
   id: string;
@@ -46,117 +35,43 @@ export interface UseAiDeckCatalogResult extends AiDeckCatalogResult {
   error: string | null;
 }
 
-function coveragePct(total: number, supported: number): number | null {
-  if (total <= 0) return null;
-  return Math.round((supported / total) * 100);
-}
-
-function expandedNames(deck: ParsedDeck): string[] {
-  return deck.main.flatMap((entry) => Array.from({ length: entry.count }, () => entry.name));
-}
-
-async function classifyCandidate(deck: ParsedDeck): Promise<DeckArchetype | null> {
-  try {
-    return (await classifyDeck(expandedNames(deck))).archetype;
-  } catch {
-    return null;
-  }
-}
-
 async function legalCandidate(
-  candidate: Omit<AiDeckCandidate, "coveragePct" | "archetype">,
+  candidate: AiDeckCandidate & { knownFormat?: GameFormat },
   options: AiDeckCatalogOptions,
 ): Promise<AiDeckCandidate | null> {
+  const { knownFormat, ...base } = candidate;
+  if (knownFormat && options.selectedFormat && knownFormat !== options.selectedFormat) return null;
+  if (knownFormat) return base;
+
   const result = await evaluateDeckCompatibility(candidate.deck, {
     selectedFormat: options.selectedFormat,
     selectedMatchType: options.selectedMatchType,
   });
   if (result.selected_format_compatible !== true) return null;
-  const cov = result.coverage;
   return {
-    ...candidate,
-    coveragePct: cov ? coveragePct(cov.total_unique, cov.supported_unique) : null,
-    archetype: await classifyCandidate(candidate.deck),
+    ...base,
+    coveragePct: result.coverage && result.coverage.total_unique > 0
+      ? Math.round((result.coverage.supported_unique / result.coverage.total_unique) * 100)
+      : base.coveragePct,
   };
 }
 
-function savedId(name: string): string {
-  return `saved:${name}`;
-}
-
-function feedId(feedIdValue: string, name: string): string {
-  return `feed:${feedIdValue}:${name}`;
-}
-
-function preconId(deckId: string): string {
-  return `precon:${deckId}`;
-}
-
 export function legacyAiDeckNameToId(name: string): string {
-  return savedId(name);
-}
-
-function collectRawCandidates(): Array<Omit<AiDeckCandidate, "coveragePct" | "archetype">> {
-  const origins = loadDeckOrigins();
-  const candidates: Array<Omit<AiDeckCandidate, "coveragePct" | "archetype">> = [];
-  const savedDisplayNames = new Set<string>();
-  const mirroredFeedNames = new Set<string>();
-
-  for (const name of listSavedDeckNames()) {
-    const deck = loadSavedDeck(name);
-    if (!deck) continue;
-    const origin = origins[name];
-    if (origin) mirroredFeedNames.add(name);
-    candidates.push({
-      id: savedId(name),
-      name,
-      source: origin ? { type: "saved", feedId: origin } : { type: "saved" },
-      deck,
-    });
-    savedDisplayNames.add(name);
-  }
-
-  for (const sub of listSubscriptions()) {
-    const feed = getCachedFeed(sub.sourceId);
-    if (!feed) continue;
-    for (const deck of feed.decks) {
-      if (mirroredFeedNames.has(deck.name) || savedDisplayNames.has(deck.name)) continue;
-      candidates.push({
-        id: feedId(sub.sourceId, deck.name),
-        name: deck.name,
-        source: { type: "feed", feedId: sub.sourceId },
-        deck: feedDeckToParsedDeck(deck),
-      });
-    }
-  }
-
-  return candidates;
-}
-
-async function collectPreconCandidates(
-  seenDisplayNames: Set<string>,
-): Promise<Array<Omit<AiDeckCandidate, "coveragePct" | "archetype">>> {
-  const decks = await loadPreconDeckMap();
-  if (!decks) return [];
-  return Object.entries(decks).flatMap(([deckIdValue, deck]) => {
-    const name = `${deck.name} (${deck.code})`;
-    if (seenDisplayNames.has(name)) return [];
-    seenDisplayNames.add(name);
-    return [{
-      id: preconId(deckIdValue),
-      name,
-      source: { type: "precon", deckId: deckIdValue, code: deck.code, releaseDate: deck.releaseDate },
-      deck: preconDeckEntryToParsedDeck(deck),
-    }];
-  });
+  return savedDeckCatalogId(name);
 }
 
 export async function buildLegalAiDeckCatalog(
   options: AiDeckCatalogOptions,
 ): Promise<AiDeckCatalogResult> {
-  const rawCandidates = collectRawCandidates();
-  const displayNames = new Set(rawCandidates.map((candidate) => candidate.name));
-  rawCandidates.push(...await collectPreconCandidates(displayNames));
+  const rawCandidates = (await buildDeckCatalog()).map((candidate) => ({
+    id: candidate.id,
+    name: candidate.name,
+    source: candidate.source,
+    deck: candidate.deck,
+    coveragePct: candidate.coveragePct ?? null,
+    archetype: null,
+    knownFormat: candidate.knownFormat,
+  }));
 
   const legal = await Promise.all(
     rawCandidates.map((candidate) => legalCandidate(candidate, options)),

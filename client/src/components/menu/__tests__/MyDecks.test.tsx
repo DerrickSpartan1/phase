@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { MyDecks } from "../MyDecks";
-import { STORAGE_KEY_PREFIX } from "../../../constants/storage";
+import { saveDeckOrigins, STORAGE_KEY_PREFIX } from "../../../constants/storage";
 import type { ParsedDeck } from "../../../services/deckParser";
 import { evaluateDeckCompatibilityBatch } from "../../../services/deckCompatibility";
 import { loadPreconDeckMap } from "../../../hooks/useDecks";
@@ -18,6 +18,7 @@ vi.mock("../../../services/deckCompatibility", () => ({
 
 vi.mock("../../../hooks/useDecks", () => ({
   loadPreconDeckMap: vi.fn(),
+  isCommanderPreconDeck: (deck: { type: string }) => deck.type === "Commander Deck",
   useDecks: vi.fn(() => null),
 }));
 
@@ -95,14 +96,10 @@ describe("MyDecks", () => {
       />,
     );
 
-    await waitFor(() => {
-      expect(evaluateDeckCompatibilityBatch).toHaveBeenCalled();
-      expect(screen.queryByText("Off Format")).not.toBeInTheDocument();
-    });
-    expect(screen.getByText("Commander Ready")).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("button", { name: "Show all decks" }));
     expect(await screen.findByText("Off Format")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Show legal only" })).toBeInTheDocument();
+    expect(evaluateDeckCompatibilityBatch).not.toHaveBeenCalled();
+    expect(screen.getByText("Commander Ready")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Show all decks" })).toBeInTheDocument();
   });
 
   it("does not prefilter in free-for-all context", async () => {
@@ -163,17 +160,18 @@ describe("MyDecks", () => {
     render(
       <MyDecks
         mode="select"
-        activeDeckName={null}
+        selectedFormat="Standard"
+        activeDeckName="Badge Deck"
         onSelectDeck={vi.fn()}
         onConfirmSelection={vi.fn()}
       />,
     );
 
-    expect(await screen.findByText("Badge Deck")).toBeInTheDocument();
-    expect(screen.getByText("STD")).toBeInTheDocument();
+    expect(await screen.findAllByText("Badge Deck")).not.toHaveLength(0);
+    expect(await screen.findByText("STD")).toBeInTheDocument();
     expect(screen.queryByText("CMD")).not.toBeInTheDocument();
-    expect(screen.getByText("BO3", { selector: "span" })).toBeInTheDocument();
-    expect(screen.getByText("Unknown 1")).toBeInTheDocument();
+    expect(await screen.findByText("BO3", { selector: "span" })).toBeInTheDocument();
+    expect(await screen.findByText("Unknown 1")).toBeInTheDocument();
   });
 
   it("uses supported game formats as deck filters without offering BO3 as a format", async () => {
@@ -225,14 +223,51 @@ describe("MyDecks", () => {
 
     await userEvent.selectOptions(screen.getByLabelText("Format"), "PauperCommander");
 
-    await waitFor(() => {
-      expect(screen.queryByText("Not PDH")).not.toBeInTheDocument();
-    });
+    expect(await screen.findByText("Not PDH")).toBeInTheDocument();
     expect(screen.getByText("PDH Ready")).toBeInTheDocument();
-    expect(evaluateDeckCompatibilityBatch).toHaveBeenLastCalledWith(
+    expect(vi.mocked(evaluateDeckCompatibilityBatch).mock.calls).toContainEqual([
       expect.any(Array),
-      { selectedFormat: "PauperCommander", selectedMatchType: undefined, summaryOnly: true },
+      expect.objectContaining({
+        selectedFormat: "PauperCommander",
+        selectedMatchType: undefined,
+      }),
+    ]);
+  });
+
+  it("uses trusted feed format metadata before background coverage filters unknown saved decks", async () => {
+    saveDeck("Known Standard", { main: [{ name: "Island", count: 60 }], sideboard: [] });
+    saveDeck("Unknown User Deck", { main: [{ name: "Mountain", count: 60 }], sideboard: [] });
+    saveDeckOrigins({ "Known Standard": "mtggoldfish-standard" });
+
+    vi.mocked(evaluateDeckCompatibilityBatch).mockImplementation(async (_decks, options) => ({
+      "Unknown User Deck": {
+        standard: { compatible: false, reasons: [] },
+        commander: { compatible: false, reasons: [] },
+        bo3_ready: false,
+        unknown_cards: [],
+        selected_format_compatible: options?.selectedFormat === "Standard" ? false : null,
+        selected_format_reasons: options?.selectedFormat === "Standard" ? ["Not Standard legal"] : [],
+        color_identity: ["R"],
+      },
+    }));
+
+    render(
+      <MyDecks
+        mode="manage"
+        activeDeckName={null}
+        onCreateDeck={vi.fn()}
+        onEditDeck={vi.fn()}
+      />,
     );
+
+    await userEvent.selectOptions(screen.getByLabelText("Format"), "Standard");
+
+    expect(await screen.findByText("Known Standard")).toBeInTheDocument();
+    expect(screen.getByText("Unknown User Deck")).toBeInTheDocument();
+    const standardCalls = vi.mocked(evaluateDeckCompatibilityBatch).mock.calls.filter(
+      ([, options]) => options?.selectedFormat === "Standard",
+    );
+    expect(standardCalls.length).toBeGreaterThan(0);
   });
 
   it("offers an edit action in selection mode without selecting the deck", async () => {
@@ -272,7 +307,7 @@ describe("MyDecks", () => {
       ...Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`deck-${i}`, {
         code: `P${i}`,
         name: `Precon ${i}`,
-        type: "Commander",
+        type: "Commander Deck",
         releaseDate: `2026-01-${String(i + 1).padStart(2, "0")}`,
         coveragePct: 100,
         mainBoard: [{ name: "Island", count: 99 }],
@@ -282,7 +317,7 @@ describe("MyDecks", () => {
       secrets: {
         code: "SOS",
         name: "Secrets of Strixhaven",
-        type: "Commander",
+        type: "Commander Deck",
         releaseDate: "2026-02-01",
         coveragePct: 100,
         mainBoard: [{ name: "Island", count: 99 }],

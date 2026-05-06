@@ -23,6 +23,10 @@ export interface DeckEntry {
 
 export type DeckMap = Record<string, DeckEntry>;
 
+export function isCommanderPreconDeck(deck: DeckEntry): boolean {
+  return deck.type === "Commander Deck";
+}
+
 let cached: DeckMap | null = null;
 let fetchPromise: Promise<DeckMap | null> | null = null;
 

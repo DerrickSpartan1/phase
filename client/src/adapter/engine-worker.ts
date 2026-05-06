@@ -20,6 +20,7 @@ import init, {
   restore_game_state,
   resume_multiplayer_host_state,
   load_card_database,
+  evaluate_deck_compatibility_js,
   apply_seat_mutation,
   export_game_state_json,
   clear_game_state,
@@ -69,6 +70,7 @@ type EngineRequest =
   | { type: "resumeMultiplayerHostState"; id: number; stateJson: string }
   | { type: "exportState"; id: number }
   | { type: "loadCardDbFromUrl"; id: number }
+  | { type: "evaluateDeckCompatibility"; id: number; request: unknown }
   | { type: "resetGame"; id: number }
   | { type: "setMultiplayerMode"; id: number; enabled: boolean }
   | { type: "ping"; id: number }
@@ -118,15 +120,39 @@ self.onmessage = async (e: MessageEvent<EngineRequest>) => {
       }
 
       case "loadCardDbFromUrl": {
+        const startedAt = performance.now();
         const resp = await fetch(__CARD_DATA_URL__);
         if (!resp.ok)
           throw new Error(
             `Failed to load card-data.json (${resp.status})`,
           );
+        const fetchedAt = performance.now();
         const text = await resp.text();
+        const decodedAt = performance.now();
         const count = load_card_database(text);
+        const loadedAt = performance.now();
+        console.info(
+          `[engine-worker] card database loaded (${count} cards, fetch=${Math.round(fetchedAt - startedAt)}ms, text=${Math.round(decodedAt - fetchedAt)}ms, rustLoad=${Math.round(loadedAt - decodedAt)}ms, total=${Math.round(loadedAt - startedAt)}ms)`,
+        );
         cardDbLoaded = true;
         result(msg.id, count);
+        break;
+      }
+
+      case "evaluateDeckCompatibility": {
+        if (!cardDbLoaded) {
+          error(
+            msg.id,
+            "Card database not loaded. Call loadCardDb or loadCardDbFromUrl first.",
+          );
+          break;
+        }
+        const startedAt = performance.now();
+        const data = evaluate_deck_compatibility_js(msg.request);
+        console.info(
+          `[engine-worker] evaluateDeckCompatibility id=${msg.id} engine=${Math.round(performance.now() - startedAt)}ms`,
+        );
+        result(msg.id, data);
         break;
       }
 

@@ -101,6 +101,10 @@ export class EngineWorkerClient {
     return this.request<number>({ type: "loadCardDbFromUrl" });
   }
 
+  async evaluateDeckCompatibility(request: unknown): Promise<unknown> {
+    return this.request<unknown>({ type: "evaluateDeckCompatibility", request });
+  }
+
   async initializeGame(
     deckData: unknown | null,
     seed: number,

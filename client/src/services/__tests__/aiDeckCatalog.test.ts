@@ -4,17 +4,12 @@ import type { DeckCompatibilityResult } from "../deckCompatibility";
 import type { ParsedDeck } from "../deckParser";
 import { evaluateDeckCompatibility } from "../deckCompatibility";
 import { buildLegalAiDeckCatalog } from "../aiDeckCatalog";
-import { classifyDeck } from "../engineRuntime";
 import { getCachedFeed, listSubscriptions } from "../feedService";
 import { loadPreconDeckMap } from "../../hooks/useDecks";
 import { FEED_DECK_ORIGINS_KEY, STORAGE_KEY_PREFIX } from "../../constants/storage";
 
 vi.mock("../deckCompatibility", () => ({
   evaluateDeckCompatibility: vi.fn(),
-}));
-
-vi.mock("../engineRuntime", () => ({
-  classifyDeck: vi.fn(),
 }));
 
 vi.mock("../feedService", () => ({
@@ -29,6 +24,7 @@ vi.mock("../feedService", () => ({
 
 vi.mock("../../hooks/useDecks", () => ({
   loadPreconDeckMap: vi.fn(),
+  isCommanderPreconDeck: (deck: { type: string }) => deck.type === "Commander Deck",
 }));
 
 function deck(firstCard: string, commander?: string): ParsedDeck {
@@ -61,7 +57,6 @@ beforeEach(() => {
   vi.mocked(listSubscriptions).mockReturnValue([]);
   vi.mocked(getCachedFeed).mockReturnValue(null);
   vi.mocked(loadPreconDeckMap).mockResolvedValue(null);
-  vi.mocked(classifyDeck).mockResolvedValue({ archetype: "Midrange", confidence: "Pure" });
   vi.mocked(evaluateDeckCompatibility).mockImplementation(async (parsed) =>
     compatibility(parsed.main[0]?.name !== "Illegal Starter")
   );
@@ -139,12 +134,12 @@ describe("buildLegalAiDeckCatalog", () => {
     expect(ids).not.toContain("feed:starter:Illegal Starter");
   });
 
-  it("exposes legal precons by default and filters illegal precons through engine compatibility", async () => {
+  it("exposes Commander precons from shared catalog metadata without engine compatibility", async () => {
     vi.mocked(loadPreconDeckMap).mockResolvedValue({
       secrets: {
         code: "SOS",
         name: "Secrets of Strixhaven",
-        type: "Commander",
+        type: "Commander Deck",
         coveragePct: 100,
         mainBoard: deck("Precon Legal Card").main,
         commander: [{ count: 1, name: "Zimone, Mystery Unraveler" }],
@@ -158,6 +153,7 @@ describe("buildLegalAiDeckCatalog", () => {
       },
     });
 
+    const callsBefore = vi.mocked(evaluateDeckCompatibility).mock.calls.length;
     const catalog = await buildLegalAiDeckCatalog({
       selectedFormat: "Commander",
       selectedMatchType: "Bo1",
@@ -166,5 +162,6 @@ describe("buildLegalAiDeckCatalog", () => {
 
     expect(ids).toContain("precon:secrets");
     expect(ids).not.toContain("precon:starter");
+    expect(vi.mocked(evaluateDeckCompatibility).mock.calls).toHaveLength(callsBefore);
   });
 });
