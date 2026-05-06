@@ -891,7 +891,16 @@ fn collect_target_slot_specs(
         return;
     }
 
-    if let Effect::Attach { attachment, target } = &ability.effect {
+    if let Effect::MoveCounters { source, target, .. } = &ability.effect {
+        for filter in [source, target] {
+            if !filter.is_context_ref() {
+                specs.push(TargetSlotSpec {
+                    filter: filter.clone(),
+                    optional: ability.optional_targeting,
+                });
+            }
+        }
+    } else if let Effect::Attach { attachment, target } = &ability.effect {
         for filter in [attachment, target] {
             if attach_filter_needs_target_slot(filter) {
                 specs.push(TargetSlotSpec {
@@ -1699,6 +1708,28 @@ fn assign_targets_recursive(
     targets: &[TargetRef],
     next_target: &mut usize,
 ) -> Result<(), EngineError> {
+    if let Effect::MoveCounters { source, target, .. } = &ability.effect {
+        for filter in [source, target] {
+            if !filter.is_context_ref() {
+                if let Some(target) = targets.get(*next_target) {
+                    ability.targets.push(target.clone());
+                    *next_target += 1;
+                } else if !ability.optional_targeting {
+                    return Err(EngineError::InvalidAction(
+                        "Missing required target".to_string(),
+                    ));
+                }
+            }
+        }
+        if defers_sub_ability_target_selection(&ability.effect) {
+            return Ok(());
+        }
+        if let Some(sub_ability) = ability.sub_ability.as_mut() {
+            assign_targets_recursive(state, sub_ability, targets, next_target)?;
+        }
+        return Ok(());
+    }
+
     if let Effect::Attach { attachment, target } = &ability.effect {
         for filter in [attachment, target] {
             if attach_filter_needs_target_slot(filter) {
@@ -1789,6 +1820,35 @@ fn assign_selected_slots_recursive(
     selected_slots: &[Option<TargetRef>],
     next_slot: &mut usize,
 ) -> Result<(), EngineError> {
+    if let Effect::MoveCounters { source, target, .. } = &ability.effect {
+        for filter in [source, target] {
+            if !filter.is_context_ref() {
+                let Some(selected_slot) = selected_slots.get(*next_slot) else {
+                    return Err(EngineError::InvalidAction(
+                        "Missing target selection".to_string(),
+                    ));
+                };
+                match selected_slot {
+                    Some(target) => ability.targets.push(target.clone()),
+                    None if ability.optional_targeting => {}
+                    None => {
+                        return Err(EngineError::InvalidAction(
+                            "Missing required target".to_string(),
+                        ));
+                    }
+                }
+                *next_slot += 1;
+            }
+        }
+        if defers_sub_ability_target_selection(&ability.effect) {
+            return Ok(());
+        }
+        if let Some(sub_ability) = ability.sub_ability.as_mut() {
+            assign_selected_slots_recursive(sub_ability, selected_slots, next_slot)?;
+        }
+        return Ok(());
+    }
+
     if let Effect::Attach { attachment, target } = &ability.effect {
         for filter in [attachment, target] {
             if attach_filter_needs_target_slot(filter) {
@@ -1961,6 +2021,19 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
     } else {
         0
     };
+    let move_counter_targets = if let Effect::MoveCounters { source, target, .. } = &ability.effect
+    {
+        if ability.optional_targeting {
+            0
+        } else {
+            [source, target]
+                .iter()
+                .filter(|filter| !filter.is_context_ref())
+                .count()
+        }
+    } else {
+        0
+    };
 
     // CR 109.4: Companion player slot for `ControllerRef::TargetPlayer` filters
     // contributes one required slot (or zero when targeting is optional).
@@ -1970,7 +2043,10 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
         } else {
             0
         };
-    let current = if matches!(&ability.effect, Effect::Attach { .. }) {
+    let current = if matches!(
+        &ability.effect,
+        Effect::Attach { .. } | Effect::MoveCounters { .. }
+    ) {
         0
     } else if triggers::extract_target_filter_from_effect(&ability.effect).is_some() {
         if let Some(spec) = ability
@@ -1987,7 +2063,7 @@ fn minimum_targets_in_chain(ability: &ResolvedAbility) -> usize {
     } else {
         0
     };
-    let current = attach_targets + player_companion + current;
+    let current = attach_targets + move_counter_targets + player_companion + current;
 
     let rest = if defers_sub_ability_target_selection(&ability.effect) {
         0
@@ -3330,6 +3406,72 @@ mod tests {
             slots[1].legal_targets,
             vec![TargetRef::Object(source), TargetRef::Object(destination)]
         );
+    }
+
+    #[test]
+    fn assign_targets_move_counters_preserves_source_and_destination_slots() {
+        use crate::types::ability::ControllerRef;
+        let state = crate::types::game_state::GameState::new_two_player(42);
+        let controlled_creature = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::You),
+            ..Default::default()
+        });
+        let mut ability = ResolvedAbility::new(
+            Effect::MoveCounters {
+                source: controlled_creature.clone(),
+                counter_type: None,
+                count: Some(QuantityExpr::Fixed { value: 1 }),
+                mode: CounterTransferMode::Move,
+                target: controlled_creature,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let counter_source = TargetRef::Object(ObjectId(1));
+        let destination = TargetRef::Object(ObjectId(2));
+
+        assign_targets_in_chain(
+            &state,
+            &mut ability,
+            &[counter_source.clone(), destination.clone()],
+        )
+        .expect("move-counters should consume both target slots");
+
+        assert_eq!(ability.targets, vec![counter_source, destination]);
+    }
+
+    #[test]
+    fn assign_selected_slots_move_counters_preserves_source_and_destination_slots() {
+        use crate::types::ability::ControllerRef;
+        let controlled_creature = TargetFilter::Typed(TypedFilter {
+            type_filters: vec![TypeFilter::Creature],
+            controller: Some(ControllerRef::You),
+            ..Default::default()
+        });
+        let mut ability = ResolvedAbility::new(
+            Effect::MoveCounters {
+                source: controlled_creature.clone(),
+                counter_type: None,
+                count: Some(QuantityExpr::Fixed { value: 1 }),
+                mode: CounterTransferMode::Move,
+                target: controlled_creature,
+            },
+            vec![],
+            ObjectId(100),
+            PlayerId(0),
+        );
+        let counter_source = TargetRef::Object(ObjectId(1));
+        let destination = TargetRef::Object(ObjectId(2));
+
+        assign_selected_slots_in_chain(
+            &mut ability,
+            &[Some(counter_source.clone()), Some(destination.clone())],
+        )
+        .expect("move-counters should consume both selected slots");
+
+        assert_eq!(ability.targets, vec![counter_source, destination]);
     }
 
     #[test]

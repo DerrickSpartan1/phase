@@ -861,7 +861,10 @@ fn parse_restricted_spell_type_phrase(spell_part: &str) -> Option<String> {
     Some(
         phrase
             .split_whitespace()
-            .map(super::capitalize)
+            .map(|word| match word {
+                "and" | "or" => word.to_string(),
+                _ => super::capitalize(word),
+            })
             .collect::<Vec<_>>()
             .join(" "),
     )

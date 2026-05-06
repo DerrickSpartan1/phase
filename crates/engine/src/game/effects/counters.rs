@@ -1293,6 +1293,85 @@ mod tests {
         );
     }
 
+    #[test]
+    fn move_counter_after_target_selection_removes_from_source_and_adds_to_destination() {
+        let mut state = GameState::new_two_player(42);
+        let ability_source_id = create_object(
+            &mut state,
+            CardId(1),
+            PlayerId(0),
+            "Tidus".to_string(),
+            Zone::Battlefield,
+        );
+        let counter_source_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Counter Source".to_string(),
+            Zone::Battlefield,
+        );
+        let dest_id = create_object(
+            &mut state,
+            CardId(3),
+            PlayerId(0),
+            "Counter Destination".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&counter_source_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 5);
+        state
+            .objects
+            .get_mut(&dest_id)
+            .unwrap()
+            .counters
+            .insert(CounterType::Plus1Plus1, 1);
+
+        let mut ability = ResolvedAbility::new(
+            Effect::MoveCounters {
+                source: TargetFilter::Any,
+                counter_type: None,
+                count: Some(QuantityExpr::Fixed { value: 1 }),
+                mode: CounterTransferMode::Move,
+                target: TargetFilter::Any,
+            },
+            vec![],
+            ability_source_id,
+            PlayerId(0),
+        );
+        crate::game::ability_utils::assign_selected_slots_in_chain(
+            &mut ability,
+            &[
+                Some(TargetRef::Object(counter_source_id)),
+                Some(TargetRef::Object(dest_id)),
+            ],
+        )
+        .expect("target selection should preserve both move-counters targets");
+
+        let mut events = Vec::new();
+        resolve_move(&mut state, &ability, &mut events).unwrap();
+
+        assert_eq!(
+            state.objects[&counter_source_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            4
+        );
+        assert_eq!(
+            state.objects[&dest_id]
+                .counters
+                .get(&CounterType::Plus1Plus1)
+                .copied()
+                .unwrap_or(0),
+            2
+        );
+    }
+
     /// CR 306.5b: Adding a Loyalty counter through the resolver must keep
     /// `obj.loyalty` in lockstep with `counters[Loyalty]`. This is the
     /// invariant that prevents the Tezzeret-class display bug where the
