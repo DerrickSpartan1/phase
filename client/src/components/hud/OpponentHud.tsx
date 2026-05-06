@@ -1,4 +1,5 @@
 import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { motion, useReducedMotion } from "framer-motion";
 
 import type { PlayerId } from "../../adapter/types.ts";
@@ -269,6 +270,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
   ) ?? false;
   const [showIncomingPopover, setShowIncomingPopover] = useState(false);
   const hasIncoming = incomingAttackerIds.length > 0;
+  const tabRef = useRef<HTMLButtonElement>(null);
   // Short close delay so cursor moving through the gap between the tab and
   // the popover below doesn't flicker the popover shut. The popover itself
   // is `pointer-events-none`, so it can't re-enter the button — the delay
@@ -333,6 +335,7 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
 
   return (
     <button
+      ref={tabRef}
       type="button"
       onClick={onClick}
       disabled={isEliminated}
@@ -447,11 +450,13 @@ function OpponentTab({ playerId, isFocused, isEliminated, isTeammate: ally, isVa
           >
             ⚔×{incomingAttackerIds.length}
           </span>
-          {showIncomingPopover && (
-            <IncomingAttackersPopover
-              attackerIds={incomingAttackerIds}
-              opponentName={label}
-            />
+          {showIncomingPopover && tabRef.current && (
+            <PortaledPopover anchorEl={tabRef.current}>
+              <IncomingAttackersPopover
+                attackerIds={incomingAttackerIds}
+                opponentName={label}
+              />
+            </PortaledPopover>
           )}
         </>
       )}
@@ -465,6 +470,48 @@ function ConnectionDotInline({ disconnected }: { disconnected: boolean }) {
       className={`inline-block h-2 w-2 rounded-full ring-1 ring-white/20 ${disconnected ? "bg-red-500 animate-pulse" : "bg-emerald-400"}`}
       title={disconnected ? "Disconnected" : "Connected"}
     />
+  );
+}
+
+function PortaledPopover({ anchorEl, children }: { anchorEl: HTMLElement; children: React.ReactNode }) {
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  const stableCountRef = useRef(0);
+
+  useEffect(() => {
+    stableCountRef.current = 0;
+    let prevLeft = 0;
+    let prevTop = 0;
+    let rafId: number;
+
+    function poll() {
+      const rect = anchorEl.getBoundingClientRect();
+      const left = rect.left + rect.width / 2;
+      const top = rect.bottom + 8;
+      const changed = Math.abs(left - prevLeft) > 0.5 || Math.abs(top - prevTop) > 0.5;
+      prevLeft = left;
+      prevTop = top;
+      stableCountRef.current = changed ? 0 : stableCountRef.current + 1;
+      setPos({ left, top });
+
+      if (stableCountRef.current < 10) {
+        rafId = requestAnimationFrame(poll);
+      }
+    }
+
+    rafId = requestAnimationFrame(poll);
+    return () => cancelAnimationFrame(rafId);
+  }, [anchorEl]);
+
+  if (!pos) return null;
+
+  return createPortal(
+    <div
+      className="pointer-events-none fixed z-40"
+      style={{ left: pos.left, top: pos.top, transform: "translateX(-50%)" }}
+    >
+      {children}
+    </div>,
+    document.body,
   );
 }
 

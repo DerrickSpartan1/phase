@@ -39,6 +39,18 @@ gh issue close <N> --repo phase-rs/phase --comment "Verified in gameplay. Closin
 gh issue edit <N> --repo phase-rs/phase --remove-label "status:needs-runtime-verify" --add-label "status:verified"
 ```
 
+### Mandatory Post-Fix Review Gate
+
+Every code fix made during bug triage must run the implementation review command before the fix is committed, marked fixed, or described as complete:
+
+```bash
+cat .claude/commands/review-impl.md
+```
+
+Then apply the review checklist in `.claude/commands/review-impl.md` to the uncommitted diff. This is a required regression gate, not an optional cleanup pass. The review must look for missing sibling coverage, overly broad parser/runtime semantics, weak tests, hidden state leaks, rules-correctness gaps, and card-specific fixes that should have been modeled as reusable building blocks.
+
+If the review finds a gap, fix it immediately, rerun the relevant targeted tests, and run the review gate again. Do not transition GitHub issues to `fixed-dirty-tree`, `fixed-unreleased`, `needs-runtime-verify`, or closed until this review is clean.
+
 ### GitHub Comment Standard
 
 GitHub comments must be concise, user-facing status updates. Do not paste local command output, long command transcripts, local machine paths, target directories, or exhaustive verification command lists into issues. Summarize the evidence at the semantic level instead:
@@ -99,6 +111,8 @@ Acceptable evidence depends on the report type:
 - AI/frontend/deckbuilder report: inspect the subsystem that owns the behavior; card parser coverage is not evidence for these.
 
 When evidence is weaker than this, keep or create the GitHub issue and label it `status:confirmed` or `status:needs-repro`. In notes, say what evidence is missing instead of calling it fixed.
+
+Before calling any bug fixed, run the mandatory post-fix review gate above. Regressions discovered by review are part of the same bug-triage task and must be resolved before issue status changes.
 
 ### Parser-gap bugs (area:parser)
 1. Check the card: `jq '.["card name"]' client/public/card-data.json`
