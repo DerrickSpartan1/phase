@@ -364,6 +364,9 @@ pub enum StaticMode {
     ReduceAbilityCost {
         keyword: String,
         amount: u32,
+        /// "This effect can't reduce the mana in that cost to less than one mana."
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        minimum_mana: Option<u32>,
     },
     /// CR 601.2f: Increases the cost of spells matching the filter.
     /// Permanent-based cost increase applied during casting (Thalia, etc.).
@@ -634,9 +637,14 @@ impl Hash for StaticMode {
     fn hash<H: Hasher>(&self, state: &mut H) {
         std::mem::discriminant(self).hash(state);
         match self {
-            StaticMode::ReduceAbilityCost { keyword, amount } => {
+            StaticMode::ReduceAbilityCost {
+                keyword,
+                amount,
+                minimum_mana,
+            } => {
                 keyword.hash(state);
                 amount.hash(state);
+                minimum_mana.hash(state);
             }
             StaticMode::ExtraBlockers { count } => count.hash(state),
             StaticMode::RevealTopOfLibrary { all_players } => all_players.hash(state),
@@ -700,8 +708,16 @@ impl fmt::Display for StaticMode {
                 write!(f, "CastWithKeyword({keyword:?})")
             }
             StaticMode::ReduceCost { .. } => write!(f, "ReduceCost"),
-            StaticMode::ReduceAbilityCost { keyword, amount } => {
-                write!(f, "ReduceAbilityCost({keyword},{amount})")
+            StaticMode::ReduceAbilityCost {
+                keyword,
+                amount,
+                minimum_mana,
+            } => {
+                if let Some(minimum_mana) = minimum_mana {
+                    write!(f, "ReduceAbilityCost({keyword},{amount},{minimum_mana})")
+                } else {
+                    write!(f, "ReduceAbilityCost({keyword},{amount})")
+                }
             }
             StaticMode::RaiseCost { .. } => write!(f, "RaiseCost"),
             StaticMode::CantGainLife => write!(f, "CantGainLife"),
@@ -850,10 +866,13 @@ impl FromStr for StaticMode {
                     .strip_prefix("ReduceAbilityCost(")
                     .and_then(|s| s.strip_suffix(')'));
                 if let Some(inner) = inner {
-                    if let Some((kw, amt)) = inner.split_once(',') {
+                    let mut parts = inner.split(',');
+                    if let (Some(kw), Some(amt), extra) = (parts.next(), parts.next(), parts.next())
+                    {
                         StaticMode::ReduceAbilityCost {
                             keyword: kw.to_string(),
                             amount: amt.parse().unwrap_or(1),
+                            minimum_mana: extra.and_then(|value| value.parse().ok()),
                         }
                     } else {
                         StaticMode::Other(s.to_string())

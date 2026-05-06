@@ -444,6 +444,7 @@ fn apply_ability_cost_reduction(
         if let StaticMode::ReduceAbilityCost {
             ref keyword,
             amount,
+            ..
         } = static_def.mode
         {
             if keyword == ability_keyword {

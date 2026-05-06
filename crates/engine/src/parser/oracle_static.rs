@@ -68,6 +68,21 @@ fn nom_tag_tp<'a>(tp: &TextPair<'a>, prefix: &str) -> Option<TextPair<'a>> {
         })
 }
 
+fn parse_activated_cost_reduction_minimum_mana(lower: &str) -> Option<u32> {
+    preceded(
+        take_until::<_, _, VerboseError<&str>>(
+            "this effect can't reduce the mana in that cost to less than ",
+        ),
+        preceded(
+            tag("this effect can't reduce the mana in that cost to less than "),
+            alt((value(1, tag("one mana")), nom_primitives::parse_number)),
+        ),
+    )
+    .parse(lower)
+    .ok()
+    .map(|(_, minimum)| minimum)
+}
+
 /// Recognizes the first token/phrase of an effect clause that follows the
 /// condition-vs-effect comma in an inverted `"As long as <cond>, <effect>"` line.
 ///
@@ -1655,6 +1670,7 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
                 StaticDefinition::new(StaticMode::ReduceAbilityCost {
                     keyword: keyword.trim().to_string(),
                     amount,
+                    minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
                 })
                 .affected(TargetFilter::Typed(
                     TypedFilter::card().controller(ControllerRef::You),
@@ -1684,6 +1700,7 @@ fn parse_static_line_inner(text: &str, inverted: InvertedAsLongAs) -> Option<Sta
                     StaticDefinition::new(StaticMode::ReduceAbilityCost {
                         keyword: "activated".to_string(),
                         amount,
+                        minimum_mana: parse_activated_cost_reduction_minimum_mana(tp.lower),
                     })
                     .affected(affected)
                     .description(text.to_string()),
@@ -11225,6 +11242,7 @@ mod tests {
                 StaticMode::ReduceAbilityCost {
                     ref keyword,
                     amount: 1,
+                    minimum_mana: None,
                 } if keyword == "ninjutsu"
             ),
             "Expected ReduceAbilityCost {{ keyword: ninjutsu, amount: 1 }}, got {:?}",
@@ -11243,6 +11261,7 @@ mod tests {
             StaticMode::ReduceAbilityCost {
                 keyword: "equip".to_string(),
                 amount: 1,
+                minimum_mana: None,
             }
         );
     }
@@ -14053,6 +14072,23 @@ mod tests {
             StaticMode::ReduceAbilityCost {
                 keyword: "activated".to_string(),
                 amount: 2,
+                minimum_mana: None,
+            }
+        );
+    }
+
+    #[test]
+    fn static_reduce_activated_ability_cost_generic_with_minimum() {
+        let def = parse_static_line(
+            "Activated abilities of creatures you control cost {2} less to activate. This effect can't reduce the mana in that cost to less than one mana.",
+        )
+        .unwrap();
+        assert_eq!(
+            def.mode,
+            StaticMode::ReduceAbilityCost {
+                keyword: "activated".to_string(),
+                amount: 2,
+                minimum_mana: Some(1),
             }
         );
     }

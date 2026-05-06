@@ -1167,9 +1167,9 @@ fn spell_object_matches_filter_inner(
 
             type_filters.iter().all(|type_filter| {
                 spell_record_matches_type_filter(record, type_filter, all_creature_types)
-            }) && properties
-                .iter()
-                .all(|prop| spell_object_matches_property(record, zone, prop, context))
+            }) && properties.iter().all(|prop| {
+                spell_object_matches_property(record, zone, prop, all_creature_types, context)
+            })
         }
         TargetFilter::Or { filters } => filters.iter().any(|inner| {
             spell_object_matches_filter_inner(
@@ -1236,6 +1236,7 @@ fn spell_object_matches_property(
     record: &SpellCastRecord,
     zone: Zone,
     prop: &FilterProp,
+    all_creature_types: &[String],
     context: Option<SpellFilterContext<'_>>,
 ) -> bool {
     match prop {
@@ -1258,6 +1259,47 @@ fn spell_object_matches_property(
             };
             comparator.evaluate(record.mana_value as i32, threshold)
         }
+        FilterProp::IsChosenCreatureType => context.is_some_and(|context| {
+            context
+                .state
+                .objects
+                .get(&context.source_id)
+                .and_then(|source| source.chosen_creature_type())
+                .is_some_and(|chosen| {
+                    subtype_matches_with_changeling(
+                        chosen,
+                        &record.subtypes,
+                        &record.keywords,
+                        all_creature_types,
+                    )
+                })
+        }),
+        FilterProp::IsChosenColor => context.is_some_and(|context| {
+            context
+                .state
+                .objects
+                .get(&context.source_id)
+                .and_then(|source| {
+                    source.chosen_attributes.iter().find_map(|attr| match attr {
+                        ChosenAttribute::Color(color) => Some(color),
+                        _ => None,
+                    })
+                })
+                .is_some_and(|color| record.colors.contains(color))
+        }),
+        FilterProp::IsChosenCardType => context.is_some_and(|context| {
+            context
+                .state
+                .objects
+                .get(&context.source_id)
+                .and_then(|source| {
+                    source.chosen_attributes.iter().find_map(|attr| match attr {
+                        ChosenAttribute::CardType(card_type) => Some(card_type),
+                        _ => None,
+                    })
+                })
+                .is_some_and(|card_type| record.core_types.contains(card_type))
+        }),
         _ => spell_record_matches_property(record, prop),
     }
 }

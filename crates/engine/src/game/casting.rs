@@ -11,7 +11,9 @@ use crate::types::game_state::{
 };
 use crate::types::identifiers::{CardId, ObjectId};
 use crate::types::keywords::{FlashbackCost, Keyword, KeywordKind};
-use crate::types::mana::{ManaCost, ManaSpellGrant, PaymentContext, SpellMeta};
+use crate::types::mana::{
+    ManaColor, ManaCost, ManaCostShard, ManaSpellGrant, PaymentContext, SpellMeta,
+};
 use crate::types::player::PlayerId;
 use crate::types::statics::{
     ActivationExemption, CastFrequency, CastingProhibitionCondition, ProhibitionScope, StaticMode,
@@ -1837,73 +1839,101 @@ fn spell_matches_cost_filter(
     let Some(spell_obj) = state.objects.get(&spell_id) else {
         return false;
     };
-    let Some(source_obj) = state.objects.get(&source_id) else {
+    if !state.objects.contains_key(&source_id) {
         return false;
-    };
+    }
 
     match filter {
-        TargetFilter::Typed(_) => super::filter::spell_object_matches_filter(
+        TargetFilter::Typed(_) => super::filter::spell_object_matches_filter_from_state(
+            state,
             spell_obj,
+            spell_obj.zone,
             caster,
             filter,
-            source_obj.controller,
+            source_id,
             &state.all_creature_types,
         ),
-        TargetFilter::Or { filters } => filters.iter().any(|f| {
-            super::filter::spell_object_matches_filter(
-                spell_obj,
-                caster,
-                f,
-                source_obj.controller,
-                &state.all_creature_types,
-            )
-        }),
+        TargetFilter::Or { filters } => filters
+            .iter()
+            .any(|inner| spell_matches_cost_filter(state, caster, spell_id, inner, source_id)),
+        TargetFilter::And { filters } => filters
+            .iter()
+            .all(|inner| spell_matches_cost_filter(state, caster, spell_id, inner, source_id)),
+        TargetFilter::Not { filter: inner } => {
+            !spell_matches_cost_filter(state, caster, spell_id, inner, source_id)
+        }
         // CR 601.2e: Cost modifications only apply when the filter explicitly matches.
         // Fail-closed: unrecognized filter shapes do not universally reduce costs.
         _ => false,
     }
 }
 
+fn shard_reduction_color(shard: ManaCostShard) -> Option<ManaColor> {
+    match shard {
+        ManaCostShard::White => Some(ManaColor::White),
+        ManaCostShard::Blue => Some(ManaColor::Blue),
+        ManaCostShard::Black => Some(ManaColor::Black),
+        ManaCostShard::Red => Some(ManaColor::Red),
+        ManaCostShard::Green => Some(ManaColor::Green),
+        _ => None,
+    }
+}
+
+fn cost_shard_matches_reduction(cost_shard: ManaCostShard, reduction: ManaCostShard) -> bool {
+    shard_reduction_color(reduction).is_some_and(|color| cost_shard.contributes_to(color))
+        || cost_shard == reduction
+}
+
+fn apply_shard_reduction(shards: &mut Vec<ManaCostShard>, reduction: ManaCostShard) {
+    if let Some(index) = shards
+        .iter()
+        .position(|shard| cost_shard_matches_reduction(*shard, reduction))
+    {
+        shards.remove(index);
+    }
+}
+
 /// CR 601.2f: Apply a single cost modification (reduce or raise) to a mana cost.
-/// For ReduceCost, reduces generic mana first (cannot go below 0).
-/// For RaiseCost, increases generic mana.
+/// ReduceCost removes matching mana symbols and generic mana (not below zero).
+/// RaiseCost adds the specified symbols and generic mana.
 fn apply_cost_mod_to_mana(
     mana_cost: &mut ManaCost,
     base_amount: &ManaCost,
     multiplier: u32,
     is_raise: bool,
 ) {
-    // Extract the generic component from the modification amount.
-    // For now, cost modifiers are primarily generic mana (e.g., {1}, {2}).
-    // Colored cost modifications (e.g., {W} more) would need shard-level handling.
-    let mod_generic = match base_amount {
-        ManaCost::Cost { generic, .. } => *generic * multiplier,
+    let (mod_shards, mod_generic) = match base_amount {
+        ManaCost::Cost { shards, generic } => (shards, *generic * multiplier),
         _ => return,
     };
 
-    if mod_generic == 0 {
+    if multiplier == 0 || (mod_generic == 0 && mod_shards.is_empty()) {
         return;
     }
 
-    match mana_cost {
-        ManaCost::Cost { generic, .. } => {
-            if is_raise {
-                *generic += mod_generic;
-            } else {
-                // CR 601.2f: Cost cannot be reduced below {0}.
-                *generic = generic.saturating_sub(mod_generic);
+    if matches!(mana_cost, ManaCost::NoCost) && is_raise {
+        *mana_cost = ManaCost::Cost {
+            shards: vec![],
+            generic: 0,
+        };
+    }
+
+    let ManaCost::Cost { shards, generic } = mana_cost else {
+        return;
+    };
+
+    if is_raise {
+        for _ in 0..multiplier {
+            shards.extend(mod_shards.iter().copied());
+        }
+        *generic += mod_generic;
+    } else {
+        for _ in 0..multiplier {
+            for shard in mod_shards {
+                apply_shard_reduction(shards, *shard);
             }
         }
-        ManaCost::NoCost => {
-            if is_raise {
-                *mana_cost = ManaCost::Cost {
-                    shards: vec![],
-                    generic: mod_generic,
-                };
-            }
-            // Reducing NoCost is a no-op
-        }
-        ManaCost::SelfManaCost => {} // Should not occur here
+        *generic = generic.saturating_sub(mod_generic);
     }
 }
 
@@ -4696,22 +4726,64 @@ pub(crate) use super::casting_costs::{
     handle_discard_for_cost, handle_return_to_hand_for_cost, handle_sacrifice_for_cost,
 };
 
-/// CR 601.2f: Reduce the generic mana component of an ability cost.
-/// Walks Composite costs to find Mana variants. Floors generic at 0.
-fn reduce_generic_in_cost(cost: &mut AbilityCost, amount: u32) {
+fn generic_mana_in_cost(cost: &AbilityCost) -> u32 {
+    match cost {
+        AbilityCost::Mana {
+            cost: ManaCost::Cost { generic, .. },
+        } => *generic,
+        AbilityCost::Composite { costs } => costs.iter().map(generic_mana_in_cost).sum(),
+        _ => 0,
+    }
+}
+
+fn total_mana_in_cost(cost: &AbilityCost) -> u32 {
+    match cost {
+        AbilityCost::Mana {
+            cost: ManaCost::Cost { generic, shards },
+        } => *generic + shards.len() as u32,
+        AbilityCost::Composite { costs } => costs.iter().map(total_mana_in_cost).sum(),
+        _ => 0,
+    }
+}
+
+fn reduce_generic_in_cost_by(cost: &mut AbilityCost, remaining: &mut u32) {
+    if *remaining == 0 {
+        return;
+    }
+
     match cost {
         AbilityCost::Mana {
             cost: ManaCost::Cost { generic, .. },
         } => {
-            *generic = generic.saturating_sub(amount);
+            let reduction = (*generic).min(*remaining);
+            *generic -= reduction;
+            *remaining -= reduction;
         }
         AbilityCost::Composite { costs } => {
             for sub in costs {
-                reduce_generic_in_cost(sub, amount);
+                reduce_generic_in_cost_by(sub, remaining);
             }
         }
         _ => {} // Non-mana costs unaffected
     }
+}
+
+/// CR 601.2f: Reduce generic mana in an ability cost without taking the total
+/// mana in that cost below `minimum_mana`.
+fn reduce_generic_in_cost_with_minimum_mana(
+    cost: &mut AbilityCost,
+    amount: u32,
+    minimum_mana: u32,
+) {
+    let reducible = total_mana_in_cost(cost)
+        .saturating_sub(minimum_mana)
+        .min(generic_mana_in_cost(cost));
+    let mut remaining = amount.min(reducible);
+    reduce_generic_in_cost_by(cost, &mut remaining);
+}
+
+fn reduce_generic_in_cost(cost: &mut AbilityCost, amount: u32) {
+    reduce_generic_in_cost_with_minimum_mana(cost, amount, 0);
 }
 
 /// CR 601.2f: Apply self-referential cost reduction to an ability definition's cost.
@@ -4745,7 +4817,12 @@ fn apply_static_activated_ability_cost_reduction(
     };
 
     for (static_source, def) in super::functioning_abilities::battlefield_active_statics(state) {
-        let StaticMode::ReduceAbilityCost { keyword, amount } = &def.mode else {
+        let StaticMode::ReduceAbilityCost {
+            keyword,
+            amount,
+            minimum_mana,
+        } = &def.mode
+        else {
             continue;
         };
         if keyword != "activated" || *amount == 0 {
@@ -4761,7 +4838,7 @@ fn apply_static_activated_ability_cost_reduction(
         }) {
             continue;
         }
-        reduce_generic_in_cost(cost, *amount);
+        reduce_generic_in_cost_with_minimum_mana(cost, *amount, minimum_mana.unwrap_or(0));
     }
 }
 
@@ -6662,6 +6739,78 @@ mod tests {
     }
 
     #[test]
+    fn morophon_reduces_colored_mana_for_chosen_creature_type() {
+        let mut state = setup_game_at_main_phase();
+        let morophon = create_object(
+            &mut state,
+            CardId(704),
+            PlayerId(0),
+            "Morophon, the Boundless".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&morophon).unwrap();
+            obj.chosen_attributes
+                .push(ChosenAttribute::CreatureType("Elf".to_string()));
+            obj.static_definitions.push(
+                StaticDefinition::new(StaticMode::ReduceCost {
+                    amount: ManaCost::Cost {
+                        generic: 0,
+                        shards: vec![
+                            ManaCostShard::White,
+                            ManaCostShard::Blue,
+                            ManaCostShard::Black,
+                            ManaCostShard::Red,
+                            ManaCostShard::Green,
+                        ],
+                    },
+                    spell_filter: Some(TargetFilter::Typed(
+                        TypedFilter::card().properties(vec![FilterProp::IsChosenCreatureType]),
+                    )),
+                    dynamic_count: None,
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::card().controller(ControllerRef::You),
+                )),
+            );
+        }
+
+        let spell = create_object(
+            &mut state,
+            CardId(705),
+            PlayerId(0),
+            "Elf Sliver".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            obj.card_types.subtypes.push("Elf".to_string());
+            obj.mana_cost = ManaCost::Cost {
+                generic: 2,
+                shards: vec![
+                    ManaCostShard::White,
+                    ManaCostShard::Blue,
+                    ManaCostShard::Black,
+                    ManaCostShard::Red,
+                    ManaCostShard::Green,
+                ],
+            };
+        }
+
+        let mut mana_cost = state.objects.get(&spell).unwrap().mana_cost.clone();
+        apply_battlefield_cost_modifiers(&state, PlayerId(0), spell, &mut mana_cost);
+
+        assert_eq!(
+            mana_cost,
+            ManaCost::Cost {
+                generic: 2,
+                shards: vec![],
+            }
+        );
+    }
+
+    #[test]
     fn activated_ability_cost_reduction_applies_to_matching_permanent_type() {
         let mut state = setup_game_at_main_phase();
         let sam = create_object(
@@ -6680,6 +6829,7 @@ mod tests {
                 StaticDefinition::new(StaticMode::ReduceAbilityCost {
                     keyword: "activated".to_string(),
                     amount: 1,
+                    minimum_mana: None,
                 })
                 .affected(TargetFilter::Typed(TypedFilter {
                     type_filters: vec![TypeFilter::Subtype("Food".to_string())],
@@ -6734,6 +6884,75 @@ mod tests {
         assert!(
             state.stack.iter().any(|entry| entry.source_id == food),
             "Food activation should reach the stack after paying the reduced cost"
+        );
+    }
+
+    #[test]
+    fn activated_ability_cost_reduction_respects_minimum_mana_floor() {
+        let mut state = setup_game_at_main_phase();
+        let training_grounds = create_object(
+            &mut state,
+            CardId(702),
+            PlayerId(0),
+            "Training Grounds".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&training_grounds)
+            .unwrap()
+            .static_definitions
+            .push(
+                StaticDefinition::new(StaticMode::ReduceAbilityCost {
+                    keyword: "activated".to_string(),
+                    amount: 2,
+                    minimum_mana: Some(1),
+                })
+                .affected(TargetFilter::Typed(
+                    TypedFilter::creature().controller(ControllerRef::You),
+                )),
+            );
+
+        let creature = create_object(
+            &mut state,
+            CardId(703),
+            PlayerId(0),
+            "Training Dummy".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&creature).unwrap();
+            obj.card_types.core_types.push(CoreType::Creature);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::GainLife {
+                        amount: QuantityExpr::Fixed { value: 1 },
+                        player: GainLifePlayer::Controller,
+                    },
+                )
+                .cost(AbilityCost::Mana {
+                    cost: ManaCost::generic(2),
+                }),
+            );
+        }
+
+        assert!(
+            !can_activate_ability_now(&state, PlayerId(0), creature, 0),
+            "Training Grounds should not reduce a two-mana activation below one generic mana"
+        );
+
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 1);
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), creature, 0),
+            "one generic mana should pay the floored Training Grounds activation cost"
+        );
+        handle_activate_ability(&mut state, PlayerId(0), creature, 0, &mut Vec::new())
+            .expect("floored activation should be payable with one generic mana");
+
+        assert!(
+            state.stack.iter().any(|entry| entry.source_id == creature),
+            "creature activation should reach the stack after paying the floored cost"
         );
     }
 
@@ -9597,6 +9816,80 @@ mod tests {
                     generic: 0,
                     shards: vec![ManaCostShard::White],
                 }
+            }
+        );
+    }
+
+    #[test]
+    fn reduce_generic_with_minimum_mana_counts_colored_symbols() {
+        let mut cost = AbilityCost::Mana {
+            cost: ManaCost::Cost {
+                generic: 2,
+                shards: vec![ManaCostShard::Green],
+            },
+        };
+        reduce_generic_in_cost_with_minimum_mana(&mut cost, 2, 1);
+        assert_eq!(
+            cost,
+            AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    generic: 0,
+                    shards: vec![ManaCostShard::Green],
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn reduce_generic_with_minimum_mana_keeps_one_generic_when_no_colored_symbols() {
+        let mut cost = AbilityCost::Mana {
+            cost: ManaCost::generic(2),
+        };
+        reduce_generic_in_cost_with_minimum_mana(&mut cost, 2, 1);
+        assert_eq!(
+            cost,
+            AbilityCost::Mana {
+                cost: ManaCost::generic(1),
+            }
+        );
+    }
+
+    #[test]
+    fn cost_reduction_removes_matching_colored_symbols() {
+        let mut cost = ManaCost::Cost {
+            generic: 1,
+            shards: vec![ManaCostShard::White, ManaCostShard::Blue],
+        };
+        let reduction = ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White, ManaCostShard::Blue],
+        };
+        apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+        assert_eq!(
+            cost,
+            ManaCost::Cost {
+                generic: 1,
+                shards: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn colored_cost_reduction_can_remove_hybrid_symbol_once() {
+        let mut cost = ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::WhiteBlue],
+        };
+        let reduction = ManaCost::Cost {
+            generic: 0,
+            shards: vec![ManaCostShard::White, ManaCostShard::Blue],
+        };
+        apply_cost_mod_to_mana(&mut cost, &reduction, 1, false);
+        assert_eq!(
+            cost,
+            ManaCost::Cost {
+                generic: 0,
+                shards: vec![],
             }
         );
     }
