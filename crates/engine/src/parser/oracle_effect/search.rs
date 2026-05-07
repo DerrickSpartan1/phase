@@ -377,6 +377,8 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDet
         }
     };
 
+    let (filter_text, from_top) = parse_seek_from_top_limit(filter_text);
+
     // Extract count: "two nonland cards" → (2, "nonland cards"); "x cards" → (X, "cards").
     // CR 107.3a + CR 601.2b: X resolves to the caster's announced value at cast time.
     let (count, remaining) =
@@ -397,9 +399,36 @@ pub(super) fn parse_seek_details(lower: &str, ctx: &mut ParseContext) -> SeekDet
     SeekDetails {
         filter,
         count,
+        from_top,
         destination,
         enter_tapped,
     }
+}
+
+fn parse_seek_from_top_limit(filter_text: &str) -> (&str, Option<usize>) {
+    fn parse_limit(input: &str) -> Result<(&str, (&str, usize)), nom::Err<OracleError<'_>>> {
+        let (rest, before) =
+            take_until::<_, _, OracleError<'_>>(" from among the top ").parse(input)?;
+        let (rest, _) = tag(" from among the top ").parse(rest)?;
+        let (rest, qty) = nom_quantity::parse_quantity_expr_number(rest)?;
+        let (rest, _) = alt((
+            tag::<_, _, OracleError<'_>>(" cards of your library"),
+            tag(" card of your library"),
+        ))
+        .parse(rest)?;
+        let QuantityExpr::Fixed { value } = qty else {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                rest,
+                nom::error::ErrorKind::Fail,
+            )));
+        };
+        Ok((rest, (before, value.max(0) as usize)))
+    }
+
+    parse_limit(filter_text)
+        .ok()
+        .and_then(|(_, (before, count))| (count > 0).then_some((before, Some(count))))
+        .unwrap_or((filter_text, None))
 }
 
 /// Parse the card type filter from search text like "basic land card, ..."

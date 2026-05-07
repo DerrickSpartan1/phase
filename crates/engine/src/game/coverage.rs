@@ -1813,11 +1813,15 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
         Effect::Seek {
             filter,
             count,
+            from_top,
             destination,
             ..
         } => {
             d.push(("filter".into(), fmt_target(filter)));
             d.push(("count".into(), fmt_quantity(count)));
+            if let Some(from_top) = from_top {
+                d.push(("from_top".into(), from_top.to_string()));
+            }
             if *destination != Zone::Hand {
                 d.push(("to".into(), fmt_zone(destination)));
             }

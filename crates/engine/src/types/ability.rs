@@ -4794,6 +4794,10 @@ pub enum Effect {
         filter: TargetFilter,
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
+        /// Alchemy digital-only: restrict the random selection pool to the
+        /// top N cards of the controller's library before applying `filter`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_top: Option<usize>,
         /// Where the sought card goes. Usually Hand, but some cards put onto Battlefield.
         #[serde(default = "default_zone_hand")]
         destination: Zone,

@@ -18677,6 +18677,7 @@ mod tests {
     fn seek_two_nonland_cards() {
         let details = parse_seek_details("seek two nonland cards", &mut ParseContext::default());
         assert_eq!(details.count, QuantityExpr::Fixed { value: 2 });
+        assert_eq!(details.from_top, None);
         assert_eq!(details.destination, Zone::Hand);
         let TargetFilter::Typed(tf) = &details.filter else {
             panic!("Expected Typed filter, got {:?}", details.filter);
@@ -18685,6 +18686,20 @@ mod tests {
             t,
             TypeFilter::Non(inner) if matches!(inner.as_ref(), TypeFilter::Land)
         )));
+    }
+
+    #[test]
+    fn seek_from_among_top_cards_carries_library_limit() {
+        let details = parse_seek_details(
+            "seek an artifact card from among the top ten cards of your library, then shuffle",
+            &mut ParseContext::default(),
+        );
+        assert_eq!(details.count, QuantityExpr::Fixed { value: 1 });
+        assert_eq!(details.from_top, Some(10));
+        let TargetFilter::Typed(tf) = &details.filter else {
+            panic!("Expected Typed filter, got {:?}", details.filter);
+        };
+        assert!(tf.type_filters.contains(&TypeFilter::Artifact));
     }
 
     #[test]
