@@ -6240,8 +6240,8 @@ mod tests {
     use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
     use crate::types::ability::{
         AbilityCondition, AbilityKind, Comparator, ContinuousModification, ControllerRef,
-        DamageModification, Duration, Effect, FilterProp, PlayerFilter, PlayerScope, PtValue,
-        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter, UnlessCost,
+        DamageModification, Duration, Effect, FilterProp, ObjectScope, PlayerFilter, PlayerScope,
+        PtValue, QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter, UnlessCost,
     };
     use crate::types::counter::{CounterMatch, CounterType};
     use crate::types::replacements::ReplacementEvent;
@@ -7916,6 +7916,36 @@ mod tests {
                 TypedFilter::default().properties(vec![FilterProp::Multicolored])
             ))
         );
+    }
+
+    #[test]
+    fn trigger_mana_cannons_uses_triggering_spell_color_count() {
+        let def = parse_trigger_line(
+            "Whenever you cast a multicolored spell, this enchantment deals X damage to any target, where X is the number of colors that spell is.",
+            "Mana Cannons",
+        );
+        assert_eq!(def.mode, TriggerMode::SpellCast);
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::new(TypeFilter::Card).properties(vec![FilterProp::Multicolored])
+            ))
+        );
+        let execute = def.execute.as_deref().expect("trigger should execute");
+        match execute.effect.as_ref() {
+            Effect::DealDamage { amount, target, .. } => {
+                assert_eq!(*target, TargetFilter::Any);
+                assert_eq!(
+                    *amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectColorCount {
+                            scope: ObjectScope::EventSource
+                        }
+                    }
+                );
+            }
+            other => panic!("expected DealDamage, got {other:?}"),
+        }
     }
 
     #[test]
