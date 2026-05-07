@@ -142,6 +142,18 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
             StaticCondition::HasCityBlessing,
             tag("you have the city's blessing"),
         ),
+        // CR 702.178a / CR 702.179f: Speed conditions.
+        value(
+            StaticCondition::HasMaxSpeed,
+            alt((tag("you have max speed"), tag("have max speed"))),
+        ),
+        map(
+            alt((tag("you don't have max speed"), tag("don't have max speed"))),
+            |_| StaticCondition::Not {
+                condition: Box::new(StaticCondition::HasMaxSpeed),
+            },
+        ),
+        parse_speed_threshold_condition,
         // CR 309.7: Dungeon completion
         value(
             StaticCondition::CompletedADungeon,
@@ -157,6 +169,20 @@ fn parse_player_state_conditions(input: &str) -> OracleResult<'_, StaticConditio
         ),
     ))
     .parse(input)
+}
+
+fn parse_speed_threshold_condition(input: &str) -> OracleResult<'_, StaticCondition> {
+    let (rest, _) = tag("your speed is ").parse(input)?;
+    let (rest, threshold) = parse_number(rest)?;
+    let (rest, _) = tag(" or higher").parse(rest)?;
+    Ok((
+        rest,
+        StaticCondition::SpeedGE {
+            threshold: u8::try_from(threshold).map_err(|_| {
+                nom::Err::Error(nom::error::Error::new(rest, nom::error::ErrorKind::Fail))
+            })?,
+        },
+    ))
 }
 
 fn parse_opponent_poison_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
@@ -2497,6 +2523,17 @@ mod tests {
             }
             other => panic!("expected And(IsPresent, IsPresent), got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_max_speed_conditions() {
+        let (rest, c) = parse_inner_condition("you have max speed").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::HasMaxSpeed);
+
+        let (rest, c) = parse_inner_condition("your speed is 2 or higher").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(c, StaticCondition::SpeedGE { threshold: 2 });
     }
 
     #[test]

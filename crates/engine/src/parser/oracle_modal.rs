@@ -1,17 +1,18 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::tag;
-use nom::combinator::value;
+use nom::combinator::{opt, value};
+use nom::sequence::preceded;
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ModalChoice, ModalSelectionCondition,
-    ModalSelectionConstraint,
+    AbilityDefinition, AbilityKind, Effect, ModalChoice, ModalSelectionConstraint, StaticCondition,
 };
 
 use super::oracle::find_activated_colon;
 use super::oracle_effect::{parse_effect_chain, parse_effect_chain_with_context};
 use super::oracle_ir::context::ParseContext;
+use super::oracle_nom::condition as nom_condition;
 use super::oracle_nom::primitives::{self as nom_primitives, scan_preceded};
 use super::oracle_util::{parse_mana_symbols, strip_reminder_text};
 use crate::parser::oracle_ir::ast::{ModalHeaderAst, ModeAst, OracleBlockAst};
@@ -219,7 +220,7 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         return None;
     }
 
-    let (min_choices, max_choices) = parse_modal_choose_count(&text.to_lowercase());
+    let (min_choices, max_choices) = parse_modal_choose_count(&header_lower);
     let mut allow_repeat_modes = false;
     let mut constraints = Vec::new();
 
@@ -232,13 +233,10 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
         constraints.push(ModalSelectionConstraint::NoRepeatThisGame);
     }
 
-    if parse_commander_conditional_choose_both(&text.to_lowercase()).is_ok() {
-        constraints.push(ModalSelectionConstraint::ConditionalMaxChoices {
-            condition: ModalSelectionCondition::ControlsCommander,
-            max_choices: 2,
-            otherwise_max_choices: 1,
-        });
-    }
+    constraints.extend(parse_conditional_modal_max_constraints(
+        &text.to_lowercase(),
+        max_choices,
+    ));
 
     for sentence in sentences.iter().skip(1) {
         let lower = sentence.to_lowercase();
@@ -260,15 +258,64 @@ pub(crate) fn parse_modal_header_ast(text: &str) -> Option<ModalHeaderAst> {
     })
 }
 
-fn parse_commander_conditional_choose_both(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
-    let (rest, _) = tag("choose one.").parse(input.trim())?;
+fn parse_conditional_modal_max_constraints(
+    input: &str,
+    otherwise_max_choices: usize,
+) -> Vec<ModalSelectionConstraint> {
+    match parse_conditional_modal_max(input.trim()) {
+        Ok(("", (condition, max_choices))) => {
+            vec![ModalSelectionConstraint::ConditionalMaxChoices {
+                condition,
+                max_choices,
+                otherwise_max_choices,
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn parse_conditional_modal_max(
+    input: &str,
+) -> nom::IResult<&str, (StaticCondition, usize), OracleError<'_>> {
+    let (rest, _) = parse_modal_base_sentence(input)?;
     let (rest, _) = tag(" if ").parse(rest)?;
-    let (rest, _) = tag("you control a commander").parse(rest)?;
-    let (rest, _) = nom::combinator::opt(tag(" as you cast this spell")).parse(rest)?;
+    let (rest, condition) = parse_modal_condition(rest)?;
     let (rest, _) = tag(",").parse(rest)?;
-    let (rest, _) = tag(" you may ").parse(rest)?;
-    let (rest, _) = tag("choose both instead").parse(rest)?;
+    let (rest, _) = tag(" ").parse(rest)?;
+    let (rest, _) = opt(tag("you may ")).parse(rest)?;
+    let (rest, max_choices) = parse_modal_override_count(rest)?;
+    let (rest, _) = opt(tag(".")).parse(rest)?;
+    Ok((rest, (condition, max_choices)))
+}
+
+fn parse_modal_base_sentence(input: &str) -> nom::IResult<&str, (), OracleError<'_>> {
+    let (rest, _) = alt((
+        tag("choose one."),
+        tag("choose two."),
+        tag("choose three."),
+        tag("choose one or both."),
+        tag("choose one or more."),
+        tag("choose any number of."),
+    ))
+    .parse(input)?;
     Ok((rest, ()))
+}
+
+fn parse_modal_condition(input: &str) -> nom::IResult<&str, StaticCondition, OracleError<'_>> {
+    let (rest, condition) = nom_condition::parse_inner_condition(input)?;
+    let (rest, _) = opt(tag(" as you cast this spell")).parse(rest)?;
+    Ok((rest, condition))
+}
+
+fn parse_modal_override_count(input: &str) -> nom::IResult<&str, usize, OracleError<'_>> {
+    alt((
+        value(2, tag("choose both instead")),
+        value(2, tag("choose two instead")),
+        value(3, tag("choose three instead")),
+        value(usize::MAX, tag("choose any number instead")),
+        value(usize::MAX, tag("choose one or more instead")),
+    ))
+    .parse(input)
 }
 
 fn split_triggered_modal_header(line: &str) -> Option<(String, String)> {
@@ -672,7 +719,6 @@ pub(super) fn extract_ability_word_reminder_body(raw: &str) -> Option<String> {
 /// Scan for modal count override phrases at word boundaries using nom combinators.
 /// Returns (min_choices, max_choices) for matching phrases.
 fn scan_modal_count_override(text: &str) -> Option<(usize, usize)> {
-    use nom::sequence::preceded;
     super::oracle_nom::primitives::scan_at_word_boundaries(text, |input| {
         alt((
             value(

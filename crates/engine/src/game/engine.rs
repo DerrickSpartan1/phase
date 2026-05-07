@@ -3033,7 +3033,8 @@ pub(super) fn begin_pending_trigger_target_selection(
     // CR 700.2a: Modal trigger — prompt for mode selection before stack.
     if let Some(ref modal) = trigger.modal {
         if !trigger.mode_abilities.is_empty() {
-            let modal = modal_choice_for_player(state, trigger.controller, modal);
+            let modal =
+                modal_choice_for_player(state, trigger.controller, trigger.source_id, modal);
             let unavailable_modes = compute_unavailable_modes(state, trigger.source_id, &modal);
 
             // CR 700.2: All modes already chosen — ability cannot be put on the stack
@@ -8219,8 +8220,8 @@ mod trigger_target_tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, ControllerRef, Effect, GainLifePlayer, ModalChoice,
-        ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr, ResolvedAbility,
-        TargetFilter, TargetRef, TypedFilter,
+        ModalSelectionConstraint, QuantityExpr, ResolvedAbility, StaticCondition, TargetFilter,
+        TargetRef, TypedFilter,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::TargetSelectionConstraint;
@@ -8667,7 +8668,7 @@ mod trigger_target_tests {
                     "Put a counter.".to_string(),
                 ],
                 constraints: vec![ModalSelectionConstraint::ConditionalMaxChoices {
-                    condition: ModalSelectionCondition::ControlsCommander,
+                    condition: StaticCondition::ControlsCommander,
                     max_choices: 2,
                     otherwise_max_choices: 1,
                 }],

@@ -2830,7 +2830,8 @@ fn continue_with_prepared(
         // CR 601.2c: The player announcing a spell with modes chooses the mode(s).
         if let Some(ref modal_choice) = prepared.modal {
             // Cap max_choices to actual mode count
-            let mut capped = modal_choice_for_player(state, player, modal_choice);
+            let mut capped =
+                modal_choice_for_player(state, player, prepared.object_id, modal_choice);
             capped.max_choices = capped.max_choices.min(capped.mode_count);
             let target_constraints = target_constraints_from_modal(&capped);
 
@@ -4493,7 +4494,7 @@ pub fn handle_activate_ability(
     // CR 602.2b: Announce → choose modes → choose targets → pay costs.
     // Modal detection must happen BEFORE cost payment.
     if let Some(ref modal) = ability_def.modal {
-        let modal = modal_choice_for_player(state, player, modal);
+        let modal = modal_choice_for_player(state, player, source_id, modal);
         // Pre-validate tap cost for modals — fail fast before presenting the choice
         if ability_def.cost.as_ref().is_some_and(requires_untapped) {
             let obj = state.objects.get(&source_id).unwrap();
@@ -5267,9 +5268,9 @@ mod tests {
     use crate::types::ability::{
         ActivationRestriction, BasicLandType, CastVariantPaid, CastingPermission, ChosenAttribute,
         ChosenSubtypeKind, ContinuousModification, ControllerRef, FilterProp, GainLifePlayer,
-        GameRestriction, ManaContribution, ManaProduction, ModalSelectionCondition,
-        ModalSelectionConstraint, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope,
-        SearchSelectionConstraint, StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        GameRestriction, ManaContribution, ManaProduction, ModalSelectionConstraint, QuantityExpr,
+        RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition,
+        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -8931,7 +8932,7 @@ mod tests {
             modal
                 .constraints
                 .push(ModalSelectionConstraint::ConditionalMaxChoices {
-                    condition: ModalSelectionCondition::ControlsCommander,
+                    condition: StaticCondition::ControlsCommander,
                     max_choices: 2,
                     otherwise_max_choices: 1,
                 });
@@ -8961,7 +8962,7 @@ mod tests {
             modal
                 .constraints
                 .push(ModalSelectionConstraint::ConditionalMaxChoices {
-                    condition: ModalSelectionCondition::ControlsCommander,
+                    condition: StaticCondition::ControlsCommander,
                     max_choices: 2,
                     otherwise_max_choices: 1,
                 });
@@ -8974,6 +8975,92 @@ mod tests {
             Zone::Battlefield,
         );
         state.objects.get_mut(&commander_id).unwrap().is_commander = true;
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(50), &mut events).unwrap();
+
+        match result {
+            WaitingFor::ModeChoice { modal, .. } => {
+                assert_eq!(modal.max_choices, 2);
+            }
+            other => panic!("expected ModeChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conditional_static_modal_caps_modes_when_condition_false() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_modal_charm(&mut state, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            let modal = obj.modal.as_mut().unwrap();
+            modal.max_choices = 2;
+            modal
+                .constraints
+                .push(ModalSelectionConstraint::ConditionalMaxChoices {
+                    condition: StaticCondition::IsPresent {
+                        filter: Some(TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: Some(ControllerRef::You),
+                            properties: vec![],
+                        })),
+                    },
+                    max_choices: 2,
+                    otherwise_max_choices: 1,
+                });
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+
+        let mut events = Vec::new();
+        let result =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(50), &mut events).unwrap();
+
+        match result {
+            WaitingFor::ModeChoice { modal, .. } => {
+                assert_eq!(modal.max_choices, 1);
+            }
+            other => panic!("expected ModeChoice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conditional_static_modal_allows_extra_mode_when_condition_true() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_modal_charm(&mut state, PlayerId(0));
+        {
+            let obj = state.objects.get_mut(&obj_id).unwrap();
+            let modal = obj.modal.as_mut().unwrap();
+            modal.max_choices = 2;
+            modal
+                .constraints
+                .push(ModalSelectionConstraint::ConditionalMaxChoices {
+                    condition: StaticCondition::IsPresent {
+                        filter: Some(TargetFilter::Typed(TypedFilter {
+                            type_filters: vec![TypeFilter::Creature],
+                            controller: Some(ControllerRef::You),
+                            properties: vec![],
+                        })),
+                    },
+                    max_choices: 2,
+                    otherwise_max_choices: 1,
+                });
+        }
+        let creature_id = create_object(
+            &mut state,
+            CardId(99),
+            PlayerId(0),
+            "Condition Creature".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature_id)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
         add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
 
         let mut events = Vec::new();

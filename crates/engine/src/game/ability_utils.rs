@@ -1,7 +1,7 @@
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ControllerRef, Effect, ModalChoice,
-    ModalSelectionConstraint, QuantityExpr, QuantityRef, ResolvedAbility, TargetFilter, TargetRef,
-    TypeFilter, TypedFilter,
+    ModalSelectionConstraint, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition,
+    TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::game_state::{
     GameState, TargetSelectionConstraint, TargetSelectionProgress, TargetSelectionSlot,
@@ -139,6 +139,7 @@ pub fn target_constraints_from_modal(modal: &ModalChoice) -> Vec<TargetSelection
 pub fn modal_choice_for_player(
     state: &GameState,
     player: crate::types::player::PlayerId,
+    source_id: ObjectId,
     modal: &ModalChoice,
 ) -> ModalChoice {
     let mut effective = modal.clone();
@@ -149,7 +150,7 @@ pub fn modal_choice_for_player(
             otherwise_max_choices,
         } = constraint
         {
-            let cap = if modal_selection_condition_matches(state, player, condition) {
+            let cap = if modal_selection_condition_matches(state, player, source_id, condition) {
                 *max_choices
             } else {
                 *otherwise_max_choices
@@ -163,13 +164,10 @@ pub fn modal_choice_for_player(
 fn modal_selection_condition_matches(
     state: &GameState,
     player: crate::types::player::PlayerId,
-    condition: &crate::types::ability::ModalSelectionCondition,
+    source_id: ObjectId,
+    condition: &StaticCondition,
 ) -> bool {
-    match condition {
-        crate::types::ability::ModalSelectionCondition::ControlsCommander => {
-            super::commander::controls_commander(state, player)
-        }
-    }
+    super::layers::evaluate_condition(state, condition, player, source_id)
 }
 
 /// Returns mode indices unavailable due to NoRepeatThisTurn/NoRepeatThisGame constraints.

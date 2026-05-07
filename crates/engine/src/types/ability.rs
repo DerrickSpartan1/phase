@@ -5942,7 +5942,7 @@ pub enum ModalSelectionConstraint {
     /// CR 601.2b / CR 700.2a: A conditional casting-time modifier to the
     /// maximum number of modes the controller may choose.
     ConditionalMaxChoices {
-        condition: ModalSelectionCondition,
+        condition: StaticCondition,
         max_choices: usize,
         otherwise_max_choices: usize,
     },
@@ -5952,13 +5952,6 @@ pub enum ModalSelectionConstraint {
     /// CR 700.2: Each mode may only be chosen once total for this source.
     /// Oracle text: "choose one that hasn't been chosen"
     NoRepeatThisGame,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum ModalSelectionCondition {
-    /// CR 903.3d: True when the spell's controller controls a commander permanent.
-    ControlsCommander,
 }
 
 /// Structured activation-time restrictions parsed from Oracle text.

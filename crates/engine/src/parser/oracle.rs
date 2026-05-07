@@ -3261,11 +3261,10 @@ mod tests {
     use crate::parser::oracle_effect::parse_effect_chain;
     use crate::types::ability::{
         AbilityCondition, AggregateFunction, Comparator, ContinuousModification, ControllerRef,
-        FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionCondition,
-        ModalSelectionConstraint, ObjectScope, ParsedCondition, PlayerFilter, PlayerScope,
-        PreventionAmount, PtValue, QuantityExpr, QuantityRef, ReplacementCondition, RoundingMode,
-        SharedQuality, SharedQualityRelation, ShieldKind, StaticCondition, TargetFilter,
-        TypeFilter, TypedFilter,
+        FilterProp, ManaProduction, ManaSpendRestriction, ModalSelectionConstraint, ObjectScope,
+        ParsedCondition, PlayerFilter, PlayerScope, PreventionAmount, PtValue, QuantityExpr,
+        QuantityRef, ReplacementCondition, RoundingMode, SharedQuality, SharedQualityRelation,
+        ShieldKind, StaticCondition, TargetFilter, TypeFilter, TypedFilter,
     };
     use crate::types::keywords::{FlashbackCost, KeywordKind, WardCost};
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
@@ -5080,12 +5079,12 @@ mod tests {
         );
         let modal = r.modal.expect("should have modal metadata");
         assert_eq!(modal.min_choices, 1);
-        assert_eq!(modal.max_choices, 2);
+        assert_eq!(modal.max_choices, 1);
         assert_eq!(modal.mode_count, 2);
         assert_eq!(
             modal.constraints,
             vec![ModalSelectionConstraint::ConditionalMaxChoices {
-                condition: ModalSelectionCondition::ControlsCommander,
+                condition: StaticCondition::ControlsCommander,
                 max_choices: 2,
                 otherwise_max_choices: 1,
             }]
@@ -5108,6 +5107,56 @@ mod tests {
     }
 
     #[test]
+    fn conditional_modal_max_reuses_static_condition_parser() {
+        let r = parse(
+            "Choose one. If you control a Wizard as you cast this spell, you may choose two instead.\n• Target player draws two cards.\n• Destroy target artifact.\n• ~ deals 5 damage to target creature.",
+            "Flame Test",
+            &[],
+            &["Instant"],
+            &[],
+        );
+        let modal = r.modal.expect("should have modal metadata");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 1);
+        assert_eq!(modal.mode_count, 3);
+        assert_eq!(modal.constraints.len(), 1);
+        assert!(matches!(
+            modal.constraints[0],
+            ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: StaticCondition::IsPresent { .. },
+                max_choices: 2,
+                otherwise_max_choices: 1,
+            }
+        ));
+        assert!(r.parse_warnings.is_empty());
+    }
+
+    #[test]
+    fn conditional_modal_max_supports_compound_presence_conditions() {
+        let r = parse(
+            "Choose one. If you control an artifact and an enchantment as you cast this spell, you may choose both instead.\n• Exile target creature or planeswalker.\n• Return target creature or planeswalker card from your graveyard to your hand.",
+            "Soul Test",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        let modal = r.modal.expect("should have modal metadata");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 1);
+        assert_eq!(modal.mode_count, 2);
+        assert_eq!(modal.constraints.len(), 1);
+        assert!(matches!(
+            modal.constraints[0],
+            ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: StaticCondition::And { .. },
+                max_choices: 2,
+                otherwise_max_choices: 1,
+            }
+        ));
+        assert!(r.parse_warnings.is_empty());
+    }
+
+    #[test]
     fn ability_word_modal_block_strips_prefix_before_modal_parse() {
         let r = parse(
             "Delirium — Choose one. If there are four or more card types among cards in your graveyard, choose both instead.\n• Draw a card.\n• Gain 3 life.",
@@ -5118,8 +5167,9 @@ mod tests {
         );
         let modal = r.modal.expect("should have modal metadata");
         assert_eq!(modal.min_choices, 1);
-        assert_eq!(modal.max_choices, 2);
+        assert_eq!(modal.max_choices, 1);
         assert_eq!(modal.mode_count, 2);
+        assert_eq!(modal.constraints.len(), 1);
         assert!(matches!(
             *r.abilities[0].effect,
             Effect::Draw {
@@ -5356,12 +5406,12 @@ mod tests {
             .expect("trigger should have execute");
         let modal = execute.modal.as_ref().expect("execute should be modal");
         assert_eq!(modal.min_choices, 1);
-        assert_eq!(modal.max_choices, 2);
+        assert_eq!(modal.max_choices, 1);
         assert_eq!(modal.mode_count, 2);
         assert_eq!(
             modal.constraints,
             vec![ModalSelectionConstraint::ConditionalMaxChoices {
-                condition: ModalSelectionCondition::ControlsCommander,
+                condition: StaticCondition::ControlsCommander,
                 max_choices: 2,
                 otherwise_max_choices: 1,
             }]
