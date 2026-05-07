@@ -7658,6 +7658,80 @@ mod tests {
     }
 
     #[test]
+    fn required_sacrifice_land_additional_cost_prompts_before_stack() {
+        let mut state = setup_game_at_main_phase();
+        let spell = create_object(
+            &mut state,
+            CardId(236),
+            PlayerId(0),
+            "Harrow".to_string(),
+            Zone::Hand,
+        );
+        {
+            let obj = state.objects.get_mut(&spell).unwrap();
+            obj.card_types.core_types.push(CoreType::Instant);
+            obj.mana_cost = ManaCost::Cost {
+                shards: vec![ManaCostShard::Green],
+                generic: 2,
+            };
+            obj.additional_cost = Some(AdditionalCost::Required(AbilityCost::Sacrifice {
+                target: TargetFilter::Typed(TypedFilter::new(TypeFilter::Land)),
+                count: 1,
+            }));
+            Arc::make_mut(&mut obj.abilities).push(AbilityDefinition::new(
+                AbilityKind::Spell,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ));
+        }
+        let land = create_object(
+            &mut state,
+            CardId(237),
+            PlayerId(0),
+            "Forest".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&land).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            obj.card_types.subtypes.push("Forest".to_string());
+        }
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 2);
+
+        let waiting =
+            handle_cast_spell(&mut state, PlayerId(0), spell, CardId(236), &mut Vec::new())
+                .expect("Harrow-style spell should reach sacrifice-cost choice");
+        state.waiting_for = waiting;
+
+        match &state.waiting_for {
+            WaitingFor::SacrificeForCost {
+                player,
+                count,
+                permanents,
+                ..
+            } => {
+                assert_eq!(*player, PlayerId(0));
+                assert_eq!(*count, 1);
+                assert_eq!(permanents, &vec![land]);
+            }
+            other => panic!("expected SacrificeForCost, got {other:?}"),
+        }
+
+        crate::game::engine::apply_as_current(
+            &mut state,
+            GameAction::SelectCards { cards: vec![land] },
+        )
+        .expect("selected land should be sacrificed and spell cast");
+
+        assert_eq!(state.objects[&land].zone, Zone::Graveyard);
+        assert_eq!(state.stack.len(), 1);
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+    }
+
+    #[test]
     fn sorcery_speed_rejects_during_opponent_turn() {
         let mut state = setup_game_at_main_phase();
         state.active_player = PlayerId(1); // Opponent's turn
