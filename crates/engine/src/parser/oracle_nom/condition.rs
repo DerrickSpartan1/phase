@@ -924,24 +924,76 @@ fn inject_controller_you(filter: TargetFilter) -> TargetFilter {
     }
 }
 
-/// CR 119: Parse "your life total is N or less/greater" and
-/// "your life total is [comparator] [quantity]" conditions. Fractional RHS
-/// quantities such as "half your starting life total" compose through
-/// `parse_quantity` (CR 107.1a). Note: "you have N or more life" is handled by
-/// `parse_you_have_conditions`.
+/// CR 102.2 + CR 102.3: Recognize opponent possessive prefixes. Shared
+/// combinator used by zone-count parsing and life-total condition parsing.
+fn parse_opponent_possessive(input: &str) -> OracleResult<'_, ()> {
+    value(
+        (),
+        alt((
+            tag::<_, _, OracleError<'_>>("an opponent's "),
+            tag("opponent's "),
+            tag("opponents' "),
+            tag("opponents "),
+            tag("each opponent's "),
+        )),
+    )
+    .parse(input)
+}
+
+/// Scope kind parsed from the possessive prefix, before the comparator
+/// determines the aggregate function for existential semantics.
+#[derive(Debug, Clone, Copy)]
+enum LifeTotalScope {
+    Controller,
+    AllPlayers,
+    Opponent,
+}
+
+/// CR 119: Parse "your/a player's/an opponent's life total is [comparator]
+/// [quantity]" conditions. Fractional RHS quantities such as "half your
+/// starting life total" compose through `parse_quantity` (CR 107.1a).
+/// Note: "you have N or more life" is handled by `parse_you_have_conditions`.
 fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
-    let (rest, _) = tag("your life total is ").parse(input)?;
+    // Stage A: parse possessive prefix → scope kind (aggregate TBD).
+    let (rest, scope) = alt((
+        value(
+            LifeTotalScope::Controller,
+            tag::<_, _, OracleError<'_>>("your life total is "),
+        ),
+        // CR 119 + CR 102.1: Life total comparison across all players (existential).
+        value(LifeTotalScope::AllPlayers, tag("a player's life total is ")),
+        // CR 119 + CR 102.2: Life total comparison across opponents (existential).
+        |i| {
+            let (rest, _) = parse_opponent_possessive(i)?;
+            let (rest, _) = tag("life total is ").parse(rest)?;
+            Ok((rest, LifeTotalScope::Opponent))
+        },
+    ))
+    .parse(input)?;
+
+    // Stage B: parse comparator, then couple aggregate to comparator direction.
+    // LE/LT → Min (min ≤ X ⟹ ∃ player with life ≤ X).
+    // GE/GT → Max (max ≥ X ⟹ ∃ player with life ≥ X).
+    let build_player = |scope: LifeTotalScope, comparator: Comparator| -> PlayerScope {
+        match scope {
+            LifeTotalScope::Controller => PlayerScope::Controller,
+            LifeTotalScope::AllPlayers => PlayerScope::AllPlayers {
+                aggregate: existential_aggregate(comparator),
+            },
+            LifeTotalScope::Opponent => PlayerScope::Opponent {
+                aggregate: existential_aggregate(comparator),
+            },
+        }
+    };
 
     if let Ok((rest, comparator)) = parse_life_total_comparator(rest) {
-        // Comparator phrases and numeric "N or less/greater" phrases are disjoint:
-        // after matching a comparator, an unparseable RHS should be a hard parser error.
         let (rest, rhs) = nom_quantity::parse_quantity(rest)?;
         return Ok((
             rest,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::LifeTotal {
-                        player: PlayerScope::Controller,
+                        player: build_player(scope, comparator),
                     },
                 },
                 comparator,
@@ -951,14 +1003,13 @@ fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
     }
 
     let (rest, n) = parse_number(rest)?;
-    // Try "or less" then "or greater"
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>(" or less").parse(rest) {
         return Ok((
             rest,
             StaticCondition::QuantityComparison {
                 lhs: QuantityExpr::Ref {
                     qty: QuantityRef::LifeTotal {
-                        player: PlayerScope::Controller,
+                        player: build_player(scope, Comparator::LE),
                     },
                 },
                 comparator: Comparator::LE,
@@ -972,13 +1023,28 @@ fn parse_life_conditions(input: &str) -> OracleResult<'_, StaticCondition> {
         StaticCondition::QuantityComparison {
             lhs: QuantityExpr::Ref {
                 qty: QuantityRef::LifeTotal {
-                    player: PlayerScope::Controller,
+                    player: build_player(scope, Comparator::GE),
                 },
             },
             comparator: Comparator::GE,
             rhs: QuantityExpr::Fixed { value: n as i32 },
         },
     ))
+}
+
+/// Existential aggregate: for "any X satisfies comparator threshold",
+/// LE/LT need Min (min ≤ threshold ⟹ ∃), GE/GT need Max (max ≥ threshold ⟹ ∃).
+/// EQ/NE have no single-aggregate existential encoding — unreachable from
+/// `parse_life_total_comparator` which only produces LT/LE/GT/GE.
+fn existential_aggregate(comparator: Comparator) -> AggregateFunction {
+    match comparator {
+        Comparator::LE | Comparator::LT => AggregateFunction::Min,
+        Comparator::GE | Comparator::GT => AggregateFunction::Max,
+        Comparator::EQ | Comparator::NE => unreachable!(
+            "EQ/NE have no single-aggregate existential encoding; \
+             parse_life_total_comparator never produces them"
+        ),
+    }
 }
 
 /// CR 119: Comparator phrase for current life total checks. Longest
@@ -1973,14 +2039,7 @@ fn parse_scoped_zone_count_ref(input: &str) -> OracleResult<'_, (ZoneRef, CountS
             Ok((rest, (zone, CountScope::Controller)))
         },
         |i| {
-            let (rest, _) = alt((
-                tag("an opponent's "),
-                tag("opponent's "),
-                tag("opponents' "),
-                tag("opponents "),
-                tag("each opponent's "),
-            ))
-            .parse(i)?;
+            let (rest, _) = parse_opponent_possessive(i)?;
             let (rest, zone) = parse_zone_count_ref(rest)?;
             Ok((rest, (zone, CountScope::Opponents)))
         },
@@ -3438,6 +3497,128 @@ mod tests {
                 panic!("expected LifeTotal LE DivideRounded(StartingLifeTotal), got {other:?}")
             }
         }
+    }
+
+    #[test]
+    fn test_a_players_life_total_le_half_their_starting() {
+        let (rest, c) = parse_inner_condition(
+            "a player's life total is less than or equal to half their starting life total",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player:
+                                    PlayerScope::AllPlayers {
+                                        aggregate: AggregateFunction::Min,
+                                    },
+                            },
+                    },
+                comparator: Comparator::LE,
+                rhs:
+                    QuantityExpr::DivideRounded {
+                        inner,
+                        divisor: 2,
+                        rounding: RoundingMode::Down,
+                    },
+            } => {
+                assert!(matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::StartingLifeTotal
+                    }
+                ));
+            }
+            other => {
+                panic!(
+                    "expected AllPlayers(Min) LE DivideRounded(StartingLifeTotal), got {other:?}"
+                )
+            }
+        }
+    }
+
+    #[test]
+    fn test_an_opponents_life_total_lt_half_their_starting() {
+        let (rest, c) = parse_inner_condition(
+            "an opponent's life total is less than half their starting life total",
+        )
+        .unwrap();
+        assert_eq!(rest, "");
+        match c {
+            StaticCondition::QuantityComparison {
+                lhs:
+                    QuantityExpr::Ref {
+                        qty:
+                            QuantityRef::LifeTotal {
+                                player:
+                                    PlayerScope::Opponent {
+                                        aggregate: AggregateFunction::Min,
+                                    },
+                            },
+                    },
+                comparator: Comparator::LT,
+                rhs:
+                    QuantityExpr::DivideRounded {
+                        inner,
+                        divisor: 2,
+                        rounding: RoundingMode::Down,
+                    },
+            } => {
+                assert!(matches!(
+                    inner.as_ref(),
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::StartingLifeTotal
+                    }
+                ));
+            }
+            other => {
+                panic!("expected Opponent(Min) LT DivideRounded(StartingLifeTotal), got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn test_a_players_life_total_n_or_less() {
+        let (rest, c) = parse_inner_condition("a player's life total is 5 or less").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::AllPlayers {
+                            aggregate: AggregateFunction::Min,
+                        },
+                    },
+                },
+                comparator: Comparator::LE,
+                rhs: QuantityExpr::Fixed { value: 5 },
+            }
+        );
+    }
+
+    #[test]
+    fn test_an_opponents_life_total_n_or_greater() {
+        let (rest, c) = parse_inner_condition("an opponent's life total is 10 or greater").unwrap();
+        assert_eq!(rest, "");
+        assert_eq!(
+            c,
+            StaticCondition::QuantityComparison {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::LifeTotal {
+                        player: PlayerScope::Opponent {
+                            aggregate: AggregateFunction::Max,
+                        },
+                    },
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 10 },
+            }
+        );
     }
 
     #[test]

@@ -1197,11 +1197,15 @@ fn parse_life_gained_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     .parse(input)
 }
 
-/// Parse "your starting life total".
+/// CR 103.4: Parse "your/their starting life total". Format-global constant —
+/// "their" is grammatically anaphoric to "a player" but resolves identically.
 fn parse_starting_life_ref(input: &str) -> OracleResult<'_, QuantityRef> {
     value(
         QuantityRef::StartingLifeTotal,
-        tag("your starting life total"),
+        alt((
+            tag::<_, _, OracleError<'_>>("your starting life total"),
+            tag("their starting life total"),
+        )),
     )
     .parse(input)
 }
@@ -2594,6 +2598,13 @@ mod tests {
                 }
             }
         );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn test_parse_their_starting_life_total() {
+        let (rest, q) = parse_quantity_ref("their starting life total").unwrap();
+        assert_eq!(q, QuantityRef::StartingLifeTotal);
         assert_eq!(rest, "");
     }
 
