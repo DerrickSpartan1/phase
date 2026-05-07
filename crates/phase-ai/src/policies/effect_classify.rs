@@ -99,6 +99,7 @@ pub(crate) fn effect_polarity(effect: &Effect) -> EffectPolarity {
         Effect::Proliferate => EffectPolarity::Contextual,
         // CR 701.10a: Doubling base P/T on a filter set is beneficial to that set.
         Effect::DoublePTAll { .. } => EffectPolarity::Beneficial,
+        Effect::SkipNextTurn { .. } | Effect::SkipNextStep { .. } => EffectPolarity::Contextual,
         Effect::Regenerate { .. }
         | Effect::PreventDamage { .. }
         | Effect::Animate { .. }
@@ -208,6 +209,7 @@ pub(crate) fn extract_target_filter(effect: &Effect) -> Option<&TargetFilter> {
         | Effect::GivePlayerCounter { target, .. }
         | Effect::BecomeCopy { target, .. }
         | Effect::ExtraTurn { target, .. }
+        | Effect::SkipNextStep { target, .. }
         | Effect::MoveCounters { target, .. } => Some(target),
         // GenericEffect and LoseLife have Option<TargetFilter>
         Effect::GenericEffect { target, .. } | Effect::LoseLife { target, .. } => {

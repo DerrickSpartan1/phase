@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use nom::branch::alt;
-use nom::bytes::complete::{tag, take_till};
+use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::combinator::{opt, value};
 use nom::multi::many0;
 use nom::Parser;
@@ -11,6 +11,7 @@ use crate::types::ability::{
     SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::Supertype;
+use crate::types::counter::CounterType;
 use crate::types::identifiers::TrackedSetId;
 use crate::types::keywords::{Keyword, KeywordKind};
 use crate::types::mana::ManaColor;
@@ -305,6 +306,26 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         return (TargetFilter::Any, rest);
     }
 
+    // CR 610.3 / CR 406.6: linked exile and counter-marked exile phrases are
+    // more specific than the generic "all <type phrase>" parser below.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("each card exiled with ~"),
+        tag("each card exiled with it"),
+        tag("all cards exiled with ~"),
+        tag("all cards exiled with it"),
+        tag("all cards they own exiled with ~"),
+        tag("all cards they own exiled with it"),
+        tag("cards exiled with ~"),
+        tag("cards exiled with it"),
+    ))
+    .parse(lower.as_str())
+    {
+        return (
+            TargetFilter::ExiledBySource,
+            &text[lower.len() - rest.len()..],
+        );
+    }
+
     // "all " + type phrase
     if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("all ").parse(lower.as_str()) {
         let (filter, rest) = parse_type_phrase_with_ctx(&text[lower.len() - rest.len()..], ctx);
@@ -584,9 +605,19 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         }
     }
 
-    // CR 610.3: "each card exiled with ~" / "each card exiled with this <type>"
-    if let Ok((rest, _)) =
-        tag::<_, _, OracleError<'_>>("each card exiled with ~").parse(lower.as_str())
+    // CR 610.3 / CR 406.6: "each card exiled with this <type>" is a linked-
+    // object reference to cards exiled by this source.
+    if let Ok((rest, _)) = alt((
+        tag::<_, _, OracleError<'_>>("each card exiled with ~"),
+        tag("each card exiled with it"),
+        tag("all cards exiled with ~"),
+        tag("all cards exiled with it"),
+        tag("all cards they own exiled with ~"),
+        tag("all cards they own exiled with it"),
+        tag("cards exiled with ~"),
+        tag("cards exiled with it"),
+    ))
+    .parse(lower.as_str())
     {
         return (
             TargetFilter::ExiledBySource,
@@ -663,11 +694,33 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         return (filter, rest);
     }
 
-    // "cards exiled with ~" / "cards exiled with this <type>"
-    if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("cards exiled with ~").parse(lower.as_str())
+    // "exiled cards with [counter] counters on them" — linked only by the
+    // counter marker, not by source. Keep the target narrowed to exile plus
+    // the counter type instead of falling back to Any.
+    if let Ok((rest, counter_type)) = alt((
+        (
+            tag::<_, _, OracleError<'_>>("exiled cards with "),
+            nom_primitives::parse_counter_type_typed,
+            tag(" on them"),
+        )
+            .map(|(_, counter_type, _)| counter_type),
+        (
+            tag("exiled cards with "),
+            take_till1::<_, _, OracleError<'_>>(|c: char| c.is_whitespace()),
+            tag(" counters on them"),
+        )
+            .map(|(_, counter_name, _)| CounterType::Generic(counter_name.to_string())),
+    ))
+    .parse(lower.as_str())
     {
         return (
-            TargetFilter::ExiledBySource,
+            TargetFilter::Typed(TypedFilter::card().properties(vec![
+                FilterProp::InZone { zone: Zone::Exile },
+                FilterProp::CountersGE {
+                    counter_type,
+                    count: QuantityExpr::Fixed { value: 1 },
+                },
+            ])),
             &text[lower.len() - rest.len()..],
         );
     }
@@ -4695,6 +4748,32 @@ mod tests {
     fn cards_exiled_with_tilde_produces_exiled_by_source() {
         let (f, _) = parse_target("cards exiled with ~");
         assert_eq!(f, TargetFilter::ExiledBySource);
+    }
+
+    #[test]
+    fn all_cards_they_own_exiled_with_it_produces_exiled_by_source() {
+        let (f, rest) = parse_target("all cards they own exiled with it");
+        assert_eq!(f, TargetFilter::ExiledBySource);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn exiled_cards_with_named_counters_produces_exile_counter_filter() {
+        let (f, rest) = parse_target("exiled cards with aegis counters on them");
+        assert_eq!(rest, "");
+        match f {
+            TargetFilter::Typed(tf) => {
+                assert!(tf
+                    .properties
+                    .contains(&FilterProp::InZone { zone: Zone::Exile }));
+                assert!(tf.properties.iter().any(|prop| matches!(
+                    prop,
+                    FilterProp::CountersGE { counter_type, .. }
+                        if counter_type.as_str() == "aegis"
+                )));
+            }
+            other => panic!("expected typed exiled-card filter, got {other:?}"),
+        }
     }
 
     #[test]

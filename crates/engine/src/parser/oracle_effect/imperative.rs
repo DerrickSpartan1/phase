@@ -909,7 +909,13 @@ pub(super) fn parse_targeted_action_ast(
         .parse(input)
     }) {
         let rest_lower = &lower[lower.len() - rest.len()..];
-        let (target_text, dest) = super::strip_return_destination_ext(rest);
+        let (trailing_target_text, trailing_dest) = super::strip_return_destination_ext(rest);
+        let (leading_target_text, leading_dest) = super::strip_leading_return_destination_ext(rest);
+        let (target_text, dest) = if trailing_dest.is_some() {
+            (trailing_target_text, trailing_dest)
+        } else {
+            (leading_target_text, leading_dest)
+        };
         let (target, _rem) = parse_target_with_ctx(target_text, ctx);
         let origin = super::infer_origin_zone(rest_lower);
         #[cfg(debug_assertions)]

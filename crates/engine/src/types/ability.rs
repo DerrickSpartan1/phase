@@ -4679,6 +4679,17 @@ pub enum Effect {
         #[serde(default = "default_quantity_one")]
         count: QuantityExpr,
     },
+    /// CR 614.10: "Skip your next [step] step." — the affected player's next N
+    /// occurrences of the named step are skipped. Stored separately from
+    /// `SkipNextTurn` because turn and step consumption happen at different
+    /// turn-flow boundaries.
+    SkipNextStep {
+        #[serde(default = "default_target_filter_controller")]
+        target: TargetFilter,
+        step: Phase,
+        #[serde(default = "default_quantity_one")]
+        count: QuantityExpr,
+    },
     /// CR 500.8: Add an additional step or phase after the specified anchor phase.
     /// Uses a LIFO stack on GameState.extra_phases. `followed_by` entries are pushed
     /// before `phase`, so "additional combat followed by an additional main phase"
@@ -5267,6 +5278,7 @@ impl Effect {
             | Effect::Detain { target, .. }
             | Effect::ExtraTurn { target, .. }
             | Effect::SkipNextTurn { target, .. }
+            | Effect::SkipNextStep { target, .. }
             | Effect::AdditionalPhase { target, .. }
             | Effect::Double { target, .. }
             | Effect::BlightEffect { target, .. }
@@ -5531,6 +5543,7 @@ pub fn effect_variant_name(effect: &Effect) -> &str {
         Effect::ManifestDread => "ManifestDread",
         Effect::ExtraTurn { .. } => "ExtraTurn",
         Effect::SkipNextTurn { .. } => "SkipNextTurn",
+        Effect::SkipNextStep { .. } => "SkipNextStep",
         Effect::AdditionalPhase { .. } => "AdditionalPhase",
         Effect::Double { .. } => "Double",
         Effect::RuntimeHandled { handler } => match handler {
@@ -5694,6 +5707,7 @@ pub enum EffectKind {
     ManifestDread,
     ExtraTurn,
     SkipNextTurn,
+    SkipNextStep,
     AdditionalPhase,
     Double,
     RuntimeHandled,
@@ -5863,6 +5877,7 @@ impl From<&Effect> for EffectKind {
             Effect::ManifestDread => EffectKind::ManifestDread,
             Effect::ExtraTurn { .. } => EffectKind::ExtraTurn,
             Effect::SkipNextTurn { .. } => EffectKind::SkipNextTurn,
+            Effect::SkipNextStep { .. } => EffectKind::SkipNextStep,
             Effect::AdditionalPhase { .. } => EffectKind::AdditionalPhase,
             Effect::Double { .. } => EffectKind::Double,
             Effect::RuntimeHandled { .. } => EffectKind::RuntimeHandled,

@@ -1,4 +1,5 @@
 import { motion } from "framer-motion";
+import { useEffect, useRef } from "react";
 
 import { useCardImage } from "../../hooks/useCardImage";
 
@@ -20,7 +21,7 @@ const CARD_HEIGHT = 112;
 const STAGGER_MS = 80;
 const FLIGHT_DURATION = 0.35;
 
-function MillCard({
+function MillCardElement({
   card,
   from,
   to,
@@ -56,7 +57,7 @@ function MillCard({
         x: [from.x - CARD_WIDTH / 2, midX - CARD_WIDTH / 2, to.x - CARD_WIDTH / 2],
         y: [from.y - CARD_HEIGHT / 2, midY - CARD_HEIGHT / 2, to.y - CARD_HEIGHT / 2],
         scale: [0.6, 1, 0.8],
-        opacity: [0, 1, 0.7],
+        opacity: [0, 1, 0],
       }}
       transition={{
         duration: FLIGHT_DURATION,
@@ -128,17 +129,39 @@ export function MillRevealAnimation({
   to,
   onComplete,
 }: MillRevealAnimationProps) {
+  const completedRef = useRef(false);
+  const displayedCards = cards;
+
+  // Safety timeout: if onAnimationComplete never fires, clean up after expected duration + buffer
+  useEffect(() => {
+    const expectedMs = (displayedCards.length - 1) * STAGGER_MS + FLIGHT_DURATION * 1000 + 500;
+    const timer = setTimeout(() => {
+      if (!completedRef.current) {
+        completedRef.current = true;
+        onComplete();
+      }
+    }, expectedMs);
+    return () => clearTimeout(timer);
+  }, [displayedCards.length, onComplete]);
+
+  const handleComplete = () => {
+    if (!completedRef.current) {
+      completedRef.current = true;
+      onComplete();
+    }
+  };
+
   return (
     <>
-      {cards.map((card, i) => (
-        <MillCard
+      {displayedCards.map((card, i) => (
+        <MillCardElement
           key={`mill-${card.objectId}`}
           card={card}
           from={from}
           to={to}
           index={i}
-          isLast={i === cards.length - 1}
-          onComplete={onComplete}
+          isLast={i === displayedCards.length - 1}
+          onComplete={handleComplete}
         />
       ))}
     </>

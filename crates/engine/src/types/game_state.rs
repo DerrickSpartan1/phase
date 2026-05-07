@@ -2589,6 +2589,11 @@ pub struct GameState {
     /// turn with a non-zero counter, the turn is skipped and the counter is decremented.
     #[serde(default)]
     pub turns_to_skip: Vec<u32>,
+
+    /// CR 614.10a: Per-player counts of step occurrences to skip. A pending skip
+    /// is consumed only when the named step would otherwise happen.
+    #[serde(default)]
+    pub steps_to_skip: Vec<HashMap<Phase, u32>>,
     #[serde(default)]
     pub scheduled_turn_controls: Vec<ScheduledTurnControl>,
 
@@ -3170,6 +3175,7 @@ impl GameState {
             commander_cast_count: HashMap::new(),
             extra_turns: Vec::new(),
             turns_to_skip: vec![0; player_count as usize],
+            steps_to_skip: vec![HashMap::new(); player_count as usize],
             scheduled_turn_controls: Vec::new(),
             extra_phases: Vec::new(),
             seat_order,
@@ -3376,6 +3382,7 @@ impl PartialEq for GameState {
             && self.commander_declined_zone_return == other.commander_declined_zone_return
             && self.extra_turns == other.extra_turns
             && self.turns_to_skip == other.turns_to_skip
+            && self.steps_to_skip == other.steps_to_skip
             && self.scheduled_turn_controls == other.scheduled_turn_controls
             && self.extra_phases == other.extra_phases
             && self.seat_order == other.seat_order

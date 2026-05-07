@@ -109,6 +109,7 @@ pub mod search_library;
 pub mod seek;
 pub mod set_class_level;
 pub mod shuffle;
+pub mod skip_next_step;
 pub mod skip_next_turn;
 pub mod solve_case;
 pub mod speed_effects;
@@ -672,6 +673,7 @@ pub fn resolve_effect(
         Effect::Manifest { .. } => manifest::resolve(state, ability, events),
         Effect::ManifestDread => manifest_dread::resolve(state, ability, events),
         Effect::ExtraTurn { .. } => extra_turn::resolve(state, ability, events),
+        Effect::SkipNextStep { .. } => skip_next_step::resolve(state, ability, events),
         Effect::SkipNextTurn { .. } => skip_next_turn::resolve(state, ability, events),
         Effect::Double { .. } => double::resolve(state, ability, events),
         Effect::RuntimeHandled { .. } => Ok(()), // Handled by dedicated engine path
@@ -1084,6 +1086,7 @@ fn extract_event_context_filter(effect: &Effect) -> Option<&TargetFilter> {
         // (e.g., TriggeringPlayer) rather than a fresh target prompt.
         | Effect::SetLifeTotal { target, .. }
         | Effect::SkipNextTurn { target, .. }
+        | Effect::SkipNextStep { target, .. }
         | Effect::ControlNextTurn { target, .. }
         | Effect::AdditionalPhase { target, .. }
         | Effect::GiveControl { target, .. }

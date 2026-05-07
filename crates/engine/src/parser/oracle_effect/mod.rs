@@ -2177,6 +2177,11 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
         return clause;
     }
 
+    // CR 614.10a: "you skip your next untap/draw/upkeep step" — one-shot step skip.
+    if let Some(clause) = try_parse_skip_next_step(tp) {
+        return clause;
+    }
+
     // CR 614.10: "you skip your next turn" / "skip your next turn" — temporal penalty.
     if let Some(clause) = try_parse_skip_next_turn(tp) {
         return clause;
@@ -2747,6 +2752,66 @@ fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
         condition: None,
         optional: false,
     })
+}
+
+/// CR 614.10a: Parse "[subject] skip[s] [their|your] next [step] step[s]" —
+/// one-shot step skips. Handles controller and target-player forms.
+fn try_parse_skip_next_step(tp: TextPair) -> Option<ParsedEffectClause> {
+    if let Some((step, rest)) = nom_on_lower(tp.original, tp.lower, |input| {
+        let (input, _) = alt((
+            tag::<_, _, OracleError<'_>>("you skip your next "),
+            tag("skip your next "),
+        ))
+        .parse(input)?;
+        let (input, step) = parse_skip_step_name(input)?;
+        Ok((input, step))
+    }) {
+        if rest.trim().trim_end_matches('.').is_empty() {
+            return Some(parsed_clause(Effect::SkipNextStep {
+                target: TargetFilter::Controller,
+                step,
+                count: QuantityExpr::Fixed { value: 1 },
+            }));
+        }
+    }
+
+    nom::combinator::peek(alt((
+        tag::<_, _, OracleError<'_>>("target opponent "),
+        tag("target player "),
+    )))
+    .parse(tp.lower)
+    .ok()?;
+
+    let (target, after_target_orig) = super::oracle_target::parse_target(tp.original);
+    let after_target_lower = &tp.lower[tp.lower.len() - after_target_orig.len()..];
+    let (after_verb_lower, _) = alt((tag::<_, _, OracleError<'_>>(" skips "), tag(" skip ")))
+        .parse(after_target_lower)
+        .ok()?;
+    let (after_next_lower, _) = alt((
+        tag::<_, _, OracleError<'_>>("their next "),
+        tag("your next "),
+    ))
+    .parse(after_verb_lower)
+    .ok()?;
+    let (rest, step) = parse_skip_step_name(after_next_lower).ok()?;
+    if !rest.trim().trim_end_matches('.').is_empty() {
+        return None;
+    }
+
+    Some(parsed_clause(Effect::SkipNextStep {
+        target,
+        step,
+        count: QuantityExpr::Fixed { value: 1 },
+    }))
+}
+
+fn parse_skip_step_name(input: &str) -> OracleResult<'_, Phase> {
+    alt((
+        value(Phase::Untap, tag("untap step")),
+        value(Phase::Upkeep, tag("upkeep step")),
+        value(Phase::Draw, tag("draw step")),
+    ))
+    .parse(input)
 }
 
 /// CR 614.10: Parse "[subject] skip[s] [their|your] next [N] turn[s]" — temporal
@@ -10355,6 +10420,101 @@ fn strip_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>)
     (text, None)
 }
 
+/// Detect "return to <zone> <target>" destination phrases.
+fn strip_leading_return_destination_ext(text: &str) -> (&str, Option<ReturnDestination>) {
+    let lower = text.to_lowercase();
+    if let Ok((rest, dest)) = parse_leading_return_destination(lower.as_str()) {
+        let consumed = lower.len() - rest.len();
+        return (text[consumed..].trim(), Some(dest));
+    }
+
+    (text, None)
+}
+
+fn parse_leading_return_destination(input: &str) -> OracleResult<'_, ReturnDestination> {
+    alt((
+        parse_leading_battlefield_return_destination,
+        parse_leading_hand_return_destination,
+        parse_leading_graveyard_return_destination,
+    ))
+    .parse(input)
+}
+
+fn parse_leading_battlefield_return_destination(
+    input: &str,
+) -> OracleResult<'_, ReturnDestination> {
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("to the battlefield"),
+        tag("onto the battlefield"),
+    ))
+    .parse(input)?;
+    let (input, modifier) = alt((
+        value((true, true), tag(" tapped and transformed")),
+        value((true, false), tag(" transformed")),
+        value((false, true), tag(" tapped")),
+        value((false, false), tag("")),
+    ))
+    .parse(input)?;
+    let (input, under_your_control) = alt((
+        value(true, tag::<_, _, OracleError<'_>>(" under your control")),
+        value(false, tag(" under their owners' control")),
+        value(false, tag(" under its owner's control")),
+        value(false, tag("")),
+    ))
+    .parse(input)?;
+    let (input, _) = tag(" ").parse(input)?;
+    Ok((
+        input,
+        ReturnDestination {
+            zone: Zone::Battlefield,
+            transformed: modifier.0,
+            under_your_control,
+            enter_tapped: modifier.1,
+            enter_with_counters: vec![],
+        },
+    ))
+}
+
+fn parse_leading_hand_return_destination(input: &str) -> OracleResult<'_, ReturnDestination> {
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("to its owner's hand "),
+        tag("to their owner's hand "),
+        tag("to their owners' hands "),
+        tag("to your hand "),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        ReturnDestination {
+            zone: Zone::Hand,
+            transformed: false,
+            under_your_control: false,
+            enter_tapped: false,
+            enter_with_counters: vec![],
+        },
+    ))
+}
+
+fn parse_leading_graveyard_return_destination(input: &str) -> OracleResult<'_, ReturnDestination> {
+    let (input, _) = alt((
+        tag::<_, _, OracleError<'_>>("to its owner's graveyard "),
+        tag("to their owner's graveyard "),
+        tag("to their owners' graveyards "),
+        tag("to your graveyard "),
+    ))
+    .parse(input)?;
+    Ok((
+        input,
+        ReturnDestination {
+            zone: Zone::Graveyard,
+            transformed: false,
+            under_your_control: false,
+            enter_tapped: false,
+            enter_with_counters: vec![],
+        },
+    ))
+}
+
 /// CR 601.2d: Parse "deal N damage divided as you choose among [targets]" and
 /// "deal N damage distributed among [targets]" → Effect::DealDamage with distribute flag.
 ///
@@ -14023,6 +14183,14 @@ mod tests {
     }
 
     #[test]
+    fn strip_leading_return_destination_your_hand() {
+        let (target, dest) =
+            strip_leading_return_destination_ext("to your hand target artifact card");
+        assert_eq!(target, "target artifact card");
+        assert_eq!(dest.unwrap().zone, Zone::Hand);
+    }
+
+    #[test]
     fn strip_return_destination_graveyard() {
         let (target, dest) = strip_return_destination_ext("it to its owner's graveyard");
         assert_eq!(target, "it");
@@ -14043,6 +14211,37 @@ mod tests {
             "Expected ChangeZone to Graveyard, got {:?}",
             e
         );
+    }
+
+    #[test]
+    fn return_leading_destination_to_battlefield_parses_target() {
+        let e = parse_effect(
+            "Return to the battlefield target creature card in your graveyard that was put there from the battlefield this turn",
+        );
+        match e {
+            Effect::ChangeZone {
+                destination,
+                target,
+                ..
+            } => {
+                assert_eq!(destination, Zone::Battlefield);
+                assert!(matches!(target, TargetFilter::Typed(_)), "got {target:?}");
+            }
+            other => panic!("expected ChangeZone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn return_leading_destination_all_exiled_with_source() {
+        let e = parse_effect("Return to the battlefield all cards they own exiled with it");
+        assert!(matches!(
+            e,
+            Effect::ChangeZone {
+                destination: Zone::Battlefield,
+                target: TargetFilter::ExiledBySource,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -22717,6 +22916,49 @@ mod tests {
             TargetFilter::Typed(tf)
                 if tf.controller == Some(ControllerRef::Opponent)
         ));
+    }
+
+    /// CR 614.10a: "You skip your next untap step" is a one-shot step skip,
+    /// not an Untap effect with bogus target text "step".
+    #[test]
+    fn skip_next_untap_step_parses_as_step_skip() {
+        let def = parse_effect_chain("You skip your next untap step.", AbilityKind::Activated);
+        let Effect::SkipNextStep {
+            target,
+            step,
+            count,
+        } = &*def.effect
+        else {
+            panic!("expected SkipNextStep, got {:?}", def.effect);
+        };
+        assert_eq!(target, &TargetFilter::Controller);
+        assert_eq!(step, &Phase::Untap);
+        assert_eq!(
+            count,
+            &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        );
+    }
+
+    #[test]
+    fn target_player_skips_next_draw_step_parses_as_step_skip() {
+        let def = parse_effect_chain(
+            "Target player skips their next draw step.",
+            AbilityKind::Spell,
+        );
+        let Effect::SkipNextStep {
+            target,
+            step,
+            count,
+        } = &*def.effect
+        else {
+            panic!("expected SkipNextStep, got {:?}", def.effect);
+        };
+        assert_eq!(target, &TargetFilter::Player);
+        assert_eq!(step, &Phase::Draw);
+        assert_eq!(
+            count,
+            &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        );
     }
 
     /// CR 603.7 + CR 107.3 + CR 202.1: "When you next cast a spell with {X} in

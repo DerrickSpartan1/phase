@@ -330,6 +330,7 @@ fn effect_requires_targets(effect: &Effect) -> bool {
         | Effect::GivePlayerCounter { target, .. }
         | Effect::BecomeCopy { target, .. }
         | Effect::ExtraTurn { target, .. }
+        | Effect::SkipNextStep { target, .. }
         | Effect::Regenerate { target, .. }
         | Effect::DoublePT { target, .. }
         | Effect::PreventDamage { target, .. }

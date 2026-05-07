@@ -1746,6 +1746,20 @@ fn effect_details(effect: &Effect) -> Vec<(String, String)> {
                 d.push(("count".into(), format!("{count:?}")));
             }
         }
+        Effect::SkipNextStep {
+            target,
+            step,
+            count,
+        } => {
+            d.push(("player".into(), fmt_target(target)));
+            d.push(("step".into(), format!("{step:?}")));
+            if !matches!(
+                count,
+                crate::types::ability::QuantityExpr::Fixed { value: 1 }
+            ) {
+                d.push(("count".into(), format!("{count:?}")));
+            }
+        }
         Effect::ControlNextTurn {
             target,
             grant_extra_turn_after,

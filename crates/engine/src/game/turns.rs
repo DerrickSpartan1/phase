@@ -876,12 +876,12 @@ pub fn finish_cleanup_discard(
 /// CR 103.8a: The player who goes first skips their first draw step.
 /// CR 614.1b + CR 614.10: Also skip if a "skip your draw step" static is active.
 pub fn should_skip_draw(state: &GameState) -> bool {
-    state.turn_number == 1 || should_skip_step(state, Phase::Draw)
+    state.turn_number == 1 || should_skip_step_static(state, Phase::Draw)
 }
 
 /// CR 614.1b + CR 614.10: Check whether the active player should skip the given step
 /// due to a "skip your [step] step" static ability on a permanent they control.
-fn should_skip_step(state: &GameState, step: Phase) -> bool {
+fn should_skip_step_static(state: &GameState, step: Phase) -> bool {
     let active = state.active_player;
     // CR 702.26b + CR 604.1: `active_static_definitions` owns the gating.
     state.battlefield.iter().any(|id| {
@@ -891,6 +891,30 @@ fn should_skip_step(state: &GameState, step: Phase) -> bool {
                     .any(|sd| sd.mode == StaticMode::SkipStep { step })
         })
     })
+}
+
+/// CR 614.10a: Consume a one-shot "skip your next [step] step" only when that
+/// step would otherwise occur. Static step skips are checked first by callers.
+fn consume_next_step_skip(state: &mut GameState, step: Phase) -> bool {
+    let idx = state.active_player.0 as usize;
+    let Some(skips) = state.steps_to_skip.get_mut(idx) else {
+        return false;
+    };
+    let Some(count) = skips.get_mut(&step) else {
+        return false;
+    };
+    if *count == 0 {
+        return false;
+    }
+    *count -= 1;
+    if *count == 0 {
+        skips.remove(&step);
+    }
+    true
+}
+
+fn should_skip_step_now(state: &mut GameState, step: Phase) -> bool {
+    should_skip_step_static(state, step) || consume_next_step_skip(state, step)
 }
 
 /// CR 714.3b: As the precombat main phase begins, put a lore counter on each Saga
@@ -943,14 +967,19 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
 
         match state.phase {
             Phase::Untap => {
-                // CR 614.1b: Skip the untap step if a "skip your untap step" static is active.
-                if !should_skip_step(state, Phase::Untap) {
+                // CR 614.1b + CR 614.10a: Skip the untap step if a static or
+                // one-shot "skip your next untap step" replacement applies.
+                if !should_skip_step_now(state, Phase::Untap) {
                     execute_untap(state, events);
                 }
                 // CR 502.4 / CR 117.3a: No player receives priority during the untap step.
                 advance_phase(state, events);
             }
             Phase::Upkeep => {
+                if should_skip_step_now(state, Phase::Upkeep) {
+                    advance_phase(state, events);
+                    continue;
+                }
                 // CR 503.1a: "At the beginning of [your] upkeep" triggers fire here.
                 if process_phase_triggers(state) {
                     return WaitingFor::Priority {
@@ -960,7 +989,8 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
                 advance_phase(state, events);
             }
             Phase::Draw => {
-                if !should_skip_draw(state) {
+                let skip_draw = state.turn_number == 1 || should_skip_step_now(state, Phase::Draw);
+                if !skip_draw {
                     if let Some(wf) = execute_draw(state, events) {
                         return wf;
                     }
@@ -2144,6 +2174,42 @@ mod tests {
             "draw step should be skipped when SkipStep(Draw) static is active"
         );
         assert!(!state.players[0].hand.contains(&card_id));
+    }
+
+    #[test]
+    fn one_shot_step_skip_consumes_matching_step() {
+        let mut state = setup();
+        state.active_player = PlayerId(0);
+        state.steps_to_skip[0].insert(Phase::Untap, 1);
+
+        assert!(consume_next_step_skip(&mut state, Phase::Untap));
+        assert!(!state.steps_to_skip[0].contains_key(&Phase::Untap));
+    }
+
+    #[test]
+    fn static_step_skip_does_not_consume_next_step_skip() {
+        use crate::types::statics::StaticMode;
+
+        let mut state = setup();
+        let enchant_id = create_object(
+            &mut state,
+            CardId(2),
+            PlayerId(0),
+            "Static Skip".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&enchant_id)
+            .unwrap()
+            .static_definitions
+            .push(crate::types::ability::StaticDefinition::new(
+                StaticMode::SkipStep { step: Phase::Untap },
+            ));
+        state.steps_to_skip[0].insert(Phase::Untap, 1);
+
+        assert!(should_skip_step_now(&mut state, Phase::Untap));
+        assert_eq!(state.steps_to_skip[0].get(&Phase::Untap), Some(&1));
     }
 
     #[test]
