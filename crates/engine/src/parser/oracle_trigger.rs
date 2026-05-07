@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{recognize, value};
+use nom::combinator::{opt, recognize, value};
 use nom::multi::many1;
 use nom::sequence::{delimited, pair, preceded, terminated};
 use nom::Parser;
@@ -2541,6 +2541,15 @@ pub(crate) fn parse_trigger_condition(
         return result;
     }
 
+    // Counter-related events: "a +1/+1 counter is put on ~" /
+    // "one or more counters are put on ~" / "the twelfth hour counter is put
+    // on ~". These are passive event subjects where the object after "on" is
+    // the trigger subject; parse them before generic subject decomposition so
+    // ordinal counter phrases don't emit a degraded-subject diagnostic first.
+    if let Some(result) = try_parse_counter_trigger(&lower) {
+        return result;
+    }
+
     // --- Subject + event decomposition ---
     // Strip leading "when"/"whenever" using nom alt()
     let after_keyword = alt((
@@ -3427,11 +3436,6 @@ fn try_parse_event(
             }
         }
         return Some((def.mode.clone(), def));
-    }
-
-    // Counter-related events: "a +1/+1 counter is put on ~" / "one or more counters are put on ~"
-    if let Some(result) = try_parse_counter_trigger(full_lower) {
-        return Some(result);
     }
 
     // CR 119.3 + CR 603.2: "Whenever [subject] loses life" — player-scoped life-loss
@@ -5439,9 +5443,12 @@ fn try_parse_counter_trigger(lower: &str) -> Option<(TriggerMode, TriggerDefinit
 /// Uses the same `CounterTriggerFilter` building block as Saga chapters, so the
 /// runtime fires only when the object crosses the named counter threshold.
 fn parse_counter_threshold_prefix(prefix: &str) -> Option<CounterTriggerFilter> {
-    let (rest, _) = alt((tag::<_, _, OracleError<'_>>("when "), tag("whenever ")))
-        .parse(prefix.trim_start())
-        .ok()?;
+    let (rest, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("when "),
+        tag("whenever "),
+    )))
+    .parse(prefix.trim_start())
+    .ok()?;
     let (rest, _) = tag::<_, _, OracleError<'_>>("the ")
         .parse(rest.trim_start())
         .ok()?;
@@ -5460,12 +5467,15 @@ fn parse_counter_threshold_prefix(prefix: &str) -> Option<CounterTriggerFilter> 
 /// Also handles zone constraints like "while it's exiled" (e.g. suspend cards).
 fn try_parse_counter_removed(lower: &str) -> Option<(TriggerMode, TriggerDefinition)> {
     // Pattern: "a [type] counter is removed from [subject] [while ...]"
-    let (after_a, ()) = alt((
-        value((), tag::<_, _, OracleError<'_>>("whenever a ")),
-        value((), tag("when a ")),
-    ))
+    let (after_prefix, _) = opt(alt((
+        tag::<_, _, OracleError<'_>>("whenever "),
+        tag("when "),
+    )))
     .parse(lower)
     .ok()?;
+    let (after_a, ()) = value((), tag::<_, _, OracleError<'_>>("a "))
+        .parse(after_prefix)
+        .ok()?;
 
     let (_, (counter_type, subject_rest)) =
         nom_primitives::split_once_on(after_a, " counter is removed from ").ok()?;
@@ -6796,6 +6806,29 @@ mod tests {
                 counter_type: crate::types::counter::CounterType::Generic("hour".to_string()),
                 threshold: Some(12),
             })
+        );
+    }
+
+    #[test]
+    fn trigger_ordinal_counter_threshold_does_not_emit_subject_fallback() {
+        let mut ctx = ParseContext::default();
+        let def = parse_trigger_line_with_index(
+            "When the fifth plan counter is put on ~, sacrifice it.",
+            "Doom Reigns Supreme",
+            None,
+            &mut ctx,
+        );
+        assert_eq!(def.mode, TriggerMode::CounterAdded);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert!(
+            ctx.diagnostics.iter().all(|diagnostic| !matches!(
+                diagnostic,
+                OracleDiagnostic::TargetFallback { context, text, .. }
+                    if context == "trigger subject parse fell back to Any"
+                        && text == "the fifth plan counter is put on ~"
+            )),
+            "ordinal counter trigger should parse before generic subject fallback, got {:?}",
+            ctx.diagnostics
         );
     }
 
