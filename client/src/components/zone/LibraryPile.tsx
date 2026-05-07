@@ -69,6 +69,7 @@ export function LibraryPile({ playerId, size }: LibraryPileProps) {
     <div
       className="relative"
       title={`Library (${count})`}
+      data-library-pile={playerId}
       style={{ width: w, height: h }}
     >
       {/* Stack layers */}

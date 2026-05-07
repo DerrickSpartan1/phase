@@ -65,6 +65,7 @@ export function GraveyardPile({ playerId, onClick, size }: GraveyardPileProps) {
       onClick={onClick}
       className={`group relative cursor-pointer ${hasTargetableCards ? "ring-2 ring-amber-400/60 rounded-lg shadow-[0_0_12px_3px_rgba(201,176,55,0.8)]" : ""}`}
       title={`Graveyard (${count})`}
+      data-graveyard-pile={playerId}
       style={{ width: w, height: h }}
     >
       {/* Shadow stack layers */}

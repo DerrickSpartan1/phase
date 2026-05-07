@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { GameState } from "../adapter/types";
 import type { AnimationStep, PositionSnapshot } from "../animation/types";
 
 interface AnimationStoreState {
@@ -6,6 +7,7 @@ interface AnimationStoreState {
   activeStep: AnimationStep | null;
   isPlaying: boolean;
   positionRegistry: Map<number, DOMRect>;
+  animationNewState: GameState | null;
 }
 
 interface AnimationStoreActions {
@@ -14,6 +16,7 @@ interface AnimationStoreActions {
   captureSnapshot: () => PositionSnapshot;
   registerPosition: (objectId: number, rect: DOMRect) => void;
   getPosition: (objectId: number) => DOMRect | undefined;
+  setAnimationNewState: (state: GameState | null) => void;
   clearQueue: () => void;
 }
 
@@ -24,6 +27,7 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
   activeStep: null,
   isPlaying: false,
   positionRegistry: new Map(),
+  animationNewState: null,
 
   enqueueSteps: (steps) => {
     if (steps.length === 0) return;
@@ -45,7 +49,7 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
       const [next, ...rest] = queue;
       set({ activeStep: next, queue: rest });
     } else {
-      set({ activeStep: null, isPlaying: false });
+      set({ activeStep: null, isPlaying: false, animationNewState: null });
     }
   },
 
@@ -71,5 +75,7 @@ export const useAnimationStore = create<AnimationStore>()((set, get) => ({
 
   getPosition: (objectId) => get().positionRegistry.get(objectId),
 
-  clearQueue: () => set({ queue: [], activeStep: null, isPlaying: false }),
+  setAnimationNewState: (state) => set({ animationNewState: state }),
+
+  clearQueue: () => set({ queue: [], activeStep: null, isPlaying: false, animationNewState: null }),
 }));

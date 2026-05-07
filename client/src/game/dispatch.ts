@@ -225,6 +225,7 @@ async function processAction(action: GameAction, actor: number): Promise<void> {
   const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
 
   if (steps.length > 0 && multiplier > 0) {
+    useAnimationStore.getState().setAnimationNewState(newState);
     useAnimationStore.getState().enqueueSteps(steps);
 
     // Schedule SFX synced with each step's visual timing
@@ -450,6 +451,7 @@ async function processRemoteUpdateInner(
   const multiplier = usePreferencesStore.getState().animationSpeedMultiplier;
 
   if (steps.length > 0 && multiplier > 0) {
+    useAnimationStore.getState().setAnimationNewState(state);
     useAnimationStore.getState().enqueueSteps(steps);
     scheduleSfxForSteps(steps, multiplier);
 
