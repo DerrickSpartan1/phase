@@ -8584,6 +8584,26 @@ mod tests {
     }
 
     #[test]
+    fn trigger_forbidden_orchard_targets_opponent_token_owner() {
+        let def = parse_trigger_line(
+            "Whenever you tap Forbidden Orchard for mana, target opponent creates a 1/1 colorless Spirit creature token.",
+            "Forbidden Orchard",
+        );
+        assert_eq!(def.mode, TriggerMode::TapsForMana);
+        assert_eq!(def.valid_card, Some(TargetFilter::SelfRef));
+        assert_eq!(def.valid_target, Some(TargetFilter::Controller));
+
+        let execute = def.execute.as_deref().expect("trigger should execute");
+        let Effect::Token { owner, .. } = execute.effect.as_ref() else {
+            panic!("expected Token effect, got {:?}", execute.effect);
+        };
+        assert_eq!(
+            *owner,
+            TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent))
+        );
+    }
+
+    #[test]
     fn trigger_player_taps_land_for_mana_adds_to_that_player() {
         let def = parse_trigger_line(
             "Whenever a player taps a land for mana, that player adds one mana of any type that land produced.",
