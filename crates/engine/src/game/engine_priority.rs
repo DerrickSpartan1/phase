@@ -3,6 +3,7 @@ use crate::types::game_state::{GameState, WaitingFor};
 
 use super::engine::{begin_pending_trigger_target_selection, check_exile_returns, EngineError};
 use super::match_flow;
+use super::players;
 use super::sba;
 use super::triggers;
 
@@ -48,6 +49,14 @@ pub(super) fn run_post_action_pipeline(
             match_flow::handle_game_over_transition(state);
         }
         return Ok(state.waiting_for.clone());
+    }
+
+    // CR 800.4: If SBAs eliminated the player who was about to receive priority,
+    // respect the reassignment that eliminate_player() already performed.
+    if let Some(player) = default_wf.acting_player() {
+        if !players::is_alive(state, player) {
+            return Ok(state.waiting_for.clone());
+        }
     }
 
     check_exile_returns(state, events);

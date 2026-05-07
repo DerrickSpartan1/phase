@@ -965,6 +965,14 @@ pub fn auto_advance(state: &mut GameState, events: &mut Vec<GameEvent>) -> Waiti
             return state.waiting_for.clone();
         }
 
+        // CR 800.4: If the active player has been eliminated, skip their
+        // remaining phases and proceed to the next player's turn.
+        if !super::players::is_alive(state, state.active_player) {
+            state.phase = Phase::Cleanup;
+            advance_phase(state, events);
+            continue;
+        }
+
         match state.phase {
             Phase::Untap => {
                 // CR 614.1b + CR 614.10a: Skip the untap step if a static or
@@ -2321,6 +2329,37 @@ mod tests {
             ),
             "state.waiting_for should be GameOver, got {:?}",
             state.waiting_for
+        );
+    }
+
+    /// CR 800.4: When the active player is eliminated mid-turn in multiplayer,
+    /// their remaining phases are skipped and the next player's turn begins.
+    #[test]
+    fn auto_advance_skips_eliminated_active_player_turn() {
+        let mut state = GameState::new(crate::types::format::FormatConfig::free_for_all(), 3, 42);
+        state.turn_number = 2;
+        state.active_player = PlayerId(1);
+        state.phase = Phase::PreCombatMain;
+
+        // Mark P1 as eliminated (as if SBA just fired)
+        state.players[1].is_eliminated = true;
+        state.eliminated_players.push(PlayerId(1));
+
+        let mut events = Vec::new();
+        let wf = auto_advance(&mut state, &mut events);
+
+        // Should have advanced to the next living player's turn
+        assert_ne!(
+            state.active_player,
+            PlayerId(1),
+            "eliminated player should no longer be active"
+        );
+        // Next living player after P1 is P2
+        assert_eq!(state.active_player, PlayerId(2));
+        // Game should not be over (P0 and P2 still alive)
+        assert!(
+            !matches!(wf, WaitingFor::GameOver { .. }),
+            "game should continue with 2 living players"
         );
     }
 
