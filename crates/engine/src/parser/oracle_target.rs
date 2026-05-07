@@ -2279,9 +2279,55 @@ fn parse_relative_mana_value_suffix(text: &str) -> Option<(FilterProp, &str)> {
 }
 
 fn parse_mana_value_reference_expr(text: &str) -> Option<(QuantityExpr, &str)> {
+    if let Ok((after, expr)) = parse_mana_value_of_reference_expr(text) {
+        return Some((expr, after));
+    }
+
     parse_mana_value_reference_qty(text)
-        .map(|(after, qty)| (QuantityExpr::Ref { qty }, after))
+        .map(|(after, qty)| {
+            (
+                apply_mana_value_reference_offset(QuantityExpr::Ref { qty }, after),
+                after,
+            )
+        })
         .ok()
+        .map(|(expr, after)| (expr, consume_mana_value_reference_offset(after)))
+}
+
+fn parse_mana_value_of_reference_expr(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, QuantityExpr> {
+    let (rest, _) = tag("the mana value of ").parse(input)?;
+    let (rest, qty) = parse_mana_value_reference_qty(rest)?;
+    let expr = apply_mana_value_reference_offset(QuantityExpr::Ref { qty }, rest);
+    Ok((consume_mana_value_reference_offset(rest), expr))
+}
+
+fn apply_mana_value_reference_offset(expr: QuantityExpr, rest: &str) -> QuantityExpr {
+    if parse_mana_value_reference_plus_one(rest).is_ok() {
+        QuantityExpr::Offset {
+            inner: Box::new(expr),
+            offset: 1,
+        }
+    } else {
+        expr
+    }
+}
+
+fn consume_mana_value_reference_offset(rest: &str) -> &str {
+    parse_mana_value_reference_plus_one(rest)
+        .map(|(after, _)| after)
+        .unwrap_or(rest)
+}
+
+fn parse_mana_value_reference_plus_one(
+    input: &str,
+) -> super::oracle_nom::error::OracleResult<'_, ()> {
+    value(
+        (),
+        nom::sequence::pair(tag(" plus "), alt((tag("one"), tag("1")))),
+    )
+    .parse(input)
 }
 
 fn parse_mana_value_reference_qty(
@@ -2298,10 +2344,18 @@ fn parse_mana_value_reference_qty(
                 tag("that card's mana value"),
                 tag("that permanent's mana value"),
                 tag("that creature's mana value"),
+                tag("the chosen spell's mana value"),
+                tag("the chosen card's mana value"),
+                tag("the chosen permanent's mana value"),
+                tag("the chosen creature's mana value"),
                 tag("that spell"),
                 tag("that card"),
                 tag("that permanent"),
                 tag("that creature"),
+                tag("the chosen spell"),
+                tag("the chosen card"),
+                tag("the chosen permanent"),
+                tag("the chosen creature"),
             )),
         ),
         value(
@@ -4175,6 +4229,24 @@ mod tests {
     }
 
     #[test]
+    fn card_with_same_mana_value_as_chosen_spell_uses_parent_target() {
+        let (f, rest) =
+            parse_type_phrase("creature card with the same mana value as the chosen spell");
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::Target,
+                    },
+                },
+            }]))
+        );
+    }
+
+    #[test]
     fn card_with_mana_value_equal_to_that_cards_mana_value() {
         let (f, rest) = parse_type_phrase("card with mana value equal to that card's mana value");
         assert!(rest.trim().is_empty(), "remainder: '{rest}'");
@@ -4186,6 +4258,28 @@ mod tests {
                     qty: QuantityRef::ObjectManaValue {
                         scope: ObjectScope::Target,
                     },
+                },
+            }]))
+        );
+    }
+
+    #[test]
+    fn card_with_mana_value_of_that_card_plus_one_uses_offset_target() {
+        let (f, rest) = parse_type_phrase(
+            "creature card with mana value equal to the mana value of that card plus one",
+        );
+        assert!(rest.trim().is_empty(), "remainder: '{rest}'");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::creature().properties(vec![FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Offset {
+                    inner: Box::new(QuantityExpr::Ref {
+                        qty: QuantityRef::ObjectManaValue {
+                            scope: ObjectScope::Target,
+                        },
+                    }),
+                    offset: 1,
                 },
             }]))
         );
