@@ -2,7 +2,7 @@ use std::str::FromStr;
 
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_till, take_till1};
-use nom::combinator::{opt, value};
+use nom::combinator::{opt, peek, value};
 use nom::multi::many0;
 use nom::Parser;
 
@@ -444,6 +444,19 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         }
     }
 
+    if let Some(rest) = parse_selected_from_set_reference(lower.as_str()) {
+        return (
+            TargetFilter::ParentTarget,
+            &text[lower.len() - rest.len()..],
+        );
+    }
+    if let Some(rest) = parse_definite_parent_reference(lower.as_str()) {
+        return (
+            TargetFilter::ParentTarget,
+            &text[lower.len() - rest.len()..],
+        );
+    }
+
     // Singular selection from a previously-referenced set.
     static SELECTED_FROM_SET_PHRASES: &[&str] = &[
         "new targets for the copies",
@@ -818,6 +831,62 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             line_index: 0,
         });
         (TargetFilter::Any, text)
+    }
+}
+
+fn parse_selected_from_set_reference(input: &str) -> Option<&str> {
+    let (rest, _) = opt(tag::<_, _, OracleError<'_>>("a different "))
+        .parse(input)
+        .ok()?;
+    let (rest, _) = tag::<_, _, OracleError<'_>>("one of those ")
+        .parse(rest)
+        .ok()?;
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("artifact cards"),
+        tag::<_, _, OracleError<'_>>("cards"),
+        tag::<_, _, OracleError<'_>>("creatures"),
+        tag::<_, _, OracleError<'_>>("dragons"),
+        tag::<_, _, OracleError<'_>>("lands"),
+        tag::<_, _, OracleError<'_>>("permanents"),
+    ))
+    .parse(rest)
+    .ok()?;
+    let (rest, _) = opt(nom::sequence::preceded(
+        tag::<_, _, OracleError<'_>>(" of "),
+        alt((
+            tag::<_, _, OracleError<'_>>("their choice"),
+            tag::<_, _, OracleError<'_>>("his or her choice"),
+            tag::<_, _, OracleError<'_>>("that player's choice"),
+        )),
+    ))
+    .parse(rest)
+    .ok()?;
+    Some(rest)
+}
+
+fn parse_definite_parent_reference(input: &str) -> Option<&str> {
+    let (rest, _) = alt((
+        tag::<_, _, OracleError<'_>>("the artifact card"),
+        tag::<_, _, OracleError<'_>>("the artifact"),
+    ))
+    .parse(input)
+    .ok()?;
+    if rest.is_empty()
+        || peek(alt((
+            tag::<_, _, OracleError<'_>>(","),
+            tag::<_, _, OracleError<'_>>("."),
+            tag::<_, _, OracleError<'_>>(";"),
+            tag::<_, _, OracleError<'_>>(" and "),
+            tag::<_, _, OracleError<'_>>(" to "),
+            tag::<_, _, OracleError<'_>>(" into "),
+            tag::<_, _, OracleError<'_>>(" onto "),
+        )))
+        .parse(rest)
+        .is_ok()
+    {
+        Some(rest)
+    } else {
+        None
     }
 }
 
@@ -4781,6 +4850,41 @@ mod tests {
         let (filter, rest) = parse_target("one of those cards");
         assert_eq!(filter, TargetFilter::ParentTarget);
         assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn selected_one_of_those_lands_with_choice_inherits_parent_target() {
+        let (filter, rest) = parse_target("one of those lands of their choice and untaps it");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, " and untaps it");
+    }
+
+    #[test]
+    fn different_one_of_those_creatures_inherits_parent_target() {
+        let (filter, rest) = parse_target("a different one of those creatures");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn subtype_one_of_those_dragons_inherits_parent_target() {
+        let (filter, rest) = parse_target("one of those Dragons");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn definite_artifact_reference_inherits_parent_target() {
+        let (filter, rest) = parse_target("the artifact and returns it");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, " and returns it");
+    }
+
+    #[test]
+    fn definite_artifact_reference_does_not_steal_type_phrase() {
+        let (filter, rest) = parse_target("the artifact creature");
+        assert_ne!(filter, TargetFilter::ParentTarget);
+        assert_ne!(rest, " creature");
     }
 
     #[test]

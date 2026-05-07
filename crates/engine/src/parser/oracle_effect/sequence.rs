@@ -530,8 +530,9 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         // Primal Amulet: "remove those counters and transform it" must split here so
         // each clause reaches the effect dispatcher independently.
         value((), tag("transform ")),
-        value((), tag("convert ")),
     ))
+    .or(value((), tag("convert ")))
+    .or(value((), tag("returns ")))
     .or(alt((
         // CR 608.2c: Subject-prefixed verb patterns — "you [verb]" is always a clause start.
         value((), tag("you gain ")),
@@ -2145,6 +2146,19 @@ mod tests {
         assert_eq!(
             chunks,
             vec!["sacrifice this Attraction", "open an Attraction"]
+        );
+    }
+
+    #[test]
+    fn bare_and_splits_sacrifice_and_returns() {
+        let chunks =
+            clause_texts("that player simultaneously sacrifices the artifact and returns it");
+        assert_eq!(
+            chunks,
+            vec![
+                "that player simultaneously sacrifices the artifact",
+                "returns it"
+            ]
         );
     }
 
