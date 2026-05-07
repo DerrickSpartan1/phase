@@ -10840,7 +10840,7 @@ fn try_parse_damage_with_remainder<'a>(
                             "",
                         ));
                     }
-                    let (filter, remainder) = parse_target(target_phrase);
+                    let (filter, remainder) = parse_target_with_ctx(target_phrase, ctx);
                     let (filter, remainder) = refine_damage_target_remainder(filter, remainder);
                     // CR 119.5 + CR 700.4: "[N] damage to each creature and each
                     // player" — composite scope. The "each creature" parse
@@ -10966,7 +10966,7 @@ fn try_parse_damage_with_remainder<'a>(
                 "",
             ));
         }
-        let (target, rem) = parse_target(after_to_for_classification);
+        let (target, rem) = parse_target_with_ctx(after_to_for_classification, ctx);
         return Some((
             Effect::DamageAll {
                 amount,
@@ -12511,6 +12511,36 @@ mod tests {
             ),
             "expected DamageEachPlayer{{OpponentOtherThanTriggering}}, got {e:?}"
         );
+    }
+
+    #[test]
+    fn effect_damage_all_that_player_controls_uses_relative_player_scope() {
+        let mut ctx = ParseContext {
+            relative_player_scope: Some(ControllerRef::TargetPlayer),
+            ..ParseContext::default()
+        };
+        let ability = parse_effect_chain_with_context(
+            "~ deals that much damage to each creature controlled by that player",
+            AbilityKind::Spell,
+            &mut ctx,
+        );
+        match &*ability.effect {
+            Effect::DamageAll {
+                amount:
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    },
+                target: TargetFilter::Typed(tf),
+                player_filter: None,
+            } => {
+                assert_eq!(tf.controller, Some(ControllerRef::TargetPlayer));
+                assert!(tf
+                    .type_filters
+                    .iter()
+                    .any(|t| matches!(t, TypeFilter::Creature)));
+            }
+            other => panic!("expected DamageAll against target player's creatures, got {other:?}"),
+        }
     }
 
     /// CR 120.3: Composite "each opponent and each [type] you don't control"

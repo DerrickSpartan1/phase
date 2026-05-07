@@ -10471,6 +10471,36 @@ mod tests {
     }
 
     #[test]
+    fn balefire_dragon_damages_creatures_controlled_by_damaged_player() {
+        let def = parse_trigger_line(
+            "Whenever this creature deals combat damage to a player, it deals that much damage to each creature controlled by that player.",
+            "Balefire Dragon",
+        );
+        assert_eq!(def.mode, TriggerMode::DamageDone);
+        assert_eq!(def.damage_kind, DamageKindFilter::CombatOnly);
+        assert_eq!(def.valid_target, Some(TargetFilter::Player));
+
+        let execute = def.execute.as_deref().expect("execute ability");
+        match &*execute.effect {
+            Effect::DamageAll { amount, target, .. } => {
+                assert_eq!(
+                    *amount,
+                    QuantityExpr::Ref {
+                        qty: QuantityRef::EventContextAmount,
+                    }
+                );
+                assert_eq!(
+                    *target,
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::TargetPlayer)
+                    )
+                );
+            }
+            other => panic!("expected DamageAll, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn ninjutsu_activation_trigger() {
         // CR 702.49a: "Whenever you activate a ninjutsu ability" → NinjutsuActivated
         let def = parse_trigger_line(
