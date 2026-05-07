@@ -1399,8 +1399,12 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
-        if let Ok((rest, _)) =
-            tag::<_, _, OracleError<'_>>("with a basic land type").parse(remaining)
+        if let Ok((rest, _)) = alt((
+            tag::<_, _, OracleError<'_>>("with a basic land type"),
+            tag::<_, _, OracleError<'_>>("that have a basic land type"),
+            tag::<_, _, OracleError<'_>>("that each have a basic land type"),
+        ))
+        .parse(remaining)
         {
             suffix.type_filters.push(basic_land_type_any_of());
             remaining = rest.trim_start();
@@ -1750,6 +1754,22 @@ mod tests {
             .properties
             .iter()
             .any(|property| matches!(property, FilterProp::SameNameAsParentTarget)));
+    }
+
+    #[test]
+    fn build_search_suffix_constraints_handles_basic_land_type_variants() {
+        for suffix_text in [
+            " with a basic land type",
+            " that have a basic land type",
+            " that each have a basic land type",
+        ] {
+            let suffix =
+                build_search_suffix_constraints(suffix_text, false, &mut ParseContext::default());
+            assert!(suffix
+                .type_filters
+                .iter()
+                .any(|filter| matches!(filter, TypeFilter::AnyOf(_))));
+        }
     }
 
     #[test]

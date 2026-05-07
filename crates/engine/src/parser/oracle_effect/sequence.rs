@@ -531,6 +531,8 @@ fn starts_bare_and_clause_lower(s: &str) -> bool {
         // each clause reaches the effect dispatcher independently.
         value((), tag("transform ")),
     ))
+    .or(value((), tag("cast ")))
+    .or(value((), tag("cloak ")))
     .or(value((), tag("convert ")))
     .or(value((), tag("returns ")))
     .or(alt((
@@ -2159,6 +2161,29 @@ mod tests {
                 "that player simultaneously sacrifices the artifact",
                 "returns it"
             ]
+        );
+    }
+
+    #[test]
+    fn bare_and_splits_search_and_cast() {
+        let chunks = clause_texts(
+            "search your library for an instant card with mana value 4 or less and cast that card without paying its mana cost",
+        );
+        assert_eq!(
+            chunks,
+            vec![
+                "search your library for an instant card with mana value 4 or less",
+                "cast that card without paying its mana cost"
+            ]
+        );
+    }
+
+    #[test]
+    fn bare_and_splits_search_and_cloak() {
+        let chunks = clause_texts("search your library for a nonland card and cloak it");
+        assert_eq!(
+            chunks,
+            vec!["search your library for a nonland card", "cloak it"]
         );
     }
 
