@@ -1,7 +1,8 @@
 use crate::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode, CastingPermission,
-    ChoiceType, ContinuousModification, Duration, Effect, GameRestriction, QuantityExpr,
-    ResolvedAbility, RestrictionPlayerScope, StaticDefinition, TargetFilter, TargetRef,
+    ChoiceType, ContinuousModification, Duration, Effect, GameRestriction, ModalSelectionCondition,
+    QuantityExpr, ResolvedAbility, RestrictionPlayerScope, StaticDefinition, TargetFilter,
+    TargetRef,
 };
 use crate::types::card::LayoutKind;
 use crate::types::events::GameEvent;
@@ -2829,19 +2830,39 @@ fn continue_with_prepared(
     let resolved = if let Some(ref ability_def) = prepared.ability_def {
         // CR 601.2c: The player announcing a spell with modes chooses the mode(s).
         if let Some(ref modal_choice) = prepared.modal {
-            // Cap max_choices to actual mode count
-            let mut capped =
-                modal_choice_for_player(state, player, prepared.object_id, modal_choice);
-            capped.max_choices = capped.max_choices.min(capped.mode_count);
-            let target_constraints = target_constraints_from_modal(&capped);
-
-            // Build a placeholder resolved ability -- will be replaced after mode selection
             let placeholder = ResolvedAbility::new(
                 *ability_def.effect.clone(),
                 Vec::new(),
                 prepared.object_id,
                 player,
             );
+            if modal_requires_additional_cost_declaration(modal_choice) {
+                return casting_costs::begin_modal_additional_cost_declaration(
+                    state,
+                    player,
+                    prepared.object_id,
+                    prepared.card_id,
+                    placeholder,
+                    prepared.mana_cost.clone(),
+                    prepared.casting_variant,
+                    modal_choice.clone(),
+                    ability_def.distribute.clone(),
+                    prepared.origin_zone,
+                    events,
+                );
+            }
+            // Cap max_choices to actual mode count
+            let mut capped = modal_choice_for_player(
+                state,
+                player,
+                prepared.object_id,
+                modal_choice,
+                &crate::types::ability::SpellContext::default(),
+            );
+            capped.max_choices = capped.max_choices.min(capped.mode_count);
+            let target_constraints = target_constraints_from_modal(&capped);
+
+            // Build a placeholder resolved ability -- will be replaced after mode selection
             let mut pending_modal = PendingCast::new(
                 prepared.object_id,
                 prepared.card_id,
@@ -3004,6 +3025,18 @@ fn continue_with_prepared(
         prepared.origin_zone,
         events,
     )
+}
+
+fn modal_requires_additional_cost_declaration(modal: &crate::types::ability::ModalChoice) -> bool {
+    modal.constraints.iter().any(|constraint| {
+        matches!(
+            constraint,
+            crate::types::ability::ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: ModalSelectionCondition::AdditionalCostPaid { .. },
+                ..
+            }
+        )
+    })
 }
 
 /// Fast path for permanent spells with no spell-level ability.
@@ -4494,7 +4527,13 @@ pub fn handle_activate_ability(
     // CR 602.2b: Announce → choose modes → choose targets → pay costs.
     // Modal detection must happen BEFORE cost payment.
     if let Some(ref modal) = ability_def.modal {
-        let modal = modal_choice_for_player(state, player, source_id, modal);
+        let modal = modal_choice_for_player(
+            state,
+            player,
+            source_id,
+            modal,
+            &crate::types::ability::SpellContext::default(),
+        );
         // Pre-validate tap cost for modals — fail fast before presenting the choice
         if ability_def.cost.as_ref().is_some_and(requires_untapped) {
             let obj = state.objects.get(&source_id).unwrap();
@@ -5268,9 +5307,10 @@ mod tests {
     use crate::types::ability::{
         ActivationRestriction, BasicLandType, CastVariantPaid, CastingPermission, ChosenAttribute,
         ChosenSubtypeKind, ContinuousModification, ControllerRef, FilterProp, GainLifePlayer,
-        GameRestriction, ManaContribution, ManaProduction, ModalSelectionConstraint, QuantityExpr,
-        RestrictionExpiry, RestrictionPlayerScope, SearchSelectionConstraint, StaticCondition,
-        StaticDefinition, TargetFilter, TypeFilter, TypedFilter,
+        GameRestriction, KickerVariant, ManaContribution, ManaProduction, ModalSelectionCondition,
+        ModalSelectionConstraint, QuantityExpr, RestrictionExpiry, RestrictionPlayerScope,
+        SearchSelectionConstraint, StaticCondition, StaticDefinition, TargetFilter, TypeFilter,
+        TypedFilter,
     };
     use crate::types::actions::GameAction;
     use crate::types::card_type::{CoreType, Supertype};
@@ -8932,7 +8972,9 @@ mod tests {
             modal
                 .constraints
                 .push(ModalSelectionConstraint::ConditionalMaxChoices {
-                    condition: StaticCondition::ControlsCommander,
+                    condition: ModalSelectionCondition::Static {
+                        condition: StaticCondition::ControlsCommander,
+                    },
                     max_choices: 2,
                     otherwise_max_choices: 1,
                 });
@@ -8962,7 +9004,9 @@ mod tests {
             modal
                 .constraints
                 .push(ModalSelectionConstraint::ConditionalMaxChoices {
-                    condition: StaticCondition::ControlsCommander,
+                    condition: ModalSelectionCondition::Static {
+                        condition: StaticCondition::ControlsCommander,
+                    },
                     max_choices: 2,
                     otherwise_max_choices: 1,
                 });
@@ -9000,12 +9044,14 @@ mod tests {
             modal
                 .constraints
                 .push(ModalSelectionConstraint::ConditionalMaxChoices {
-                    condition: StaticCondition::IsPresent {
-                        filter: Some(TargetFilter::Typed(TypedFilter {
-                            type_filters: vec![TypeFilter::Creature],
-                            controller: Some(ControllerRef::You),
-                            properties: vec![],
-                        })),
+                    condition: ModalSelectionCondition::Static {
+                        condition: StaticCondition::IsPresent {
+                            filter: Some(TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Creature],
+                                controller: Some(ControllerRef::You),
+                                properties: vec![],
+                            })),
+                        },
                     },
                     max_choices: 2,
                     otherwise_max_choices: 1,
@@ -9036,12 +9082,14 @@ mod tests {
             modal
                 .constraints
                 .push(ModalSelectionConstraint::ConditionalMaxChoices {
-                    condition: StaticCondition::IsPresent {
-                        filter: Some(TargetFilter::Typed(TypedFilter {
-                            type_filters: vec![TypeFilter::Creature],
-                            controller: Some(ControllerRef::You),
-                            properties: vec![],
-                        })),
+                    condition: ModalSelectionCondition::Static {
+                        condition: StaticCondition::IsPresent {
+                            filter: Some(TargetFilter::Typed(TypedFilter {
+                                type_filters: vec![TypeFilter::Creature],
+                                controller: Some(ControllerRef::You),
+                                properties: vec![],
+                            })),
+                        },
                     },
                     max_choices: 2,
                     otherwise_max_choices: 1,
@@ -9073,6 +9121,146 @@ mod tests {
             }
             other => panic!("expected ModeChoice, got {other:?}"),
         }
+    }
+
+    fn create_kicker_modal_charm(state: &mut GameState, player: PlayerId) -> ObjectId {
+        let obj_id = create_modal_charm(state, player);
+        let obj = state.objects.get_mut(&obj_id).unwrap();
+        obj.additional_cost = Some(AdditionalCost::Kicker {
+            costs: vec![AbilityCost::Mana {
+                cost: ManaCost::Cost {
+                    shards: vec![ManaCostShard::Green],
+                    generic: 0,
+                },
+            }],
+            repeatable: false,
+        });
+        obj.modal.as_mut().unwrap().constraints.push(
+            ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: ModalSelectionCondition::AdditionalCostPaid {
+                    variant: None,
+                    kicker_cost: None,
+                    min_count: 1,
+                },
+                max_choices: usize::MAX,
+                otherwise_max_choices: 1,
+            },
+        );
+        obj_id
+    }
+
+    #[test]
+    fn modal_kicker_declined_caps_modes_before_mode_choice() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_kicker_modal_charm(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+
+        let mut events = Vec::new();
+        state.waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(50), &mut events).unwrap();
+        assert!(matches!(
+            state.waiting_for,
+            WaitingFor::OptionalCostChoice { .. }
+        ));
+
+        let (pending, cost) = match &state.waiting_for {
+            WaitingFor::OptionalCostChoice {
+                pending_cast, cost, ..
+            } => (*pending_cast.clone(), cost.clone()),
+            other => panic!("expected OptionalCostChoice, got {other:?}"),
+        };
+        state.waiting_for = crate::game::engine_casting::handle_optional_cost_choice(
+            &mut state,
+            PlayerId(0),
+            pending,
+            &cost,
+            false,
+            &mut events,
+        )
+        .unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::ModeChoice {
+                modal,
+                pending_cast,
+                ..
+            } => {
+                assert_eq!(modal.max_choices, 1);
+                assert!(!pending_cast.ability.context.additional_cost_paid);
+            }
+            other => panic!("expected ModeChoice, got {other:?}"),
+        }
+
+        state.waiting_for =
+            handle_select_modes(&mut state, PlayerId(0), vec![1], &mut events).unwrap();
+
+        assert!(matches!(state.waiting_for, WaitingFor::Priority { .. }));
+        assert_eq!(state.stack.len(), 1);
+        let StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = &state.stack[0].kind
+        else {
+            panic!("expected spell ability on stack");
+        };
+        assert!(!ability.context.additional_cost_paid);
+        assert!(ability.context.kickers_paid.is_empty());
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 1);
+    }
+
+    #[test]
+    fn modal_kicker_paid_allows_extra_modes_and_reaches_stack_context() {
+        let mut state = setup_game_at_main_phase();
+        let obj_id = create_kicker_modal_charm(&mut state, PlayerId(0));
+        add_mana(&mut state, PlayerId(0), ManaType::Red, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Green, 1);
+
+        let mut events = Vec::new();
+        state.waiting_for =
+            handle_cast_spell(&mut state, PlayerId(0), obj_id, CardId(50), &mut events).unwrap();
+        let (pending, cost) = match &state.waiting_for {
+            WaitingFor::OptionalCostChoice {
+                pending_cast, cost, ..
+            } => (*pending_cast.clone(), cost.clone()),
+            other => panic!("expected OptionalCostChoice, got {other:?}"),
+        };
+        state.waiting_for = crate::game::engine_casting::handle_optional_cost_choice(
+            &mut state,
+            PlayerId(0),
+            pending,
+            &cost,
+            true,
+            &mut events,
+        )
+        .unwrap();
+
+        match &state.waiting_for {
+            WaitingFor::ModeChoice {
+                modal,
+                pending_cast,
+                ..
+            } => {
+                assert_eq!(modal.max_choices, 3);
+                assert!(pending_cast.ability.context.additional_cost_paid);
+            }
+            other => panic!("expected ModeChoice, got {other:?}"),
+        }
+
+        state.waiting_for =
+            handle_select_modes(&mut state, PlayerId(0), vec![1, 2], &mut events).unwrap();
+
+        assert_eq!(state.stack.len(), 1);
+        let StackEntryKind::Spell {
+            ability: Some(ability),
+            ..
+        } = &state.stack[0].kind
+        else {
+            panic!("expected spell ability on stack");
+        };
+        assert!(ability.context.additional_cost_paid);
+        assert_eq!(ability.context.kickers_paid, vec![KickerVariant::First]);
+        assert_eq!(state.players[0].mana_pool.count_color(ManaType::Green), 0);
     }
 
     #[test]

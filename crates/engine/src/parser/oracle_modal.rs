@@ -1,12 +1,13 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
-use nom::bytes::complete::tag;
-use nom::combinator::{opt, value};
-use nom::sequence::preceded;
+use nom::bytes::complete::{tag, take_until};
+use nom::combinator::{map, opt, success, value};
+use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
 use crate::types::ability::{
-    AbilityDefinition, AbilityKind, Effect, ModalChoice, ModalSelectionConstraint, StaticCondition,
+    AbilityDefinition, AbilityKind, Effect, ModalChoice, ModalSelectionCondition,
+    ModalSelectionConstraint,
 };
 
 use super::oracle::find_activated_colon;
@@ -276,7 +277,7 @@ fn parse_conditional_modal_max_constraints(
 
 fn parse_conditional_modal_max(
     input: &str,
-) -> nom::IResult<&str, (StaticCondition, usize), OracleError<'_>> {
+) -> nom::IResult<&str, (ModalSelectionCondition, usize), OracleError<'_>> {
     let (rest, _) = parse_modal_base_sentence(input)?;
     let (rest, _) = tag(" if ").parse(rest)?;
     let (rest, condition) = parse_modal_condition(rest)?;
@@ -301,10 +302,81 @@ fn parse_modal_base_sentence(input: &str) -> nom::IResult<&str, (), OracleError<
     Ok((rest, ()))
 }
 
-fn parse_modal_condition(input: &str) -> nom::IResult<&str, StaticCondition, OracleError<'_>> {
+fn parse_modal_condition(
+    input: &str,
+) -> nom::IResult<&str, ModalSelectionCondition, OracleError<'_>> {
+    alt((
+        parse_modal_additional_cost_condition,
+        parse_modal_static_condition,
+    ))
+    .parse(input)
+}
+
+fn parse_modal_static_condition(
+    input: &str,
+) -> nom::IResult<&str, ModalSelectionCondition, OracleError<'_>> {
     let (rest, condition) = nom_condition::parse_inner_condition(input)?;
     let (rest, _) = opt(tag(" as you cast this spell")).parse(rest)?;
-    Ok((rest, condition))
+    Ok((rest, ModalSelectionCondition::Static { condition }))
+}
+
+fn parse_modal_additional_cost_condition(
+    input: &str,
+) -> nom::IResult<&str, ModalSelectionCondition, OracleError<'_>> {
+    let (rest, _) = alt((
+        tag("this spell was kicked"),
+        tag("it was kicked"),
+        preceded(take_until(" was kicked"), tag(" was kicked")),
+    ))
+    .parse(input)?;
+
+    alt((
+        parse_modal_specific_kicker_cost_condition,
+        value(
+            ModalSelectionCondition::AdditionalCostPaid {
+                variant: None,
+                kicker_cost: None,
+                min_count: 2,
+            },
+            tag(" twice"),
+        ),
+        map(
+            preceded(
+                tag(" "),
+                terminated(nom_primitives::parse_number, tag(" times")),
+            ),
+            |min_count| ModalSelectionCondition::AdditionalCostPaid {
+                variant: None,
+                kicker_cost: None,
+                min_count,
+            },
+        ),
+        success(ModalSelectionCondition::AdditionalCostPaid {
+            variant: None,
+            kicker_cost: None,
+            min_count: 1,
+        }),
+    ))
+    .parse(rest)
+}
+
+fn parse_modal_specific_kicker_cost_condition(
+    input: &str,
+) -> nom::IResult<&str, ModalSelectionCondition, OracleError<'_>> {
+    let (rest, _) = tag(" with its ").parse(input)?;
+    let (rest, cost_text) = take_until(" kicker").parse(rest)?;
+    let (rest, _) = tag(" kicker").parse(rest)?;
+    let normalized_cost = cost_text.to_uppercase();
+    let (_, kicker_cost) = nom_primitives::parse_mana_cost(normalized_cost.as_str())
+        .map_err(|_| nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Fail)))?;
+    Ok((
+        rest,
+        ModalSelectionCondition::AdditionalCostPaid {
+            variant: None,
+            kicker_cost: Some(kicker_cost),
+            min_count: 1,
+        },
+    ))
 }
 
 fn parse_modal_override_count(input: &str) -> nom::IResult<&str, usize, OracleError<'_>> {

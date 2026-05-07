@@ -6,10 +6,10 @@ use crate::parser::oracle::{oracle_text_allows_commander, parse_oracle_text};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, AdditionalCost, CardPlayMode,
     CastVariantPaid, ChoiceType, ContinuousModification, ControllerRef, CounterTriggerFilter,
-    Duration, Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction, NinjutsuVariant,
-    PtValue, QuantityExpr, ReplacementCondition, ReplacementDefinition, RuntimeHandler,
-    SearchSelectionConstraint, StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition,
-    TypeFilter, TypedFilter,
+    Duration, Effect, FilterProp, KickerVariant, ManaContribution, ManaProduction,
+    ModalSelectionCondition, ModalSelectionConstraint, NinjutsuVariant, PtValue, QuantityExpr,
+    ReplacementCondition, ReplacementDefinition, RuntimeHandler, SearchSelectionConstraint,
+    StaticDefinition, TargetFilter, TriggerCondition, TriggerDefinition, TypeFilter, TypedFilter,
 };
 use crate::types::card::{CardFace, CardLayout};
 use crate::types::card_type::{CardType, CoreType, Supertype};
@@ -508,6 +508,9 @@ fn resolve_ability_kicker_condition_variants(
     if let Some(condition) = ability.condition.as_mut() {
         resolve_condition_kicker_variant(condition, additional_cost);
     }
+    if let Some(modal) = ability.modal.as_mut() {
+        resolve_modal_kicker_condition_variants(modal, additional_cost);
+    }
 
     if let Some(sub_ability) = ability.sub_ability.as_mut() {
         resolve_ability_kicker_condition_variants(sub_ability, additional_cost);
@@ -515,6 +518,26 @@ fn resolve_ability_kicker_condition_variants(
 
     for mode in &mut ability.mode_abilities {
         resolve_ability_kicker_condition_variants(mode, additional_cost);
+    }
+}
+
+fn resolve_modal_kicker_condition_variants(
+    modal: &mut crate::types::ability::ModalChoice,
+    additional_cost: &AdditionalCost,
+) {
+    for constraint in &mut modal.constraints {
+        let ModalSelectionConstraint::ConditionalMaxChoices { condition, .. } = constraint else {
+            continue;
+        };
+        let ModalSelectionCondition::AdditionalCostPaid {
+            variant,
+            kicker_cost,
+            ..
+        } = condition
+        else {
+            continue;
+        };
+        resolve_kicker_cost_metadata(variant, kicker_cost, additional_cost);
     }
 }
 
@@ -2035,6 +2058,73 @@ mod kicker_synthesis_tests {
                 variant: Some(KickerVariant::Second),
                 kicker_cost: None
             })
+        ));
+    }
+
+    #[test]
+    fn resolves_specific_kicker_modal_condition_to_position() {
+        let mut face = CardFace {
+            additional_cost: Some(AdditionalCost::Kicker {
+                costs: vec![
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic: 1,
+                            shards: vec![ManaCostShard::Red],
+                        },
+                    },
+                    AbilityCost::Mana {
+                        cost: ManaCost::Cost {
+                            generic: 1,
+                            shards: vec![ManaCostShard::White],
+                        },
+                    },
+                ],
+                repeatable: false,
+            }),
+            abilities: vec![AbilityDefinition {
+                modal: Some(crate::types::ability::ModalChoice {
+                    constraints: vec![ModalSelectionConstraint::ConditionalMaxChoices {
+                        condition: ModalSelectionCondition::AdditionalCostPaid {
+                            variant: None,
+                            kicker_cost: Some(ManaCost::Cost {
+                                generic: 1,
+                                shards: vec![ManaCostShard::White],
+                            }),
+                            min_count: 1,
+                        },
+                        max_choices: 2,
+                        otherwise_max_choices: 1,
+                    }],
+                    ..Default::default()
+                }),
+                ..AbilityDefinition::new(
+                    AbilityKind::Spell,
+                    Effect::Draw {
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Controller,
+                    },
+                )
+            }],
+            ..CardFace::default()
+        };
+
+        resolve_kicker_condition_variants(&mut face);
+
+        let Some(ModalSelectionConstraint::ConditionalMaxChoices { condition, .. }) = face
+            .abilities
+            .first()
+            .and_then(|ability| ability.modal.as_ref())
+            .and_then(|modal| modal.constraints.first())
+        else {
+            panic!("expected conditional modal constraint");
+        };
+        assert!(matches!(
+            condition,
+            ModalSelectionCondition::AdditionalCostPaid {
+                variant: Some(KickerVariant::Second),
+                kicker_cost: None,
+                min_count: 1
+            }
         ));
     }
 }

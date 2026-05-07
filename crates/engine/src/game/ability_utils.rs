@@ -1,7 +1,7 @@
 use crate::types::ability::{
     AbilityCondition, AbilityDefinition, ControllerRef, Effect, ModalChoice,
-    ModalSelectionConstraint, QuantityExpr, QuantityRef, ResolvedAbility, StaticCondition,
-    TargetFilter, TargetRef, TypeFilter, TypedFilter,
+    ModalSelectionCondition, ModalSelectionConstraint, QuantityExpr, QuantityRef, ResolvedAbility,
+    SpellContext, TargetFilter, TargetRef, TypeFilter, TypedFilter,
 };
 use crate::types::game_state::{
     GameState, TargetSelectionConstraint, TargetSelectionProgress, TargetSelectionSlot,
@@ -141,6 +141,7 @@ pub fn modal_choice_for_player(
     player: crate::types::player::PlayerId,
     source_id: ObjectId,
     modal: &ModalChoice,
+    context: &SpellContext,
 ) -> ModalChoice {
     let mut effective = modal.clone();
     for constraint in &modal.constraints {
@@ -150,12 +151,14 @@ pub fn modal_choice_for_player(
             otherwise_max_choices,
         } = constraint
         {
-            let cap = if modal_selection_condition_matches(state, player, source_id, condition) {
+            let cap = if modal_selection_condition_matches(
+                state, player, source_id, condition, context,
+            ) {
                 *max_choices
             } else {
                 *otherwise_max_choices
             };
-            effective.max_choices = effective.max_choices.min(cap);
+            effective.max_choices = cap;
         }
     }
     effective
@@ -165,9 +168,19 @@ fn modal_selection_condition_matches(
     state: &GameState,
     player: crate::types::player::PlayerId,
     source_id: ObjectId,
-    condition: &StaticCondition,
+    condition: &ModalSelectionCondition,
+    context: &SpellContext,
 ) -> bool {
-    super::layers::evaluate_condition(state, condition, player, source_id)
+    match condition {
+        ModalSelectionCondition::Static { condition } => {
+            super::layers::evaluate_condition(state, condition, player, source_id)
+        }
+        ModalSelectionCondition::AdditionalCostPaid {
+            variant,
+            kicker_cost,
+            min_count,
+        } => context.additional_cost_paid_matches(*variant, kicker_cost.as_ref(), *min_count),
+    }
 }
 
 /// Returns mode indices unavailable due to NoRepeatThisTurn/NoRepeatThisGame constraints.

@@ -3033,8 +3033,13 @@ pub(super) fn begin_pending_trigger_target_selection(
     // CR 700.2a: Modal trigger — prompt for mode selection before stack.
     if let Some(ref modal) = trigger.modal {
         if !trigger.mode_abilities.is_empty() {
-            let modal =
-                modal_choice_for_player(state, trigger.controller, trigger.source_id, modal);
+            let modal = modal_choice_for_player(
+                state,
+                trigger.controller,
+                trigger.source_id,
+                modal,
+                &crate::types::ability::SpellContext::default(),
+            );
             let unavailable_modes = compute_unavailable_modes(state, trigger.source_id, &modal);
 
             // CR 700.2: All modes already chosen — ability cannot be put on the stack
@@ -7020,6 +7025,8 @@ mod tests {
             distribute: None,
             origin_zone: crate::types::zones::Zone::Hand,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         }));
@@ -8668,7 +8675,9 @@ mod trigger_target_tests {
                     "Put a counter.".to_string(),
                 ],
                 constraints: vec![ModalSelectionConstraint::ConditionalMaxChoices {
-                    condition: StaticCondition::ControlsCommander,
+                    condition: crate::types::ability::ModalSelectionCondition::Static {
+                        condition: StaticCondition::ControlsCommander,
+                    },
                     max_choices: 2,
                     otherwise_max_choices: 1,
                 }],

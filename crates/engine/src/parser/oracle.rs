@@ -5099,7 +5099,9 @@ mod tests {
         assert_eq!(
             modal.constraints,
             vec![ModalSelectionConstraint::ConditionalMaxChoices {
-                condition: StaticCondition::ControlsCommander,
+                condition: crate::types::ability::ModalSelectionCondition::Static {
+                    condition: StaticCondition::ControlsCommander,
+                },
                 max_choices: 2,
                 otherwise_max_choices: 1,
             }]
@@ -5138,7 +5140,9 @@ mod tests {
         assert!(matches!(
             modal.constraints[0],
             ModalSelectionConstraint::ConditionalMaxChoices {
-                condition: StaticCondition::IsPresent { .. },
+                condition: crate::types::ability::ModalSelectionCondition::Static {
+                    condition: StaticCondition::IsPresent { .. },
+                },
                 max_choices: 2,
                 otherwise_max_choices: 1,
             }
@@ -5163,8 +5167,38 @@ mod tests {
         assert!(matches!(
             modal.constraints[0],
             ModalSelectionConstraint::ConditionalMaxChoices {
-                condition: StaticCondition::And { .. },
+                condition: crate::types::ability::ModalSelectionCondition::Static {
+                    condition: StaticCondition::And { .. },
+                },
                 max_choices: 2,
+                otherwise_max_choices: 1,
+            }
+        ));
+        assert!(r.parse_warnings.is_empty());
+    }
+
+    #[test]
+    fn conditional_modal_max_supports_kicker_condition() {
+        let r = parse(
+            "Kicker {2}{G}\nChoose one. If this spell was kicked, choose any number instead.\n• Draw a card.\n• Gain 3 life.\n• Scry 1.",
+            "Inscription Test",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        let modal = r.modal.expect("should have modal metadata");
+        assert_eq!(modal.min_choices, 1);
+        assert_eq!(modal.max_choices, 1);
+        assert_eq!(modal.mode_count, 3);
+        assert!(matches!(
+            modal.constraints[0],
+            ModalSelectionConstraint::ConditionalMaxChoices {
+                condition: crate::types::ability::ModalSelectionCondition::AdditionalCostPaid {
+                    variant: None,
+                    kicker_cost: None,
+                    min_count: 1,
+                },
+                max_choices: usize::MAX,
                 otherwise_max_choices: 1,
             }
         ));
@@ -5482,7 +5516,9 @@ mod tests {
         assert_eq!(
             modal.constraints,
             vec![ModalSelectionConstraint::ConditionalMaxChoices {
-                condition: StaticCondition::ControlsCommander,
+                condition: crate::types::ability::ModalSelectionCondition::Static {
+                    condition: StaticCondition::ControlsCommander,
+                },
                 max_choices: 2,
                 otherwise_max_choices: 1,
             }]

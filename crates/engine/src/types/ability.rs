@@ -5942,7 +5942,7 @@ pub enum ModalSelectionConstraint {
     /// CR 601.2b / CR 700.2a: A conditional casting-time modifier to the
     /// maximum number of modes the controller may choose.
     ConditionalMaxChoices {
-        condition: StaticCondition,
+        condition: ModalSelectionCondition,
         max_choices: usize,
         otherwise_max_choices: usize,
     },
@@ -5952,6 +5952,73 @@ pub enum ModalSelectionConstraint {
     /// CR 700.2: Each mode may only be chosen once total for this source.
     /// Oracle text: "choose one that hasn't been chosen"
     NoRepeatThisGame,
+}
+
+/// Casting-time condition used by modal choice headers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "type")]
+pub enum ModalSelectionCondition {
+    /// CR 700.2a: Static game-state check made as the modal choice is announced.
+    Static { condition: StaticCondition },
+    /// CR 601.2b + CR 702.33d/f: Additional-cost declaration made while casting
+    /// the spell, before the modal cap is evaluated.
+    AdditionalCostPaid {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        variant: Option<KickerVariant>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kicker_cost: Option<ManaCost>,
+        #[serde(
+            default = "AbilityCondition::default_min_count",
+            skip_serializing_if = "AbilityCondition::is_default_min_count"
+        )]
+        min_count: u32,
+    },
+}
+
+impl<'de> Deserialize<'de> for ModalSelectionCondition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(tag = "type")]
+        enum Tagged {
+            Static {
+                condition: StaticCondition,
+            },
+            AdditionalCostPaid {
+                #[serde(default)]
+                variant: Option<KickerVariant>,
+                #[serde(default)]
+                kicker_cost: Option<ManaCost>,
+                #[serde(default = "AbilityCondition::default_min_count")]
+                min_count: u32,
+            },
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Tagged(Tagged),
+            LegacyStatic(StaticCondition),
+        }
+
+        match Repr::deserialize(deserializer)? {
+            Repr::Tagged(Tagged::Static { condition }) => {
+                Ok(ModalSelectionCondition::Static { condition })
+            }
+            Repr::Tagged(Tagged::AdditionalCostPaid {
+                variant,
+                kicker_cost,
+                min_count,
+            }) => Ok(ModalSelectionCondition::AdditionalCostPaid {
+                variant,
+                kicker_cost,
+                min_count,
+            }),
+            Repr::LegacyStatic(condition) => Ok(ModalSelectionCondition::Static { condition }),
+        }
+    }
 }
 
 /// Structured activation-time restrictions parsed from Oracle text.
@@ -6600,6 +6667,30 @@ pub struct SpellContext {
     /// conditions such as "if you cast this spell during your main phase".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast_phase: Option<Phase>,
+}
+
+impl SpellContext {
+    pub fn additional_cost_paid_matches(
+        &self,
+        variant: Option<KickerVariant>,
+        kicker_cost: Option<&ManaCost>,
+        min_count: u32,
+    ) -> bool {
+        if kicker_cost.is_some() && variant.is_none() {
+            return false;
+        }
+
+        match variant {
+            Some(kicker) => self.kickers_paid.contains(&kicker),
+            None => {
+                if min_count <= 1 {
+                    self.additional_cost_paid
+                } else {
+                    self.kickers_paid.len() >= min_count as usize
+                }
+            }
+        }
+    }
 }
 
 /// Intervening-if condition for triggered abilities.
@@ -8117,6 +8208,16 @@ impl ResolvedAbility {
         }
         if let Some(else_branch) = self.else_ability.as_mut() {
             else_branch.set_original_controller_recursive(player);
+        }
+    }
+
+    pub fn set_context_recursive(&mut self, context: SpellContext) {
+        self.context = context.clone();
+        if let Some(sub) = self.sub_ability.as_mut() {
+            sub.set_context_recursive(context.clone());
+        }
+        if let Some(else_branch) = self.else_ability.as_mut() {
+            else_branch.set_context_recursive(context);
         }
     }
 

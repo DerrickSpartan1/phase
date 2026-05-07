@@ -633,6 +633,13 @@ pub struct PendingCast {
     /// kicker costs and multikicker loops.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub additional_cost_flow: Option<AdditionalCost>,
+    /// CR 601.2b + CR 700.2a: Modal spells with kicker-dependent mode caps
+    /// announce kicker intent before choosing modes, but pay those costs later
+    /// in the normal cost-payment step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deferred_modal_choice: Option<ModalChoice>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub declared_kickers_to_pay: Vec<KickerVariant>,
     /// CR 702.33f: Non-repeatable kicker options the player has declined in
     /// the current casting announcement. Paid options are tracked on
     /// `ability.context.kickers_paid`; this list only prevents re-prompting
@@ -670,6 +677,8 @@ impl PendingCast {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         }
@@ -3560,6 +3569,8 @@ mod tests {
                 distribute: None,
                 origin_zone: Zone::Hand,
                 additional_cost_flow: None,
+                deferred_modal_choice: None,
+                declared_kickers_to_pay: Vec::new(),
                 declined_kickers: Vec::new(),
                 convoked_creatures: Vec::new(),
             })
@@ -3821,6 +3832,8 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         });

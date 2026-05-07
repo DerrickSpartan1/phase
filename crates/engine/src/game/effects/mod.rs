@@ -2044,20 +2044,9 @@ fn evaluate_condition(
             kicker_cost,
             min_count,
         } => {
-            if kicker_cost.is_some() && variant.is_none() {
-                false
-            } else {
-                match variant {
-                    Some(kicker) => ability.context.kickers_paid.contains(kicker),
-                    None => {
-                        if *min_count <= 1 {
-                            ability.context.additional_cost_paid
-                        } else {
-                            ability.context.kickers_paid.len() >= *min_count as usize
-                        }
-                    }
-                }
-            }
+            ability
+                .context
+                .additional_cost_paid_matches(*variant, kicker_cost.as_ref(), *min_count)
         }
         AbilityCondition::IfYouDo | AbilityCondition::IfAPlayerDoes => {
             ability.context.optional_effect_performed && !state.cost_payment_failed_flag

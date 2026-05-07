@@ -25,7 +25,8 @@ use super::stack;
 
 use super::ability_utils::{
     assign_targets_in_chain, auto_select_targets_for_ability, begin_target_selection_for_ability,
-    build_target_slots, flatten_targets_in_chain,
+    build_target_slots, flatten_targets_in_chain, modal_choice_for_player,
+    target_constraints_from_modal,
 };
 use super::life_costs::{pay_life_as_cost, PayLifeCostResult};
 
@@ -179,6 +180,10 @@ fn handle_decide_kicker_cost(
 
     pending.ability.context.additional_cost_paid = true;
     pending.ability.context.kickers_paid.push(variant);
+    if pending.deferred_modal_choice.is_some() {
+        pending.declared_kickers_to_pay.push(variant);
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    }
     pay_additional_cost(state, player, cost, pending, events)
 }
 
@@ -239,6 +244,11 @@ fn finish_pending_cost_or_cast(
         pending.additional_cost_flow,
         Some(AdditionalCost::Kicker { .. })
     ) {
+        if pending.deferred_modal_choice.is_none() {
+            if let Some(cost) = next_declared_kicker_cost(&mut pending) {
+                return pay_additional_cost(state, player, cost, pending, events);
+            }
+        }
         if let Some((_, current_cost, _)) = next_kicker_option(state, player, &pending) {
             return Ok(WaitingFor::OptionalCostChoice {
                 player,
@@ -246,7 +256,26 @@ fn finish_pending_cost_or_cast(
                 pending_cast: Box::new(pending),
             });
         }
-        pending.additional_cost_flow = None;
+        if pending.deferred_modal_choice.is_none() {
+            pending.additional_cost_flow = None;
+        }
+    }
+
+    if let Some(modal) = pending.deferred_modal_choice.take() {
+        let mut capped = modal_choice_for_player(
+            state,
+            player,
+            pending.object_id,
+            &modal,
+            &pending.ability.context,
+        );
+        capped.max_choices = capped.max_choices.min(capped.mode_count);
+        pending.target_constraints = target_constraints_from_modal(&capped);
+        return Ok(WaitingFor::ModeChoice {
+            player,
+            modal: capped,
+            pending_cast: Box::new(pending),
+        });
     }
 
     pay_and_push(
@@ -261,6 +290,22 @@ fn finish_pending_cost_or_cast(
         pending.origin_zone,
         events,
     )
+}
+
+fn next_declared_kicker_cost(pending: &mut PendingCast) -> Option<AbilityCost> {
+    let additional = pending.additional_cost_flow.as_ref()?;
+    let AdditionalCost::Kicker { costs, repeatable } = additional else {
+        return None;
+    };
+    let variant = pending.declared_kickers_to_pay.pop()?;
+    if *repeatable {
+        return costs.first().cloned();
+    }
+    let index = match variant {
+        KickerVariant::First => 0,
+        KickerVariant::Second => 1,
+    };
+    costs.get(index).cloned()
 }
 
 /// Complete the discard-for-cost flow: discard selected cards, then continue casting.
@@ -676,6 +721,83 @@ pub(super) fn check_additional_cost_or_pay(
     )
 }
 
+pub(super) fn finish_pending_cast_cost_or_pay(
+    state: &mut GameState,
+    player: PlayerId,
+    mut pending: PendingCast,
+    ability: ResolvedAbility,
+    cost: ManaCost,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    pending.ability = ability;
+    pending.cost = cost;
+    if pending.additional_cost_flow.is_some() {
+        return finish_pending_cost_or_cast(state, player, pending, events);
+    }
+    let object_id = pending.object_id;
+    let card_id = pending.card_id;
+    let casting_variant = pending.casting_variant;
+    let distribute = pending.distribute;
+    let origin_zone = pending.origin_zone;
+    let cost = pending.cost;
+    let ability = pending.ability;
+    check_additional_cost_or_pay_with_distribute(
+        state,
+        player,
+        object_id,
+        card_id,
+        ability,
+        &cost,
+        casting_variant,
+        distribute,
+        origin_zone,
+        events,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn begin_modal_additional_cost_declaration(
+    state: &mut GameState,
+    player: PlayerId,
+    object_id: ObjectId,
+    card_id: CardId,
+    ability: ResolvedAbility,
+    cost: ManaCost,
+    casting_variant: CastingVariant,
+    modal: crate::types::ability::ModalChoice,
+    distribute: Option<DistributionUnit>,
+    origin_zone: Zone,
+    events: &mut Vec<GameEvent>,
+) -> Result<WaitingFor, EngineError> {
+    let additional = state
+        .objects
+        .get(&object_id)
+        .and_then(|obj| obj.additional_cost.clone());
+    let Some(AdditionalCost::Kicker { costs, repeatable }) = additional else {
+        let mut capped =
+            modal_choice_for_player(state, player, object_id, &modal, &ability.context);
+        capped.max_choices = capped.max_choices.min(capped.mode_count);
+        let mut pending = PendingCast::new(object_id, card_id, ability, cost);
+        pending.casting_variant = casting_variant;
+        pending.distribute = distribute;
+        pending.origin_zone = origin_zone;
+        pending.target_constraints = target_constraints_from_modal(&capped);
+        return Ok(WaitingFor::ModeChoice {
+            player,
+            modal: capped,
+            pending_cast: Box::new(pending),
+        });
+    };
+
+    let mut pending = PendingCast::new(object_id, card_id, ability, cost);
+    pending.casting_variant = casting_variant;
+    pending.distribute = distribute;
+    pending.origin_zone = origin_zone;
+    pending.deferred_modal_choice = Some(modal);
+    pending.additional_cost_flow = Some(AdditionalCost::Kicker { costs, repeatable });
+    finish_pending_cost_or_cast(state, player, pending, events)
+}
+
 /// CR 601.2d: Extended version of `check_additional_cost_or_pay` that threads the
 /// `distribute` flag through PendingCast creation so X-spell distribution
 /// survives to the `(ManaPayment, PassPriority)` handler.
@@ -783,6 +905,16 @@ pub(super) fn check_additional_cost_or_pay_with_distribute(
                     costs: costs.clone(),
                     repeatable: *repeatable,
                 });
+                if !pending.ability.context.kickers_paid.is_empty() {
+                    pending.declared_kickers_to_pay = pending
+                        .ability
+                        .context
+                        .kickers_paid
+                        .iter()
+                        .rev()
+                        .copied()
+                        .collect();
+                }
                 return finish_pending_cost_or_cast(state, player, pending, events);
             }
             AdditionalCost::Optional(opt_cost) => {
@@ -2931,6 +3063,8 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         }
@@ -4945,6 +5079,8 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         };
@@ -5057,6 +5193,8 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         };
@@ -5138,6 +5276,8 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         };
@@ -5208,6 +5348,8 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Hand,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         };
@@ -5311,6 +5453,8 @@ mod tests {
             distribute: None,
             origin_zone: Zone::Graveyard,
             additional_cost_flow: None,
+            deferred_modal_choice: None,
+            declared_kickers_to_pay: Vec::new(),
             declined_kickers: Vec::new(),
             convoked_creatures: Vec::new(),
         };
