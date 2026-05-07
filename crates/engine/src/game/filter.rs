@@ -1387,6 +1387,9 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         // CR 107.3 + CR 202.1: The snapshot captured whether the printed mana
         // cost contained an `{X}` shard at cast time.
         FilterProp::HasXInManaCost => record.has_x_in_cost,
+        // CR 605.1: Spell-cast records snapshot the spell object, not the
+        // object's ability list. Fail closed for history predicates.
+        FilterProp::HasManaAbility => false,
         // Disjunctive composite: recurse into inner props under the same snapshot.
         FilterProp::AnyOf { props } => props
             .iter()
@@ -1631,6 +1634,12 @@ fn matches_filter_prop(
         // printed mana cost for an `{X}` shard. Applies to spells on the stack
         // and to any live-object evaluation path (e.g. static-ability filters).
         FilterProp::HasXInManaCost => crate::game::casting_costs::cost_has_x(&obj.mana_cost),
+        // CR 605.1: Delegate to the single mana-ability classifier instead of
+        // duplicating the definition at the filter layer.
+        FilterProp::HasManaAbility => obj
+            .abilities
+            .iter()
+            .any(crate::game::mana_abilities::is_mana_ability),
         // CR 201.2: Name matching is exact (case-insensitive comparison).
         FilterProp::Named { name } => obj.name.eq_ignore_ascii_case(name),
         // SameName: matches objects with the same name as the tracked card from context.
@@ -2253,6 +2262,8 @@ fn zone_change_record_matches_property(
         // meaning for a zone-change record (the object has already left the stack
         // or never was a spell). Fail closed — the snapshot carries no such info.
         | FilterProp::HasXInManaCost
+        // CR 605.1: Zone-change records do not snapshot ability lists.
+        | FilterProp::HasManaAbility
         // CR 903.3d + CR 903.3: Commander designation is preserved across zones,
         // but zone-change records do not carry it. Fail closed — zone-change
         // triggers that need to filter by commander status will require record
@@ -2654,7 +2665,8 @@ mod tests {
     use super::*;
     use crate::game::zones::create_object;
     use crate::types::ability::{
-        AggregateFunction, AttachmentKind, ChosenAttribute, Comparator, ControllerRef, FilterProp,
+        AbilityDefinition, AbilityKind, AggregateFunction, AttachmentKind, ChosenAttribute,
+        Comparator, ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction,
         PlayerScope, QuantityExpr, QuantityRef, TargetFilter,
     };
     use crate::types::card_type::{CoreType, Supertype};
@@ -2878,6 +2890,67 @@ mod tests {
             !spell_record_matches_filter(&non_x_record, &filter, PlayerId(0), &[]),
             "record without X in cost must NOT match HasXInManaCost filter"
         );
+    }
+
+    #[test]
+    fn object_has_mana_ability_filter_uses_mana_ability_classifier() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let mana_rock = create_object(
+            &mut state,
+            CardId(410),
+            PlayerId(0),
+            "Mana Rock".to_string(),
+            Zone::Battlefield,
+        );
+        let draw_rock = create_object(
+            &mut state,
+            CardId(411),
+            PlayerId(0),
+            "Draw Rock".to_string(),
+            Zone::Battlefield,
+        );
+
+        for id in [mana_rock, draw_rock] {
+            state
+                .objects
+                .get_mut(&id)
+                .unwrap()
+                .card_types
+                .core_types
+                .push(CoreType::Artifact);
+        }
+        let mana_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Mana {
+                produced: ManaProduction::Fixed {
+                    colors: vec![ManaColor::Green],
+                    contribution: ManaContribution::Base,
+                },
+                restrictions: vec![],
+                grants: vec![],
+                expiry: None,
+                target: None,
+            },
+        );
+        let draw_ability = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Draw {
+                count: QuantityExpr::Fixed { value: 1 },
+                target: TargetFilter::Controller,
+            },
+        );
+        std::sync::Arc::make_mut(&mut state.objects.get_mut(&mana_rock).unwrap().abilities)
+            .push(mana_ability);
+        std::sync::Arc::make_mut(&mut state.objects.get_mut(&draw_rock).unwrap().abilities)
+            .push(draw_ability);
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::new(TypeFilter::Artifact).properties(vec![FilterProp::HasManaAbility]),
+        );
+
+        assert!(matches_target_filter(&state, mana_rock, &filter, source));
+        assert!(!matches_target_filter(&state, draw_rock, &filter, source));
     }
 
     #[test]

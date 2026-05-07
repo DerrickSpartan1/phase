@@ -490,6 +490,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
                 parts.push(format!("any of ({})", fmt_typed_filter(&inner_tf)));
             }
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
+            FilterProp::HasManaAbility => parts.push("with a mana ability".into()),
             FilterProp::HasAnyCounter => parts.push("with one or more counters".into()),
         }
     }

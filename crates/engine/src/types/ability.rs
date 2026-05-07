@@ -1624,6 +1624,10 @@ pub enum FilterProp {
     /// Evaluated against `SpellCastRecord.has_x_in_cost` in the spell-history
     /// filter path and against `cost_has_x(&obj.mana_cost)` for live objects.
     HasXInManaCost,
+    /// CR 605.1: Matches objects that have at least one ability classified as a
+    /// mana ability by the engine's authoritative mana-ability classifier.
+    /// Used for library filters such as "artifact card with a mana ability".
+    HasManaAbility,
     /// CR 201.2: Matches objects whose card name equals the given name.
     /// Used for "cards named [X]" and "named [X]" filter patterns.
     /// Name comparison is exact per CR 201.2a (case-insensitive at evaluation).

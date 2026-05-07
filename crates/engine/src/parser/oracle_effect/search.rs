@@ -1339,6 +1339,13 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
+        if let Ok((rest, _)) = tag::<_, _, OracleError<'_>>("with a mana ability").parse(remaining)
+        {
+            suffix.properties.push(FilterProp::HasManaAbility);
+            remaining = rest.trim_start();
+            continue;
+        }
+
         if let Some((rest, type_filters)) = parse_search_suffix_subtype_redeclaration(remaining) {
             for type_filter in type_filters {
                 suffix.type_filters.push(type_filter);
@@ -1681,6 +1688,22 @@ mod tests {
             "expected basic-land subtype disjunction, got {:?}",
             typed.type_filters
         );
+    }
+
+    #[test]
+    fn parse_search_filter_handles_card_with_mana_ability() {
+        let filter = parse_search_filter(
+            "artifact card with a mana ability",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Artifact));
+        assert!(typed
+            .properties
+            .iter()
+            .any(|property| matches!(property, FilterProp::HasManaAbility)));
     }
 
     #[test]
