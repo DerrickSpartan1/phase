@@ -1,7 +1,7 @@
 use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until};
-use nom::combinator::{map, opt, rest, value};
+use nom::combinator::{eof, map, opt, rest, value};
 use nom::sequence::{preceded, terminated};
 use nom::Parser;
 
@@ -664,6 +664,33 @@ fn strip_sacrifice_choice_marker(target_text: &str) -> String {
     target_text.to_string()
 }
 
+fn strip_sacrifice_count_suffix(target_text: &str) -> String {
+    let trimmed = target_text.trim_start();
+    let lower = trimmed.to_lowercase();
+    if nom_on_lower(trimmed, &lower, |input| {
+        value(
+            (),
+            (
+                alt((
+                    tag::<_, _, OracleError<'_>>(", rounded up"),
+                    tag(", rounded down"),
+                    tag(", round up"),
+                    tag(", round down"),
+                )),
+                opt(tag(".")),
+                eof,
+            ),
+        )
+        .parse(input)
+    })
+    .is_some()
+    {
+        String::new()
+    } else {
+        target_text.to_string()
+    }
+}
+
 /// NOTE: Shares verb prefixes with `try_parse_verb_and_target` in `mod.rs`.
 /// When adding a new targeted verb here, check if it also needs to be added there
 /// (for compound action splitting like "tap target creature and put a counter on it").
@@ -709,7 +736,7 @@ pub(super) fn parse_targeted_action_ast(
         // they control of their choice" — split at the leading space), and
         // (2) the count subsumes the filter and only the phrase is left
         // ("of their choice" — treat the entire remainder as the phrase).
-        let target_text = strip_sacrifice_choice_marker(target_text);
+        let target_text = strip_sacrifice_count_suffix(&strip_sacrifice_choice_marker(target_text));
         // CR 107.2: Skip `parse_target` on an empty remainder — the count
         // subsumed the filter ("sacrifice half the permanents they control
         // of their choice"), so there is nothing left to classify. Avoids
@@ -5741,6 +5768,81 @@ mod tests {
     }
 
     #[test]
+    fn parse_sacrifice_half_non_demon_permanents_lifts_count_filter() {
+        let text = "sacrifice half the non-Demon permanents you control, rounded up";
+        let lower = text.to_lowercase();
+        let result = parse_targeted_action_ast(text, &lower, &mut ParseContext::default());
+        match result {
+            Some(TargetedImperativeAst::Sacrifice { target, count }) => {
+                assert!(matches!(
+                    count,
+                    QuantityExpr::HalfRounded {
+                        rounding: crate::types::ability::RoundingMode::Up,
+                        ..
+                    }
+                ));
+                let TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::You),
+                    ..
+                }) = target
+                else {
+                    panic!("expected You-controlled typed target");
+                };
+                assert_eq!(
+                    type_filters,
+                    vec![
+                        crate::types::ability::TypeFilter::Permanent,
+                        crate::types::ability::TypeFilter::Non(Box::new(
+                            crate::types::ability::TypeFilter::Subtype("Demon".to_string())
+                        )),
+                    ]
+                );
+            }
+            other => panic!("Expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_sacrifice_half_non_god_creatures_ignores_choice_rounding_suffix() {
+        let text =
+            "sacrifice half the non-God creatures they control of their choice, rounded down";
+        let lower = text.to_lowercase();
+        let mut ctx = ParseContext::default();
+        let result = parse_targeted_action_ast(text, &lower, &mut ctx);
+        match result {
+            Some(TargetedImperativeAst::Sacrifice { target, count }) => {
+                assert!(matches!(
+                    count,
+                    QuantityExpr::HalfRounded {
+                        rounding: crate::types::ability::RoundingMode::Down,
+                        ..
+                    }
+                ));
+                assert!(ctx.diagnostics.is_empty(), "{:?}", ctx.diagnostics);
+                let TargetFilter::Typed(TypedFilter {
+                    type_filters,
+                    controller: Some(ControllerRef::ScopedPlayer),
+                    ..
+                }) = target
+                else {
+                    panic!("expected ScopedPlayer-controlled typed target");
+                };
+                assert_eq!(
+                    type_filters,
+                    vec![
+                        crate::types::ability::TypeFilter::Creature,
+                        crate::types::ability::TypeFilter::Non(Box::new(
+                            crate::types::ability::TypeFilter::Subtype("God".to_string())
+                        )),
+                    ]
+                );
+            }
+            other => panic!("Expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_lose_life_equal_to_mana_value() {
         let text = "loses life equal to that card's mana value";
         let lower = text.to_lowercase();
@@ -5761,7 +5863,6 @@ mod tests {
             other => panic!("Expected LoseLife, got {other:?}"),
         }
     }
-
     #[test]
     fn parse_gain_life_equal_to_power() {
         let text = "gain life equal to its power";

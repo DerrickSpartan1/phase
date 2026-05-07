@@ -8,7 +8,7 @@ use crate::parser::oracle_nom::error::OracleError;
 use nom::branch::alt;
 use nom::bytes::complete::{tag, take_until, take_while1};
 use nom::combinator::{map, opt, value};
-use nom::sequence::{pair, preceded};
+use nom::sequence::{pair, preceded, terminated};
 use nom::Parser;
 
 use super::context::ParseContext;
@@ -286,22 +286,54 @@ fn parse_cards_in_possessive_zone(input: &str) -> OracleResult<'_, QuantityRef> 
 /// controller. `"you"` remains `ControllerRef::You`.
 fn parse_possessive_objects_they_control(input: &str) -> OracleResult<'_, QuantityRef> {
     let (rest, _) = tag("the ").parse(input)?;
-    let (rest, tf) = parse_type_filter_word(rest)?;
-    let (rest, controller) = alt((
-        value(ControllerRef::ScopedPlayer, tag(" they control")),
-        value(ControllerRef::You, tag(" you control")),
+    let (rest, (type_phrase, controller)) = alt((
+        map(
+            terminated(take_until(" they control"), tag(" they control")),
+            |type_phrase| (type_phrase, ControllerRef::ScopedPlayer),
+        ),
+        map(
+            terminated(take_until(" you control"), tag(" you control")),
+            |type_phrase| (type_phrase, ControllerRef::You),
+        ),
     ))
     .parse(rest)?;
-    Ok((
-        rest,
-        QuantityRef::ObjectCount {
-            filter: TargetFilter::Typed(TypedFilter {
-                type_filters: vec![tf],
-                controller: Some(controller),
-                properties: Vec::new(),
-            }),
-        },
-    ))
+    let (mut filter, type_rest) = parse_type_phrase(type_phrase);
+    if !type_rest.trim().is_empty() || !quantity_filter_has_meaningful_content(&filter) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    attach_controller_to_quantity_filter(&mut filter, controller);
+    Ok((rest, QuantityRef::ObjectCount { filter }))
+}
+
+fn attach_controller_to_quantity_filter(filter: &mut TargetFilter, controller: ControllerRef) {
+    match filter {
+        TargetFilter::Typed(TypedFilter {
+            controller: slot, ..
+        }) if slot.is_none() => {
+            *slot = Some(controller);
+        }
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            for filter in filters {
+                attach_controller_to_quantity_filter(filter, controller.clone());
+            }
+        }
+        TargetFilter::Not { filter } => attach_controller_to_quantity_filter(filter, controller),
+        _ => {}
+    }
+}
+
+fn quantity_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
+    match filter {
+        TargetFilter::Typed(tf) => !tf.type_filters.is_empty() || !tf.properties.is_empty(),
+        TargetFilter::Or { filters } | TargetFilter::And { filters } => {
+            filters.iter().any(quantity_filter_has_meaningful_content)
+        }
+        TargetFilter::Not { filter } => quantity_filter_has_meaningful_content(filter),
+        _ => false,
+    }
 }
 
 /// Parse an optional ", rounded up/down" / ", round up/down" suffix.
@@ -3414,6 +3446,76 @@ mod tests {
                 }
             )
         ));
+    }
+
+    #[test]
+    fn test_parse_half_non_demon_permanents_you_control_preserves_full_filter() {
+        let (rest, q) =
+            parse_half_rounded("half the non-Demon permanents you control, rounded up").unwrap();
+        assert_eq!(rest, "");
+        let QuantityExpr::HalfRounded {
+            inner,
+            rounding: RoundingMode::Up,
+        } = q
+        else {
+            panic!("expected HalfRounded(Up), got {q:?}");
+        };
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter:
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters,
+                            controller: Some(ControllerRef::You),
+                            ..
+                        }),
+                },
+        } = *inner
+        else {
+            panic!("expected ObjectCount with You controller");
+        };
+        assert_eq!(
+            type_filters,
+            vec![
+                TypeFilter::Permanent,
+                TypeFilter::Non(Box::new(TypeFilter::Subtype("Demon".to_string()))),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_parse_half_non_god_creatures_they_control_preserves_scoped_filter() {
+        let (rest, q) =
+            parse_half_rounded("half the non-God creatures they control, rounded down").unwrap();
+        assert_eq!(rest, "");
+        let QuantityExpr::HalfRounded {
+            inner,
+            rounding: RoundingMode::Down,
+        } = q
+        else {
+            panic!("expected HalfRounded(Down), got {q:?}");
+        };
+        let QuantityExpr::Ref {
+            qty:
+                QuantityRef::ObjectCount {
+                    filter:
+                        TargetFilter::Typed(TypedFilter {
+                            type_filters,
+                            controller: Some(ControllerRef::ScopedPlayer),
+                            ..
+                        }),
+                },
+        } = *inner
+        else {
+            panic!("expected ObjectCount with ScopedPlayer controller");
+        };
+        assert_eq!(
+            type_filters,
+            vec![
+                TypeFilter::Creature,
+                TypeFilter::Non(Box::new(TypeFilter::Subtype("God".to_string()))),
+            ]
+        );
     }
 
     #[test]

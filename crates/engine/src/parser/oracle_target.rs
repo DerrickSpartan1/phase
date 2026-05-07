@@ -243,6 +243,13 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
         alt((
             value(
+                TargetFilter::TriggeringSource,
+                (
+                    alt((tag("the discarded card"), tag("that discarded card"))),
+                    opt(tag(" from your graveyard")),
+                ),
+            ),
+            value(
                 TargetFilter::ParentTargetController,
                 tag::<_, _, OracleError<'_>>("that creature's controller"),
             ),
@@ -1542,6 +1549,8 @@ fn starts_with_type_phrase_lead(text: &str) -> bool {
     starts_with_type_word(text)
         || nom_target::parse_supertype_prefix(text).is_ok()
         || parse_color_prefix(text).is_some()
+        || parse_color_quality_prefix(text).is_some()
+        || parse_combat_status_prefix(text).is_some()
 }
 
 fn target_filter_has_meaningful_content(filter: &TargetFilter) -> bool {
@@ -3535,6 +3544,27 @@ mod tests {
             f,
             TargetFilter::Typed(TypedFilter::creature().controller(ControllerRef::You))
         );
+    }
+
+    #[test]
+    fn article_status_type_phrase_parses_as_target() {
+        let (f, rest) = parse_target("a tapped land you control");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(
+                TypedFilter::land()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Tapped])
+            )
+        );
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn discarded_card_from_graveyard_refers_to_triggering_source() {
+        let (f, rest) = parse_target("the discarded card from your graveyard");
+        assert_eq!(f, TargetFilter::TriggeringSource);
+        assert_eq!(rest, "");
     }
 
     #[test]
