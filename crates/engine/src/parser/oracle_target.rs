@@ -2233,6 +2233,23 @@ pub(crate) fn parse_mana_value_suffix(text: &str) -> Option<(FilterProp, usize)>
                 },
                 a,
             )
+        } else if let Ok((a, _)) = tag::<_, _, OracleError<'_>>("or ").parse(after_num) {
+            let (after, second_value) = nom_quantity::parse_quantity_expr_number(a).ok()?;
+            (
+                FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value,
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: second_value,
+                        },
+                    ],
+                },
+                after,
+            )
         } else {
             // CR 202.3: Exact mana value match — "with mana value N" (no "or less"/"or greater").
             (
@@ -3915,6 +3932,13 @@ mod tests {
     }
 
     #[test]
+    fn this_attraction_is_self_ref() {
+        let (f, rest) = parse_target("this attraction");
+        assert_eq!(f, TargetFilter::SelfRef);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
     fn white_creature_you_control() {
         let (f, _) = parse_type_phrase("white creature you control");
         assert_eq!(
@@ -4104,6 +4128,29 @@ mod tests {
                 comparator: Comparator::GE,
                 value: QuantityExpr::Fixed { value: 4 },
             }]))
+        );
+    }
+
+    #[test]
+    fn artifact_card_with_mana_value_4_or_5() {
+        let (f, rest) = parse_type_phrase("artifact card with mana value 4 or 5, reveal it");
+        assert_eq!(rest, ", reveal it");
+        assert_eq!(
+            f,
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Artifact).properties(vec![
+                FilterProp::AnyOf {
+                    props: vec![
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: QuantityExpr::Fixed { value: 4 },
+                        },
+                        FilterProp::Cmc {
+                            comparator: Comparator::EQ,
+                            value: QuantityExpr::Fixed { value: 5 },
+                        },
+                    ],
+                },
+            ]))
         );
     }
 

@@ -22,6 +22,7 @@ use crate::types::ability::{
     TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
+use crate::types::keywords::Keyword;
 use crate::types::zones::Zone;
 
 /// Scan `lower` at word boundaries for `tag_prefix`, then apply `combinator` to the
@@ -1433,6 +1434,12 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
+        if let Ok((rest, prop)) = parse_search_enchant_keyword_suffix(remaining) {
+            suffix.properties.push(prop);
+            remaining = rest.trim_start();
+            continue;
+        }
+
         // CR 608.2c + CR 202.3: "with total mana value N or less" constrains
         // the selected set, not each individual card. `parse_search_library_details`
         // stores it in `SearchSelectionConstraint`; consume the suffix here so it
@@ -1520,6 +1527,27 @@ fn scan_same_name_reference_target(lower: &str) -> Option<TargetFilter> {
     })
     .map(|(target, _)| target)
     .filter(|target| !matches!(target, TargetFilter::Any))
+}
+
+fn parse_search_enchant_keyword_suffix(
+    input: &str,
+) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
+    let (rest, _) = tag("with enchant ").parse(input)?;
+    let (after_target, target_text) =
+        take_till1::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.').parse(rest)?;
+    let (target, remainder) = parse_type_phrase(target_text.trim());
+    if !remainder.trim().is_empty() || !search_filter_has_meaningful_content(&target) {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    }
+    Ok((
+        after_target,
+        FilterProp::WithKeyword {
+            value: Keyword::Enchant(target),
+        },
+    ))
 }
 
 /// Parse the destination zone from search Oracle text.
@@ -1894,6 +1922,27 @@ mod tests {
                 comparator: Comparator::EQ,
                 value: QuantityExpr::Fixed { value: 9 }
             }
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_enchant_keyword_suffix() {
+        let filter = parse_search_filter(
+            "aura card with enchant creature, reveal it",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Enchantment));
+        assert!(typed
+            .type_filters
+            .contains(&TypeFilter::Subtype("Aura".to_string())));
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::WithKeyword {
+                value: Keyword::Enchant(TargetFilter::Typed(target))
+            } if target.type_filters.contains(&TypeFilter::Creature)
         )));
     }
 
