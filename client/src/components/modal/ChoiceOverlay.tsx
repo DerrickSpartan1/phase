@@ -200,3 +200,24 @@ export function ConfirmButton({
     </AnimatePresence>
   );
 }
+
+export function CancelButton({
+  onClick,
+  label = "Cancel",
+}: {
+  onClick: () => void;
+  label?: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={menuButtonClass({
+        tone: "slate",
+        size: "lg",
+        className: "w-full",
+      })}
+    >
+      {label}
+    </button>
+  );
+}

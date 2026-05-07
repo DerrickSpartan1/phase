@@ -129,6 +129,40 @@ describe("TargetingOverlay", () => {
     });
   });
 
+  it("allows cancelling tap-creatures spell costs", () => {
+    const dispatch = vi.fn().mockResolvedValue([]);
+    const gameState = createGameState({
+      waiting_for: {
+        type: "TapCreaturesForSpellCost",
+        data: {
+          player: 0,
+          count: 1,
+          creatures: [],
+          pending_cast: {
+            object_id: 5,
+            card_id: 10,
+            ability: { targets: [] },
+            cost: { type: "NoCost" },
+          },
+        },
+      },
+    });
+
+    act(() => {
+      useGameStore.setState({
+        gameState,
+        waitingFor: gameState.waiting_for,
+        dispatch,
+      });
+    });
+
+    render(<TargetingOverlay />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    expect(dispatch).toHaveBeenCalledWith({ type: "CancelCast" });
+  });
+
   it("informs the player when the target slot is up to one nonland permanent", () => {
     const dispatch = vi.fn().mockResolvedValue([]);
     const nonLandTarget = buildGameObject({

@@ -118,7 +118,7 @@ export function TargetingOverlay() {
         {/* Player targets are handled by PlayerHud/OpponentHud glow + click */}
 
         <div className="pointer-events-auto absolute bottom-6 left-0 right-0 flex justify-center gap-4">
-          {waitingFor.type === "TargetSelection" && (
+          {(waitingFor.type === "TargetSelection" || waitingFor.type === "TapCreaturesForSpellCost") && (
             <button
               onClick={handleCancel}
               className="rounded-lg bg-gray-700 px-6 py-2 font-semibold text-gray-200 shadow-lg transition hover:bg-gray-600"

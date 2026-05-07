@@ -8,7 +8,7 @@ import { useGameDispatch } from "../../hooks/useGameDispatch.ts";
 import { useInspectHoverProps } from "../../hooks/useInspectHoverProps.ts";
 import type { GameObject, ManaCost, ManaType, ObjectId, TargetFilter, WaitingFor } from "../../adapter/types.ts";
 import { useCanActForWaitingState } from "../../hooks/usePlayerId.ts";
-import { ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "./ChoiceOverlay.tsx";
+import { CancelButton, ChoiceOverlay, ConfirmButton, ScrollableCardStrip } from "./ChoiceOverlay.tsx";
 import { ManaSymbol } from "../mana/ManaSymbol.tsx";
 import { NamedChoiceModal } from "./NamedChoiceModal.tsx";
 import { VoteChoiceModal } from "./VoteChoiceModal.tsx";
@@ -55,6 +55,25 @@ function objectImageProps(obj: GameObject) {
     isToken,
     tokenFilters: isToken ? { power: obj.power, toughness: obj.toughness, colors: obj.color } : undefined,
   };
+}
+
+function CostActionFooter({
+  onCancel,
+  children,
+}: {
+  onCancel: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="mx-auto flex w-full max-w-xl flex-col gap-2 sm:flex-row">
+      <div className="flex-1">
+        <CancelButton onClick={onCancel} />
+      </div>
+      <div className="flex-1">
+        {children}
+      </div>
+    </div>
+  );
 }
 
 function canAssignDistinctCardTypes(
@@ -148,7 +167,7 @@ export function CardChoiceModal() {
       return <DiscardModal data={waitingFor.data} />;
     case "DiscardForCost":
       if (!canActForWaitingState) return null;
-      return <DiscardModal data={waitingFor.data} title="Discard as additional cost" />;
+      return <DiscardModal data={waitingFor.data} title="Discard as additional cost" canCancel />;
     case "SacrificeForCost":
       if (!canActForWaitingState) return null;
       return <SacrificeModal data={waitingFor.data} />;
@@ -1098,6 +1117,10 @@ function PermanentCostModal({
     });
   }, [dispatch, selected]);
 
+  const handleCancel = useCallback(() => {
+    dispatch({ type: "CancelCast" });
+  }, [dispatch]);
+
   if (!objects) return null;
 
   const isReady = selected.size === data.count;
@@ -1106,7 +1129,11 @@ function PermanentCostModal({
     <ChoiceOverlay
       title={title}
       subtitle={subtitle}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`${label} (${selected.size}/${data.count})`} />}
+      footer={
+        <CostActionFooter onCancel={handleCancel}>
+          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`${label} (${selected.size}/${data.count})`} />
+        </CostActionFooter>
+      }
     >
       <ScrollableCardStrip>
         {data.permanents.map((id, index) => {
@@ -1176,6 +1203,10 @@ function BlightModal({ data }: { data: BlightChoice["data"] }) {
     });
   }, [dispatch, selected]);
 
+  const handleCancel = useCallback(() => {
+    dispatch({ type: "CancelCast" });
+  }, [dispatch]);
+
   if (!objects) return null;
 
   const isReady = selected.size === data.count;
@@ -1184,7 +1215,11 @@ function BlightModal({ data }: { data: BlightChoice["data"] }) {
     <ChoiceOverlay
       title="Blight"
       subtitle={`Put a -1/-1 counter on ${data.count} creature${data.count > 1 ? "s" : ""} you control`}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Confirm (${selected.size}/${data.count})`} />}
+      footer={
+        <CostActionFooter onCancel={handleCancel}>
+          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Confirm (${selected.size}/${data.count})`} />
+        </CostActionFooter>
+      }
     >
       <ScrollableCardStrip>
         {data.creatures.map((id, index) => {
@@ -1642,6 +1677,10 @@ function ExileForCostModal({
     });
   }, [dispatch, selected]);
 
+  const handleCancel = useCallback(() => {
+    dispatch({ type: "CancelCast" });
+  }, [dispatch]);
+
   if (!objects) return null;
 
   const isReady = selected.size === count;
@@ -1650,7 +1689,11 @@ function ExileForCostModal({
     <ChoiceOverlay
       title={title}
       subtitle={subtitle}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Exile (${selected.size}/${count})`} />}
+      footer={
+        <CostActionFooter onCancel={handleCancel}>
+          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Exile (${selected.size}/${count})`} />
+        </CostActionFooter>
+      }
     >
       <ScrollableCardStrip>
         {cards.map((id, index) => {
@@ -1769,6 +1812,10 @@ function CollectEvidenceModal({ data }: { data: CollectEvidenceChoice["data"] })
     });
   }, [dispatch, selected]);
 
+  const handleCancel = useCallback(() => {
+    dispatch({ type: "CancelCast" });
+  }, [dispatch]);
+
   if (!objects) return null;
 
   const total = Array.from(selected).reduce((sum, id) => {
@@ -1781,7 +1828,11 @@ function CollectEvidenceModal({ data }: { data: CollectEvidenceChoice["data"] })
     <ChoiceOverlay
       title="Collect Evidence"
       subtitle={`Exile cards from your graveyard with total mana value ${data.minimum_mana_value} or greater`}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Collect (${total}/${data.minimum_mana_value})`} />}
+      footer={
+        <CostActionFooter onCancel={handleCancel}>
+          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Collect (${total}/${data.minimum_mana_value})`} />
+        </CostActionFooter>
+      }
     >
       <ScrollableCardStrip>
         {data.cards.map((id, index) => {
@@ -1829,7 +1880,15 @@ function CollectEvidenceModal({ data }: { data: CollectEvidenceChoice["data"] })
 
 // ── Discard to Hand Size Modal ───────────────────────────────────────────────
 
-function DiscardModal({ data, title = "Discard" }: { data: DiscardToHandSize["data"] & { up_to?: boolean; unless_filter?: TargetFilter }; title?: string }) {
+function DiscardModal({
+  data,
+  title = "Discard",
+  canCancel = false,
+}: {
+  data: DiscardToHandSize["data"] & { up_to?: boolean; unless_filter?: TargetFilter };
+  title?: string;
+  canCancel?: boolean;
+}) {
   const dispatch = useGameDispatch();
   const objects = useGameStore((s) => s.gameState?.objects);
   const hoverProps = useInspectHoverProps();
@@ -1859,6 +1918,10 @@ function DiscardModal({ data, title = "Discard" }: { data: DiscardToHandSize["da
     });
   }, [dispatch, selected]);
 
+  const handleCancel = useCallback(() => {
+    dispatch({ type: "CancelCast" });
+  }, [dispatch]);
+
   if (!objects) return null;
 
   // CR 701.9b: "up to N" allows 0..=count; exact requires precisely count.
@@ -1877,7 +1940,15 @@ function DiscardModal({ data, title = "Discard" }: { data: DiscardToHandSize["da
     <ChoiceOverlay
       title={title}
       subtitle={subtitle}
-      footer={<ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Discard (${selected.size}/${data.count})`} />}
+      footer={
+        canCancel ? (
+          <CostActionFooter onCancel={handleCancel}>
+            <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Discard (${selected.size}/${data.count})`} />
+          </CostActionFooter>
+        ) : (
+          <ConfirmButton onClick={handleConfirm} disabled={!isReady} label={`Discard (${selected.size}/${data.count})`} />
+        )
+      }
     >
       <ScrollableCardStrip>
         {data.cards.map((id, index) => {
@@ -1937,13 +2008,21 @@ function HarmonizeTapModal({ data }: { data: HarmonizeTapChoice["data"] }) {
     dispatch({ type: "HarmonizeTap", data: { creature_id: null } });
   }, [dispatch]);
 
+  const handleCancel = useCallback(() => {
+    dispatch({ type: "CancelCast" });
+  }, [dispatch]);
+
   if (!objects) return null;
 
   return (
     <ChoiceOverlay
       title="Harmonize"
       subtitle="Tap a creature to reduce casting cost by its power, or skip"
-      footer={<ConfirmButton onClick={handleSkip} label="Skip (pay full cost)" />}
+      footer={
+        <CostActionFooter onCancel={handleCancel}>
+          <ConfirmButton onClick={handleSkip} label="Skip (pay full cost)" />
+        </CostActionFooter>
+      }
     >
       <ScrollableCardStrip>
         {data.eligible_creatures.map((id, index) => {
