@@ -2993,7 +2993,9 @@ fn cap_search_choice_pool(
                 })
                 .collect()
         }
-        SearchSelectionConstraint::None => cards.to_vec(),
+        SearchSelectionConstraint::None | SearchSelectionConstraint::TotalManaValue { .. } => {
+            cards.to_vec()
+        }
     };
     if collapsed.len() <= cap {
         collapsed

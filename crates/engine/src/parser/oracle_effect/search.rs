@@ -17,7 +17,7 @@ use super::{capitalize, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{SearchLibraryDetails, SeekDetails};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    ControllerRef, FilterProp, QuantityExpr, SearchSelectionConstraint, SharedQuality,
+    Comparator, ControllerRef, FilterProp, QuantityExpr, SearchSelectionConstraint, SharedQuality,
     SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
@@ -136,7 +136,9 @@ pub(super) fn parse_search_library_details(
     // word-boundary nom scan so it composes with arbitrary preceding filter text
     // ("for four cards with different names", "for any number of cards with
     // different names", etc.) without enumerating per-prefix permutations.
-    let selection_constraint = if scan_distinct_names_clause(lower) {
+    let selection_constraint = if let Some(constraint) = scan_total_mana_value_constraint(lower) {
+        constraint
+    } else if scan_distinct_names_clause(lower) {
         SearchSelectionConstraint::DistinctNames
     } else {
         SearchSelectionConstraint::None
@@ -165,6 +167,33 @@ fn parse_distinct_names_marker(input: &str) -> Result<(&str, ()), nom::Err<Oracl
         ),
     )
     .parse(input)
+}
+
+fn scan_total_mana_value_constraint(lower: &str) -> Option<SearchSelectionConstraint> {
+    scan_preceded(
+        lower,
+        "with total mana value ",
+        parse_total_mana_value_constraint,
+    )
+    .map(|(constraint, _)| constraint)
+}
+
+fn parse_total_mana_value_constraint(
+    input: &str,
+) -> Result<(&str, SearchSelectionConstraint), nom::Err<OracleError<'_>>> {
+    let (rest, amount) = nom_primitives::parse_number.parse(input)?;
+    let (rest, comparator) = alt((
+        value(Comparator::LE, tag::<_, _, OracleError<'_>>(" or less")),
+        value(Comparator::GE, tag(" or greater")),
+    ))
+    .parse(rest)?;
+    Ok((
+        rest,
+        SearchSelectionConstraint::TotalManaValue {
+            comparator,
+            value: amount as i32,
+        },
+    ))
 }
 
 /// CR 608.2c + CR 701.23: Detect the distinct-names printed-text restriction
@@ -1203,6 +1232,19 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
+        // CR 608.2c + CR 202.3: "with total mana value N or less" constrains
+        // the selected set, not each individual card. `parse_search_library_details`
+        // stores it in `SearchSelectionConstraint`; consume the suffix here so it
+        // does not surface as a per-card filter gap.
+        if let Ok((rest, _)) =
+            tag::<_, _, OracleError<'_>>("with total mana value ").parse(remaining)
+        {
+            if let Ok((rest, _)) = parse_total_mana_value_constraint(rest) {
+                remaining = rest.trim_start();
+                continue;
+            }
+        }
+
         if let Some((prop, consumed)) = parse_mana_value_suffix(remaining) {
             suffix.properties.push(prop);
             remaining = remaining[consumed..].trim_start();
@@ -2219,6 +2261,33 @@ mod tests {
         );
         assert!(details.up_to);
         assert_eq!(details.count, QuantityExpr::Fixed { value: 5 });
+    }
+
+    #[test]
+    fn search_total_mana_value_emits_selection_constraint_without_suffix_warning() {
+        let mut ctx = ParseContext::default();
+        let details = parse_search_library_details(
+            "search your library for any number of creature cards with total mana value 6 or less, put them onto the battlefield, then shuffle",
+            &mut ctx,
+        );
+        assert_eq!(
+            details.selection_constraint,
+            SearchSelectionConstraint::TotalManaValue {
+                comparator: Comparator::LE,
+                value: 6,
+            }
+        );
+        assert!(details.up_to);
+        assert!(
+            ctx.diagnostics.iter().all(|diagnostic| !matches!(
+                diagnostic,
+                OracleDiagnostic::TargetFallback { context, text, .. }
+                    if context == "search-filter-suffix unmatched"
+                        && text == "with total mana value 6 or less, put them onto the battlefield"
+            )),
+            "total mana value is a set-level search constraint, got {:?}",
+            ctx.diagnostics
+        );
     }
 
     /// Regression: searches without the "different names" clause stay on the

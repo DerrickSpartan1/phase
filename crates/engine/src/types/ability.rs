@@ -68,6 +68,11 @@ pub enum SearchSelectionConstraint {
     /// no two chosen cards may share a name. Used by Gifts Ungiven and the
     /// "for X cards with different names" tutor class.
     DistinctNames,
+    /// CR 608.2c + CR 202.3: The chosen set's combined mana value must satisfy
+    /// the printed comparator. Used by "cards with total mana value N or less"
+    /// tutor text, where the constraint applies across the selected set rather
+    /// than to each individual card.
+    TotalManaValue { comparator: Comparator, value: i32 },
 }
 
 /// CR 608.2d: Who may choose to perform an optional effect during resolution.
@@ -2521,7 +2526,7 @@ impl QuantityExpr {
 }
 
 /// Comparison operator used in static conditions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Comparator {
     GT,
     LT,
