@@ -18703,6 +18703,34 @@ mod tests {
     }
 
     #[test]
+    fn seek_with_opponent_cast_mana_value_condition_keeps_filter_clean() {
+        let def = parse_effect_chain(
+            "Seek a creature card if an opponent has cast a spell with mana value 3 or less this turn.",
+            AbilityKind::Spell,
+        );
+        let Effect::Seek { filter, .. } = &*def.effect else {
+            panic!("expected Seek, got {:?}", def.effect);
+        };
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Creature));
+        assert!(matches!(
+            def.condition,
+            Some(AbilityCondition::QuantityCheck {
+                lhs: QuantityExpr::Ref {
+                    qty: QuantityRef::SpellsCastThisTurn {
+                        scope: crate::types::ability::CountScope::Opponents,
+                        ..
+                    }
+                },
+                comparator: Comparator::GE,
+                rhs: QuantityExpr::Fixed { value: 1 }
+            })
+        ));
+    }
+
+    #[test]
     fn seek_cards_of_chosen_kind() {
         let details = parse_seek_details(
             "seek two cards of the chosen kind",

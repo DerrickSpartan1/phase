@@ -948,6 +948,44 @@ fn parse_search_suffix_subtype_redeclaration(text: &str) -> Option<(&str, Vec<Ty
     Some((rest, filters))
 }
 
+fn parse_search_type_negation_suffix(
+    input: &str,
+) -> Result<(&str, TypeFilter), nom::Err<OracleError<'_>>> {
+    let (rest, _) = alt((
+        tag("that isn't a "),
+        tag("that isn't an "),
+        tag("that is not a "),
+        tag("that is not an "),
+        tag("that aren't "),
+        tag("that are not "),
+    ))
+    .parse(input)?;
+    let (filter, rest) = parse_type_phrase(rest);
+    let Some(negated_type) = single_search_type_filter(filter) else {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+    Ok((rest, TypeFilter::Non(Box::new(negated_type))))
+}
+
+fn single_search_type_filter(filter: TargetFilter) -> Option<TypeFilter> {
+    let TargetFilter::Typed(TypedFilter {
+        mut type_filters,
+        controller: None,
+        properties,
+    }) = filter
+    else {
+        return None;
+    };
+    if properties.is_empty() && type_filters.len() == 1 {
+        type_filters.pop()
+    } else {
+        None
+    }
+}
+
 fn parse_search_name_reference_suffix(
     input: &str,
 ) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
@@ -1389,6 +1427,12 @@ fn parse_search_filter_suffixes(
             continue;
         }
 
+        if let Ok((rest, type_filter)) = parse_search_type_negation_suffix(remaining) {
+            suffix.type_filters.push(type_filter);
+            remaining = rest.trim_start();
+            continue;
+        }
+
         // CR 608.2c + CR 202.3: "with total mana value N or less" constrains
         // the selected set, not each individual card. `parse_search_library_details`
         // stores it in `SearchSelectionConstraint`; consume the suffix here so it
@@ -1755,6 +1799,36 @@ mod tests {
             .properties
             .iter()
             .any(|property| matches!(property, FilterProp::HasNoAbilities)));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_negated_type_suffix() {
+        let filter = parse_search_filter(
+            "legendary artifact card that isn't a creature, reveal it",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Artifact));
+        assert!(typed.type_filters.iter().any(
+            |type_filter| matches!(type_filter, TypeFilter::Non(inner) if **inner == TypeFilter::Creature)
+        ));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_plural_negated_type_suffix() {
+        let filter = parse_search_filter(
+            "artifact cards that are not lands",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Artifact));
+        assert!(typed.type_filters.iter().any(
+            |type_filter| matches!(type_filter, TypeFilter::Non(inner) if **inner == TypeFilter::Land)
+        ));
     }
 
     #[test]
