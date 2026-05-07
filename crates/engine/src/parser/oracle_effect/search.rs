@@ -1536,10 +1536,17 @@ fn scan_same_name_reference_target(lower: &str) -> Option<TargetFilter> {
 fn parse_search_enchant_keyword_suffix(
     input: &str,
 ) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
-    let (rest, _) = tag("with enchant ").parse(input)?;
+    let (rest, _) = alt((tag("with enchant "), tag("that could enchant "))).parse(input)?;
     let (after_target, target_text) =
         take_till1::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.').parse(rest)?;
-    let (target, remainder) = parse_type_phrase(target_text.trim());
+    let (target, remainder) = {
+        let (target, remainder) = parse_target(target_text.trim());
+        if matches!(target, TargetFilter::Any) {
+            parse_type_phrase(target_text.trim())
+        } else {
+            (target, remainder)
+        }
+    };
     if !remainder.trim().is_empty() || !search_filter_has_meaningful_content(&target) {
         return Err(nom::Err::Error(nom::error::Error::new(
             input,
@@ -1963,6 +1970,27 @@ mod tests {
             FilterProp::WithKeyword {
                 value: Keyword::Enchant(TargetFilter::Typed(target))
             } if target.type_filters.contains(&TypeFilter::Creature)
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_handles_could_enchant_parent_reference_suffix() {
+        let filter = parse_search_filter(
+            "aura card that could enchant that creature, put it onto the battlefield attached to that creature",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.type_filters.contains(&TypeFilter::Enchantment));
+        assert!(typed
+            .type_filters
+            .contains(&TypeFilter::Subtype("Aura".to_string())));
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::WithKeyword {
+                value: Keyword::Enchant(TargetFilter::ParentTarget)
+            }
         )));
     }
 
