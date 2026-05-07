@@ -5198,7 +5198,7 @@ mod tests {
                     kicker_cost: None,
                     min_count: 1,
                 },
-                max_choices: usize::MAX,
+                max_choices: 3,
                 otherwise_max_choices: 1,
             }
         ));

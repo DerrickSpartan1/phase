@@ -506,16 +506,39 @@ fn modal_marker_effect(_header: &ModalHeaderAst) -> Effect {
 }
 
 fn build_modal_choice(header: &ModalHeaderAst, modes: &[ModeAst]) -> ModalChoice {
+    let mode_count = modes.len();
     ModalChoice {
         min_choices: header.min_choices,
-        max_choices: header.max_choices.min(modes.len()),
-        mode_count: modes.len(),
+        max_choices: header.max_choices.min(mode_count),
+        mode_count,
         mode_descriptions: modes.iter().map(|mode| mode.raw.clone()).collect(),
         allow_repeat_modes: header.allow_repeat_modes,
-        constraints: header.constraints.clone(),
+        constraints: cap_modal_constraints(&header.constraints, mode_count),
         mode_costs: modes.iter().filter_map(|m| m.mode_cost.clone()).collect(),
         entwine_cost: None,
     }
+}
+
+fn cap_modal_constraints(
+    constraints: &[ModalSelectionConstraint],
+    mode_count: usize,
+) -> Vec<ModalSelectionConstraint> {
+    constraints
+        .iter()
+        .cloned()
+        .map(|constraint| match constraint {
+            ModalSelectionConstraint::ConditionalMaxChoices {
+                condition,
+                max_choices,
+                otherwise_max_choices,
+            } => ModalSelectionConstraint::ConditionalMaxChoices {
+                condition,
+                max_choices: max_choices.min(mode_count),
+                otherwise_max_choices: otherwise_max_choices.min(mode_count),
+            },
+            other => other,
+        })
+        .collect()
 }
 
 fn lower_mode_abilities(modes: &[ModeAst], kind: AbilityKind) -> Vec<AbilityDefinition> {

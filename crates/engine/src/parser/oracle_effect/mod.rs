@@ -2178,7 +2178,7 @@ fn parse_effect_clause_inner(text: &str, ctx: &mut ParseContext) -> ParsedEffect
     }
 
     // CR 614.10a: "you skip your next untap/draw/upkeep step" — one-shot step skip.
-    if let Some(clause) = try_parse_skip_next_step(tp) {
+    if let Some(clause) = try_parse_skip_next_step(tp, ctx) {
         return clause;
     }
 
@@ -2756,7 +2756,7 @@ fn try_parse_still_a_type(tp: TextPair) -> Option<ParsedEffectClause> {
 
 /// CR 614.10a: Parse "[subject] skip[s] [their|your] next [step] step[s]" —
 /// one-shot step skips. Handles controller and target-player forms.
-fn try_parse_skip_next_step(tp: TextPair) -> Option<ParsedEffectClause> {
+fn try_parse_skip_next_step(tp: TextPair, ctx: &ParseContext) -> Option<ParsedEffectClause> {
     if let Some((step, rest)) = nom_on_lower(tp.original, tp.lower, |input| {
         let (input, _) = alt((
             tag::<_, _, OracleError<'_>>("you skip your next "),
@@ -2769,6 +2769,39 @@ fn try_parse_skip_next_step(tp: TextPair) -> Option<ParsedEffectClause> {
         if rest.trim().trim_end_matches('.').is_empty() {
             return Some(parsed_clause(Effect::SkipNextStep {
                 target: TargetFilter::Controller,
+                step,
+                count: QuantityExpr::Fixed { value: 1 },
+            }));
+        }
+    }
+
+    if let Some((target, after_verb_orig)) = nom_on_lower(tp.original, tp.lower, |input| {
+        alt((
+            value(
+                TargetFilter::DefendingPlayer,
+                tag("defending player skips "),
+            ),
+            value(TargetFilter::TriggeringPlayer, tag("that player skips ")),
+            value(TargetFilter::TriggeringPlayer, tag("the player skips ")),
+        ))
+        .parse(input)
+    }) {
+        let target = if matches!(target, TargetFilter::TriggeringPlayer) && ctx.subject.is_none() {
+            TargetFilter::ParentTarget
+        } else {
+            target
+        };
+        let after_verb_lower = &tp.lower[tp.lower.len() - after_verb_orig.len()..];
+        let (after_next_lower, _) = alt((
+            tag::<_, _, OracleError<'_>>("their next "),
+            tag("your next "),
+        ))
+        .parse(after_verb_lower)
+        .ok()?;
+        let (rest, step) = parse_skip_step_name(after_next_lower).ok()?;
+        if rest.trim().trim_end_matches('.').is_empty() {
+            return Some(parsed_clause(Effect::SkipNextStep {
+                target,
                 step,
                 count: QuantityExpr::Fixed { value: 1 },
             }));
@@ -17565,6 +17598,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_look_at_possessive_hands_targets_player_axes() {
+        let cases = [
+            ("Look at your hand.", TargetFilter::Controller),
+            ("Look at target player's hand.", TargetFilter::Player),
+            (
+                "Look at target opponent's hand.",
+                TargetFilter::Typed(TypedFilter::default().controller(ControllerRef::Opponent)),
+            ),
+            ("Look at their hand.", TargetFilter::TriggeringPlayer),
+            (
+                "Look at that player's hand.",
+                TargetFilter::TriggeringPlayer,
+            ),
+            (
+                "Look at defending player's hand.",
+                TargetFilter::DefendingPlayer,
+            ),
+        ];
+
+        for (text, expected_target) in cases {
+            let def = parse_effect_chain(text, AbilityKind::Spell);
+            let Effect::RevealHand { target, .. } = &*def.effect else {
+                panic!("Expected RevealHand for {text}, got {:?}", def.effect);
+            };
+            assert_eq!(*target, expected_target, "{text}");
+        }
+    }
+
+    #[test]
     fn target_opponent_exiles_relative_creature_and_graveyard_uses_target_only_chain() {
         let def = parse_effect_chain(
             "Target opponent exiles a creature they control and their graveyard.",
@@ -22955,6 +23017,77 @@ mod tests {
         };
         assert_eq!(target, &TargetFilter::Player);
         assert_eq!(step, &Phase::Draw);
+        assert_eq!(
+            count,
+            &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        );
+    }
+
+    #[test]
+    fn that_player_skips_next_untap_step_uses_context_target() {
+        let mut trigger_ctx = ParseContext {
+            subject: Some(TargetFilter::Player),
+            ..ParseContext::default()
+        };
+        let def = parse_effect_chain_with_context(
+            "That player skips their next untap step.",
+            AbilityKind::Spell,
+            &mut trigger_ctx,
+        );
+        let Effect::SkipNextStep {
+            target,
+            step,
+            count,
+        } = &*def.effect
+        else {
+            panic!("expected SkipNextStep, got {:?}", def.effect);
+        };
+        assert_eq!(target, &TargetFilter::TriggeringPlayer);
+        assert_eq!(step, &Phase::Untap);
+        assert_eq!(
+            count,
+            &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        );
+    }
+
+    #[test]
+    fn that_player_skips_next_untap_step_in_chain_uses_parent_target() {
+        let def = parse_effect_chain(
+            "That player skips their next untap step.",
+            AbilityKind::Spell,
+        );
+        let Effect::SkipNextStep {
+            target,
+            step,
+            count,
+        } = &*def.effect
+        else {
+            panic!("expected SkipNextStep, got {:?}", def.effect);
+        };
+        assert_eq!(target, &TargetFilter::ParentTarget);
+        assert_eq!(step, &Phase::Untap);
+        assert_eq!(
+            count,
+            &crate::types::ability::QuantityExpr::Fixed { value: 1 }
+        );
+    }
+
+    #[test]
+    fn defending_player_skips_next_untap_step_uses_defending_player_target() {
+        let def = parse_effect_chain(
+            "Defending player skips their next untap step.",
+            AbilityKind::Spell,
+        );
+        let Effect::SkipNextStep {
+            target,
+            step,
+            count,
+        } = &*def.effect
+        else {
+            panic!("expected SkipNextStep, got {:?}", def.effect);
+        };
+        assert_eq!(target, &TargetFilter::DefendingPlayer);
+        assert_eq!(step, &Phase::Untap);
         assert_eq!(
             count,
             &crate::types::ability::QuantityExpr::Fixed { value: 1 }

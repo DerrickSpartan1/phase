@@ -1480,26 +1480,40 @@ pub(super) fn lower_search_and_creation_ast(ast: SearchCreationImperativeAst) ->
 pub(super) fn parse_hand_reveal_ast(
     text: &str,
     lower: &str,
-    ctx: &mut ParseContext,
+    _ctx: &mut ParseContext,
 ) -> Option<HandRevealImperativeAst> {
     if nom_on_lower(text, lower, |input| value((), tag("look at ")).parse(input)).is_some()
         && nom_primitives::scan_contains(lower, "hand")
     {
         if contains_possessive(lower, "look at", "hand") {
-            // CR 603.7c: "that player's hand" / "their hand" resolves to the player
-            // from the triggering event or prior instruction context.
-            let target = if nom_primitives::scan_contains(lower, "that player's hand")
-                || nom_primitives::scan_contains(lower, "their hand")
-            {
-                TargetFilter::TriggeringPlayer
-            } else {
-                ctx.push_diagnostic(OracleDiagnostic::TargetFallback {
-                    context: "unrecognized look-at target".into(),
-                    text: lower.trim().into(),
-                    line_index: 0,
-                });
-                TargetFilter::Any
-            };
+            // CR 400.1/400.2 + CR 508.5 + CR 608.2c: Possessive hand phrases are
+            // player references, not object targets. Map the reusable player
+            // axes explicitly so combat-trigger forms like "defending player's
+            // hand" do not fall back to `Any`.
+            let target = nom_on_lower(text, lower, |input| {
+                preceded(
+                    tag("look at "),
+                    alt((
+                        value(TargetFilter::Controller, tag("your hand")),
+                        value(TargetFilter::Player, tag("target player's hand")),
+                        value(
+                            TargetFilter::Typed(
+                                TypedFilter::default().controller(ControllerRef::Opponent),
+                            ),
+                            tag("target opponent's hand"),
+                        ),
+                        value(TargetFilter::TriggeringPlayer, tag("that player's hand")),
+                        value(TargetFilter::TriggeringPlayer, tag("their hand")),
+                        value(
+                            TargetFilter::DefendingPlayer,
+                            tag("defending player's hand"),
+                        ),
+                    )),
+                )
+                .parse(input)
+            })
+            .map(|(target, _)| target);
+            let target = target?;
             return Some(HandRevealImperativeAst::LookAt { target });
         }
 
