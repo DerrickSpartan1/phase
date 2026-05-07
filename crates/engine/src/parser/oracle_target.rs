@@ -473,6 +473,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
         "the chosen card",
         "the chosen players",
         "the chosen player",
+        "the chosen permanent",
         "the last chosen card",
         "the revealed card",
         "the token",
@@ -4822,6 +4823,13 @@ mod tests {
     #[test]
     fn the_chosen_card_inherits_parent_target() {
         let (filter, rest) = parse_target("the chosen card");
+        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(rest, "");
+    }
+
+    #[test]
+    fn the_chosen_permanent_inherits_parent_target() {
+        let (filter, rest) = parse_target("the chosen permanent");
         assert_eq!(filter, TargetFilter::ParentTarget);
         assert_eq!(rest, "");
     }
