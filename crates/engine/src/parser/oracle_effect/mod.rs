@@ -4137,6 +4137,9 @@ fn lower_imperative_clause(text: &str, ctx: &mut ParseContext) -> ParsedEffectCl
 
     // Compound targeted actions: "tap target creature and put a stun counter on it"
     // Split on " and " when the primary clause is a targeted verb.
+    if let Some(clause) = try_parse_tap_goad_compound(text, ctx) {
+        return clause;
+    }
     if let Some(clause) = try_split_targeted_compound(text, ctx) {
         return clause;
     }
@@ -4661,6 +4664,42 @@ fn try_split_targeted_compound(text: &str, ctx: &mut ParseContext) -> Option<Par
 
     Some(ParsedEffectClause {
         effect: primary_effect,
+        duration: None,
+        sub_ability: Some(Box::new(sub_ability)),
+        distribute: None,
+        multi_target: None,
+        condition: None,
+        optional: false,
+    })
+}
+
+fn try_parse_tap_goad_compound(text: &str, ctx: &mut ParseContext) -> Option<ParsedEffectClause> {
+    let lower = text.to_lowercase();
+    let (target_lower, untap) = alt((
+        value(false, tag::<_, _, OracleError<'_>>("tap and goad ")),
+        value(true, tag("untap and goad ")),
+    ))
+    .parse(lower.as_str())
+    .ok()?;
+    let target_text = &text[text.len() - target_lower.len()..];
+    let (target, rem) = parse_target_with_ctx(target_text, ctx);
+    if !rem.trim().is_empty() {
+        return None;
+    }
+
+    let primary = if untap {
+        Effect::Untap {
+            target: target.clone(),
+        }
+    } else {
+        Effect::Tap {
+            target: target.clone(),
+        }
+    };
+    let sub_ability = AbilityDefinition::new(AbilityKind::Spell, Effect::Goad { target });
+
+    Some(ParsedEffectClause {
+        effect: primary,
         duration: None,
         sub_ability: Some(Box::new(sub_ability)),
         distribute: None,
@@ -18675,6 +18714,60 @@ mod tests {
     fn effect_goads_target_creature() {
         let e = parse_effect("goads target creature");
         assert!(matches!(e, Effect::Goad { .. }), "Expected Goad, got {e:?}");
+    }
+
+    #[test]
+    fn effect_tap_and_goad_chains_same_target() {
+        let def = parse_effect_chain("Tap and goad the chosen creatures", AbilityKind::Spell);
+
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::Tap {
+                    target: TargetFilter::ParentTarget
+                }
+            ),
+            "Expected Tap ParentTarget, got {:?}",
+            def.effect
+        );
+        let sub = def.sub_ability.expect("goad should be chained");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::Goad {
+                    target: TargetFilter::ParentTarget
+                }
+            ),
+            "Expected Goad ParentTarget, got {:?}",
+            sub.effect
+        );
+    }
+
+    #[test]
+    fn effect_untap_and_goad_chains_same_target() {
+        let def = parse_effect_chain("Untap and goad that creature", AbilityKind::Spell);
+
+        assert!(
+            matches!(
+                *def.effect,
+                Effect::Untap {
+                    target: TargetFilter::ParentTarget
+                }
+            ),
+            "Expected Untap ParentTarget, got {:?}",
+            def.effect
+        );
+        let sub = def.sub_ability.expect("goad should be chained");
+        assert!(
+            matches!(
+                *sub.effect,
+                Effect::Goad {
+                    target: TargetFilter::ParentTarget
+                }
+            ),
+            "Expected Goad ParentTarget, got {:?}",
+            sub.effect
+        );
     }
 
     #[test]
