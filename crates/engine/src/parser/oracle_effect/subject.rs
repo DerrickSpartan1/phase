@@ -581,6 +581,30 @@ pub(super) fn parse_subject_application(
     if let Ok((_, _)) = tag::<_, _, OracleError<'_>>("those ").parse(lower.as_str()) {
         return subject_filter_application(TargetFilter::ParentTarget, false);
     }
+    if all_consuming(preceded(
+        tag::<_, _, OracleError<'_>>("the chosen "),
+        alt((
+            tag("artifacts"),
+            tag("artifact"),
+            tag("cards"),
+            tag("card"),
+            tag("creatures"),
+            tag("creature"),
+            tag("enchantments"),
+            tag("enchantment"),
+            tag("lands"),
+            tag("land"),
+            tag("permanents"),
+            tag("permanent"),
+            tag("players"),
+            tag("player"),
+        )),
+    ))
+    .parse(lower.as_str())
+    .is_ok()
+    {
+        return subject_filter_application(TargetFilter::ParentTarget, false);
+    }
 
     // Bare plural noun phrase subjects ("creatures you control", "other creatures you control")
     // are implicit "all X" forms — strip any "other " prefix and route through parse_target.
@@ -2355,6 +2379,70 @@ mod tests {
         assert!(result.is_some());
         let app = result.unwrap();
         assert_eq!(app.affected, TargetFilter::ParentTarget);
+    }
+
+    #[test]
+    fn parse_subject_the_chosen_creature() {
+        for subject in [
+            "the chosen artifact",
+            "the chosen card",
+            "the chosen creature",
+            "the chosen creatures",
+            "the chosen land",
+            "the chosen permanent",
+            "the chosen player",
+        ] {
+            let mut ctx = ParseContext::default();
+            let result = parse_subject_application(subject, &mut ctx);
+            let app = result.expect("should recognize selected subject");
+            assert_eq!(app.affected, TargetFilter::ParentTarget);
+            assert!(
+                app.target.is_none(),
+                "chosen object is an anaphoric parent target, not a new target"
+            );
+        }
+    }
+
+    #[test]
+    fn chosen_creature_doesnt_untap_builds_cant_untap_restriction() {
+        let mut ctx = ParseContext::default();
+        let clause = try_parse_subject_restriction_clause(
+            "The chosen creature doesn't untap during its controller's next untap step.",
+            &mut ctx,
+        )
+        .expect("chosen object untap restriction should parse");
+
+        let Effect::GenericEffect {
+            static_abilities,
+            duration,
+            target,
+        } = clause.effect
+        else {
+            panic!(
+                "expected GenericEffect restriction, got {:?}",
+                clause.effect
+            );
+        };
+
+        assert_eq!(target, None);
+        assert_eq!(
+            duration,
+            Some(Duration::UntilNextUntapStepOf {
+                player: PlayerScope::Controller,
+            })
+        );
+        assert_eq!(static_abilities.len(), 1);
+        assert_eq!(static_abilities[0].mode, StaticMode::CantUntap);
+        assert_eq!(
+            static_abilities[0].affected,
+            Some(TargetFilter::ParentTarget)
+        );
+        assert!(static_abilities[0].modifications.iter().any(|m| matches!(
+            m,
+            ContinuousModification::AddStaticMode {
+                mode: StaticMode::CantUntap
+            }
+        )));
     }
 
     #[test]
