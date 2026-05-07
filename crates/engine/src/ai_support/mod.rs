@@ -171,7 +171,8 @@ fn cheap_reject_candidate(state: &GameState, action: &GameAction) -> bool {
         | (WaitingFor::ModalFaceChoice { .. }, GameAction::ChooseModalFace { .. })
         | (WaitingFor::WarpCostChoice { .. }, GameAction::ChooseWarpCost { .. })
         | (WaitingFor::EvokeCostChoice { .. }, GameAction::ChooseEvokeCost { .. })
-        | (WaitingFor::OverloadCostChoice { .. }, GameAction::ChooseOverloadCost { .. }) => false,
+        | (WaitingFor::OverloadCostChoice { .. }, GameAction::ChooseOverloadCost { .. })
+        | (WaitingFor::BestowCostChoice { .. }, GameAction::ChooseBestowCost { .. }) => false,
         // CR 107.1c + CR 107.14: Submitted amount must fall within [min, max].
         (WaitingFor::PayAmountChoice { min, max, .. }, GameAction::SubmitPayAmount { amount }) => {
             *amount < *min || *amount > *max

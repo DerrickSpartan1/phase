@@ -1249,6 +1249,23 @@ fn apply_action(
             use_overload,
             &mut events,
         )?,
+        // CR 702.103a: Player chooses normal cast or Bestow cast from hand.
+        (
+            WaitingFor::BestowCostChoice {
+                player,
+                object_id,
+                card_id,
+                ..
+            },
+            GameAction::ChooseBestowCost { use_bestow },
+        ) => casting::handle_bestow_cost_choice(
+            state,
+            *player,
+            *object_id,
+            *card_id,
+            use_bestow,
+            &mut events,
+        )?,
         (WaitingFor::ModeChoice { player, .. }, GameAction::SelectModes { indices }) => {
             casting::handle_select_modes(state, *player, indices, &mut events)?
         }

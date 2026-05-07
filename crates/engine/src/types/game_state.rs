@@ -1362,6 +1362,19 @@ pub enum WaitingFor {
         /// The Overload keyword's alternative mana cost (for display in the choice modal).
         overload_cost: ManaCost,
     },
+    /// CR 702.103a: Player chooses between normal cast and Bestow cast from hand.
+    /// Bestow substitutes the bestow mana cost and turns the spell into an Aura
+    /// with `enchant creature` (CR 702.103b). Only presented when both costs are
+    /// affordable AND there is at least one legal creature to enchant.
+    BestowCostChoice {
+        player: PlayerId,
+        object_id: ObjectId,
+        card_id: CardId,
+        /// The card's normal mana cost (for display in the choice modal).
+        normal_cost: ManaCost,
+        /// The Bestow keyword's alternative mana cost (for display in the choice modal).
+        bestow_cost: ManaCost,
+    },
     /// CR 601.2c: Player chooses any number of legal targets from a set.
     /// Used for "exile any number of" and similar variable-count targeting.
     MultiTargetSelection {
@@ -2028,6 +2041,7 @@ impl WaitingFor {
             | WaitingFor::WarpCostChoice { player, .. }
             | WaitingFor::EvokeCostChoice { player, .. }
             | WaitingFor::OverloadCostChoice { player, .. }
+            | WaitingFor::BestowCostChoice { player, .. }
             | WaitingFor::ChooseRingBearer { player, .. }
             | WaitingFor::ChooseDungeon { player, .. }
             | WaitingFor::ChooseDungeonRoom { player, .. }
@@ -2355,6 +2369,21 @@ pub enum CastingVariant {
     /// no targets, so target selection is naturally skipped because the
     /// transformed effects carry no `TargetRef` slots.
     Overload,
+    /// CR 702.103a-b: Cast from hand via Bestow's alternative cost. The
+    /// printed mana cost is replaced by `Keyword::Bestow(cost)` at cast
+    /// preparation; the spell becomes an Aura with `enchant creature` while
+    /// on the stack and as the resulting permanent (until it becomes
+    /// unattached, per CR 702.103f). The type-changing mutation is applied
+    /// directly to the stack object (mirroring `swap_to_alternative_spell_face`
+    /// for Adventure/Omen) — Layers cannot be used here because they only
+    /// apply to battlefield/hand objects, not stack objects.
+    ///
+    /// Per CR 702.103e: if the target is illegal at resolution, the
+    /// type-changing effect ends and the spell resolves as a creature spell.
+    /// Per CR 702.103f: when a bestowed Aura becomes unattached on the
+    /// battlefield, the type-changing effect ends — it remains as an
+    /// enchantment creature (overrides CR 704.5m for bestow Auras).
+    Bestow,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

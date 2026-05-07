@@ -15,8 +15,7 @@
             "count": {
               "type": "Ref",
               "qty": {
-                "type": "Variable",
-                "name": "X"
+                "type": "CostXPaid"
               }
             },
             "target": {

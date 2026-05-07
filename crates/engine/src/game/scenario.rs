@@ -1071,6 +1071,7 @@ impl GameRunner {
             WaitingFor::WarpCostChoice { .. } => "WarpCostChoice",
             WaitingFor::EvokeCostChoice { .. } => "EvokeCostChoice",
             WaitingFor::OverloadCostChoice { .. } => "OverloadCostChoice",
+            WaitingFor::BestowCostChoice { .. } => "BestowCostChoice",
             WaitingFor::MultiTargetSelection { .. } => "MultiTargetSelection",
             WaitingFor::AbilityModeChoice { .. } => "AbilityModeChoice",
             WaitingFor::OptionalEffectChoice { .. } => "OptionalEffectChoice",

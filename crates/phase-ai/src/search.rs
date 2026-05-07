@@ -389,6 +389,9 @@ fn fallback_action(state: &GameState) -> Option<GameAction> {
         WaitingFor::OverloadCostChoice { .. } => Some(GameAction::ChooseOverloadCost {
             use_overload: false,
         }),
+        WaitingFor::BestowCostChoice { .. } => {
+            Some(GameAction::ChooseBestowCost { use_bestow: false })
+        }
 
         // Choose play/draw and sideboard: between-games defaults.
         WaitingFor::BetweenGamesChoosePlayDraw { .. } => {

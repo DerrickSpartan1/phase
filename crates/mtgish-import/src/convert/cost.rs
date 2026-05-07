@@ -17,12 +17,22 @@ use crate::convert::quantity;
 use crate::convert::result::{ConvResult, ConversionGap};
 use crate::schema::types::{CardInHand, Cost};
 
-/// Return `Some(ManaCost)` when `cost` is `Cost::PayMana(...)`. Other
-/// shapes return `Ok(None)` so callers can decide whether to fall
-/// through to a gap or look for a different idiom.
+/// Return `Some(ManaCost)` when `cost` is a pure mana payment — either
+/// `Cost::PayMana(...)` (no `{X}`) or `Cost::PayManaX(...)` (with one or
+/// more `{X}` shards). The engine's `ManaCost::Cost { shards, generic }`
+/// uniformly carries `ManaCostShard::X` for the X-bearing case via
+/// `mana::convert_x`, so the two shapes flatten to the same engine type.
+/// Non-mana shapes (Sacrifice, PayLife, And/Or composites, ...) return
+/// `Ok(None)` so callers can decide whether to fall through to a gap or
+/// look for a different idiom. CR 107.3a + CR 601.2f.
 pub fn as_pure_mana(cost: &Cost) -> ConvResult<Option<ManaCost>> {
     match cost {
         Cost::PayMana(symbols) => mana::convert(symbols).map(Some),
+        // CR 107.3a: X-bearing alt-cost payloads (BestowX, KickerX, MorphX,
+        // etc.). The second `GameNumber` argument is informational — it
+        // duplicates the X-binding that's already encoded as a
+        // `ManaCostShard::X` shard in the symbol list.
+        Cost::PayManaX(symbols, _x_value) => mana::convert_x(symbols).map(Some),
         _ => Ok(None),
     }
 }

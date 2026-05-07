@@ -3076,6 +3076,11 @@ pub enum CastVariantPaid {
     /// CR 702.143c: The spell or permanent was a foretold card before it was
     /// cast. Read by "if this spell was foretold" instead/condition clauses.
     Foretell,
+    /// CR 702.103a + CR 702.103b: The spell was cast bestowed (its bestow
+    /// alternative cost was paid). Read by trigger/ability conditions for
+    /// "if its bestow cost was paid" and by display layers that need to
+    /// distinguish a bestow-cast permanent from a hard-cast creature.
+    Bestow,
 }
 
 impl From<NinjutsuVariant> for CastVariantPaid {

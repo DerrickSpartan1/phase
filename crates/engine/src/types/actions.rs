@@ -173,6 +173,12 @@ pub enum GameAction {
     ChooseOverloadCost {
         use_overload: bool,
     },
+    /// CR 702.103a: Choose normal cast (false) or Bestow cast (true) from hand.
+    /// Bestow cast substitutes the bestow mana cost and turns the spell into an
+    /// Aura with `enchant creature` (CR 702.103b).
+    ChooseBestowCost {
+        use_bestow: bool,
+    },
     /// CR 702.49: Activate a Ninjutsu-family keyword from hand or command zone during combat.
     ActivateNinjutsu {
         /// The card object with Ninjutsu in hand or command zone.
@@ -629,6 +635,7 @@ impl GameAction {
             | GameAction::ChooseWarpCost { .. }
             | GameAction::ChooseEvokeCost { .. }
             | GameAction::ChooseOverloadCost { .. }
+            | GameAction::ChooseBestowCost { .. }
             | GameAction::DecideOptionalEffect { .. }
             | GameAction::DecideOptionalEffectAndRemember { .. }
             | GameAction::PayUnlessCost { .. }

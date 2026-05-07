@@ -8,7 +8,7 @@
 use engine::types::ability::{
     AbilityCost, AbilityDefinition, AbilityKind, ChoiceType, ContinuousModification, ControllerRef,
     DamageModification, DamageTargetFilter, DamageTargetPlayerScope, Effect, ManaReplacementScope,
-    QuantityExpr, QuantityModification, ReplacementCondition, ReplacementDefinition,
+    QuantityExpr, QuantityModification, QuantityRef, ReplacementCondition, ReplacementDefinition,
     ReplacementMode, TargetFilter,
 };
 use engine::types::card_type::Supertype;
@@ -1497,11 +1497,26 @@ fn build_replacement_exec(
             count: QuantityExpr::Fixed { value: 1 },
             target: target.clone(),
         },
-        A::EntersWithNumberCounters(g, ct) => Effect::AddCounter {
-            counter_type: counter_type_name(ct),
-            count: quantity::convert(g)?,
-            target: target.clone(),
-        },
+        // CR 614.12 + CR 122.1 + CR 107.3m: "~ enters with N [type] counters
+        // on it." When N is `Variable("X")` (the spell's paid X), rewrite to
+        // `QuantityRef::CostXPaid` so the runtime resolver reads the entering
+        // permanent's own `cost_x_paid` field — populated by `finalize_cast`
+        // and surviving the stack → battlefield move. Plain `Variable("X")`
+        // resolves via `current_trigger_event`/`chosen_x` channels which are
+        // empty during ETB-replacement application; without this rewrite,
+        // X-bestow / Walking Ballista / Endless One / Hangarback Walker /
+        // Astral Cornucopia / Nyxborn Hydra all silently produce 0 counters.
+        // Mirrors `oracle_replacement::rewrite_variable_x_to_cost_x_paid` in
+        // the native parser.
+        A::EntersWithNumberCounters(g, ct) => {
+            let mut count = quantity::convert(g)?;
+            rewrite_variable_x_to_cost_x_paid(&mut count);
+            Effect::AddCounter {
+                counter_type: counter_type_name(ct),
+                count,
+                target: target.clone(),
+            }
+        }
         // CR 614.12 + CR 110.2: "Enters under [opponent / a player]'s
         // control." `Effect::ChangeZone` carries `under_your_control`,
         // but the engine has no slot for "under SOME OTHER player's
@@ -2468,6 +2483,41 @@ fn variant_tag(a: &ReplacementActionWouldEnter) -> String {
         .unwrap_or_else(|| "<unknown>".to_string())
 }
 
+/// CR 107.3m: In the ETB-counter replacement context, the bare X variable
+/// refers to the value paid for `{X}` in the spell's mana cost. The runtime
+/// resolves `QuantityRef::Variable { name: "X" }` via the
+/// `current_trigger_event` / ability `chosen_x` channels, both of which are
+/// empty during as-enters replacement application. Rewriting to
+/// `QuantityRef::CostXPaid` switches the resolver to read the entering
+/// permanent's own `cost_x_paid` field — populated by `finalize_cast` and
+/// preserved across the stack → battlefield zone change. Walks the
+/// expression tree so wrapped forms (`Multiply`, `DivideRounded`, `Offset`,
+/// `Sum`, `UpTo`) all rewrite correctly.
+///
+/// Mirrors `engine::parser::oracle_replacement::rewrite_variable_x_to_cost_x_paid`
+/// (which is `pub(crate)` to the engine crate). Replicated here so the
+/// converter doesn't widen the engine API surface for one helper. Keep the
+/// two implementations in sync if either gains a new `QuantityExpr` arm.
+fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
+    match expr {
+        QuantityExpr::Ref { qty } => {
+            if matches!(qty, QuantityRef::Variable { name } if name == "X") {
+                *qty = QuantityRef::CostXPaid;
+            }
+        }
+        QuantityExpr::Fixed { .. } => {}
+        QuantityExpr::DivideRounded { inner, .. }
+        | QuantityExpr::Offset { inner, .. }
+        | QuantityExpr::Multiply { inner, .. } => rewrite_variable_x_to_cost_x_paid(inner),
+        QuantityExpr::Sum { exprs } => {
+            for inner in exprs {
+                rewrite_variable_x_to_cost_x_paid(inner);
+            }
+        }
+        QuantityExpr::UpTo { max } => rewrite_variable_x_to_cost_x_paid(max),
+    }
+}
+
 /// CR 615.1 + CR 514.2: Build an `Effect::PreventDamage` from
 /// `Action::CreateReplaceWouldDealDamageUntil(event, actions, expiration)`.
 ///
@@ -3001,6 +3051,82 @@ mod tests {
                 assert!(replacement.expires_at_eot);
             }
             other => panic!("expected AddTargetReplacement, got {other:?}"),
+        }
+    }
+
+    /// CR 107.3m + CR 614.12: An ETB replacement of the form
+    /// "this permanent enters with X +1/+1 counters on it" must emit a
+    /// `count` of `QuantityRef::CostXPaid`, not bare `Variable("X")`.
+    /// `Variable("X")` only resolves while the ability is on the stack with
+    /// `chosen_x` set; during ETB-replacement application the runtime reads
+    /// the entering object's `cost_x_paid` field. Walking Ballista, Endless
+    /// One, Hangarback Walker, Astral Cornucopia, and Nyxborn Hydra all
+    /// depend on this rewrite — without it, every X-enters-with-X-counters
+    /// card silently produces zero counters.
+    #[test]
+    fn enters_with_x_counters_rewrites_variable_x_to_cost_x_paid() {
+        use engine::types::ability::{QuantityExpr as QE, QuantityRef as QR};
+
+        let defs = convert_as_enters(
+            &Permanent::ThisPermanent,
+            &[ReplacementActionWouldEnter::EntersWithNumberCounters(
+                Box::new(GameNumber::ValueX),
+                CounterType::PTCounter(1, 1),
+            )],
+        )
+        .unwrap();
+        assert_eq!(defs.len(), 1);
+
+        let execute = defs[0].execute.as_ref().expect("ETB AddCounter execute");
+        match &*execute.effect {
+            Effect::AddCounter {
+                counter_type,
+                count,
+                target,
+            } => {
+                assert_eq!(counter_type, "+1/+1");
+                assert_eq!(target, &TargetFilter::SelfRef);
+                assert!(
+                    matches!(count, QE::Ref { qty: QR::CostXPaid }),
+                    "expected CostXPaid (CR 107.3m), got {count:?}"
+                );
+            }
+            other => panic!("expected AddCounter, got {other:?}"),
+        }
+    }
+
+    /// Wrapped X (e.g., `Multiply { factor: 2, inner: Variable("X") }`)
+    /// must also rewrite. Mirrors the engine native parser's recursive
+    /// rewrite to ensure 2X / X-1 / Sum-of-X expressions also flow through.
+    #[test]
+    fn enters_with_offset_x_counters_rewrites_inner_variable() {
+        use engine::types::ability::{QuantityExpr as QE, QuantityRef as QR};
+
+        let defs = convert_as_enters(
+            &Permanent::ThisPermanent,
+            &[ReplacementActionWouldEnter::EntersWithNumberCounters(
+                Box::new(GameNumber::Plus(
+                    Box::new(GameNumber::ValueX),
+                    Box::new(GameNumber::Integer(1)),
+                )),
+                CounterType::PTCounter(1, 1),
+            )],
+        )
+        .unwrap();
+
+        let execute = defs[0].execute.as_ref().unwrap();
+        match &*execute.effect {
+            Effect::AddCounter { count, .. } => match count {
+                QE::Offset { inner, offset } => {
+                    assert_eq!(*offset, 1);
+                    assert!(
+                        matches!(&**inner, QE::Ref { qty: QR::CostXPaid }),
+                        "inner of Offset should be CostXPaid, got {inner:?}"
+                    );
+                }
+                other => panic!("expected Offset, got {other:?}"),
+            },
+            other => panic!("expected AddCounter, got {other:?}"),
         }
     }
 }

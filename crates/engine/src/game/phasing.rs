@@ -15,12 +15,13 @@
 use std::collections::HashSet;
 
 use crate::game::effects::remove_from_combat::remove_object_from_combat;
-use crate::game::game_object::{PhaseOutCause, PhaseStatus};
+use crate::game::game_object::{AttachTarget, PhaseOutCause, PhaseStatus};
 use crate::types::card_type::CoreType;
 use crate::types::events::GameEvent;
 use crate::types::game_state::GameState;
 use crate::types::identifiers::ObjectId;
 use crate::types::player::{PlayerId, PlayerStatus};
+use crate::types::zones::Zone;
 
 /// CR 702.26b: Phase out a permanent directly, cascading indirect phase-out
 /// through Auras/Equipment/Fortifications attached to it (CR 702.26g).
@@ -158,6 +159,29 @@ pub fn phase_in_object(
     }
 
     for &id in &phased {
+        // CR 702.103g: A bestow Aura that phases in unattached (its host left
+        // the battlefield while it was phased out) ceases to be bestowed and
+        // becomes a creature. The attached_to pointer persists across phase-out
+        // (CR 702.26d: no zone change), so we validate whether the attachment
+        // target is still on the battlefield rather than checking is_none().
+        let is_bestow_unattached = state.objects.get(&id).is_some_and(|o| {
+            o.bestow_form.is_some()
+                && match o.attached_to {
+                    Some(AttachTarget::Object(t)) => !state
+                        .objects
+                        .get(&t)
+                        .is_some_and(|h| h.zone == Zone::Battlefield),
+                    Some(AttachTarget::Player(pid)) => !state
+                        .players
+                        .get(pid.0 as usize)
+                        .is_some_and(|p| !p.is_eliminated),
+                    None => true,
+                }
+        });
+        if is_bestow_unattached {
+            super::casting::revert_bestow_form(state, id);
+        }
+
         events.push(GameEvent::PermanentPhasedIn { object_id: id });
     }
 
@@ -917,6 +941,56 @@ mod tests {
         assert!(
             state.objects[&aura].is_phased_in(),
             "Aura must phase in with its host (CR 702.26g)"
+        );
+    }
+
+    /// CR 702.103g: A bestow Aura that phases in but whose host has left
+    /// the battlefield while it was phased out reverts to creature form.
+    #[test]
+    fn bestow_aura_phases_in_unattached_reverts_to_creature() {
+        use crate::game::game_object::BestowFormState;
+
+        let mut state = GameState::new_two_player(42);
+        let host = setup_creature(&mut state, "Host Bear", PlayerId(0));
+        let bestow_id = setup_aura(&mut state, "Hopeful Eidolon", PlayerId(0), host);
+
+        // Mark the Aura as bestowed (it has both Enchantment and Creature types).
+        if let Some(obj) = state.objects.get_mut(&bestow_id) {
+            obj.card_types.core_types.push(CoreType::Enchantment);
+            obj.bestow_form = Some(BestowFormState);
+        }
+
+        // Phase out the host (and the bestow Aura cascades indirectly).
+        let mut events = Vec::new();
+        phase_out_object(&mut state, host, PhaseOutCause::Directly, &mut events);
+        assert!(state.objects[&bestow_id].is_phased_out());
+
+        // The attached_to pointer persists across phase-out (CR 702.26d).
+        assert!(
+            state.objects[&bestow_id].attached_to.is_some(),
+            "attached_to must NOT be cleared by phasing — it persists (CR 702.26d)"
+        );
+
+        // Kill the host while the Aura is phased out.
+        state.objects.remove(&host);
+
+        // Phase in: the bestow Aura's host is gone → CR 702.103g revert.
+        events.clear();
+        phase_in_object(&mut state, bestow_id, &mut events);
+
+        let obj = &state.objects[&bestow_id];
+        assert!(obj.is_phased_in());
+        assert!(
+            obj.bestow_form.is_none(),
+            "CR 702.103g: bestow form must revert when phasing in unattached"
+        );
+        assert!(
+            obj.card_types.core_types.contains(&CoreType::Creature),
+            "CR 702.103g: reverted object is a creature again"
+        );
+        assert!(
+            !obj.card_types.subtypes.iter().any(|s| s == "Aura"),
+            "CR 702.103g: Aura subtype removed on revert"
         );
     }
 }
