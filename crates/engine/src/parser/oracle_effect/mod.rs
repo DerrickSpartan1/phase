@@ -553,6 +553,16 @@ fn try_parse_when_next_event(tp: TextPair) -> Option<ParsedEffectClause> {
     })
 }
 
+pub(crate) fn try_parse_temporal_delayed_trigger_ability(
+    text: &str,
+    kind: AbilityKind,
+) -> Option<AbilityDefinition> {
+    let lower = text.to_lowercase();
+    let tp = TextPair::new(text, &lower);
+    let clause = try_parse_whenever_this_turn(tp).or_else(|| try_parse_when_next_event(tp))?;
+    Some(ability_definition_from_clause(kind, clause))
+}
+
 /// CR 614.1a + CR 514.2: Detect "If [target_phrase] would die this turn, exile
 /// it instead." damage-spell rider, returning an `AddTargetReplacement` def.
 /// Returns `None` if the text doesn't match.

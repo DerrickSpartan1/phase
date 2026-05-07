@@ -39,6 +39,7 @@ use super::oracle_cost::{parse_oracle_cost, try_parse_cost_reduction};
 use super::oracle_dispatch::{dispatch_line_nom, make_unimplemented_with_effect};
 use super::oracle_effect::{
     lower_effect_chain_ir, parse_effect_chain, parse_effect_chain_with_context,
+    try_parse_temporal_delayed_trigger_ability,
 };
 use super::oracle_ir::context::ParseContext;
 use super::oracle_ir::diagnostic::OracleDiagnostic;
@@ -1451,6 +1452,20 @@ pub(crate) fn parse_oracle_ir(
         if has_trigger_prefix(&lower) && scan_contains(&lower, "enters with") {
             if let Some(rep_def) = parse_replacement_line(&line, card_name) {
                 result.replacements.push(rep_def);
+                i += 1;
+                continue;
+            }
+        }
+
+        // CR 603.7a-b: Instant/sorcery text like "Whenever [event] this turn, ..."
+        // creates a delayed triggered ability during resolution. It is not a
+        // permanent's printed triggered ability, so spell cards must get one
+        // chance to route trigger-shaped temporal text through the effect parser
+        // before generic trigger dispatch.
+        if is_spell && has_trigger_prefix(&lower) && scan_contains(&lower, "this turn") {
+            if let Some(def) = try_parse_temporal_delayed_trigger_ability(&line, AbilityKind::Spell)
+            {
+                result.abilities.push(def);
                 i += 1;
                 continue;
             }
@@ -5153,6 +5168,62 @@ mod tests {
                 otherwise_max_choices: 1,
             }
         ));
+        assert!(r.parse_warnings.is_empty());
+    }
+
+    #[test]
+    fn spell_temporal_whenever_line_builds_delayed_trigger() {
+        let r = parse(
+            "Whenever you cast a creature spell this turn, draw a card.",
+            "Glimpse Test",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert!(r.triggers.is_empty());
+        assert_eq!(r.abilities.len(), 1);
+        assert!(matches!(
+            *r.abilities[0].effect,
+            Effect::CreateDelayedTrigger { .. }
+        ));
+        let Effect::CreateDelayedTrigger { condition, .. } = &*r.abilities[0].effect else {
+            panic!("expected delayed trigger, got {:?}", r.abilities[0].effect);
+        };
+        let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger } = condition
+        else {
+            panic!("expected WheneverEvent, got {condition:?}");
+        };
+        assert_eq!(trigger.mode, TriggerMode::SpellCast);
+        assert_eq!(trigger.valid_target, Some(TargetFilter::Controller));
+        assert!(trigger.valid_card.is_some());
+        assert!(r.parse_warnings.is_empty());
+    }
+
+    #[test]
+    fn spell_temporal_enters_line_builds_delayed_trigger() {
+        let r = parse(
+            "Whenever a creature enters this turn, you may draw a card.",
+            "Beck Test",
+            &[],
+            &["Sorcery"],
+            &[],
+        );
+        assert!(r.triggers.is_empty());
+        assert_eq!(r.abilities.len(), 1);
+        let Effect::CreateDelayedTrigger {
+            condition, effect, ..
+        } = &*r.abilities[0].effect
+        else {
+            panic!("expected delayed trigger, got {:?}", r.abilities[0].effect);
+        };
+        let crate::types::ability::DelayedTriggerCondition::WheneverEvent { trigger } = condition
+        else {
+            panic!("expected WheneverEvent, got {condition:?}");
+        };
+        assert_eq!(trigger.mode, TriggerMode::ChangesZone);
+        assert_eq!(trigger.destination, Some(Zone::Battlefield));
+        assert!(trigger.valid_card.is_some());
+        assert!(effect.optional);
         assert!(r.parse_warnings.is_empty());
     }
 

@@ -341,6 +341,7 @@ fn effect_has_internal_optionality(effect: &Effect) -> bool {
             ..
         } => true,
         Effect::ChooseOneOf { branches, .. } => branches.iter().any(def_tree_has_optional),
+        Effect::CreateDelayedTrigger { effect, .. } => def_tree_has_optional(effect),
         Effect::CreateEmblem { statics, triggers } => {
             statics.iter().any(static_definition_has_optional)
                 || triggers.iter().any(trigger_tree_has_optional)
@@ -1811,6 +1812,16 @@ mod tests {
         );
 
         assert!(!has_swallowed_detector(&parsed, "Duration_ThisTurn"));
+    }
+
+    #[test]
+    fn optional_you_may_accepts_delayed_trigger_inner_optionality() {
+        let parsed = parse(
+            "Whenever a creature enters this turn, you may draw a card.",
+            &["Sorcery"],
+        );
+
+        assert!(!has_swallowed_detector(&parsed, "Optional_YouMay"));
     }
 
     #[test]
