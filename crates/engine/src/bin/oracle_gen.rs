@@ -57,9 +57,10 @@ struct CardExportEntry {
 /// 3. On a tie, the first-inserted entry is kept (iteration is sorted by
 ///    MTGJSON key, so "first" is deterministic across machines).
 ///
-/// Every collision emits a `warn!` so new MTGJSON data drops surface any
-/// overlap in the build log. `mtgjson_key` is the source key (e.g.
-/// `"Start // Fire"`) for actionable diagnostics.
+/// Collisions are logged at `debug` level so a full card-data export does not
+/// flood stderr with deterministic, already-resolved face-name overlaps.
+/// `mtgjson_key` is the source key (e.g. `"Start // Fire"`) for diagnostics
+/// when running with debug logging enabled.
 fn insert_face(
     face_index: &mut BTreeMap<String, CardExportEntry>,
     mtgjson_key: &str,
@@ -85,14 +86,14 @@ fn insert_face(
     let new_printings = entry.printings.len();
 
     if new_wins {
-        tracing::warn!(
+        tracing::debug!(
             "Face collision on '{key}': replacing prior entry ({existing_oracle:?}, \
              {existing_printings} printings) with entry from MTGJSON key '{mtgjson_key}' \
              ({new_oracle:?}, {new_printings} printings)"
         );
         face_index.insert(key, entry);
     } else {
-        tracing::warn!(
+        tracing::debug!(
             "Face collision on '{key}': keeping prior entry ({existing_oracle:?}, \
              {existing_printings} printings) over entry from MTGJSON key '{mtgjson_key}' \
              ({new_oracle:?}, {new_printings} printings)"
@@ -1052,6 +1053,7 @@ mod tests {
             layout: layout.map(|s| s.to_string()),
             printings: printings.iter().map(|s| s.to_string()).collect(),
             rulings: Vec::new(),
+            rarities: BTreeSet::new(),
         }
     }
 
