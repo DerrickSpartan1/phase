@@ -92,12 +92,18 @@ function CommanderCard({ commander }: { commander: GameObject }) {
   return (
     <motion.button
       {...hoverHandlers}
-      onClick={() => {
+      onClick={(e: React.MouseEvent) => {
         if (dragCastedRef.current) {
           dragCastedRef.current = false;
           return;
         }
-        if (!firedRef.current) inspectObject(commander.id);
+        if (firedRef.current) return;
+        if (useUiStore.getState().debugInteractionMode) {
+          e.stopPropagation();
+          useUiStore.getState().openDebugContextMenu({ objectId: commander.id, x: e.clientX, y: e.clientY });
+          return;
+        }
+        inspectObject(commander.id);
       }}
       onDoubleClick={canCast ? () => dispatchAction(castAction) : undefined}
       drag={canCast || false}
