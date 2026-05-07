@@ -450,11 +450,8 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
             &text[lower.len() - rest.len()..],
         );
     }
-    if let Some(rest) = parse_definite_parent_reference(lower.as_str()) {
-        return (
-            TargetFilter::ParentTarget,
-            &text[lower.len() - rest.len()..],
-        );
+    if let Some((filter, rest)) = parse_definite_parent_reference(lower.as_str()) {
+        return (filter, &text[lower.len() - rest.len()..]);
     }
 
     // Singular selection from a previously-referenced set.
@@ -865,10 +862,16 @@ fn parse_selected_from_set_reference(input: &str) -> Option<&str> {
     Some(rest)
 }
 
-fn parse_definite_parent_reference(input: &str) -> Option<&str> {
-    let (rest, _) = alt((
-        tag::<_, _, OracleError<'_>>("the artifact card"),
-        tag::<_, _, OracleError<'_>>("the artifact"),
+fn parse_definite_parent_reference(input: &str) -> Option<(TargetFilter, &str)> {
+    let (rest, filter) = alt((
+        value(
+            TargetFilter::ParentTargetSlot { index: 1 },
+            tag::<_, _, OracleError<'_>>("the artifact card"),
+        ),
+        value(
+            TargetFilter::ParentTargetSlot { index: 0 },
+            tag::<_, _, OracleError<'_>>("the artifact"),
+        ),
     ))
     .parse(input)
     .ok()?;
@@ -885,7 +888,7 @@ fn parse_definite_parent_reference(input: &str) -> Option<&str> {
         .parse(rest)
         .is_ok()
     {
-        Some(rest)
+        Some((filter, rest))
     } else {
         None
     }
@@ -4882,16 +4885,23 @@ mod tests {
     }
 
     #[test]
-    fn definite_artifact_reference_inherits_parent_target() {
+    fn definite_artifact_reference_binds_first_parent_target_slot() {
         let (filter, rest) = parse_target("the artifact and returns it");
-        assert_eq!(filter, TargetFilter::ParentTarget);
+        assert_eq!(filter, TargetFilter::ParentTargetSlot { index: 0 });
         assert_eq!(rest, " and returns it");
+    }
+
+    #[test]
+    fn definite_artifact_card_reference_binds_second_parent_target_slot() {
+        let (filter, rest) = parse_target("the artifact card to the battlefield");
+        assert_eq!(filter, TargetFilter::ParentTargetSlot { index: 1 });
+        assert_eq!(rest, " to the battlefield");
     }
 
     #[test]
     fn definite_artifact_reference_does_not_steal_type_phrase() {
         let (filter, rest) = parse_target("the artifact creature");
-        assert_ne!(filter, TargetFilter::ParentTarget);
+        assert_ne!(filter, TargetFilter::ParentTargetSlot { index: 0 });
         assert_ne!(rest, " creature");
     }
 

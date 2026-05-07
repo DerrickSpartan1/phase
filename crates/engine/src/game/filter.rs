@@ -613,6 +613,7 @@ fn filter_inner_for_object(
         // ParentTarget/ParentTargetController/PostReplacementSourceController resolve
         // at resolution time, not via object matching.
         TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget => false,
@@ -814,6 +815,7 @@ fn zone_change_filter_inner(
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
@@ -1025,6 +1027,7 @@ pub fn spell_record_matches_filter(
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
@@ -1225,6 +1228,7 @@ fn spell_object_matches_filter_inner(
         | TargetFilter::TriggeringPlayer
         | TargetFilter::TriggeringSource
         | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget
@@ -1357,6 +1361,9 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         FilterProp::WithoutKeywordKind { value } => {
             !record.keywords.iter().any(|k| k.kind() == *value)
         }
+        // CR 303.4: "could enchant [target]" needs live target context and
+        // Aura attachment legality; stack snapshots only record keyword values.
+        FilterProp::CanEnchant { .. } => false,
         FilterProp::HasColor { color } => record.colors.contains(color),
         FilterProp::NotColor { color } => !record.colors.contains(color),
         FilterProp::HasSupertype { value } => record.supertypes.contains(value),
@@ -1512,6 +1519,46 @@ fn parent_target_name(state: &GameState, ability: Option<&ResolvedAbility>) -> O
     state.lki_cache.get(&id).map(|lki| lki.name.clone())
 }
 
+fn referenced_targets_for_filter<'a>(
+    target: &TargetFilter,
+    ability: Option<&'a ResolvedAbility>,
+) -> Vec<&'a TargetRef> {
+    let Some(ability) = ability else {
+        return vec![];
+    };
+    match target {
+        TargetFilter::ParentTarget => ability.targets.iter().collect(),
+        TargetFilter::ParentTargetSlot { index } => {
+            ability.targets.get(*index).into_iter().collect()
+        }
+        _ => vec![],
+    }
+}
+
+fn aura_can_enchant_referenced_target(
+    state: &GameState,
+    aura: &GameObject,
+    aura_id: ObjectId,
+    enchant_filter: &TargetFilter,
+    target_ref: &TargetRef,
+    source: &SourceContext<'_>,
+) -> bool {
+    match target_ref {
+        TargetRef::Object(target_id) => filter_inner(
+            state,
+            *target_id,
+            enchant_filter,
+            aura_id,
+            Some(aura.controller),
+            source.ability,
+            source.recipient_id,
+        ),
+        TargetRef::Player(player_id) => {
+            player_matches_target_filter(enchant_filter, *player_id, Some(aura.controller))
+        }
+    }
+}
+
 /// Resolve a dynamic filter threshold against the source context.
 ///
 /// When the filter evaluation has an ability in scope (e.g. SearchLibrary resolving
@@ -1599,6 +1646,23 @@ fn matches_filter_prop(
         // CR 302.6 / CR 110.5: Untapped status as targeting qualifier.
         FilterProp::Untapped => !obj.tapped,
         FilterProp::WithKeyword { value } => obj.has_keyword(value),
+        FilterProp::CanEnchant { target } => obj.keywords.iter().any(|keyword| {
+            let Keyword::Enchant(enchant_filter) = keyword else {
+                return false;
+            };
+            referenced_targets_for_filter(target, source.ability)
+                .iter()
+                .any(|target_ref| {
+                    aura_can_enchant_referenced_target(
+                        state,
+                        obj,
+                        object_id,
+                        enchant_filter,
+                        target_ref,
+                        source,
+                    )
+                })
+        }),
         FilterProp::HasKeywordKind { value } => {
             crate::game::keywords::object_has_effective_keyword_kind(state, object_id, *value)
         }
@@ -2066,6 +2130,9 @@ fn zone_change_record_matches_property(
         FilterProp::WithoutKeywordKind { value } => {
             !record.keywords.iter().any(|k| k.kind() == *value)
         }
+        // CR 303.4: Requires live target context; zone-change snapshots cannot
+        // prove attachment legality against a referenced target.
+        FilterProp::CanEnchant { .. } => false,
         // CR 205.4a: Supertype membership as of the zone change.
         FilterProp::HasSupertype { value } => record.supertypes.contains(value),
         FilterProp::NotSupertype { value } => !record.supertypes.contains(value),
@@ -4466,6 +4533,84 @@ mod tests {
 
         assert!(super::matches_target_filter(&state, weak, &filter, &ctx));
         assert!(!super::matches_target_filter(&state, strong, &filter, &ctx));
+    }
+
+    #[test]
+    fn can_enchant_matches_aura_keyword_against_parent_target() {
+        let mut state = setup();
+        let creature = add_creature(&mut state, PlayerId(0), "Host Creature");
+        let aura = create_object(
+            &mut state,
+            CardId(200),
+            PlayerId(0),
+            "Creature Aura".to_string(),
+            Zone::Library,
+        );
+        {
+            let aura_obj = state.objects.get_mut(&aura).unwrap();
+            aura_obj.card_types.core_types.push(CoreType::Enchantment);
+            aura_obj.card_types.subtypes.push("Aura".to_string());
+            aura_obj.keywords.push(Keyword::Enchant(TargetFilter::Typed(
+                TypedFilter::creature(),
+            )));
+        }
+        let ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: String::new(),
+                description: None,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let filter =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment).properties(vec![
+                FilterProp::CanEnchant {
+                    target: Box::new(TargetFilter::ParentTarget),
+                },
+            ]));
+        let ctx = FilterContext::from_ability(&ability);
+
+        assert!(super::matches_target_filter(&state, aura, &filter, &ctx));
+    }
+
+    #[test]
+    fn can_enchant_rejects_aura_that_cannot_enchant_parent_target() {
+        let mut state = setup();
+        let creature = add_creature(&mut state, PlayerId(0), "Host Creature");
+        let aura = create_object(
+            &mut state,
+            CardId(201),
+            PlayerId(0),
+            "Land Aura".to_string(),
+            Zone::Library,
+        );
+        {
+            let aura_obj = state.objects.get_mut(&aura).unwrap();
+            aura_obj.card_types.core_types.push(CoreType::Enchantment);
+            aura_obj.card_types.subtypes.push("Aura".to_string());
+            aura_obj
+                .keywords
+                .push(Keyword::Enchant(TargetFilter::Typed(TypedFilter::land())));
+        }
+        let ability = ResolvedAbility::new(
+            Effect::Unimplemented {
+                name: String::new(),
+                description: None,
+            },
+            vec![TargetRef::Object(creature)],
+            ObjectId(999),
+            PlayerId(0),
+        );
+        let filter =
+            TargetFilter::Typed(TypedFilter::new(TypeFilter::Enchantment).properties(vec![
+                FilterProp::CanEnchant {
+                    target: Box::new(TargetFilter::ParentTarget),
+                },
+            ]));
+        let ctx = FilterContext::from_ability(&ability);
+
+        assert!(!super::matches_target_filter(&state, aura, &filter, &ctx));
     }
 
     /// CR 107.2: Bare context (no ability in scope) — `Variable("X")` resolves to 0,

@@ -1375,6 +1375,14 @@ pub enum FilterProp {
     WithoutKeywordKind {
         value: KeywordKind,
     },
+    /// CR 303.4 + CR 702.5: Matches Aura objects whose enchant ability can
+    /// legally enchant the referenced target. This is a semantic predicate,
+    /// not exact keyword equality: `Enchant(creature)` can satisfy "that could
+    /// enchant that creature" where the reference resolves through the
+    /// ability's target slots.
+    CanEnchant {
+        target: Box<TargetFilter>,
+    },
     CountersGE {
         counter_type: CounterType,
         count: QuantityExpr,
@@ -1865,6 +1873,13 @@ pub enum TargetFilter {
     /// (e.g., "tap target creature and put a stun counter on it").
     /// At resolution time, the sub_ability chain inherits parent targets automatically.
     ParentTarget,
+    /// CR 608.2c: Resolves to a specific target slot from the parent ability.
+    /// Used when later English anaphors distinguish multiple prior targets by
+    /// role ("the artifact" vs. "the artifact card") and live-state filtering
+    /// would be ambiguous after earlier instructions mutate zones.
+    ParentTargetSlot {
+        index: usize,
+    },
     /// CR 608.2c: Resolves to the controller of the parent ability's target object.
     /// Used for "its controller" in compound effects (e.g., "counter target spell. Its controller
     /// loses 2 life."). At resolution time, looks up the controller of the first parent target.
@@ -5092,6 +5107,9 @@ fn normalized_filter_prop(prop: FilterProp) -> FilterProp {
             reference: reference.map(|filter| Box::new(filter.normalized())),
             relation,
         },
+        FilterProp::CanEnchant { target } => FilterProp::CanEnchant {
+            target: Box::new(target.normalized()),
+        },
         FilterProp::TargetsOnly { filter } => FilterProp::TargetsOnly {
             filter: Box::new(filter.normalized()),
         },
@@ -5147,6 +5165,7 @@ impl TargetFilter {
                 | TargetFilter::AttachedTo
                 | TargetFilter::CostPaidObject
                 | TargetFilter::ParentTarget
+                | TargetFilter::ParentTargetSlot { .. }
                 | TargetFilter::ParentTargetController
                 | TargetFilter::PostReplacementSourceController
                 | TargetFilter::PostReplacementDamageTarget

@@ -1227,6 +1227,7 @@ fn filter_references_ability(filter: &TargetFilter) -> bool {
             matches!(
                 p,
                 crate::types::ability::FilterProp::WithKeyword { .. }
+                    | crate::types::ability::FilterProp::CanEnchant { .. }
                     | crate::types::ability::FilterProp::HasKeywordKind { .. }
                     | crate::types::ability::FilterProp::WithoutKeyword { .. }
                     | crate::types::ability::FilterProp::WithoutKeywordKind { .. }

@@ -526,6 +526,7 @@ pub(super) fn target_filter_matches_object(
         | TargetFilter::TriggeringSource
         | TargetFilter::DefendingPlayer
         | TargetFilter::ParentTarget
+        | TargetFilter::ParentTargetSlot { .. }
         | TargetFilter::ParentTargetController
         | TargetFilter::PostReplacementSourceController
         | TargetFilter::PostReplacementDamageTarget

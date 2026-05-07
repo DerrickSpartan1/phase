@@ -1536,7 +1536,11 @@ fn scan_same_name_reference_target(lower: &str) -> Option<TargetFilter> {
 fn parse_search_enchant_keyword_suffix(
     input: &str,
 ) -> Result<(&str, FilterProp), nom::Err<OracleError<'_>>> {
-    let (rest, _) = alt((tag("with enchant "), tag("that could enchant "))).parse(input)?;
+    let (rest, semantic_can_enchant) = alt((
+        value(false, tag("with enchant ")),
+        value(true, tag("that could enchant ")),
+    ))
+    .parse(input)?;
     let (after_target, target_text) =
         take_till1::<_, _, OracleError<'_>>(|c: char| c == ',' || c == '.').parse(rest)?;
     let (target, remainder) = {
@@ -1553,12 +1557,20 @@ fn parse_search_enchant_keyword_suffix(
             nom::error::ErrorKind::Fail,
         )));
     }
-    Ok((
-        after_target,
+    let prop = if semantic_can_enchant
+        && matches!(
+            target,
+            TargetFilter::ParentTarget | TargetFilter::ParentTargetSlot { .. }
+        ) {
+        FilterProp::CanEnchant {
+            target: Box::new(target),
+        }
+    } else {
         FilterProp::WithKeyword {
             value: Keyword::Enchant(target),
-        },
-    ))
+        }
+    };
+    Ok((after_target, prop))
 }
 
 /// Parse the destination zone from search Oracle text.
@@ -1988,9 +2000,26 @@ mod tests {
             .contains(&TypeFilter::Subtype("Aura".to_string())));
         assert!(typed.properties.iter().any(|property| matches!(
             property,
+            FilterProp::CanEnchant {
+                target
+            } if matches!(target.as_ref(), TargetFilter::ParentTarget)
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_keeps_plain_could_enchant_type_as_keyword_filter() {
+        let filter = parse_search_filter(
+            "aura card that could enchant creature, reveal it",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(typed) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(typed.properties.iter().any(|property| matches!(
+            property,
             FilterProp::WithKeyword {
-                value: Keyword::Enchant(TargetFilter::ParentTarget)
-            }
+                value: Keyword::Enchant(TargetFilter::Typed(target))
+            } if target.type_filters.contains(&TypeFilter::Creature)
         )));
     }
 

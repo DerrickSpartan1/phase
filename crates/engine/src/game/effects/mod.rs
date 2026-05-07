@@ -125,6 +125,36 @@ pub mod venture;
 pub mod vote;
 pub mod win_lose;
 
+/// Resolve object targets for effect handlers that operate directly on the
+/// resolving ability's target slots.
+///
+/// `ParentTarget` preserves the historical "all inherited object targets"
+/// behavior for broad anaphors. `ParentTargetSlot` is the precise CR 608.2c
+/// form for later instructions that refer to a specific earlier target slot
+/// after intervening actions may have changed object zones.
+pub(crate) fn effect_object_targets(
+    target_filter: &TargetFilter,
+    fallback_targets: &[TargetRef],
+) -> Vec<ObjectId> {
+    match target_filter {
+        TargetFilter::ParentTargetSlot { index } => fallback_targets
+            .get(*index)
+            .and_then(|target| match target {
+                TargetRef::Object(id) => Some(*id),
+                TargetRef::Player(_) => None,
+            })
+            .into_iter()
+            .collect(),
+        _ => fallback_targets
+            .iter()
+            .filter_map(|target| match target {
+                TargetRef::Object(obj_id) => Some(*obj_id),
+                TargetRef::Player(_) => None,
+            })
+            .collect(),
+    }
+}
+
 fn matches_player_scope(
     state: &GameState,
     player: PlayerId,

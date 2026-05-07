@@ -117,14 +117,7 @@ pub fn resolve(
     };
     let count = resolve_quantity_with_targets(state, count_expr, ability).max(0) as usize;
 
-    let targeted_objects: Vec<ObjectId> = ability
-        .targets
-        .iter()
-        .filter_map(|target| match target {
-            TargetRef::Object(obj_id) => Some(*obj_id),
-            _ => None,
-        })
-        .collect();
+    let targeted_objects = crate::game::effects::effect_object_targets(filter, &ability.targets);
 
     if targeted_objects.is_empty() {
         // CR 701.16a: Derive the player(s) whose permanents are in scope from

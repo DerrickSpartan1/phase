@@ -294,6 +294,7 @@ fn fmt_target(filter: &TargetFilter) -> String {
         TargetFilter::TriggeringSource => "triggering source".into(),
         TargetFilter::DefendingPlayer => "defending player".into(),
         TargetFilter::ParentTarget => "parent target".into(),
+        TargetFilter::ParentTargetSlot { index } => format!("parent target slot {index}"),
         TargetFilter::ParentTargetController => "parent target's controller".into(),
         TargetFilter::PostReplacementSourceController => {
             "prevented event source's controller".into()
@@ -339,6 +340,9 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             FilterProp::Tapped => parts.push("tapped".into()),
             FilterProp::Untapped => parts.push("untapped".into()),
             FilterProp::WithKeyword { value } => parts.push(format!("with {value:?}")),
+            FilterProp::CanEnchant { target } => {
+                parts.push(format!("can enchant {}", fmt_target(target)))
+            }
             FilterProp::HasKeywordKind { value } => {
                 parts.push(format!("with {value:?}").to_lowercase())
             }

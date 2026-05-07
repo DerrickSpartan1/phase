@@ -1295,6 +1295,7 @@ fn target_filter_has_per_object_condition_property(filter: &TargetFilter) -> boo
                 prop,
                 crate::types::ability::FilterProp::ToughnessGTPower
                     | crate::types::ability::FilterProp::WithKeyword { .. }
+                    | crate::types::ability::FilterProp::CanEnchant { .. }
             )
         }),
         TargetFilter::Or { filters } | TargetFilter::And { filters } => filters

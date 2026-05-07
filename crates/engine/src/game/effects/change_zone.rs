@@ -355,13 +355,8 @@ pub fn resolve(
     } else {
         &self_ref_targets
     };
-    let targeted_objects: Vec<ObjectId> = effective_targets
-        .iter()
-        .filter_map(|target| match target {
-            TargetRef::Object(obj_id) => Some(*obj_id),
-            TargetRef::Player(_) => None,
-        })
-        .collect();
+    let targeted_objects =
+        crate::game::effects::effect_object_targets(target_filter, effective_targets);
 
     if targeted_objects.is_empty() {
         // CR 115.6: "Up to one target" — if the player chose zero targets during
@@ -1894,6 +1889,91 @@ mod tests {
         assert_eq!(
             state.objects.get(&graveyard_card).unwrap().zone,
             Zone::Exile
+        );
+    }
+
+    #[test]
+    fn parent_target_slot_keeps_goblin_welder_targets_distinct_after_sacrifice() {
+        let mut state = GameState::new_two_player(42);
+        let battlefield_artifact = create_object(
+            &mut state,
+            CardId(30),
+            PlayerId(0),
+            "Battlefield Artifact".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&battlefield_artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+        let graveyard_artifact = create_object(
+            &mut state,
+            CardId(31),
+            PlayerId(0),
+            "Graveyard Artifact".to_string(),
+            Zone::Graveyard,
+        );
+        state
+            .objects
+            .get_mut(&graveyard_artifact)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Artifact);
+
+        let ability = ResolvedAbility::new(
+            Effect::TargetOnly {
+                target: TargetFilter::Any,
+            },
+            vec![
+                TargetRef::Object(battlefield_artifact),
+                TargetRef::Object(graveyard_artifact),
+            ],
+            ObjectId(200),
+            PlayerId(0),
+        )
+        .sub_ability(
+            ResolvedAbility::new(
+                Effect::Sacrifice {
+                    target: TargetFilter::ParentTargetSlot { index: 0 },
+                    count: crate::types::ability::QuantityExpr::Fixed { value: 1 },
+                },
+                vec![],
+                ObjectId(200),
+                PlayerId(0),
+            )
+            .sub_ability(ResolvedAbility::new(
+                Effect::ChangeZone {
+                    origin: Some(Zone::Graveyard),
+                    destination: Zone::Battlefield,
+                    target: TargetFilter::ParentTargetSlot { index: 1 },
+                    owner_library: false,
+                    enter_transformed: false,
+                    under_your_control: false,
+                    enter_tapped: false,
+                    enters_attacking: false,
+                    up_to: false,
+                    enter_with_counters: vec![],
+                },
+                vec![],
+                ObjectId(200),
+                PlayerId(0),
+            )),
+        );
+
+        let mut events = Vec::new();
+        crate::game::effects::resolve_ability_chain(&mut state, &ability, &mut events, 0).unwrap();
+
+        assert_eq!(
+            state.objects.get(&battlefield_artifact).unwrap().zone,
+            Zone::Graveyard
+        );
+        assert_eq!(
+            state.objects.get(&graveyard_artifact).unwrap().zone,
+            Zone::Battlefield
         );
     }
 

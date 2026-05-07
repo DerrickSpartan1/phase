@@ -1015,6 +1015,7 @@ fn target_filter_variant_name(f: &TargetFilter) -> &'static str {
         TargetFilter::TriggeringPlayer => "TriggeringPlayer",
         TargetFilter::TriggeringSource => "TriggeringSource",
         TargetFilter::ParentTarget => "ParentTarget",
+        TargetFilter::ParentTargetSlot { .. } => "ParentTargetSlot",
         TargetFilter::ParentTargetController => "ParentTargetController",
         TargetFilter::PostReplacementSourceController => "PostReplacementSourceController",
         TargetFilter::PostReplacementDamageTarget => "PostReplacementDamageTarget",
