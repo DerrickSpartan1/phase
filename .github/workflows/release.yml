@@ -190,6 +190,7 @@ jobs:
         run: |
           ./scripts/gen-scryfall-images.sh
           ./scripts/gen-scryfall-sets.sh
+          ./scripts/gen-scryfall-printings.sh
 
       - name: Run semantic audit
         # Produces data/semantic-audit.json with structured findings for cards

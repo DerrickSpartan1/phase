@@ -131,6 +131,7 @@ jobs:
         run: |
           ./scripts/gen-scryfall-images.sh
           ./scripts/gen-scryfall-sets.sh
+          ./scripts/gen-scryfall-printings.sh
 
       - name: Generate coverage badge endpoints
         run: |
