@@ -1628,6 +1628,10 @@ pub enum FilterProp {
     /// mana ability by the engine's authoritative mana-ability classifier.
     /// Used for library filters such as "artifact card with a mana ability".
     HasManaAbility,
+    /// CR 113.1 + CR 113.3: Matches objects that currently have no abilities:
+    /// no keyword, activated, triggered, replacement, or static abilities.
+    /// Used for library filters such as "creature card with no abilities".
+    HasNoAbilities,
     /// CR 201.2: Matches objects whose card name equals the given name.
     /// Used for "cards named [X]" and "named [X]" filter patterns.
     /// Name comparison is exact per CR 201.2a (case-insensitive at evaluation).

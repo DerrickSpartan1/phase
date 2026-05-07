@@ -1389,7 +1389,10 @@ fn spell_record_matches_property(record: &SpellCastRecord, prop: &FilterProp) ->
         FilterProp::HasXInManaCost => record.has_x_in_cost,
         // CR 605.1: Spell-cast records snapshot the spell object, not the
         // object's ability list. Fail closed for history predicates.
-        FilterProp::HasManaAbility => false,
+        FilterProp::HasManaAbility
+        // CR 113.1 + CR 113.3: Spell-cast records snapshot keywords but not
+        // all ability lists, so "no abilities" cannot be proven here.
+        | FilterProp::HasNoAbilities => false,
         // Disjunctive composite: recurse into inner props under the same snapshot.
         FilterProp::AnyOf { props } => props
             .iter()
@@ -1640,6 +1643,9 @@ fn matches_filter_prop(
             .abilities
             .iter()
             .any(crate::game::mana_abilities::is_mana_ability),
+        // CR 113.1 + CR 113.3: "no abilities" means no keyword abilities and
+        // no activated, triggered, replacement, or static abilities.
+        FilterProp::HasNoAbilities => object_has_no_abilities(obj),
         // CR 201.2: Name matching is exact (case-insensitive comparison).
         FilterProp::Named { name } => obj.name.eq_ignore_ascii_case(name),
         // SameName: matches objects with the same name as the tracked card from context.
@@ -2022,6 +2028,14 @@ fn matches_filter_prop(
     }
 }
 
+fn object_has_no_abilities(obj: &GameObject) -> bool {
+    obj.keywords.is_empty()
+        && obj.abilities.is_empty()
+        && obj.trigger_definitions.is_empty()
+        && obj.replacement_definitions.is_empty()
+        && obj.static_definitions.is_empty()
+}
+
 /// CR 603.10: Evaluate a `FilterProp` against a zone-change event snapshot.
 ///
 /// Properties fall into four groups:
@@ -2264,6 +2278,9 @@ fn zone_change_record_matches_property(
         | FilterProp::HasXInManaCost
         // CR 605.1: Zone-change records do not snapshot ability lists.
         | FilterProp::HasManaAbility
+        // CR 113.1 + CR 113.3: Zone-change records do not snapshot all
+        // ability lists, so "no abilities" cannot be proven here.
+        | FilterProp::HasNoAbilities
         // CR 903.3d + CR 903.3: Commander designation is preserved across zones,
         // but zone-change records do not carry it. Fail closed — zone-change
         // triggers that need to filter by commander status will require record
@@ -2667,7 +2684,8 @@ mod tests {
     use crate::types::ability::{
         AbilityDefinition, AbilityKind, AggregateFunction, AttachmentKind, ChosenAttribute,
         Comparator, ControllerRef, Effect, FilterProp, ManaContribution, ManaProduction,
-        PlayerScope, QuantityExpr, QuantityRef, TargetFilter,
+        PlayerScope, QuantityExpr, QuantityRef, ReplacementDefinition, StaticDefinition,
+        TargetFilter, TriggerDefinition,
     };
     use crate::types::card_type::{CoreType, Supertype};
     use crate::types::events::GameEvent;
@@ -2676,6 +2694,9 @@ mod tests {
     use crate::types::keywords::Keyword;
     use crate::types::mana::{ManaColor, ManaCost, ManaCostShard};
     use crate::types::player::PlayerId;
+    use crate::types::replacements::ReplacementEvent;
+    use crate::types::statics::StaticMode;
+    use crate::types::triggers::TriggerMode;
     use crate::types::zones::Zone;
 
     /// Terse 4-arg wrapper for filter-matching tests.
@@ -2951,6 +2972,68 @@ mod tests {
 
         assert!(matches_target_filter(&state, mana_rock, &filter, source));
         assert!(!matches_target_filter(&state, draw_rock, &filter, source));
+    }
+
+    #[test]
+    fn object_has_no_abilities_filter_checks_all_ability_kinds() {
+        let mut state = setup();
+        let source = add_creature(&mut state, PlayerId(0), "Source");
+        let vanilla = add_creature(&mut state, PlayerId(0), "Vanilla");
+        let keyworded = add_creature(&mut state, PlayerId(0), "Keyworded");
+        let activated = add_creature(&mut state, PlayerId(0), "Activated");
+        let triggered = add_creature(&mut state, PlayerId(0), "Triggered");
+        let replacement = add_creature(&mut state, PlayerId(0), "Replacement");
+        let static_ability = add_creature(&mut state, PlayerId(0), "Static");
+
+        state
+            .objects
+            .get_mut(&keyworded)
+            .unwrap()
+            .keywords
+            .push(Keyword::Flying);
+        std::sync::Arc::make_mut(&mut state.objects.get_mut(&activated).unwrap().abilities).push(
+            AbilityDefinition::new(
+                AbilityKind::Activated,
+                Effect::Draw {
+                    count: QuantityExpr::Fixed { value: 1 },
+                    target: TargetFilter::Controller,
+                },
+            ),
+        );
+        state
+            .objects
+            .get_mut(&triggered)
+            .unwrap()
+            .trigger_definitions
+            .push(TriggerDefinition::new(TriggerMode::ChangesZone));
+        state
+            .objects
+            .get_mut(&replacement)
+            .unwrap()
+            .replacement_definitions
+            .push(ReplacementDefinition::new(ReplacementEvent::ChangeZone));
+        state
+            .objects
+            .get_mut(&static_ability)
+            .unwrap()
+            .static_definitions
+            .push(StaticDefinition::new(StaticMode::Continuous));
+
+        let filter = TargetFilter::Typed(
+            TypedFilter::creature().properties(vec![FilterProp::HasNoAbilities]),
+        );
+
+        assert!(matches_target_filter(&state, vanilla, &filter, source));
+        assert!(!matches_target_filter(&state, keyworded, &filter, source));
+        assert!(!matches_target_filter(&state, activated, &filter, source));
+        assert!(!matches_target_filter(&state, triggered, &filter, source));
+        assert!(!matches_target_filter(&state, replacement, &filter, source));
+        assert!(!matches_target_filter(
+            &state,
+            static_ability,
+            &filter,
+            source
+        ));
     }
 
     #[test]

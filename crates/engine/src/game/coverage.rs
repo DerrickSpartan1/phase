@@ -491,6 +491,7 @@ fn fmt_typed_filter(tf: &TypedFilter) -> String {
             }
             FilterProp::HasXInManaCost => parts.push("with {X} in cost".into()),
             FilterProp::HasManaAbility => parts.push("with a mana ability".into()),
+            FilterProp::HasNoAbilities => parts.push("with no abilities".into()),
             FilterProp::HasAnyCounter => parts.push("with one or more counters".into()),
         }
     }
