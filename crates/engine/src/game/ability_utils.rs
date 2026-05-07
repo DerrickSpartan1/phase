@@ -44,6 +44,7 @@ pub fn build_resolved_from_def(
     resolved.repeat_for = def.repeat_for.clone();
     resolved.description = def.description.clone();
     resolved.forward_result = def.forward_result;
+    resolved.unless_pay = def.unless_pay.clone();
     resolved.player_scope = def.player_scope;
     resolved
 }
@@ -2179,7 +2180,8 @@ mod tests {
     use crate::game::zones::create_object;
     use crate::types::ability::{
         AbilityKind, CounterTransferMode, Duration, Effect, ModalChoice, ModalSelectionConstraint,
-        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter,
+        QuantityExpr, QuantityRef, TargetFilter, TypeFilter, TypedFilter, UnlessCost,
+        UnlessPayModifier,
     };
     use crate::types::card_type::CoreType;
     use crate::types::game_state::{GameState, TargetSelectionConstraint, TargetSelectionSlot};
@@ -2250,6 +2252,24 @@ mod tests {
             .as_ref()
             .expect("Draw sub must survive multi-mode chaining");
         assert!(matches!(draw_node.effect, Effect::Draw { .. }));
+    }
+
+    #[test]
+    fn build_resolved_from_def_preserves_unless_pay_modifier() {
+        let modifier = UnlessPayModifier {
+            cost: UnlessCost::PayLife { amount: 2 },
+            payer: TargetFilter::ParentTargetController,
+        };
+        let def = AbilityDefinition::new(
+            AbilityKind::Activated,
+            Effect::Tap {
+                target: TargetFilter::ParentTarget,
+            },
+        )
+        .unless_pay(modifier.clone());
+
+        let resolved = build_resolved_from_def(&def, ObjectId(1), PlayerId(0));
+        assert_eq!(resolved.unless_pay, Some(modifier));
     }
 
     #[test]

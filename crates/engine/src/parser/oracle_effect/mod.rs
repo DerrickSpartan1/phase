@@ -35,8 +35,8 @@ use super::oracle_target::{
     parse_event_context_ref, parse_target, parse_target_with_ctx, parse_type_phrase,
 };
 use super::oracle_util::{
-    contains_possessive, has_unconsumed_conditional, parse_mana_symbols, split_around,
-    starts_with_possessive, strip_after, TextPair,
+    contains_possessive, has_unconsumed_conditional, parse_mana_symbols, parse_number,
+    split_around, starts_with_possessive, strip_after, TextPair,
 };
 use crate::database::mtgjson::parse_mtgjson_mana_cost;
 use crate::parser::oracle_effect::subject::parse_subject_application;
@@ -49,7 +49,7 @@ use crate::types::ability::{
     PlayerFilter, PlayerScope, PreventionAmount, PtValue, QuantityExpr, QuantityRef,
     ReplacementDefinition, RestrictionExpiry, RestrictionPlayerScope, RoundingMode,
     StaticCondition, StaticDefinition, TargetFilter, TriggerDefinition, TypeFilter, TypedFilter,
-    UnlessCost,
+    UnlessCost, UnlessPayModifier,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::game_state::{DistributionUnit, NextSpellModifier, RetargetScope};
@@ -7312,6 +7312,7 @@ pub(crate) fn parse_effect_chain_ir(
                 multi_target: None,
                 where_x_expression: None,
                 is_otherwise: false,
+                unless_pay: None,
                 special: Some(SpecialClause::AltCostRider(cost)),
                 source_text: normalized_text.to_string(),
             });
@@ -7365,6 +7366,7 @@ pub(crate) fn parse_effect_chain_ir(
                 multi_target: None,
                 where_x_expression: None,
                 is_otherwise: true,
+                unless_pay: None,
                 special: Some(special),
                 source_text: normalized_text.to_string(),
             });
@@ -7423,6 +7425,7 @@ pub(crate) fn parse_effect_chain_ir(
                     multi_target: None,
                     where_x_expression: None,
                     is_otherwise: false,
+                    unless_pay: None,
                     special: Some(SpecialClause::DieExileRider(Box::new(rider_def))),
                     source_text: normalized_text.to_string(),
                 });
@@ -7453,6 +7456,7 @@ pub(crate) fn parse_effect_chain_ir(
                     multi_target: None,
                     where_x_expression: None,
                     is_otherwise: false,
+                    unless_pay: None,
                     special: Some(SpecialClause::DrawnThisTurnPayOrTopdeck { life_payment }),
                     source_text: normalized_text.to_string(),
                 });
@@ -7500,6 +7504,7 @@ pub(crate) fn parse_effect_chain_ir(
                         multi_target: None,
                         where_x_expression: None,
                         is_otherwise: false,
+                        unless_pay: None,
                         special: Some(SpecialClause::DigInsteadAlt(Box::new(alt_def))),
                         source_text: normalized_text.to_string(),
                     });
@@ -7541,6 +7546,7 @@ pub(crate) fn parse_effect_chain_ir(
                 multi_target: None,
                 where_x_expression: None,
                 is_otherwise: false,
+                unless_pay: None,
                 special: None,
                 source_text: normalized_text.to_string(),
             });
@@ -7566,6 +7572,7 @@ pub(crate) fn parse_effect_chain_ir(
                 multi_target: None,
                 where_x_expression: None,
                 is_otherwise: false,
+                unless_pay: None,
                 special: None,
                 source_text: normalized_text.to_string(),
             });
@@ -7596,6 +7603,7 @@ pub(crate) fn parse_effect_chain_ir(
                     multi_target: None,
                     where_x_expression: None,
                     is_otherwise: false,
+                    unless_pay: None,
                     special: Some(SpecialClause::InsteadClause(Box::new(instead_def))),
                     source_text: normalized_text.to_string(),
                 });
@@ -7791,6 +7799,7 @@ pub(crate) fn parse_effect_chain_ir(
                             multi_target: None,
                             where_x_expression: None,
                             is_otherwise: false,
+                            unless_pay: None,
                             special: Some(SpecialClause::EntersTappedAttacking),
                             source_text: normalized_text.to_string(),
                         });
@@ -7839,6 +7848,7 @@ pub(crate) fn parse_effect_chain_ir(
         let mut player_scope = player_scope
             .or(implicit_player_scope)
             .or(carried_player_scope);
+        let (text, unless_pay) = extract_resolution_unless_pay_modifier(&text);
 
         // CR 701.21a + CR 608.2k: Derive the actor performing this chunk's effect
         // from any actor prefix that was just stripped ("you (may) ", "an
@@ -7959,6 +7969,7 @@ pub(crate) fn parse_effect_chain_ir(
                 multi_target: None,
                 where_x_expression: where_x_expression.clone(),
                 is_otherwise: false,
+                unless_pay: None,
                 special: None,
                 source_text: normalized_text.to_string(),
             });
@@ -8015,6 +8026,7 @@ pub(crate) fn parse_effect_chain_ir(
                 multi_target: None,
                 where_x_expression: None,
                 is_otherwise: false,
+                unless_pay: None,
                 special: None,
                 source_text: normalized_text.to_string(),
             });
@@ -8165,6 +8177,7 @@ pub(crate) fn parse_effect_chain_ir(
                 multi_target,
                 where_x_expression,
                 is_otherwise: false,
+                unless_pay: None,
                 special: Some(SpecialClause::KeywordInsteadOverride),
                 source_text: normalized_text.to_string(),
             });
@@ -8222,6 +8235,7 @@ pub(crate) fn parse_effect_chain_ir(
                     multi_target,
                     where_x_expression,
                     is_otherwise: false,
+                    unless_pay: None,
                     special: Some(SpecialClause::AdditionalCostInsteadSearch),
                     source_text: normalized_text.to_string(),
                 });
@@ -8337,6 +8351,9 @@ pub(crate) fn parse_effect_chain_ir(
             if let Some(ref unit) = clause.distribute {
                 check_def = check_def.distribute(unit.clone());
             }
+            if let Some(ref modifier) = unless_pay {
+                check_def = check_def.unless_pay(modifier.clone());
+            }
             // Include delayed_condition wrapping for accurate cascade check
             if let Some(ref delayed_cond) = delayed_condition {
                 let inner = check_def;
@@ -8401,6 +8418,7 @@ pub(crate) fn parse_effect_chain_ir(
                     multi_target,
                     where_x_expression,
                     is_otherwise: false,
+                    unless_pay: None,
                     special: None,
                     source_text: normalized_text.to_string(),
                 });
@@ -8432,6 +8450,7 @@ pub(crate) fn parse_effect_chain_ir(
             multi_target,
             where_x_expression,
             is_otherwise: false,
+            unless_pay,
             special: None,
             source_text: normalized_text.to_string(),
         });
@@ -8727,6 +8746,9 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
         // CR 601.2d: Propagate distribute flag.
         if let Some(ref unit) = clause_ir.parsed.distribute {
             def = def.distribute(unit.clone());
+        }
+        if let Some(ref modifier) = clause_ir.unless_pay {
+            def = def.unless_pay(modifier.clone());
         }
 
         let mut current_defs = vec![def];
@@ -11481,6 +11503,74 @@ fn parse_unless_payment(lower: &str) -> Option<UnlessCost> {
     Some(UnlessCost::Fixed { cost })
 }
 
+fn extract_resolution_unless_pay_modifier(text: &str) -> (String, Option<UnlessPayModifier>) {
+    let lower = text.to_lowercase();
+    if tag::<_, _, OracleError<'_>>("counter ")
+        .parse(lower.trim_start())
+        .is_ok()
+    {
+        return (text.to_string(), None);
+    }
+    let Some((before, payer, cost_text)) =
+        nom_primitives::scan_preceded(&lower, parse_resolution_unless_payer)
+    else {
+        return (text.to_string(), None);
+    };
+
+    let Some(cost) = parse_resolution_unless_cost(cost_text) else {
+        return (text.to_string(), None);
+    };
+
+    let cleaned = text[..before.trim_end().len()].trim().to_string();
+    (cleaned, Some(UnlessPayModifier { cost, payer }))
+}
+
+fn parse_resolution_unless_payer(input: &str) -> OracleResult<'_, TargetFilter> {
+    preceded(
+        tag("unless "),
+        alt((
+            value(
+                TargetFilter::ParentTargetController,
+                (
+                    alt((
+                        tag("its controller "),
+                        tag("that artifact's controller "),
+                        tag("that creature's controller "),
+                        tag("that permanent's controller "),
+                        tag("that spell's controller "),
+                    )),
+                    tag("pays "),
+                ),
+            ),
+            value(TargetFilter::Controller, tag("you pay ")),
+        )),
+    )
+    .parse(input)
+}
+
+fn parse_resolution_unless_cost(cost_text: &str) -> Option<UnlessCost> {
+    if let Ok((rest, cost)) = nom_primitives::parse_mana_cost(cost_text.trim_start()) {
+        if let Some(unless_cost) = parse_unless_for_each_payment(rest, &cost) {
+            return Some(unless_cost);
+        }
+        if cost != ManaCost::NoCost && cost != ManaCost::zero() {
+            return Some(UnlessCost::Fixed { cost });
+        }
+    }
+
+    let (amount, after_amount) = parse_number(cost_text.trim_start())?;
+    if tag::<_, _, OracleError<'_>>("life")
+        .parse(after_amount.trim_start())
+        .is_ok()
+    {
+        return Some(UnlessCost::PayLife {
+            amount: amount as i32,
+        });
+    }
+
+    None
+}
+
 fn parse_unless_for_each_payment(after_cost: &str, cost: &ManaCost) -> Option<UnlessCost> {
     let ManaCost::Cost { shards, generic } = cost else {
         return None;
@@ -12903,6 +12993,42 @@ mod tests {
         } else {
             panic!("expected Counter effect, got {e:?}");
         }
+    }
+
+    #[test]
+    fn effect_chain_unless_target_controller_pays_mana() {
+        use crate::types::mana::ManaCost;
+
+        let def = parse_effect_chain(
+            "Tap target creature unless its controller pays {1}",
+            AbilityKind::Activated,
+        );
+
+        assert!(matches!(*def.effect, Effect::Tap { .. }));
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+        assert_eq!(
+            unless_pay.cost,
+            UnlessCost::Fixed {
+                cost: ManaCost::Cost {
+                    shards: vec![],
+                    generic: 1,
+                },
+            },
+        );
+    }
+
+    #[test]
+    fn effect_chain_unless_target_controller_pays_life() {
+        let def = parse_effect_chain(
+            "Tap target creature unless its controller pays 2 life",
+            AbilityKind::Activated,
+        );
+
+        assert!(matches!(*def.effect, Effect::Tap { .. }));
+        let unless_pay = def.unless_pay.expect("should attach unless_pay");
+        assert_eq!(unless_pay.payer, TargetFilter::ParentTargetController);
+        assert_eq!(unless_pay.cost, UnlessCost::PayLife { amount: 2 });
     }
 
     #[test]

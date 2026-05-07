@@ -6104,6 +6104,11 @@ pub struct AbilityDefinition {
     /// Triggers WaitingFor::DistributeAmong during casting target selection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub distribute: Option<DistributionUnit>,
+    /// CR 118.12: "Effect unless [player] pays {cost}" — resolution-time payment modifier.
+    /// Triggered abilities and normal spell/activated definitions use the same runtime
+    /// `ResolvedAbility::unless_pay` pipeline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unless_pay: Option<UnlessPayModifier>,
     /// Modal metadata for activated/triggered abilities with "Choose one —" etc.
     /// When present, the ability pauses for mode selection before resolving.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -6174,6 +6179,7 @@ impl AbilityDefinition {
             optional_for: None,
             multi_target: None,
             distribute: None,
+            unless_pay: None,
             modal: None,
             mode_abilities: Vec::new(),
             repeat_for: None,
@@ -6195,6 +6201,11 @@ impl AbilityDefinition {
 
     pub fn distribute(mut self, unit: DistributionUnit) -> Self {
         self.distribute = Some(unit);
+        self
+    }
+
+    pub fn unless_pay(mut self, modifier: UnlessPayModifier) -> Self {
+        self.unless_pay = Some(modifier);
         self
     }
 

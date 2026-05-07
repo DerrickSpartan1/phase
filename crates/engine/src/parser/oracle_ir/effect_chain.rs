@@ -12,7 +12,7 @@ use super::ast::{ClauseBoundary, ContinuationAst, ParsedEffectClause};
 use crate::types::ability::{
     AbilityCondition, AbilityCost, AbilityDefinition, AbilityKind, ControllerRef,
     DelayedTriggerCondition, MultiTargetSpec, OpponentMayScope, PlayerFilter, QuantityExpr,
-    RoundingMode,
+    RoundingMode, UnlessPayModifier,
 };
 
 /// Chain-level IR: the complete parsed representation of an effect chain before assembly.
@@ -102,6 +102,9 @@ pub(crate) struct ClauseIr {
     pub(crate) where_x_expression: Option<String>,
     /// Special-case: "otherwise" clause that attaches to prior conditional.
     pub(crate) is_otherwise: bool,
+    /// CR 118.12: Resolution-time "unless [player] pays" modifier carried by
+    /// this clause.
+    pub(crate) unless_pay: Option<UnlessPayModifier>,
     /// Special-case action that modifies adjacent clauses during lowering.
     pub(crate) special: Option<SpecialClause>,
     /// The raw normalized text (for debug/diagnostic purposes).
@@ -146,6 +149,7 @@ mod tests {
             multi_target: None,
             where_x_expression: None,
             is_otherwise: false,
+            unless_pay: None,
             special: None,
             source_text: "draw a card".to_string(),
         };
@@ -177,6 +181,7 @@ mod tests {
                 multi_target: None,
                 where_x_expression: None,
                 is_otherwise: false,
+                unless_pay: None,
                 special: None,
                 source_text: "draw two cards".to_string(),
             }],
