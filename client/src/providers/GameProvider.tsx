@@ -35,6 +35,7 @@ import {
 } from "../stores/gameStore";
 import type { AISeatBinding } from "../game/controllers/aiController";
 import { useMultiplayerStore } from "../stores/multiplayerStore";
+import { assignRandomAvatars, fetchAvatarArtUrl } from "../services/playerAvatars";
 
 /** Build per-seat AI controller bindings for a game about to start. Reads
  *  the session-scoped `aiSeats` snapshot from `ActiveGameMeta` (written at
@@ -55,6 +56,56 @@ function resolveAiSeatBindings(
     playerId: i + 1,
     difficulty: snapshot?.[i]?.difficulty ?? fallback,
   }));
+}
+
+let avatarGeneration = 0;
+
+function setupRandomAvatars(playerCount: number) {
+  const generation = ++avatarGeneration;
+  const avatars = assignRandomAvatars(playerCount);
+  const names = new Map<number, string>();
+  names.set(0, "You");
+  for (let i = 1; i < avatars.length; i++) {
+    names.set(i, avatars[i].name);
+  }
+  useMultiplayerStore.setState({ playerNames: names, playerAvatars: new Map() });
+  for (let i = 0; i < avatars.length; i++) {
+    fetchAvatarArtUrl(avatars[i].cardName).then((url) => {
+      if (!url || avatarGeneration !== generation) return;
+      const next = new Map(useMultiplayerStore.getState().playerAvatars);
+      next.set(i, url);
+      useMultiplayerStore.setState({ playerAvatars: next });
+    });
+  }
+}
+
+function setupCommanderAvatars(gameState: { objects: Record<number, { name: string; owner: number; is_commander?: boolean }>; command_zone?: number[] }) {
+  const generation = ++avatarGeneration;
+  const names = new Map<number, string>();
+  const commanderNames = new Map<number, string>();
+
+  const czIds = gameState.command_zone ?? [];
+  for (const id of czIds) {
+    const obj = gameState.objects[id];
+    if (!obj?.is_commander) continue;
+    if (commanderNames.has(obj.owner)) continue;
+    commanderNames.set(obj.owner, obj.name);
+  }
+
+  for (const [playerId, cardName] of commanderNames) {
+    names.set(playerId, cardName.split(",")[0].split(" //")[0]);
+  }
+
+  useMultiplayerStore.setState({ playerNames: names, playerAvatars: new Map() });
+
+  for (const [playerId, cardName] of commanderNames) {
+    fetchAvatarArtUrl(cardName).then((url) => {
+      if (!url || avatarGeneration !== generation) return;
+      const next = new Map(useMultiplayerStore.getState().playerAvatars);
+      next.set(playerId, url);
+      useMultiplayerStore.setState({ playerAvatars: next });
+    });
+  }
 }
 
 function parsedDeckToDeckData(deck: ParsedDeck): DeckData {
@@ -280,6 +331,24 @@ export function GameProvider({
   onResumeResetRef.current = onResumeReset;
 
   useEffect(() => {
+    if (mode !== "ai") return;
+    let applied = false;
+    const unsub = useGameStore.subscribe((state) => {
+      if (applied || !state.gameState?.command_zone?.length) return;
+      applied = true;
+      setupCommanderAvatars(state.gameState);
+      unsub();
+    });
+    const state = useGameStore.getState();
+    if (!applied && state.gameState?.command_zone?.length) {
+      applied = true;
+      setupCommanderAvatars(state.gameState);
+      unsub();
+    }
+    return unsub;
+  }, [mode, gameId]);
+
+  useEffect(() => {
     // A prior cleanup may have deferred a store reset. Cancel it — this mount
     // is about to populate the store via initGame/resumeGame, and a fire from
     // the previous cleanup would null out the state we just wrote.
@@ -291,7 +360,11 @@ export function GameProvider({
     const isOnline = mode === "online";
     const isP2P = mode === "p2p-host" || mode === "p2p-join";
     if (!isOnline && !isP2P) {
-      useMultiplayerStore.setState({ playerNames: new Map() });
+      if (mode === "ai") {
+        setupRandomAvatars(playerCount ?? 2);
+      } else {
+        useMultiplayerStore.setState({ playerNames: new Map(), playerAvatars: new Map() });
+      }
     }
     const hasSession = loadWsSession() !== null;
     const isReconnect = isOnline && !joinCode && hasSession;

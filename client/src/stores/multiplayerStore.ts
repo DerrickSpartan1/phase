@@ -187,6 +187,8 @@ interface MultiplayerState {
   isSpectator: boolean;
   // PlayerId → display name, captured from playerSlots at game start (ephemeral — not persisted)
   playerNames: Map<number, string>;
+  // PlayerId → avatar art crop URL (ephemeral — assigned at game start)
+  playerAvatars: Map<number, string>;
   // Per-player connection tracking (ephemeral — not persisted)
   disconnectedPlayers: Set<number>;
   // Action round-trip tracking (ephemeral — not persisted)
@@ -376,6 +378,7 @@ export const useMultiplayerStore = create<MultiplayerState & MultiplayerActions>
       spectators: [],
       isSpectator: false,
       playerNames: new Map(),
+      playerAvatars: new Map(),
       disconnectedPlayers: new Set(),
       actionPending: false,
       latencyMs: null,
@@ -1076,7 +1079,9 @@ export function getPlayerDisplayName(playerId: number, myId?: number): string {
 }
 
 export function getOpponentDisplayName(playerId: number): string {
-  const name = useMultiplayerStore.getState().playerNames.get(playerId);
+  const state = useMultiplayerStore.getState();
+  const name = state.playerNames.get(playerId);
   if (name) return name;
   return `Opp ${playerId + 1}`;
 }
+

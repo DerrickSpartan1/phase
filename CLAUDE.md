@@ -55,7 +55,39 @@ When creating or participating in an agent team (whether triggered by `/batch-me
 1. **Use existing skills.** Every implementation must follow the relevant skill checklist (`/add-engine-effect`, `/add-keyword`, `/add-trigger`, etc.). No ad-hoc approaches.
 2. **Teammates cannot spawn subagents.** All review subagents must be spawned by the lead. The lead receives the plan/implementation from the teammate, spawns a review subagent (model: opus), and sends feedback back to the teammate. This review loop repeats until clean (max 3 rounds).
 3. **Sequential execution by default.** Multiple teammates must not implement concurrently unless their file sets are completely disjoint. Shared files like `types/ability.rs`, `effects/mod.rs`, and `parser/oracle.rs` are frequent collision points.
-4. **Verify before committing.** Run `cargo fmt`, `cargo clippy`, `cargo test -p engine`, and `cargo coverage` before any commit. For frontend changes, also run `pnpm run type-check` and `pnpm lint` in `client/` — TypeScript errors must not be committed.
+4. **Verify before committing.** Run `cargo fmt --all`, then check Tilt logs (`tilt logs clippy --tail 30 --since 2m`, `tilt logs test-engine --tail 50 --since 2m`) to confirm clippy and tests pass. For frontend changes, check `tilt logs check-frontend --tail 30 --since 2m`. Do NOT run cargo build/clippy/test directly — Tilt handles these continuously and running them manually causes target lock contention. TypeScript errors must not be committed.
+
+### CRITICAL: Use Tilt Logs Instead of Running Builds
+
+**Tilt is always running and continuously rebuilds on file changes.** Do NOT run `cargo build`, `cargo clippy`, `cargo test -p engine`, `pnpm run type-check`, or `pnpm lint` directly — these compete for cargo target locks and queue up redundant builds. Instead, check the Tilt logs for the relevant resource to see if your changes compiled/passed.
+
+**Available Tilt resources** (defined in `Tiltfile`):
+| Resource | What it does | Triggers on |
+|----------|-------------|-------------|
+| `clippy` | `cargo clippy --all-targets -- -D warnings` | `crates/` changes |
+| `test-engine` | `cargo test -p engine` | `crates/engine/src/` changes |
+| `wasm` | WASM build (depends on clippy) | engine/AI/WASM src changes |
+| `card-data` | `./scripts/gen-card-data.sh` | `crates/engine/src/` changes |
+| `check-frontend` | `pnpm run type-check && pnpm lint` | `client/src/` changes |
+| `test-frontend` | `pnpm test -- --run` | `client/src/` changes |
+| `server` | Build + serve phase-server | server src changes |
+| `coverage` | `cargo coverage` | Manual trigger only |
+
+**How to check results:**
+```bash
+tilt logs clippy --tail 30 --since 2m          # Recent clippy output
+tilt logs test-engine --tail 50 --since 2m     # Recent test results
+tilt logs card-data --tail 20 --since 1m       # Card data gen output
+tilt logs check-frontend --tail 30 --since 2m  # TS type-check + lint
+```
+
+**Rules:**
+- After saving files, wait ~10-30s for Tilt to detect changes and rebuild, then check logs.
+- Use `--follow` only when you need to stream live output (e.g., waiting for a build in progress).
+- Use `--since` to limit output — don't dump entire build history.
+- If a resource shows errors, fix your code and Tilt will automatically rebuild.
+- Only run cargo/pnpm commands directly if Tilt is confirmed not running (check `tilt status` or `curl -s localhost:10350/api/status`).
+- `cargo fmt --all` is the one exception — always run it directly since Tilt doesn't auto-format.
 
 ### CRITICAL: Building Blocks and Architecture Purity
 

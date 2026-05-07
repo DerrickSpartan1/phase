@@ -3,7 +3,7 @@ import { useCallback } from "react";
 import { usePerspectivePlayerId } from "../../hooks/usePlayerId.ts";
 import { useSeatColor } from "../../hooks/useSeatColor.ts";
 import { useGameStore } from "../../stores/gameStore.ts";
-import { getPlayerDisplayName } from "../../stores/multiplayerStore.ts";
+import { getPlayerDisplayName, useMultiplayerStore } from "../../stores/multiplayerStore.ts";
 import { ScoreBadge } from "../draft/ScoreBadge.tsx";
 import { LifeTotal } from "../controls/LifeTotal.tsx";
 import { ManaPoolSummary } from "./ManaPoolSummary.tsx";
@@ -25,6 +25,7 @@ export function PlayerHud() {
     ) ?? false,
   );
   const matchScore = useGameStore((s) => s.gameState?.match_score ?? null);
+  const showMatchScore = useGameStore((s) => s.gameState?.match_config?.match_type === "Bo3");
   const waitingFor = useGameStore((s) => s.waitingFor);
   const dispatch = useGameStore((s) => s.dispatch);
 
@@ -43,6 +44,7 @@ export function PlayerHud() {
 
   const hudTone = isValidTarget ? "cyan" : isMyTurn ? "emerald" : "neutral";
   const seatColor = useSeatColor(playerId);
+  const avatarUrl = useMultiplayerStore((s) => s.playerAvatars.get(playerId) ?? null);
 
   return (
     <div
@@ -54,15 +56,16 @@ export function PlayerHud() {
     >
       <PhaseIndicatorLeft />
       <HudPlate
-        label={getPlayerDisplayName(playerId)}
+        label={getPlayerDisplayName(playerId, playerId)}
         tone={hudTone}
         active={isMyTurn}
         seatColor={seatColor}
         underAttack={isUnderAttack}
+        avatarUrl={avatarUrl}
         onClick={isValidTarget ? handleTargetClick : undefined}
         trailing={
           <>
-            {matchScore ? <ScoreBadge score={matchScore} player={0} /> : null}
+            {showMatchScore && matchScore ? <ScoreBadge score={matchScore} player={0} /> : null}
             {isPhasedOut ? <StatusBadge label="Phased Out" tone="neutral" /> : null}
             {poisonCounters > 0 ? <CounterBadge kind="poison" value={poisonCounters} /> : null}
             {speed > 0 ? <CounterBadge kind="speed" value={speed} /> : null}
