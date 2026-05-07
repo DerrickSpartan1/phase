@@ -3408,8 +3408,9 @@ mod tests {
                     },
                 comparator: Comparator::LE,
                 rhs:
-                    QuantityExpr::HalfRounded {
+                    QuantityExpr::DivideRounded {
                         inner,
+                        divisor: 2,
                         rounding: RoundingMode::Down,
                     },
             } => {
@@ -3420,7 +3421,9 @@ mod tests {
                     }
                 ));
             }
-            other => panic!("expected LifeTotal LE HalfRounded(StartingLifeTotal), got {other:?}"),
+            other => {
+                panic!("expected LifeTotal LE DivideRounded(StartingLifeTotal), got {other:?}")
+            }
         }
     }
 

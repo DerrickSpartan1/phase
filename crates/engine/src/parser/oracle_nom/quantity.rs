@@ -31,7 +31,7 @@ use crate::types::zones::Zone;
 /// same `parse_quantity_ref` / `parse_number` primitives used for plain quantities.
 pub fn parse_quantity(input: &str) -> OracleResult<'_, QuantityExpr> {
     alt((
-        parse_half_rounded,
+        parse_fraction_rounded,
         map(parse_quantity_ref, |qty| QuantityExpr::Ref { qty }),
         map(parse_number, |n| QuantityExpr::Fixed { value: n as i32 }),
     ))
@@ -53,21 +53,32 @@ pub fn parse_quantity(input: &str) -> OracleResult<'_, QuantityExpr> {
 /// Composes over existing refs only — does NOT introduce new QuantityRef
 /// variants. New fractional patterns are unlocked by extending
 /// [`parse_half_rounded_inner`], not by adding bespoke refs.
-pub fn parse_half_rounded(input: &str) -> OracleResult<'_, QuantityExpr> {
-    let (rest, _) = tag("half ").parse(input)?;
-    // "half X" and "half of X" are equivalent Oracle surface forms — the
-    // "of" variant appears in phrases like "exile the top half of their
-    // library, rounded down". Consume the optional connector before the inner.
+pub fn parse_fraction_rounded(input: &str) -> OracleResult<'_, QuantityExpr> {
+    let (rest, divisor) = parse_fraction_divisor(input)?;
     let (rest, _) = opt(tag("of ")).parse(rest)?;
     let (rest, inner) = parse_half_rounded_inner(rest)?;
     let (rest, rounding) = parse_rounding_suffix(rest)?;
     Ok((
         rest,
-        QuantityExpr::HalfRounded {
+        QuantityExpr::DivideRounded {
             inner: Box::new(inner),
+            divisor,
             rounding,
         },
     ))
+}
+
+pub fn parse_half_rounded(input: &str) -> OracleResult<'_, QuantityExpr> {
+    parse_fraction_rounded(input)
+}
+
+fn parse_fraction_divisor(input: &str) -> OracleResult<'_, u32> {
+    alt((
+        value(2, tag("half ")),
+        value(3, alt((tag("a third "), tag("one third "), tag("third ")))),
+        value(10, alt((tag("a tenth "), tag("one tenth "), tag("tenth ")))),
+    ))
+    .parse(input)
 }
 
 /// Inner expression of "half ...": a full quantity ref, a possessive ref
@@ -3431,7 +3442,7 @@ mod tests {
         assert_eq!(rest, "");
         assert!(matches!(
             q,
-            QuantityExpr::HalfRounded {
+            QuantityExpr::DivideRounded {
                 inner,
                 ..
             } if matches!(
@@ -3453,12 +3464,13 @@ mod tests {
         let (rest, q) =
             parse_half_rounded("half the non-Demon permanents you control, rounded up").unwrap();
         assert_eq!(rest, "");
-        let QuantityExpr::HalfRounded {
+        let QuantityExpr::DivideRounded {
             inner,
+            divisor: 2,
             rounding: RoundingMode::Up,
         } = q
         else {
-            panic!("expected HalfRounded(Up), got {q:?}");
+            panic!("expected DivideRounded(Up), got {q:?}");
         };
         let QuantityExpr::Ref {
             qty:
@@ -3488,12 +3500,13 @@ mod tests {
         let (rest, q) =
             parse_half_rounded("half the non-God creatures they control, rounded down").unwrap();
         assert_eq!(rest, "");
-        let QuantityExpr::HalfRounded {
+        let QuantityExpr::DivideRounded {
             inner,
+            divisor: 2,
             rounding: RoundingMode::Down,
         } = q
         else {
-            panic!("expected HalfRounded(Down), got {q:?}");
+            panic!("expected DivideRounded(Down), got {q:?}");
         };
         let QuantityExpr::Ref {
             qty:
@@ -3516,6 +3529,33 @@ mod tests {
                 TypeFilter::Non(Box::new(TypeFilter::Subtype("God".to_string()))),
             ]
         );
+    }
+
+    #[test]
+    fn test_parse_third_and_tenth_object_fractions() {
+        let (rest, third) =
+            parse_fraction_rounded("a third of the lands they control, rounded down").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            third,
+            QuantityExpr::DivideRounded {
+                divisor: 3,
+                rounding: RoundingMode::Down,
+                ..
+            }
+        ));
+
+        let (rest, tenth) =
+            parse_fraction_rounded("a tenth of the creatures they control, rounded up").unwrap();
+        assert_eq!(rest, "");
+        assert!(matches!(
+            tenth,
+            QuantityExpr::DivideRounded {
+                divisor: 10,
+                rounding: RoundingMode::Up,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -3646,12 +3686,13 @@ mod tests {
         let (rest, q) = parse_quantity("half their library, rounded down").unwrap();
         assert_eq!(
             q,
-            QuantityExpr::HalfRounded {
+            QuantityExpr::DivideRounded {
                 inner: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Library,
                     },
                 }),
+                divisor: 2,
                 rounding: RoundingMode::Down,
             }
         );
@@ -3663,12 +3704,13 @@ mod tests {
         let (rest, q) = parse_quantity("half their life, rounded up").unwrap();
         assert_eq!(
             q,
-            QuantityExpr::HalfRounded {
+            QuantityExpr::DivideRounded {
                 inner: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::LifeTotal {
                         player: PlayerScope::Target
                     },
                 }),
+                divisor: 2,
                 rounding: RoundingMode::Up,
             }
         );
@@ -3680,12 +3722,13 @@ mod tests {
         let (rest, q) = parse_quantity("half their life total, rounded up").unwrap();
         assert_eq!(
             q,
-            QuantityExpr::HalfRounded {
+            QuantityExpr::DivideRounded {
                 inner: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::LifeTotal {
                         player: PlayerScope::Target
                     },
                 }),
+                divisor: 2,
                 rounding: RoundingMode::Up,
             }
         );
@@ -3699,12 +3742,13 @@ mod tests {
         let (rest, q) = parse_quantity("half its power, rounded up").unwrap();
         assert_eq!(
             q,
-            QuantityExpr::HalfRounded {
+            QuantityExpr::DivideRounded {
                 inner: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::Power {
                         scope: crate::types::ability::ObjectScope::Source
                     },
                 }),
+                divisor: 2,
                 rounding: RoundingMode::Up,
             }
         );
@@ -3716,12 +3760,13 @@ mod tests {
         let (rest, q) = parse_quantity("half your life, rounded up").unwrap();
         assert_eq!(
             q,
-            QuantityExpr::HalfRounded {
+            QuantityExpr::DivideRounded {
                 inner: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::LifeTotal {
                         player: PlayerScope::Controller
                     },
                 }),
+                divisor: 2,
                 rounding: RoundingMode::Up,
             }
         );
@@ -3735,12 +3780,13 @@ mod tests {
         let (rest, q) = parse_quantity("half his or her life, rounded up").unwrap();
         assert_eq!(
             q,
-            QuantityExpr::HalfRounded {
+            QuantityExpr::DivideRounded {
                 inner: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::LifeTotal {
                         player: PlayerScope::Target
                     },
                 }),
+                divisor: 2,
                 rounding: RoundingMode::Up,
             }
         );
@@ -3754,12 +3800,13 @@ mod tests {
         let (rest, q) = parse_quantity("half their library").unwrap();
         assert_eq!(
             q,
-            QuantityExpr::HalfRounded {
+            QuantityExpr::DivideRounded {
                 inner: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::TargetZoneCardCount {
                         zone: ZoneRef::Library,
                     },
                 }),
+                divisor: 2,
                 rounding: RoundingMode::Down,
             }
         );
@@ -3772,12 +3819,13 @@ mod tests {
         let (rest, q) = parse_quantity("half their life, round up").unwrap();
         assert_eq!(
             q,
-            QuantityExpr::HalfRounded {
+            QuantityExpr::DivideRounded {
                 inner: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::LifeTotal {
                         player: PlayerScope::Target
                     },
                 }),
+                divisor: 2,
                 rounding: RoundingMode::Up,
             }
         );
@@ -3789,7 +3837,7 @@ mod tests {
         // After the rounding suffix, remaining text should be passed through
         // unchanged so callers can consume it (e.g., the period at end-of-line).
         let (rest, q) = parse_quantity("half their library, rounded down.").unwrap();
-        assert!(matches!(q, QuantityExpr::HalfRounded { .. }));
+        assert!(matches!(q, QuantityExpr::DivideRounded { .. }));
         assert_eq!(rest, ".");
     }
 

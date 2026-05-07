@@ -64,7 +64,7 @@ pub enum ManaSourcePenalty {
     /// CR 605.3b: Resolution chain contains a `DealDamage { target: Controller }`
     /// and/or `LoseLife { target: Controller|None }` whose amounts sum to a
     /// fixed total. `fixed_amount = None` means the chain contains a non-fixed
-    /// (`QuantityExpr::Ref` / `HalfRounded` / etc.) amount — treated as
+    /// (`QuantityExpr::Ref` / `DivideRounded` / etc.) amount — treated as
     /// maximally bad in `priority_amount()` for conservative auto-tap.
     ///
     /// Examples: painlands (1), Ancient Tomb (2), future N-damage lands,
@@ -240,7 +240,7 @@ fn fold_amount(acc: Option<u16>, rhs: Option<u16>) -> Option<u16> {
 }
 
 /// Collapse a `QuantityExpr` to a fixed `u16` amount if possible. Any
-/// non-`Fixed` shape (Ref / HalfRounded / Offset / Multiply / …) returns
+/// non-`Fixed` shape (Ref / DivideRounded / Offset / Multiply / …) returns
 /// `None` — the caller treats that as "unknown amount, poison the sum."
 fn quantity_expr_to_fixed_amount(expr: &QuantityExpr) -> Option<u16> {
     match expr {

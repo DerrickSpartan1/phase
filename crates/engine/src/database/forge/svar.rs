@@ -125,12 +125,14 @@ impl<'a> SvarResolver<'a> {
                 factor: 2,
                 inner: Box::new(base_expr),
             }),
-            Some("HalfUp") => Ok(QuantityExpr::HalfRounded {
+            Some("HalfUp") => Ok(QuantityExpr::DivideRounded {
                 inner: Box::new(base_expr),
+                divisor: 2,
                 rounding: RoundingMode::Up,
             }),
-            Some("HalfDown") => Ok(QuantityExpr::HalfRounded {
+            Some("HalfDown") => Ok(QuantityExpr::DivideRounded {
                 inner: Box::new(base_expr),
+                divisor: 2,
                 rounding: RoundingMode::Down,
             }),
             _ => Ok(base_expr),

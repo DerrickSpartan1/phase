@@ -582,12 +582,21 @@ fn fmt_quantity(q: &QuantityExpr) -> String {
     match q {
         QuantityExpr::Fixed { value } => value.to_string(),
         QuantityExpr::Ref { qty } => fmt_quantity_ref(qty),
-        QuantityExpr::HalfRounded { inner, rounding } => {
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => {
             let dir = match rounding {
                 crate::types::ability::RoundingMode::Up => "up",
                 crate::types::ability::RoundingMode::Down => "down",
             };
-            format!("half({}, rounded {})", fmt_quantity(inner), dir)
+            format!(
+                "divide({}, {}, rounded {})",
+                fmt_quantity(inner),
+                divisor,
+                dir
+            )
         }
         QuantityExpr::Offset { inner, offset } => {
             format!("{}+{}", fmt_quantity(inner), offset)
@@ -4400,7 +4409,7 @@ fn extract_quantity_features(qty: &QuantityExpr, features: &mut HashMap<String, 
         QuantityExpr::Offset { inner, .. } | QuantityExpr::Multiply { inner, .. } => {
             extract_quantity_features(inner, features);
         }
-        QuantityExpr::HalfRounded { inner, .. } => {
+        QuantityExpr::DivideRounded { inner, .. } => {
             extract_quantity_features(inner, features);
         }
         QuantityExpr::Sum { exprs } => {

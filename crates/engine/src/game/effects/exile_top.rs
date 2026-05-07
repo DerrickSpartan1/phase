@@ -13,7 +13,7 @@ pub fn resolve(
     let (count, player_filter) = match &ability.effect {
         Effect::ExileTop { count, player } => (
             // Use resolve_quantity_with_targets so that TargetZoneCardCount (and
-            // HalfRounded wrapping it) can resolve against the targeted player.
+            // DivideRounded wrapping it) can resolve against the targeted player.
             resolve_quantity_with_targets(state, count, ability) as usize,
             player.clone(),
         ),

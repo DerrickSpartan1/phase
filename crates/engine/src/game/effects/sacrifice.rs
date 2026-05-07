@@ -87,7 +87,7 @@ pub fn resolve(
     // compatibility branch below preserves existing behavior.
     // CR 701.21a + CR 608.2d: Peel `UpTo` from the count expression to derive
     // the upper-bound expression and the may-pick-fewer flag. Plain
-    // `QuantityExpr` (Fixed/Ref/HalfRounded/...) means a mandatory count;
+    // `QuantityExpr` (Fixed/Ref/DivideRounded/...) means a mandatory count;
     // wrapped in `UpTo` means the player may select 0..=count.
     let default_count = QuantityExpr::Fixed { value: 1 };
     let (filter, count_expr, up_to) = match &ability.effect {

@@ -896,7 +896,7 @@ fn json_has_any(ast_json: &str, markers: &[&str]) -> bool {
 
 /// Oracle text contains dynamic-quantity grammar ("equal to", "for each",
 /// "twice", "where x is", "the number of", "half [poss]") but the parsed
-/// AST contains no dynamic carrier (Ref, Multiply, HalfRounded, Offset,
+/// AST contains no dynamic carrier (Ref, Multiply, DivideRounded, Offset,
 /// Variable, EventContext, ForEach, NumberOf). The clause was swallowed.
 ///
 /// CR 107.1a + CR 107.3 + CR 119.1: dynamic quantities must produce typed
@@ -932,7 +932,7 @@ fn detect_dynamic_qty(
     let dynamic_markers: &[&str] = &[
         "\"type\":\"Ref\"",
         "\"type\":\"Multiply\"",
-        "\"type\":\"HalfRounded\"",
+        "\"type\":\"DivideRounded\"",
         "\"type\":\"Offset\"",
         "\"type\":\"Sum\"",
         "\"Variable\"",

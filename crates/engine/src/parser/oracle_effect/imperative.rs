@@ -449,7 +449,7 @@ pub(super) fn parse_numeric_imperative_ast(
 }
 
 /// CR 107.1a: Parse "lose(s) half [possessive] life, rounded up/down" →
-/// `HalfRounded` expression by delegating to the shared quantity combinator.
+/// `DivideRounded` expression by delegating to the shared quantity combinator.
 ///
 /// Strips the `lose(s) ` verb prefix, then runs
 /// [`super::super::oracle_nom::quantity::parse_half_rounded`] over the
@@ -539,7 +539,7 @@ fn strip_article(text: &str) -> &str {
 /// `ObjectCount` quantity expression. Used by the sacrifice AST builder to
 /// lift "half the permanents they control" → ObjectCount's filter into the
 /// effect's target, so eligibility matches the same set the count was
-/// computed against. Recurses through `HalfRounded` / `Multiply` / `Offset`
+/// computed against. Recurses through `DivideRounded` / `Multiply` / `Offset`
 /// wrappers since the filter belongs to the innermost ObjectCount; returns
 /// `None` for expressions that carry no filter (Fixed, Variable(X), etc.).
 fn extract_object_count_filter(expr: &QuantityExpr) -> Option<TargetFilter> {
@@ -547,7 +547,7 @@ fn extract_object_count_filter(expr: &QuantityExpr) -> Option<TargetFilter> {
         QuantityExpr::Ref {
             qty: QuantityRef::ObjectCount { filter },
         } => Some(filter.clone()),
-        QuantityExpr::HalfRounded { inner, .. }
+        QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::Offset { inner, .. } => extract_object_count_filter(inner),
         _ => None,
@@ -5745,7 +5745,7 @@ mod tests {
     #[test]
     fn parse_lose_half_their_life_rounded_up_trace() {
         // Class-level trace: make sure "lose half their life, rounded up"
-        // produces a typed HalfRounded amount at the imperative level.
+        // produces a typed DivideRounded amount at the imperative level.
         let text = "lose half their life, rounded up";
         let lower = text.to_lowercase();
         let result = parse_numeric_imperative_ast(text, &lower);
@@ -5755,12 +5755,12 @@ mod tests {
                 assert!(
                     matches!(
                         amount,
-                        QuantityExpr::HalfRounded {
+                        QuantityExpr::DivideRounded {
                             rounding: crate::types::ability::RoundingMode::Up,
                             ..
                         }
                     ),
-                    "Expected HalfRounded(Up), got {amount:?}"
+                    "Expected DivideRounded(Up), got {amount:?}"
                 );
             }
             other => panic!("Expected LoseLife, got {other:?}"),
@@ -5776,7 +5776,7 @@ mod tests {
             Some(TargetedImperativeAst::Sacrifice { target, count }) => {
                 assert!(matches!(
                     count,
-                    QuantityExpr::HalfRounded {
+                    QuantityExpr::DivideRounded {
                         rounding: crate::types::ability::RoundingMode::Up,
                         ..
                     }
@@ -5814,7 +5814,7 @@ mod tests {
             Some(TargetedImperativeAst::Sacrifice { target, count }) => {
                 assert!(matches!(
                     count,
-                    QuantityExpr::HalfRounded {
+                    QuantityExpr::DivideRounded {
                         rounding: crate::types::ability::RoundingMode::Down,
                         ..
                     }

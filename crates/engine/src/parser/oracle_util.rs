@@ -270,7 +270,7 @@ pub fn parse_number(text: &str) -> Option<(u32, &str)> {
 /// a variable ("X"), or a fixed number.
 ///
 /// Dispatch order:
-/// 1. **Fractional** — delegates to [`super::oracle_nom::quantity::parse_half_rounded`]
+/// 1. **Fractional** — delegates to [`super::oracle_nom::quantity::parse_fraction_rounded`]
 ///    which composes over existing `QuantityRef` variants (CR 107.1a). The inner
 ///    expression is any ref the nom quantity parser can recognize, including
 ///    possessive forms ("their library", "its power", "his or her life").
@@ -292,7 +292,7 @@ pub fn parse_count_expr(text: &str) -> Option<(QuantityExpr, &str)> {
     if let Some((expr, rest)) = super::oracle_nom::bridge::nom_on_lower(
         text,
         &lower,
-        super::oracle_nom::quantity::parse_half_rounded,
+        super::oracle_nom::quantity::parse_fraction_rounded,
     ) {
         // Trim leading whitespace on the remainder to match the rest of
         // `parse_count_expr`'s output shape — all the other branches return
@@ -2023,7 +2023,12 @@ mod tests {
     fn parse_count_expr_half_x() {
         let (qty, rest) = parse_count_expr("half X cards").unwrap();
         match qty {
-            QuantityExpr::HalfRounded { inner, rounding } => {
+            QuantityExpr::DivideRounded {
+                inner,
+                divisor,
+                rounding,
+            } => {
+                assert_eq!(divisor, 2);
                 assert!(matches!(
                     *inner,
                     QuantityExpr::Ref {
@@ -2036,7 +2041,7 @@ mod tests {
                     "Default rounding should be Down per CR 107.1a"
                 );
             }
-            other => panic!("Expected HalfRounded, got {other:?}"),
+            other => panic!("Expected DivideRounded, got {other:?}"),
         }
         assert_eq!(rest, "cards");
     }
@@ -2046,7 +2051,7 @@ mod tests {
         let (qty, _rest) = parse_count_expr("half X").unwrap();
         assert!(matches!(
             qty,
-            QuantityExpr::HalfRounded {
+            QuantityExpr::DivideRounded {
                 rounding: crate::types::ability::RoundingMode::Down,
                 ..
             }
@@ -2057,16 +2062,16 @@ mod tests {
     fn parse_count_expr_half_x_rounded_up() {
         let (qty, _rest) = parse_count_expr("half X, rounded up").unwrap();
         match qty {
-            QuantityExpr::HalfRounded { rounding, .. } => {
+            QuantityExpr::DivideRounded { rounding, .. } => {
                 assert_eq!(rounding, crate::types::ability::RoundingMode::Up);
             }
-            other => panic!("Expected HalfRounded, got {other:?}"),
+            other => panic!("Expected DivideRounded, got {other:?}"),
         }
     }
 
     #[test]
     fn parse_count_expr_fixed_regression() {
-        // Ensure "3 cards" still returns Fixed, not HalfRounded
+        // Ensure "3 cards" still returns Fixed, not DivideRounded
         let (qty, rest) = parse_count_expr("3 cards").unwrap();
         assert!(matches!(qty, QuantityExpr::Fixed { value: 3 }));
         assert_eq!(rest, "cards");

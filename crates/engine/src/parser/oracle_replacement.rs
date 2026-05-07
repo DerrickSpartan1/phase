@@ -1308,7 +1308,7 @@ fn extract_life_payment(text: &str) -> Option<i32> {
 /// entering object's own `cost_x_paid` field, which is populated by
 /// `finalize_cast` and survives the stack → battlefield move. Walks the
 /// expression tree so `Multiply { factor: 2, inner: Variable("X") }` (Primo)
-/// and `HalfRounded { inner: Variable("X"), .. }` also get the rewrite.
+/// and `DivideRounded { inner: Variable("X"), .. }` also get the rewrite.
 pub(crate) fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
     match expr {
         QuantityExpr::Ref { qty } => {
@@ -1317,7 +1317,7 @@ pub(crate) fn rewrite_variable_x_to_cost_x_paid(expr: &mut QuantityExpr) {
             }
         }
         QuantityExpr::Fixed { .. } => {}
-        QuantityExpr::HalfRounded { inner, .. }
+        QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => rewrite_variable_x_to_cost_x_paid(inner),
         QuantityExpr::Sum { exprs } => {
@@ -1366,7 +1366,7 @@ fn parse_enters_with_counters(
     // CR 107.3 + CR 107.3m + CR 107.1a: Parse the counter count as a full
     // `QuantityExpr`, so "N", "X", "twice X", "three times X", and
     // "half X, rounded up/down" all compose through the same typed arithmetic
-    // wrappers (`Multiply`, `HalfRounded`). `parse_count_expr` returns
+    // wrappers (`Multiply`, `DivideRounded`). `parse_count_expr` returns
     // `Variable("X")` for bare X; the ETB-enters context requires the entering
     // object's `cost_x_paid` (runtime `Variable("X")` only reads trigger-event
     // sources, not the entering permanent), so rewrite X → `CostXPaid`
@@ -5178,7 +5178,7 @@ mod tests {
     #[test]
     fn enters_with_half_x_rounded_up_counters() {
         // CR 107.1a + CR 107.3m: Hypothetical half-X fixture — "half X, rounded up"
-        // composes `HalfRounded { inner: CostXPaid, rounding: Up }`.
+        // composes `DivideRounded { inner: CostXPaid, rounding: Up }`.
         let def = parse_replacement_line(
             "~ enters with half X, rounded up +1/+1 counters on it.",
             "Hypothetical Half-X Creature",
@@ -5192,7 +5192,12 @@ mod tests {
             } => {
                 assert_eq!(counter_type, "P1P1");
                 match count {
-                    QuantityExpr::HalfRounded { inner, rounding } => {
+                    QuantityExpr::DivideRounded {
+                        inner,
+                        divisor,
+                        rounding,
+                    } => {
+                        assert_eq!(*divisor, 2);
                         assert!(matches!(
                             inner.as_ref(),
                             QuantityExpr::Ref {
@@ -5201,7 +5206,7 @@ mod tests {
                         ));
                         assert!(matches!(rounding, crate::types::ability::RoundingMode::Up));
                     }
-                    other => panic!("expected HalfRounded, got {other:?}"),
+                    other => panic!("expected DivideRounded, got {other:?}"),
                 }
             }
             other => panic!("Expected PutCounter, got {other:?}"),

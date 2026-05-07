@@ -2438,10 +2438,12 @@ pub enum QuantityExpr {
     Ref { qty: QuantityRef },
     /// A literal integer constant.
     Fixed { value: i32 },
-    /// CR 107.1a: "Half X, rounded up/down" — divides the inner expression by
-    /// 2 in the rounding direction specified by the Oracle text.
-    HalfRounded {
+    /// CR 107.1a: Fractional quantities ("half X", "a third of X", etc.) divide
+    /// the inner expression by `divisor` in the rounding direction specified by
+    /// the Oracle text.
+    DivideRounded {
         inner: Box<QuantityExpr>,
+        divisor: u32,
         rounding: RoundingMode,
     },
     /// CR 604.3: Base expression plus a fixed integer offset.
@@ -2469,10 +2471,10 @@ pub enum QuantityExpr {
     /// wrapper via `QuantityExpr::peel_up_to` and propagate the bool to
     /// their `WaitingFor::*Choice` runtime state.
     ///
-    /// Layered above `QuantityExpr::Ref`/`Fixed`/`HalfRounded`/etc. so the
+    /// Layered above `QuantityExpr::Ref`/`Fixed`/`DivideRounded`/etc. so the
     /// upper bound itself can be a dynamic game-state quantity (e.g. "draw
     /// up to your hand size cards" → `UpTo { max: Ref { qty: HandSize } }`,
-    /// "sacrifice up to half your creatures" → `UpTo { max: HalfRounded {
+    /// "sacrifice up to half your creatures" → `UpTo { max: DivideRounded {
     /// inner: Ref { qty: ObjectCount {..} }, rounding: Down } }`).
     ///
     /// Generic quantity resolvers (`resolve_quantity`,
@@ -8437,7 +8439,7 @@ mod tests {
     }
 
     /// Demonstrates the second new compositional axis: "up to half the
-    /// creatures they control" stacks `UpTo` over `HalfRounded` over
+    /// creatures they control" stacks `UpTo` over `DivideRounded` over
     /// `ObjectCount`. Each layer is an existing primitive — the refactor
     /// only added the outer wrapper.
     #[test]
@@ -8446,17 +8448,18 @@ mod tests {
             type_filters: vec![TypeFilter::Creature],
             ..Default::default()
         });
-        let expr = QuantityExpr::up_to(QuantityExpr::HalfRounded {
+        let expr = QuantityExpr::up_to(QuantityExpr::DivideRounded {
             inner: Box::new(QuantityExpr::Ref {
                 qty: QuantityRef::ObjectCount {
                     filter: creatures_filter,
                 },
             }),
+            divisor: 2,
             rounding: RoundingMode::Down,
         });
         let (max, up_to) = expr.peel_up_to();
         assert!(up_to);
-        assert!(matches!(max, QuantityExpr::HalfRounded { .. }));
+        assert!(matches!(max, QuantityExpr::DivideRounded { .. }));
     }
 
     /// CR 107.1c: Nesting `UpTo` inside `UpTo` is meaningless ("up to up to N"

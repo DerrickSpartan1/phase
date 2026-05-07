@@ -160,7 +160,7 @@ pub(crate) fn quantity_expr_uses_recipient(expr: &QuantityExpr) -> bool {
             } => false,
             _ => false,
         },
-        QuantityExpr::HalfRounded { inner, .. }
+        QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. } => quantity_expr_uses_recipient(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_uses_recipient),
@@ -210,7 +210,7 @@ pub fn resolve_quantity_with_ctx(
 }
 
 /// Compose recursively-resolved inner values for the non-leaf
-/// `QuantityExpr` variants (`HalfRounded`, `Offset`, `Multiply`, `Sum`).
+/// `QuantityExpr` variants (`DivideRounded`, `Offset`, `Multiply`, `Sum`).
 /// All four resolver entry points share this logic; only the leaf arms
 /// (`Fixed`, `Ref`) differ in context handling. `recurse` is a closure
 /// the caller supplies that re-enters its own resolver with the inner
@@ -220,7 +220,11 @@ pub fn resolve_quantity_with_ctx(
 /// before delegating here.
 fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> i32 {
     match expr {
-        QuantityExpr::HalfRounded { inner, rounding } => half_rounded(recurse(inner), *rounding),
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => divide_rounded(recurse(inner), *divisor, *rounding),
         QuantityExpr::Offset { inner, offset } => recurse(inner) + offset,
         QuantityExpr::Multiply { factor, inner } => factor * recurse(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().map(&recurse).sum(),
@@ -230,7 +234,7 @@ fn fold_compose(expr: &QuantityExpr, recurse: impl Fn(&QuantityExpr) -> i32) -> 
         // `QuantityExpr::peel_up_to` to extract the "may pick fewer" flag
         // before reaching arithmetic. Treating it transparently here keeps
         // legacy serde round-trips correct and makes accidental composition
-        // (e.g., `HalfRounded { inner: UpTo { max: ... } }`) collapse to a
+        // (e.g., `DivideRounded { inner: UpTo { max: ... } }`) collapse to a
         // sensible bound rather than panicking.
         QuantityExpr::UpTo { max } => recurse(max),
         QuantityExpr::Fixed { .. } | QuantityExpr::Ref { .. } => {
@@ -508,16 +512,23 @@ pub(crate) fn resolve_quantity_scoped(
 }
 
 /// CR 107.1a: "If a spell or ability could generate a fractional number, the
-/// spell or ability will tell you whether to round up or down." Integer-divides
-/// by 2 in the direction specified by the parsed `RoundingMode`. Negative
-/// inputs are resolver-safe: `(−1 + 1) / 2 = 0` rounds up, `−1 / 2 = 0` rounds
-/// down (Rust truncates toward zero), matching CR 107.1b which permits
-/// negative intermediate values but forbids negative damage/life results.
-fn half_rounded(value: i32, rounding: RoundingMode) -> i32 {
-    match rounding {
-        RoundingMode::Up => (value + 1) / 2,
-        RoundingMode::Down => value / 2,
-    }
+/// spell or ability will tell you whether to round up or down.
+fn divide_rounded(value: i32, divisor: u32, rounding: RoundingMode) -> i32 {
+    debug_assert!(divisor > 0, "fractional quantity divisor must be nonzero");
+    let divisor = i64::from(divisor.max(1));
+    let value = i64::from(value);
+    let rounded = match rounding {
+        RoundingMode::Up => {
+            let quotient = value.div_euclid(divisor);
+            if value.rem_euclid(divisor) == 0 {
+                quotient
+            } else {
+                quotient + 1
+            }
+        }
+        RoundingMode::Down => value.div_euclid(divisor),
+    };
+    rounded as i32
 }
 
 fn resolve_ref(
@@ -2680,10 +2691,11 @@ mod tests {
         };
         assert_eq!(resolve_quantity(&state, &twice, PlayerId(0), obj_id), 8);
 
-        let half_up = QuantityExpr::HalfRounded {
+        let half_up = QuantityExpr::DivideRounded {
             inner: Box::new(QuantityExpr::Ref {
                 qty: QuantityRef::CostXPaid,
             }),
+            divisor: 2,
             rounding: crate::types::ability::RoundingMode::Up,
         };
         // half of 4 = 2 (exact).
@@ -3674,8 +3686,9 @@ mod tests {
     #[test]
     fn half_rounded_up_even() {
         let state = GameState::new_two_player(42);
-        let expr = QuantityExpr::HalfRounded {
+        let expr = QuantityExpr::DivideRounded {
             inner: Box::new(QuantityExpr::Fixed { value: 20 }),
+            divisor: 2,
             rounding: crate::types::ability::RoundingMode::Up,
         };
         assert_eq!(
@@ -3687,8 +3700,9 @@ mod tests {
     #[test]
     fn half_rounded_up_odd() {
         let state = GameState::new_two_player(42);
-        let expr = QuantityExpr::HalfRounded {
+        let expr = QuantityExpr::DivideRounded {
             inner: Box::new(QuantityExpr::Fixed { value: 7 }),
+            divisor: 2,
             rounding: crate::types::ability::RoundingMode::Up,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 4);
@@ -3697,8 +3711,9 @@ mod tests {
     #[test]
     fn half_rounded_down_odd() {
         let state = GameState::new_two_player(42);
-        let expr = QuantityExpr::HalfRounded {
+        let expr = QuantityExpr::DivideRounded {
             inner: Box::new(QuantityExpr::Fixed { value: 7 }),
+            divisor: 2,
             rounding: crate::types::ability::RoundingMode::Down,
         };
         assert_eq!(resolve_quantity(&state, &expr, PlayerId(0), ObjectId(1)), 3);

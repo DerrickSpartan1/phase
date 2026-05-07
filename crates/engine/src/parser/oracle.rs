@@ -3709,8 +3709,9 @@ mod tests {
                         },
                     comparator: Comparator::LE,
                     rhs:
-                        QuantityExpr::HalfRounded {
+                        QuantityExpr::DivideRounded {
                             inner,
+                            divisor: 2,
                             rounding: RoundingMode::Down,
                         },
                 } => {
@@ -9221,7 +9222,7 @@ mod tests {
     //      player, not the empty targets list or original controller.
     //   B. half-rounded inner: `half the cards in their hand` parses through
     //      the new `parse_cards_in_possessive_zone` combinator, producing a
-    //      HalfRounded count rather than collapsing to 1.
+    //      DivideRounded count rather than collapsing to 1.
     //   C. Sacrifice.count: a dynamic count lifted from
     //      `half the permanents they control` into the new count field, and
     //      the embedded ObjectCount filter lifted into `Sacrifice.target` so
@@ -9257,7 +9258,12 @@ mod tests {
         // Fix A: LoseLife amount uses per-player-scoped LifeTotal.
         match &*ability.effect {
             Effect::LoseLife { amount, .. } => match amount {
-                QuantityExpr::HalfRounded { inner, rounding } => {
+                QuantityExpr::DivideRounded {
+                    inner,
+                    divisor,
+                    rounding,
+                } => {
+                    assert_eq!(*divisor, 2);
                     assert_eq!(*rounding, RoundingMode::Down);
                     assert!(
                         matches!(
@@ -9271,16 +9277,21 @@ mod tests {
                         "expected LifeTotal, got {inner:?}"
                     );
                 }
-                other => panic!("expected HalfRounded LoseLife amount, got {other:?}"),
+                other => panic!("expected DivideRounded LoseLife amount, got {other:?}"),
             },
             other => panic!("expected LoseLife top-level, got {other:?}"),
         }
 
-        // Fix B + A: Discard count uses HalfRounded(HandSize) for the scoped player.
+        // Fix B + A: Discard count uses DivideRounded(HandSize) for the scoped player.
         let discard = ability.sub_ability.as_ref().expect("discard sub_ability");
         match &*discard.effect {
             Effect::Discard { count, .. } => match count {
-                QuantityExpr::HalfRounded { inner, rounding } => {
+                QuantityExpr::DivideRounded {
+                    inner,
+                    divisor,
+                    rounding,
+                } => {
+                    assert_eq!(*divisor, 2);
                     assert_eq!(*rounding, RoundingMode::Down);
                     assert!(
                         matches!(
@@ -9294,19 +9305,24 @@ mod tests {
                         "expected HandSize, got {inner:?}"
                     );
                 }
-                other => panic!("expected HalfRounded Discard count, got {other:?}"),
+                other => panic!("expected DivideRounded Discard count, got {other:?}"),
             },
             other => panic!("expected Discard mid-chain, got {other:?}"),
         }
 
-        // Fix C: Sacrifice carries HalfRounded(ObjectCount{Permanent,you-control})
+        // Fix C: Sacrifice carries DivideRounded(ObjectCount{Permanent,you-control})
         // as count, and the same Typed filter lifted into target.
         let sacrifice = discard.sub_ability.as_ref().expect("sacrifice sub_ability");
         match &*sacrifice.effect {
             Effect::Sacrifice { target, count } => {
                 assert!(!count.is_up_to(), "expected non-UpTo sacrifice count");
                 match count {
-                    QuantityExpr::HalfRounded { inner, rounding } => {
+                    QuantityExpr::DivideRounded {
+                        inner,
+                        divisor,
+                        rounding,
+                    } => {
+                        assert_eq!(*divisor, 2);
                         assert_eq!(*rounding, RoundingMode::Down);
                         match &**inner {
                             QuantityExpr::Ref {
@@ -9320,7 +9336,7 @@ mod tests {
                             other => panic!("expected ObjectCount inner, got {other:?}"),
                         }
                     }
-                    other => panic!("expected HalfRounded Sacrifice count, got {other:?}"),
+                    other => panic!("expected DivideRounded Sacrifice count, got {other:?}"),
                 }
                 match target {
                     TargetFilter::Typed(tf) => {

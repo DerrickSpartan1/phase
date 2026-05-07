@@ -801,7 +801,7 @@ fn quantity_expr_references_tracked_set(qty: &QuantityExpr) -> bool {
         QuantityExpr::Ref { qty } => matches!(qty, QuantityRef::TrackedSetSize),
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::HalfRounded { inner, .. } => quantity_expr_references_tracked_set(inner),
+        | QuantityExpr::DivideRounded { inner, .. } => quantity_expr_references_tracked_set(inner),
         QuantityExpr::Sum { exprs } => exprs.iter().any(quantity_expr_references_tracked_set),
         QuantityExpr::UpTo { max } => quantity_expr_references_tracked_set(max),
     }

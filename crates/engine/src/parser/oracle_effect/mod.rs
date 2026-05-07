@@ -5822,7 +5822,7 @@ fn force_controller(filter: &mut TargetFilter, ctrl: ControllerRef) {
 }
 
 /// Rewrite all occurrences of `from` controller inside a `QuantityExpr`'s
-/// embedded filters to `to`. Walks HalfRounded/Multiply/Offset/Sum wrappers
+/// embedded filters to `to`. Walks DivideRounded/Multiply/Offset/Sum wrappers
 /// and rewrites ObjectCount filter controllers.
 fn rewrite_quantity_controller(expr: &mut QuantityExpr, from: ControllerRef, to: ControllerRef) {
     match expr {
@@ -5831,7 +5831,7 @@ fn rewrite_quantity_controller(expr: &mut QuantityExpr, from: ControllerRef, to:
                 rewrite_filter_controller(filter, &from, &to);
             }
         }
-        QuantityExpr::HalfRounded { inner, .. }
+        QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::UpTo { max: inner } => {
@@ -5855,7 +5855,7 @@ fn rewrite_event_source_power_to_object_power(expr: &mut QuantityExpr, scope: Ob
                 qty: QuantityRef::Power { scope },
             };
         }
-        QuantityExpr::HalfRounded { inner, .. }
+        QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
         | QuantityExpr::Offset { inner, .. }
         | QuantityExpr::UpTo { max: inner } => {
@@ -7015,7 +7015,7 @@ fn intrinsic_continuation_effect(def: &AbilityDefinition) -> &Effect {
 /// captured rounding mode. Used by `parse_effect_chain_ir` to consume the
 /// chain-level rounding annotation (Pox Plague) before chunk splitting so
 /// the phrase doesn't become an Unimplemented chunk. The captured mode is
-/// re-applied to every `HalfRounded` in the built chain via
+/// re-applied to every `DivideRounded` in the built chain via
 /// `rewrite_rounding_mode`.
 fn strip_trailing_rounding_annotation(text: &str) -> (String, Option<RoundingMode>) {
     let trimmed = text.trim_end();
@@ -7168,7 +7168,7 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                 QuantityRef::ObjectCount { filter } => rewrite_filter_controller_to_scoped(filter),
                 _ => {}
             },
-            QuantityExpr::HalfRounded { inner, .. }
+            QuantityExpr::DivideRounded { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
             | QuantityExpr::Offset { inner, .. } => rewrite_condition_quantity_expr(inner),
             QuantityExpr::Sum { exprs } => {
@@ -7245,7 +7245,7 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
                 },
                 _ => {}
             },
-            QuantityExpr::HalfRounded { inner, .. }
+            QuantityExpr::DivideRounded { inner, .. }
             | QuantityExpr::Multiply { inner, .. }
             | QuantityExpr::Offset { inner, .. } => rewrite_quantity_expr(inner),
             QuantityExpr::Sum { exprs } => {
@@ -7270,7 +7270,7 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
     }
 }
 
-/// CR 107.1a: Back-apply a rounding mode to every `HalfRounded` in an ability
+/// CR 107.1a: Back-apply a rounding mode to every `DivideRounded` in an ability
 /// tree. Used by `parse_effect_chain_ir` after stripping a trailing
 /// "Round down each time" / "Round up each time" sentence (Pox Plague), so
 /// earlier chunks that defaulted to `RoundingMode::Down` pick up an explicit
@@ -7281,7 +7281,11 @@ fn rewrite_player_scope_refs(def: &mut AbilityDefinition) {
 fn rewrite_rounding_mode(def: &mut AbilityDefinition, mode: RoundingMode) {
     fn rewrite_quantity_expr(expr: &mut QuantityExpr, mode: RoundingMode) {
         match expr {
-            QuantityExpr::HalfRounded { inner, rounding } => {
+            QuantityExpr::DivideRounded {
+                inner,
+                divisor: _,
+                rounding,
+            } => {
                 *rounding = mode;
                 rewrite_quantity_expr(inner, mode);
             }
@@ -7383,7 +7387,7 @@ pub(crate) fn parse_effect_chain_ir(
 ) -> EffectChainIr {
     // CR 107.1a: Strip a trailing "Round down each time" / "Round up each time"
     // sentence before chain splitting — it is a chain-level rounding annotation
-    // (Pox Plague) that back-applies to every `HalfRounded` the chain contains.
+    // (Pox Plague) that back-applies to every `DivideRounded` the chain contains.
     // Stripped here so it doesn't become an Unimplemented chunk; the captured
     // mode is re-applied to the built chain via `rewrite_rounding_mode`.
     let (text, chain_rounding) = strip_trailing_rounding_annotation(text);
@@ -9109,7 +9113,7 @@ pub(crate) fn lower_effect_chain_ir(ir: &EffectChainIr) -> AbilityDefinition {
     }
 
     // CR 107.1a: Apply the chain-level rounding annotation (captured above)
-    // to every HalfRounded in the built tree. No-op when the sentence was
+    // to every DivideRounded in the built tree. No-op when the sentence was
     // absent (chain_rounding == None).
     if let Some(mode) = chain_rounding {
         rewrite_rounding_mode(&mut result, mode);
@@ -11357,11 +11361,16 @@ fn apply_where_x_quantity_expression(
                 where_x_expression,
             )),
         },
-        QuantityExpr::HalfRounded { inner, rounding } => QuantityExpr::HalfRounded {
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => QuantityExpr::DivideRounded {
             inner: Box::new(apply_where_x_quantity_expression(
                 *inner,
                 where_x_expression,
             )),
+            divisor,
             rounding,
         },
         other => other,
@@ -17878,12 +17887,12 @@ mod tests {
                 assert!(
                     matches!(
                         count,
-                        QuantityExpr::HalfRounded {
+                        QuantityExpr::DivideRounded {
                             rounding: crate::types::ability::RoundingMode::Up,
                             ..
                         }
                     ),
-                    "Expected HalfRounded(Up), got {count:?}"
+                    "Expected DivideRounded(Up), got {count:?}"
                 );
             }
             other => panic!("Expected ExileTop, got {other:?}"),
@@ -17892,7 +17901,7 @@ mod tests {
 
     /// CR 107.1a class-level regression — "Target opponent loses half their
     /// life, rounded up." The `try_parse_half_life_amount` path must now
-    /// produce a typed HalfRounded `amount` on `LoseLife`, not `Fixed { 1 }`.
+    /// produce a typed DivideRounded `amount` on `LoseLife`, not `Fixed { 1 }`.
     #[test]
     fn blood_tribute_lose_half_their_life_rounded_up() {
         use crate::types::ability::RoundingMode;
@@ -17904,15 +17913,16 @@ mod tests {
             Effect::LoseLife { amount, .. } => {
                 assert_eq!(
                     *amount,
-                    QuantityExpr::HalfRounded {
+                    QuantityExpr::DivideRounded {
                         inner: Box::new(QuantityExpr::Ref {
                             qty: QuantityRef::LifeTotal {
                                 player: PlayerScope::Target
                             },
                         }),
+                        divisor: 2,
                         rounding: RoundingMode::Up,
                     },
-                    "Expected HalfRounded(TargetLifeTotal, Up), got {amount:?}",
+                    "Expected DivideRounded(TargetLifeTotal, Up), got {amount:?}",
                 );
             }
             other => panic!("Expected LoseLife, got {other:?}"),
@@ -17942,12 +17952,13 @@ mod tests {
                 assert_eq!(*destination, crate::types::zones::Zone::Graveyard);
                 assert_eq!(
                     *count,
-                    QuantityExpr::HalfRounded {
+                    QuantityExpr::DivideRounded {
                         inner: Box::new(QuantityExpr::Ref {
                             qty: QuantityRef::TargetZoneCardCount {
                                 zone: ZoneRef::Library,
                             },
                         }),
+                        divisor: 2,
                         rounding: RoundingMode::Down,
                     },
                 );

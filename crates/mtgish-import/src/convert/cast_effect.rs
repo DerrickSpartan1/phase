@@ -150,7 +150,7 @@ pub fn apply(eff: &CastEffect, stub: &mut EngineFaceStub) -> ConvResult<()> {
         // CR 117.7 + CR 601.2f: Self-spell cost reduction with a dynamic
         // "for each X" multiplier. The engine `StaticMode::ReduceCost.dynamic_count`
         // is `Option<QuantityRef>` — `QuantityExpr::Ref { qty }` unwraps cleanly;
-        // `Fixed`/`Offset`/`Multiply`/`HalfRounded` cannot be expressed as a bare
+        // `Fixed`/`Offset`/`Multiply`/`DivideRounded` cannot be expressed as a bare
         // `QuantityRef` and strict-fail.
         E::ReduceCastingCostForEach(reduction, count) => {
             let qty_ref = quantity_to_ref(count, "ReduceCastingCostForEach")?;

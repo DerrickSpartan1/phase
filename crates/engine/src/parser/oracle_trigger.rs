@@ -1287,8 +1287,13 @@ fn substitute_another_in_expr(expr: &QuantityExpr) -> QuantityExpr {
             inner: Box::new(substitute_another_in_expr(inner)),
             offset: *offset,
         },
-        QuantityExpr::HalfRounded { inner, rounding } => QuantityExpr::HalfRounded {
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => QuantityExpr::DivideRounded {
             inner: Box::new(substitute_another_in_expr(inner)),
+            divisor: *divisor,
             rounding: *rounding,
         },
         QuantityExpr::Multiply { factor, inner } => QuantityExpr::Multiply {
@@ -7329,7 +7334,7 @@ mod tests {
             "sub_ability.condition must be QuantityCheck ≥ 5, got {:?}",
             sub.condition,
         );
-        // Sub-ability effect is LoseLife targeting TriggeringPlayer with HalfRounded amount.
+        // Sub-ability effect is LoseLife targeting TriggeringPlayer with DivideRounded amount.
         match &*sub.effect {
             Effect::LoseLife { amount, target } => {
                 assert_eq!(
@@ -7340,12 +7345,12 @@ mod tests {
                 assert!(
                     matches!(
                         amount,
-                        QuantityExpr::HalfRounded {
+                        QuantityExpr::DivideRounded {
                             rounding: RoundingMode::Up,
                             ..
                         }
                     ),
-                    "amount must be HalfRounded(Up), got {amount:?}",
+                    "amount must be DivideRounded(Up), got {amount:?}",
                 );
             }
             other => panic!("sub_ability effect must be LoseLife, got {other:?}"),
@@ -13025,7 +13030,7 @@ mod tests {
     /// and must put X +1/+1 counters on himself. Verify the pronoun "him"
     /// routes through `resolve_it_pronoun` → `SelfRef` (not `ParentTarget`),
     /// and that `Variable{name:"X"}` is rewritten to `CostXPaid` on both the
-    /// primary PutCounter count and the chained Draw's `HalfRounded` inner.
+    /// primary PutCounter count and the chained Draw's `DivideRounded` inner.
     #[test]
     fn wan_shi_tong_etb_cost_x_and_self_pronoun() {
         let def = parse_trigger_line(
@@ -13058,16 +13063,16 @@ mod tests {
         let sub = execute.sub_ability.as_ref().expect("sub ability");
         match sub.effect.as_ref() {
             Effect::Draw { count, .. } => match count {
-                QuantityExpr::HalfRounded { inner, .. } => {
+                QuantityExpr::DivideRounded { inner, .. } => {
                     assert_eq!(
                         **inner,
                         QuantityExpr::Ref {
                             qty: QuantityRef::CostXPaid
                         },
-                        "HalfRounded inner should be CostXPaid, got {inner:?}"
+                        "DivideRounded inner should be CostXPaid, got {inner:?}"
                     );
                 }
-                other => panic!("expected HalfRounded, got {other:?}"),
+                other => panic!("expected DivideRounded, got {other:?}"),
             },
             other => panic!("expected Draw, got {other:?}"),
         }

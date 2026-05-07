@@ -797,7 +797,7 @@ fn quantity_expr_has_unresolved_variable(
         } => state.last_named_choice.is_none(),
         QuantityExpr::Offset { inner, .. }
         | QuantityExpr::Multiply { inner, .. }
-        | QuantityExpr::HalfRounded { inner, .. }
+        | QuantityExpr::DivideRounded { inner, .. }
         | QuantityExpr::UpTo { max: inner } => {
             quantity_expr_has_unresolved_variable(state, ability, inner)
         }

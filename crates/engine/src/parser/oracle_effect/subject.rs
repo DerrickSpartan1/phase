@@ -1569,10 +1569,11 @@ fn try_parse_set_life_total(
     {
         // "half their starting life total" / "half that player's starting life total"
         if nom_primitives::scan_contains(rest, "starting life total") {
-            QuantityExpr::HalfRounded {
+            QuantityExpr::DivideRounded {
                 inner: Box::new(QuantityExpr::Ref {
                     qty: QuantityRef::StartingLifeTotal,
                 }),
+                divisor: 2,
                 rounding: RoundingMode::Down,
             }
         } else {

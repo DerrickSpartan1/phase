@@ -559,11 +559,16 @@ fn resolve_draw_replacement_quantity(expr: &QuantityExpr, event_count: u32) -> O
             qty: crate::types::ability::QuantityRef::EventContextAmount,
         } => Some(event_count as i32),
         QuantityExpr::Fixed { value } => Some(*value),
-        QuantityExpr::HalfRounded { inner, rounding } => {
+        QuantityExpr::DivideRounded {
+            inner,
+            divisor,
+            rounding,
+        } => {
             let value = resolve_draw_replacement_quantity(inner, event_count)?;
+            let divisor = i32::try_from((*divisor).max(1)).ok()?;
             Some(match rounding {
-                crate::types::ability::RoundingMode::Up => (value + 1) / 2,
-                crate::types::ability::RoundingMode::Down => value / 2,
+                crate::types::ability::RoundingMode::Up => (value + divisor - 1) / divisor,
+                crate::types::ability::RoundingMode::Down => value / divisor,
             })
         }
         QuantityExpr::Offset { inner, offset } => {
