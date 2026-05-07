@@ -242,6 +242,7 @@ pub fn parse_target_with_ctx<'a>(text: &'a str, ctx: &mut ParseContext) -> (Targ
     }
     if let Some((filter, rest)) = nom_on_lower(text, &lower, |input| {
         alt((
+            parse_cost_paid_object_reference,
             value(
                 TargetFilter::TriggeringSource,
                 (
@@ -2724,6 +2725,10 @@ fn parse_shared_quality(input: &str) -> nom::IResult<&str, SharedQuality, Oracle
 fn parse_shared_quality_reference(
     input: &str,
 ) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
+    if let Ok((rest, filter)) = parse_cost_paid_object_reference(input) {
+        return Ok((rest, filter));
+    }
+
     if let Ok((rest, filter)) = value(
         TargetFilter::TriggeringSource,
         tag::<_, _, OracleError<'_>>("one of the discarded cards"),
@@ -2751,6 +2756,24 @@ fn parse_shared_quality_reference(
     } else {
         Ok((rest, filter))
     }
+}
+
+fn parse_cost_paid_object_reference(
+    input: &str,
+) -> nom::IResult<&str, TargetFilter, OracleError<'_>> {
+    let (rest, _) = opt(tag("the ")).parse(input)?;
+    let (rest, _) = tag("sacrificed ").parse(rest)?;
+    let (rest, _) = alt((
+        tag("creature"),
+        tag("card"),
+        tag("permanent"),
+        tag("artifact"),
+        tag("enchantment"),
+        tag("planeswalker"),
+        tag("land"),
+    ))
+    .parse(rest)?;
+    Ok((rest, TargetFilter::CostPaidObject))
 }
 
 pub(crate) fn parse_shared_quality_clause(
@@ -4984,6 +5007,13 @@ mod tests {
     fn unrecognized_bare_text_stays_any() {
         let (f, _) = parse_target("foobar");
         assert_eq!(f, TargetFilter::Any);
+    }
+
+    #[test]
+    fn parse_cost_paid_object_reference() {
+        let (filter, rest) = parse_target("the sacrificed creature");
+        assert_eq!(filter, TargetFilter::CostPaidObject);
+        assert!(rest.is_empty(), "remainder: {rest:?}");
     }
 
     #[test]

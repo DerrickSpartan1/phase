@@ -17,8 +17,9 @@ use super::{capitalize, scan_contains_phrase, ParseContext};
 use crate::parser::oracle_ir::ast::{SearchLibraryDetails, SeekDetails};
 use crate::parser::oracle_ir::diagnostic::OracleDiagnostic;
 use crate::types::ability::{
-    Comparator, ControllerRef, FilterProp, QuantityExpr, SearchSelectionConstraint, SharedQuality,
-    SharedQualityRelation, TargetFilter, TypeFilter, TypedFilter,
+    Comparator, ControllerRef, FilterProp, ObjectScope, QuantityExpr, QuantityRef,
+    SearchSelectionConstraint, SharedQuality, SharedQualityRelation, TargetFilter, TypeFilter,
+    TypedFilter,
 };
 use crate::types::card_type::{CoreType, Supertype};
 use crate::types::zones::Zone;
@@ -417,7 +418,8 @@ pub(super) fn parse_search_filter(text: &str, ctx: &mut ParseContext) -> TargetF
     let (parsed_filter, remainder) = parse_type_phrase(type_text);
     if search_filter_has_meaningful_content(&parsed_filter) {
         let mut suffix = SearchSuffixConstraints::default();
-        parse_search_filter_suffixes(remainder, &mut suffix, ctx);
+        let linked_reference = last_shared_quality_reference_in_filter(&parsed_filter);
+        parse_search_filter_suffixes(remainder, &mut suffix, ctx, linked_reference);
         return apply_search_suffix_constraints(normalize_search_filter(parsed_filter), &suffix);
     }
 
@@ -763,7 +765,7 @@ fn build_search_suffix_constraints(
             value: crate::types::card_type::Supertype::Basic,
         });
     }
-    parse_search_filter_suffixes(suffix_text, &mut suffix, ctx);
+    parse_search_filter_suffixes(suffix_text, &mut suffix, ctx, None);
     suffix
 }
 
@@ -956,6 +958,18 @@ fn parse_search_name_reference_suffix(
         )));
     }
 
+    let (reference, after_reference) = parse_target(rest);
+    if !matches!(reference, TargetFilter::Any) {
+        return Ok((
+            after_reference,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Name,
+                reference: Some(Box::new(name_reference_filter(reference))),
+                relation,
+            },
+        ));
+    }
+
     let (reference, rest) = parse_type_phrase(rest);
     if !search_filter_has_meaningful_content(&reference) {
         return Err(nom::Err::Error(OracleError::new(
@@ -972,6 +986,98 @@ fn parse_search_name_reference_suffix(
             relation,
         },
     ))
+}
+
+fn parse_linked_reference_mana_value_suffix<'a>(
+    input: &'a str,
+    reference: &TargetFilter,
+) -> Result<(&'a str, FilterProp), nom::Err<OracleError<'a>>> {
+    let Some(scope) = object_scope_for_linked_reference(reference) else {
+        return Err(nom::Err::Error(OracleError::new(
+            input,
+            nom::error::ErrorKind::Fail,
+        )));
+    };
+
+    let (rest, _) = tag("has mana value equal to ").parse(input)?;
+    let (rest, offset) = alt((
+        value(
+            1,
+            nom::sequence::pair(tag("1 plus "), parse_that_object_mana_value),
+        ),
+        value(
+            1,
+            nom::sequence::pair(tag("one plus "), parse_that_object_mana_value),
+        ),
+        value(0, parse_that_object_mana_value),
+    ))
+    .parse(rest)?;
+    let value = if offset == 0 {
+        QuantityExpr::Ref {
+            qty: QuantityRef::ObjectManaValue { scope },
+        }
+    } else {
+        QuantityExpr::Offset {
+            inner: Box::new(QuantityExpr::Ref {
+                qty: QuantityRef::ObjectManaValue { scope },
+            }),
+            offset,
+        }
+    };
+
+    Ok((
+        rest,
+        FilterProp::Cmc {
+            comparator: Comparator::EQ,
+            value,
+        },
+    ))
+}
+
+fn parse_that_object_mana_value(input: &str) -> Result<(&str, ()), nom::Err<OracleError<'_>>> {
+    let (rest, _) = tag("that ").parse(input)?;
+    let (rest, _) = alt((
+        tag("creature"),
+        tag("card"),
+        tag("permanent"),
+        tag("artifact"),
+        tag("enchantment"),
+        tag("planeswalker"),
+        tag("land"),
+    ))
+    .parse(rest)?;
+    let (rest, _) = tag("'s mana value").parse(rest)?;
+    Ok((rest, ()))
+}
+
+fn object_scope_for_linked_reference(reference: &TargetFilter) -> Option<ObjectScope> {
+    match reference {
+        TargetFilter::CostPaidObject => Some(ObjectScope::CostPaidObject),
+        TargetFilter::ParentTarget => Some(ObjectScope::Target),
+        TargetFilter::TriggeringSource => Some(ObjectScope::EventSource),
+        _ => None,
+    }
+}
+
+fn last_shared_quality_reference_in_filter(filter: &TargetFilter) -> Option<TargetFilter> {
+    match filter {
+        TargetFilter::Typed(typed) => typed.properties.iter().rev().find_map(|property| {
+            if let FilterProp::SharesQuality {
+                reference: Some(reference),
+                ..
+            } = property
+            {
+                Some(reference.as_ref().clone())
+            } else {
+                None
+            }
+        }),
+        TargetFilter::And { filters } | TargetFilter::Or { filters } => filters
+            .iter()
+            .rev()
+            .find_map(last_shared_quality_reference_in_filter),
+        _ => None,
+    }
 }
 
 fn parse_zero_or_one_mana_cost_suffix(
@@ -1073,9 +1179,11 @@ fn parse_search_filter_suffixes(
     text: &str,
     suffix: &mut SearchSuffixConstraints,
     ctx: &mut ParseContext,
+    initial_shared_quality_reference: Option<TargetFilter>,
 ) {
     let lower = text.to_lowercase();
     let mut remaining = lower.as_str();
+    let mut last_shared_quality_reference = initial_shared_quality_reference;
 
     while !remaining.is_empty() {
         remaining = remaining.trim_start();
@@ -1192,6 +1300,13 @@ fn parse_search_filter_suffixes(
         }
 
         if let Ok((rest, prop)) = parse_shared_quality_clause(remaining) {
+            last_shared_quality_reference = match &prop {
+                FilterProp::SharesQuality {
+                    reference: Some(reference),
+                    ..
+                } => Some(reference.as_ref().clone()),
+                _ => None,
+            };
             suffix.properties.push(prop);
             remaining = rest.trim_start();
             continue;
@@ -1249,6 +1364,15 @@ fn parse_search_filter_suffixes(
             suffix.properties.push(prop);
             remaining = remaining[consumed..].trim_start();
             continue;
+        }
+
+        if let Some(reference) = &last_shared_quality_reference {
+            if let Ok((rest, prop)) = parse_linked_reference_mana_value_suffix(remaining, reference)
+            {
+                suffix.properties.push(prop);
+                remaining = rest.trim_start();
+                continue;
+            }
         }
 
         if let Ok((rest, prop)) = parse_zero_or_one_mana_cost_suffix(remaining) {
@@ -1460,6 +1584,7 @@ mod tests {
             " with unrecognized flibbertigibbet suffix",
             &mut suffix,
             &mut ctx,
+            None,
         );
         assert!(
             ctx.diagnostics
@@ -2064,6 +2189,59 @@ mod tests {
                 )
             )));
         }
+    }
+
+    #[test]
+    fn parse_search_filter_same_name_as_cost_paid_object() {
+        let filter = parse_search_filter(
+            "card with the same name as the sacrificed creature, reveal it",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::Name,
+                reference: Some(reference),
+                relation: SharedQualityRelation::Shares,
+            } if matches!(reference.as_ref(), TargetFilter::CostPaidObject)
+        )));
+    }
+
+    #[test]
+    fn parse_search_filter_cost_paid_shared_type_and_mana_value() {
+        let filter = parse_search_filter(
+            "creature card that shares a creature type with the sacrificed creature and has mana value equal to 1 plus that creature's mana value",
+            &mut ParseContext::default(),
+        );
+        let TargetFilter::Typed(filter) = filter else {
+            panic!("expected Typed filter, got {filter:?}");
+        };
+        assert!(filter.type_filters.contains(&TypeFilter::Creature));
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::SharesQuality {
+                quality: SharedQuality::CreatureType,
+                reference: Some(reference),
+                relation: SharedQualityRelation::Shares,
+            } if matches!(reference.as_ref(), TargetFilter::CostPaidObject)
+        )));
+        assert!(filter.properties.iter().any(|property| matches!(
+            property,
+            FilterProp::Cmc {
+                comparator: Comparator::EQ,
+                value: QuantityExpr::Offset { inner, offset: 1 },
+            } if matches!(
+                inner.as_ref(),
+                QuantityExpr::Ref {
+                    qty: QuantityRef::ObjectManaValue {
+                        scope: ObjectScope::CostPaidObject
+                    }
+                }
+            )
+        )));
     }
 
     #[test]
