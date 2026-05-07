@@ -7218,6 +7218,81 @@ mod tests {
     }
 
     #[test]
+    fn untapped_land_can_activate_composite_mana_tap_counter_ability_with_pooled_mana() {
+        let mut state = setup_game_at_main_phase();
+        let air_temple = create_object(
+            &mut state,
+            CardId(704),
+            PlayerId(0),
+            "Abandoned Air Temple".to_string(),
+            Zone::Battlefield,
+        );
+        {
+            let obj = state.objects.get_mut(&air_temple).unwrap();
+            obj.card_types.core_types.push(CoreType::Land);
+            Arc::make_mut(&mut obj.abilities).push(
+                AbilityDefinition::new(
+                    AbilityKind::Activated,
+                    Effect::PutCounterAll {
+                        counter_type: "P1P1".to_string(),
+                        count: QuantityExpr::Fixed { value: 1 },
+                        target: TargetFilter::Typed(
+                            TypedFilter::creature().controller(ControllerRef::You),
+                        ),
+                    },
+                )
+                .cost(AbilityCost::Composite {
+                    costs: vec![
+                        AbilityCost::Mana {
+                            cost: ManaCost::Cost {
+                                generic: 3,
+                                shards: vec![ManaCostShard::White],
+                            },
+                        },
+                        AbilityCost::Tap,
+                    ],
+                }),
+            );
+        }
+        let creature = create_object(
+            &mut state,
+            CardId(705),
+            PlayerId(0),
+            "Training Dummy".to_string(),
+            Zone::Battlefield,
+        );
+        state
+            .objects
+            .get_mut(&creature)
+            .unwrap()
+            .card_types
+            .core_types
+            .push(CoreType::Creature);
+        add_mana(&mut state, PlayerId(0), ManaType::White, 1);
+        add_mana(&mut state, PlayerId(0), ManaType::Colorless, 3);
+
+        assert!(
+            can_activate_ability_now(&state, PlayerId(0), air_temple, 0),
+            "untapped Abandoned Air Temple should be activatable with {{3}}{{W}} already available"
+        );
+        handle_activate_ability(&mut state, PlayerId(0), air_temple, 0, &mut Vec::new())
+            .expect("Abandoned Air Temple activation should pay pooled mana and tap the land");
+
+        assert!(state.objects[&air_temple].tapped);
+        assert_eq!(state.players[0].mana_pool.total(), 0);
+
+        let mut events = Vec::new();
+        stack::resolve_top(&mut state, &mut events);
+        assert_eq!(
+            state.objects[&creature]
+                .counters
+                .get(&crate::types::counter::CounterType::Plus1Plus1)
+                .copied(),
+            Some(1)
+        );
+    }
+
+    #[test]
     fn activated_ability_cost_reduction_respects_minimum_mana_floor() {
         let mut state = setup_game_at_main_phase();
         let training_grounds = create_object(

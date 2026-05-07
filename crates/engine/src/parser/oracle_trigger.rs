@@ -6783,6 +6783,36 @@ mod tests {
     }
 
     #[test]
+    fn trigger_gain_life_and_get_energy_chains_both_effects() {
+        let def = parse_trigger_line(
+            "Whenever another creature you control enters, you gain 1 life and get {E} (an energy counter).",
+            "Guide of Souls",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.destination, Some(Zone::Battlefield));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature()
+                    .controller(ControllerRef::You)
+                    .properties(vec![FilterProp::Another])
+            ))
+        );
+
+        let execute = def.execute.expect("trigger should have execute ability");
+        assert!(matches!(*execute.effect, Effect::GainLife { .. }));
+        let sub_ability = execute
+            .sub_ability
+            .expect("energy gain should be chained after life gain");
+        assert_eq!(
+            *sub_ability.effect,
+            Effect::GainEnergy {
+                amount: QuantityExpr::Fixed { value: 1 }
+            }
+        );
+    }
+
+    #[test]
     fn trigger_counter_put_on_self() {
         let def = parse_trigger_line(
             "Whenever a +1/+1 counter is put on ~, draw a card.",
@@ -10403,6 +10433,37 @@ mod tests {
                     *target,
                     TargetFilter::SelfRef,
                     "`sacrifice it` in an ETB-self trigger should resolve to SelfRef"
+                );
+            }
+            other => panic!("expected Sacrifice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grave_pact_scopes_sacrifice_to_other_players() {
+        let def = parse_trigger_line(
+            "Whenever a creature you control dies, each other player sacrifices a creature of their choice.",
+            "Grave Pact",
+        );
+        assert_eq!(def.mode, TriggerMode::ChangesZone);
+        assert_eq!(def.origin, Some(Zone::Battlefield));
+        assert_eq!(def.destination, Some(Zone::Graveyard));
+        assert_eq!(
+            def.valid_card,
+            Some(TargetFilter::Typed(
+                TypedFilter::creature().controller(ControllerRef::You)
+            ))
+        );
+
+        let execute = def.execute.as_deref().expect("execute ability");
+        match &*execute.effect {
+            Effect::Sacrifice { target, count } => {
+                assert_eq!(*count, QuantityExpr::Fixed { value: 1 });
+                assert_eq!(
+                    *target,
+                    TargetFilter::Typed(
+                        TypedFilter::creature().controller(ControllerRef::Opponent)
+                    )
                 );
             }
             other => panic!("expected Sacrifice, got {other:?}"),
